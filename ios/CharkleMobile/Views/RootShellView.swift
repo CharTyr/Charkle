@@ -34,6 +34,7 @@ struct RootShellView: View {
     @Namespace private var previewZoomNamespace
 
     @State private var compactTab: CompactTab = .library
+    @State private var searchTabIsPinterest: Bool = false
     @State private var moodboardPath: [UUID] = []
     @State private var splitVisibility: NavigationSplitViewVisibility = .automatic
     @State private var isCapturePresented = false
@@ -212,6 +213,17 @@ struct RootShellView: View {
                             onOpenAsset: { openAsset($0, from: .moodboard) },
                             onRevealAssetInLibrary: { revealAssetInLibrary($0, sourceBoardID: boardID) }
                         )
+                    case .pinterest:
+                        PinterestExploreMobileView(
+                            store: store,
+                            controller: store.pinterestController,
+                            onToggleSidebar: {
+                                withAnimation(MobileMotion.drawerEase) {
+                                    splitVisibility = (splitVisibility == .detailOnly) ? .all : .detailOnly
+                                }
+                            }
+                        )
+                        .toolbar(.hidden, for: .navigationBar)
                     default:
                         MasonryGalleryView(
                             store: store,
@@ -230,7 +242,7 @@ struct RootShellView: View {
                 .navigationTitle(store.currentScopeTitle)
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
-                    if !isMoodboardScope(store.scope) {
+                    if !isMoodboardScope(store.scope) && store.scope != .pinterest {
                         ToolbarItemGroup(placement: .topBarTrailing) {
                             Button {
                                 Task { await store.captureFromPasteboard() }
@@ -364,19 +376,35 @@ struct RootShellView: View {
             .tag(CompactTab.moodboards)
 
             NavigationStack {
-                VisualSearchTabView(
-                    store: store,
-                    zoomNamespace: previewZoomNamespace,
-                    onOpenAsset: { openAsset($0, from: .visualSearch) },
-                    onFindSimilar: { openAsset($0, from: .visualSearch, inspectorTab: .similar, openInspector: true) },
-                    onNavigateToScope: { scope in navigateToScope(scope) },
-                    onOpenBoard: { openBoard($0) }
-                )
-                .navigationTitle("搜图")
-                .navigationBarTitleDisplayMode(.inline)
+                Group {
+                    if searchTabIsPinterest {
+                        PinterestExploreMobileView(
+                            store: store,
+                            controller: store.pinterestController,
+                            onSwitchToLibrarySearch: {
+                                searchTabIsPinterest = false
+                            }
+                        )
+                        .toolbar(.hidden, for: .navigationBar)
+                    } else {
+                        VisualSearchTabView(
+                            store: store,
+                            zoomNamespace: previewZoomNamespace,
+                            onOpenAsset: { openAsset($0, from: .visualSearch) },
+                            onFindSimilar: { openAsset($0, from: .visualSearch, inspectorTab: .similar, openInspector: true) },
+                            onNavigateToScope: { scope in navigateToScope(scope) },
+                            onOpenBoard: { openBoard($0) },
+                            onOpenPinterestSpace: {
+                                searchTabIsPinterest = true
+                            }
+                        )
+                        .navigationTitle("搜图")
+                        .navigationBarTitleDisplayMode(.inline)
+                    }
+                }
             }
             .tabItem {
-                Label("搜图", systemImage: "magnifyingglass")
+                Label("搜图", systemImage: searchTabIsPinterest ? "sparkles" : "magnifyingglass")
             }
             .tag(CompactTab.search)
 
@@ -433,6 +461,9 @@ struct RootShellView: View {
         case .moodboard(let id):
             moodboardPath = [id]
             compactTab = .moodboards
+        case .pinterest:
+            searchTabIsPinterest = true
+            compactTab = .search
         default:
             store.selectScope(scope)
             compactTab = .library

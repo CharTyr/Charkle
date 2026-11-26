@@ -47,6 +47,16 @@ struct SidebarNavigationView: View {
                 )
             }
 
+            Section("灵感发现") {
+                scopeRow(
+                    scope: .pinterest,
+                    title: "Pinterest 空间",
+                    icon: "sparkles",
+                    badge: store.pinterestController.trayCount > 0 ? store.pinterestController.trayCount : nil,
+                    emphasizeBadge: true
+                )
+            }
+
             Section {
                 scopeRow(
                     scope: .moodboardsHome,

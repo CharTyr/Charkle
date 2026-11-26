@@ -376,7 +376,7 @@ public final class LibraryStore {
             filter.tags = [tagName]
             recordRecentlyTouchedTags([tagName])
             tagCounts = sortTagCounts(tagCounts)
-        case .moodboardsHome, .moodboard:
+        case .moodboardsHome, .moodboard, .pinterest:
             assetsRequestGeneration &+= 1
             return
         }

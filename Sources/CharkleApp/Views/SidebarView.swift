@@ -319,6 +319,7 @@ public struct SidebarView: View {
                     railButton(destination: .untagged, symbolName: "tag.slash", tooltip: "未打标签")
                     railButton(destination: .recent, symbolName: "clock", tooltip: "最近添加")
                     railButton(destination: .moodboardsHome, symbolName: "rectangle.3.group", tooltip: "所有情绪板")
+                    railButton(destination: .pinterest, symbolName: "sparkles", tooltip: "Pinterest 无限空间")
 
                     if !library.smartFolders.isEmpty {
                         railDivider
@@ -618,6 +619,18 @@ public struct SidebarView: View {
                         destination: .trash,
                         symbolName: "trash",
                         title: "废纸篓"
+                    )
+                }
+
+                sidebarSectionDivider
+
+                // Section: Pinterest Infinite Exploration Space
+                VStack(alignment: .leading, spacing: 2) {
+                    sectionHeader("灵感发现")
+                    sidebarRow(
+                        destination: .pinterest,
+                        symbolName: "sparkles",
+                        title: "Pinterest 空间"
                     )
                 }
 

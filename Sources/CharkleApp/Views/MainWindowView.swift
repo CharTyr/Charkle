@@ -27,6 +27,7 @@ public struct MainWindowView: View {
     @Namespace private var heroNamespace
 
     @State private var searchDraft: String = ""
+    @State private var pinterestController = PinterestExploreController()
     @State private var searchDebounceTask: Task<Void, Never>?
     @State private var colorToleranceDebounceTask: Task<Void, Never>?
     @State private var isSidebarVisible: Bool = true
@@ -216,7 +217,8 @@ public struct MainWindowView: View {
                     .clipped()
                     .layoutPriority(0)
 
-                if coordinator.isInspectorVisible {
+                let showRightInspector = coordinator.isInspectorVisible && coordinator.selectedDestination != .pinterest
+                if showRightInspector {
                     inspectorResizeDivider
                         .ignoresSafeArea(.container, edges: .top)
                         .zIndex(20)
@@ -257,11 +259,11 @@ public struct MainWindowView: View {
                 )
                 .frame(width: effectiveInspectorWidth)
                 .frame(minHeight: 0, maxHeight: .infinity)
-                .opacity(coordinator.isInspectorVisible ? 1 : 0)
-                .allowsHitTesting(coordinator.isInspectorVisible)
-                .disabled(!coordinator.isInspectorVisible)
-                .accessibilityHidden(!coordinator.isInspectorVisible)
-                .frame(width: coordinator.isInspectorVisible ? effectiveInspectorWidth : 0, alignment: .leading)
+                .opacity(showRightInspector ? 1 : 0)
+                .allowsHitTesting(showRightInspector)
+                .disabled(!showRightInspector)
+                .accessibilityHidden(!showRightInspector)
+                .frame(width: showRightInspector ? effectiveInspectorWidth : 0, alignment: .leading)
                 .ignoresSafeArea(.container, edges: .top)
                 .clipped()
                 .layoutPriority(1)
@@ -576,6 +578,18 @@ public struct MainWindowView: View {
             moodboardsHomeStage
         case .moodboard:
             moodboardStudioStage
+        case .pinterest:
+            PinterestExploreWorkspaceView(
+                controller: pinterestController,
+                library: library,
+                coordinator: coordinator,
+                isSidebarVisible: isSidebarVisible,
+                onToggleSidebar: {
+                    withAnimation(CharkleMotion.accessible(CharkleMotion.drawerEase, reduced: reduceMotion)) {
+                        isSidebarVisible.toggle()
+                    }
+                }
+            )
         default:
             libraryGalleryStage
         }
@@ -1092,6 +1106,7 @@ public struct MainWindowView: View {
         case .moodboardsHome: "所有情绪板"
         case .moodboard(let id):
             moodboards.boards.first(where: { $0.id == id })?.title ?? "情绪板"
+        case .pinterest: "Pinterest 空间"
         case .folder(let id):
             library.folders.first(where: { $0.id == id })?.name ?? "文件夹"
         case .smartFolder(let id):
@@ -3272,6 +3287,8 @@ public struct MainWindowView: View {
             }
         case .moodboardsHome:
             Task { await moodboards.refreshBoards() }
+        case .pinterest:
+            Task { await pinterestController.bootstrap(engine: library.engine) }
         default:
             Task { await library.applyDestination(destination) }
         }
@@ -3398,9 +3415,18 @@ public struct MainWindowView: View {
                 coordinator.isJumpAnywherePresented = false
                 return nil
             }
+            if coordinator.selectedDestination == .pinterest, pinterestController.activeDetailPin != nil {
+                if event.isARepeat { return nil }
+                withAnimation(CharkleMotion.accessible(CharkleMotion.exitSm, reduced: reduceMotion)) {
+                    pinterestController.closePinDetail()
+                }
+                return nil
+            }
         }
 
-        let isInGalleryStage = !coordinator.isViewingMoodboard && coordinator.selectedDestination != .moodboardsHome
+        let isInGalleryStage = !coordinator.isViewingMoodboard
+            && coordinator.selectedDestination != .moodboardsHome
+            && coordinator.selectedDestination != .pinterest
 
         // Support ⌘V paste in Gallery Filmstrip & 3D Ring Gallery (Masonry & Moodboard handle ⌘V directly)
         if primaryModifiers == [.command],

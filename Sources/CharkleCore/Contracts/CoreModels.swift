@@ -1569,6 +1569,7 @@ public enum GalleryLayoutMode: String, Codable, CaseIterable, Hashable, Sendable
 public enum SidebarDestination: Hashable, Sendable {
     case allItems
     case inbox
+    case pinterest
     case moodboardsHome
     case moodboard(UUID)
     case untagged

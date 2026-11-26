@@ -15,7 +15,7 @@ if [[ ! -d "$APP_BUNDLE" ]]; then
   exit 1
 fi
 
-VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_BUNDLE/Contents/Info.plist" 2>/dev/null || echo "1.4.0")"
+VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_BUNDLE/Contents/Info.plist" 2>/dev/null || echo "1.4.1")"
 ARCH="$(lipo -archs "$APP_BUNDLE/Contents/MacOS/$APP_NAME" 2>/dev/null | tr ' ' '-' || echo "arm64")"
 DMG_NAME="${APP_NAME}-${VERSION}-${ARCH}.dmg"
 FINAL_DMG="$DIST_DIR/$DMG_NAME"

@@ -739,6 +739,7 @@ struct VisualSearchTabView: View {
     let onFindSimilar: (AssetRecord) -> Void
     let onNavigateToScope: (MobileScope) -> Void
     let onOpenBoard: (UUID) -> Void
+    var onOpenPinterestSpace: (() -> Void)? = nil
 
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -776,6 +777,45 @@ struct VisualSearchTabView: View {
             ZStack(alignment: .top) {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 12) {
+                        if let onOpenPinterestSpace {
+                            HStack(spacing: 4) {
+                                Text("库内搜图")
+                                    .font(.system(size: 13, weight: .semibold))
+                                    .foregroundStyle(.white)
+                                    .frame(maxWidth: .infinity)
+                                    .frame(height: 34)
+                                    .background(MobileTheme.accentButtonFill(for: colorScheme), in: Capsule())
+
+                                Button {
+                                    MobileHaptics.light()
+                                    onOpenPinterestSpace()
+                                } label: {
+                                    HStack(spacing: 5) {
+                                        Image(systemName: "sparkles")
+                                            .font(.system(size: 12, weight: .semibold))
+                                        Text("Pinterest 空间")
+                                            .font(.system(size: 13, weight: .semibold))
+                                        if store.pinterestController.trayCount > 0 {
+                                            Text("\(store.pinterestController.trayCount)")
+                                                .font(.system(size: 11, weight: .bold).monospacedDigit())
+                                                .foregroundStyle(.white)
+                                                .padding(.horizontal, 6)
+                                                .padding(.vertical, 1)
+                                                .background(MobileTheme.accent(for: colorScheme), in: Capsule())
+                                        }
+                                    }
+                                    .foregroundStyle(.primary)
+                                    .frame(maxWidth: .infinity)
+                                    .frame(height: 34)
+                                    .contentShape(Capsule())
+                                }
+                                .buttonStyle(.plain)
+                            }
+                            .padding(3)
+                            .background(MobileTheme.surfaceSubtle(for: colorScheme), in: Capsule())
+                            .padding(.horizontal, 14)
+                        }
+
                         // 1. Desktop-matched Token Search Field + Hybrid Semantic Search toggle
                         searchFieldRow
                             .padding(.horizontal, 14)

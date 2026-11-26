@@ -8,6 +8,7 @@ enum MobileScope: Hashable, Sendable {
     case inbox
     case moodboardsHome
     case moodboard(UUID)
+    case pinterest
     case recent
     case untagged
     case trash
@@ -56,6 +57,7 @@ struct MobileToast: Identifiable, Equatable {
 final class MobileAppStore {
     let engine: any CharkleEngineProtocol
     let thumbnails: MobileThumbnailCache
+    let pinterestController = PinterestExploreController()
     private let authPresenter = GoogleAuthPresenter()
 
     // MARK: - Navigation & Library State
@@ -166,6 +168,7 @@ final class MobileAppStore {
         case .inbox: "收件箱"
         case .moodboardsHome: "情绪板"
         case .moodboard(let id): boards.first(where: { $0.id == id })?.title ?? "情绪板"
+        case .pinterest: "Pinterest 空间"
         case .recent: "最近"
         case .untagged: "未打标"
         case .trash: "回收站"
@@ -667,7 +670,7 @@ final class MobileAppStore {
         c.includeTrashed = false
 
         switch scope {
-        case .allItems, .moodboardsHome, .moodboard:
+        case .allItems, .moodboardsHome, .moodboard, .pinterest:
             break
         case .inbox:
             c.onlyInbox = true
