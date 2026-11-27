@@ -284,7 +284,9 @@ public struct AISettingsPane: View {
                         .labelsHidden()
                         .toggleStyle(.switch)
                         .controlSize(.small)
-                        .onChange(of: draftAIConfig.autoAnalyzeOnImport) { _, _ in persistAIConfigIfReady() }
+                        .onChange(of: draftAIConfig.autoAnalyzeOnImport) { _, newVal in
+                            persistAIConfigIfReady(message: newVal ? "已开启导入时自动 AI 分析" : "已关闭导入时自动 AI 分析")
+                        }
                 }
 
                 SettingsCardDivider()
@@ -297,7 +299,9 @@ public struct AISettingsPane: View {
                         .labelsHidden()
                         .toggleStyle(.switch)
                         .controlSize(.small)
-                        .onChange(of: draftAIConfig.sendThumbnailsToCloud) { _, _ in persistAIConfigIfReady() }
+                        .onChange(of: draftAIConfig.sendThumbnailsToCloud) { _, newVal in
+                            persistAIConfigIfReady(message: newVal ? "已开启仅上传轻量化预览图" : "已切换为允许上传原图分析")
+                        }
                 }
             }
         }
@@ -324,7 +328,9 @@ public struct AISettingsPane: View {
                     .labelsHidden()
                     .toggleStyle(.switch)
                     .controlSize(.small)
-                    .onChange(of: draftTypeSafeConfig.enabled) { _, _ in persistTypeSafeConfigIfReady() }
+                    .onChange(of: draftTypeSafeConfig.enabled) { _, newVal in
+                        persistTypeSafeConfigIfReady(message: newVal ? "已启用进阶视觉定位（TypeSafe）" : "已关闭进阶视觉定位（TypeSafe）")
+                    }
             }
 
             if draftTypeSafeConfig.enabled {
@@ -1126,16 +1132,32 @@ public struct AISettingsPane: View {
         }
     }
 
-    private func persistAIConfigIfReady() {
+    private func persistAIConfigIfReady(message: String? = nil) {
         guard didLoadDraft else { return }
         let snapshot = draftAIConfig
-        Task { await syncAndAI.saveAIConfig(snapshot, apiKey: nil, quiet: true) }
+        guard snapshot != syncAndAI.aiConfig else { return }
+        Task {
+            await syncAndAI.saveAIConfig(
+                snapshot,
+                apiKey: nil,
+                quiet: message == nil,
+                successMessage: message
+            )
+        }
     }
 
-    private func persistTypeSafeConfigIfReady() {
+    private func persistTypeSafeConfigIfReady(message: String? = nil) {
         guard didLoadDraft else { return }
         let snapshot = draftTypeSafeConfig
-        Task { await syncAndAI.saveTypeSafeConfig(snapshot, apiKey: nil, quiet: true) }
+        guard snapshot != syncAndAI.typeSafeConfig else { return }
+        Task {
+            await syncAndAI.saveTypeSafeConfig(
+                snapshot,
+                apiKey: nil,
+                quiet: message == nil,
+                successMessage: message
+            )
+        }
     }
 
     private func applySmartAIDefaults(for provider: CloudAIProviderKind, format: CustomAIEndpointFormat) {

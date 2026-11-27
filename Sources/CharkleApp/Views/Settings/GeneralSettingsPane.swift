@@ -51,7 +51,15 @@ public struct GeneralSettingsPane: View {
                         CharkleSegmentedControl(
                             selection: Binding(
                                 get: { coordinator.accentSource },
-                                set: { coordinator.accentSource = $0 }
+                                set: { newSource in
+                                    guard coordinator.accentSource != newSource else { return }
+                                    coordinator.accentSource = newSource
+                                    coordinator.showToast(
+                                        "强调色已切换为「\(newSource.displayTitle)」",
+                                        icon: "paintpalette",
+                                        tone: .success
+                                    )
+                                }
                             ),
                             options: CharkleAccentSource.allCases,
                             size: .regular,
@@ -152,7 +160,15 @@ public struct GeneralSettingsPane: View {
                 ) {
                     Picker("", selection: Binding(
                         get: { coordinator.galleryLayoutMode },
-                        set: { coordinator.galleryLayoutMode = $0 }
+                        set: { newMode in
+                            guard coordinator.galleryLayoutMode != newMode else { return }
+                            coordinator.galleryLayoutMode = newMode
+                            coordinator.showToast(
+                                "画廊默认排布已切换为「\(newMode.localizedLabel)」",
+                                icon: "square.grid.2x2.fill",
+                                tone: .success
+                            )
+                        }
                     )) {
                         ForEach(GalleryLayoutMode.allCases, id: \.self) { mode in
                             Text(mode.localizedLabel).tag(mode)

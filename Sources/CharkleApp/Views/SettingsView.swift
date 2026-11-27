@@ -31,15 +31,19 @@ public struct SettingsView: View {
     }
 
     public var body: some View {
-        SettingsContentShell(
-            coordinator: coordinator,
-            library: library,
-            syncAndAI: syncAndAI,
-            onToggleNotchPreview: onToggleNotchPreview,
-            onSyncHotkeysEnabled: onSyncHotkeysEnabled,
-            onSyncDefaultNotchTarget: onSyncDefaultNotchTarget,
-            onClose: nil
-        )
+        ZStack {
+            SettingsContentShell(
+                coordinator: coordinator,
+                library: library,
+                syncAndAI: syncAndAI,
+                onToggleNotchPreview: onToggleNotchPreview,
+                onSyncHotkeysEnabled: onSyncHotkeysEnabled,
+                onSyncDefaultNotchTarget: onSyncDefaultNotchTarget,
+                onClose: nil
+            )
+            CharkleToastOverlay(coordinator: coordinator)
+                .zIndex(300)
+        }
         .frame(width: 820, height: 630)
     }
 }

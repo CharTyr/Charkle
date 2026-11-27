@@ -37,6 +37,11 @@ public struct CaptureShortcutsSettingsPane: View {
                     HStack(spacing: 8) {
                         Button("重新检测") {
                             hasScreenCapturePermission = ScreenCapturePermissionChecker.hasScreenRecordingAccess()
+                            coordinator.showToast(
+                                hasScreenCapturePermission ? "屏幕录制权限已授权" : "尚未检测到屏幕录制权限",
+                                icon: hasScreenCapturePermission ? "checkmark.shield.fill" : "exclamationmark.triangle.fill",
+                                tone: hasScreenCapturePermission ? .success : .warning
+                            )
                         }
                         .buttonStyle(.charkle(.standard, size: .sm))
                         .fixedSize()
@@ -85,8 +90,14 @@ public struct CaptureShortcutsSettingsPane: View {
                     Toggle("", isOn: Binding(
                         get: { coordinator.globalHotkeysEnabled },
                         set: { newVal in
+                            guard coordinator.globalHotkeysEnabled != newVal else { return }
                             coordinator.globalHotkeysEnabled = newVal
                             onSyncHotkeysEnabled(newVal)
+                            coordinator.showToast(
+                                newVal ? "已启用系统全局快捷键" : "已关闭系统全局快捷键",
+                                icon: "keyboard",
+                                tone: .success
+                            )
                         }
                     ))
                     .labelsHidden()
@@ -170,16 +181,22 @@ public struct CaptureShortcutsSettingsPane: View {
     ) -> some View {
         SettingsRow(title: title, subtitle: subtitle) {
             KeyboardShortcuts.Recorder(for: name) { _ in
-                handleShortcutRecorded()
+                handleShortcutRecorded(title: title, name: name)
             }
             .fixedSize()
             .opacity(coordinator.globalHotkeysEnabled ? 1.0 : 0.6)
         }
     }
 
-    private func handleShortcutRecorded() {
+    private func handleShortcutRecorded(title: String, name: KeyboardShortcuts.Name) {
         refreshShortcutSummaries()
         onSyncHotkeysEnabled(coordinator.globalHotkeysEnabled)
+        let current = GlobalHotkeyManager.displayString(for: name, fallback: "")
+        if current.isEmpty {
+            coordinator.showToast("已清除「\(title)」快捷键", icon: "keyboard")
+        } else {
+            coordinator.showToast("已更新「\(title)」快捷键为 \(current)", icon: "keyboard", tone: .success)
+        }
     }
 
     private func refreshShortcutSummaries() {

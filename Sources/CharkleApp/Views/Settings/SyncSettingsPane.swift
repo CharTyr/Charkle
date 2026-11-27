@@ -659,9 +659,15 @@ public struct SyncSettingsPane: View {
                     .frame(width: 210)
                     .disabled(draftConfig.resolvedSharedFolderID != nil)
                     .focused($isRootFolderFieldFocused)
-                    .onSubmit { persistIfReady() }
+                    .onSubmit {
+                        let path = draftConfig.rootFolderName.trimmingCharacters(in: .whitespacesAndNewlines)
+                        persistIfReady(message: path.isEmpty ? "已更新云端保存路径" : "云端保存路径已更新为「\(path)」")
+                    }
                     .onChange(of: isRootFolderFieldFocused) { wasFocused, nowFocused in
-                        if wasFocused && !nowFocused { persistIfReady() }
+                        if wasFocused && !nowFocused {
+                            let path = draftConfig.rootFolderName.trimmingCharacters(in: .whitespacesAndNewlines)
+                            persistIfReady(message: path.isEmpty ? "已更新云端保存路径" : "云端保存路径已更新为「\(path)」")
+                        }
                     }
             }
         }
@@ -708,7 +714,7 @@ public struct SyncSettingsPane: View {
                                 ForEach(syncAndAI.sharedFolders, id: \.id) { folder in
                                     Button {
                                         draftConfig.sharedFolderURLOrID = folder.webViewLink ?? folder.id
-                                        persistIfReady()
+                                        persistIfReady(message: "已绑定共享协作目录「\(folder.name)」")
                                     } label: {
                                         Label(folder.name, systemImage: "folder.badge.person.crop")
                                     }
@@ -752,15 +758,21 @@ public struct SyncSettingsPane: View {
                     TextField("https://drive.google.com/drive/folders/… 或目录 ID", text: $draftConfig.sharedFolderURLOrID)
                         .textFieldStyle(.roundedBorder)
                         .focused($isSharedFolderFieldFocused)
-                        .onSubmit { persistIfReady() }
+                        .onSubmit {
+                            let val = draftConfig.sharedFolderURLOrID.trimmingCharacters(in: .whitespacesAndNewlines)
+                            persistIfReady(message: val.isEmpty ? "已清除团队共享协作目录" : "已更新团队共享协作目录")
+                        }
                         .onChange(of: isSharedFolderFieldFocused) { wasFocused, nowFocused in
-                            if wasFocused && !nowFocused { persistIfReady() }
+                            if wasFocused && !nowFocused {
+                                let val = draftConfig.sharedFolderURLOrID.trimmingCharacters(in: .whitespacesAndNewlines)
+                                persistIfReady(message: val.isEmpty ? "已清除团队共享协作目录" : "已更新团队共享协作目录")
+                            }
                         }
 
                     if !trimmed.isEmpty {
                         Button("清除") {
                             draftConfig.sharedFolderURLOrID = ""
-                            persistIfReady()
+                            persistIfReady(message: "已清除团队共享协作目录")
                         }
                         .buttonStyle(SettingsSecondaryButtonStyle())
                         .fixedSize()
@@ -842,7 +854,9 @@ public struct SyncSettingsPane: View {
                     .labelsHidden()
                     .toggleStyle(.switch)
                     .controlSize(.small)
-                    .onChange(of: draftConfig.syncThumbnails) { _, _ in persistIfReady() }
+                    .onChange(of: draftConfig.syncThumbnails) { _, newVal in
+                        persistIfReady(message: newVal ? "已开启同步轻量化预览图" : "已关闭同步轻量化预览图")
+                    }
             }
 
             SettingsCardDivider()
@@ -855,7 +869,9 @@ public struct SyncSettingsPane: View {
                     .labelsHidden()
                     .toggleStyle(.switch)
                     .controlSize(.small)
-                    .onChange(of: draftConfig.syncEmbeddings) { _, _ in persistIfReady() }
+                    .onChange(of: draftConfig.syncEmbeddings) { _, newVal in
+                        persistIfReady(message: newVal ? "已开启同步智能搜索索引" : "已关闭同步智能搜索索引")
+                    }
             }
         }
     }
@@ -982,10 +998,17 @@ public struct SyncSettingsPane: View {
         }
     }
 
-    private func persistIfReady() {
+    private func persistIfReady(message: String? = nil) {
         guard didLoadDraft else { return }
         let snapshot = draftConfig
-        Task { await syncAndAI.saveSyncConfig(snapshot, quiet: true) }
+        guard snapshot != syncAndAI.syncConfig else { return }
+        Task {
+            await syncAndAI.saveSyncConfig(
+                snapshot,
+                quiet: message == nil,
+                successMessage: message
+            )
+        }
     }
 
     private func googleAccountHint(hasOAuth: Bool, hasGDirect: Bool, isFallback: Bool) -> String {

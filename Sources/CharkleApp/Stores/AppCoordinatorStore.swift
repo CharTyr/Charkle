@@ -238,8 +238,11 @@ public final class AppCoordinatorStore {
         var startedAt: Date?
     }
 
+    public static let maxQueuedToasts: Int = 24
+
     @ObservationIgnored private var toastTimers: [UUID: ToastTimerRecord] = [:]
     @ObservationIgnored private var toastActions: [UUID: @MainActor () -> Void] = [:]
+    @ObservationIgnored private var isToastStackPaused: Bool = false
 
     private enum Keys {
         static let notchShelfEnabled = "charkle.notchShelfEnabled"
@@ -442,17 +445,21 @@ public final class AppCoordinatorStore {
             tone: tone,
             actionTitle: actionTitle,
             duration: resolvedDuration,
-            isPaused: false
+            isPaused: isToastStackPaused
         )
         toasts.append(toast)
         if let onAction {
             toastActions[toast.id] = onAction
         }
-        while toasts.count > 3 {
+        while toasts.count > Self.maxQueuedToasts {
             let evicted = toasts.removeFirst()
             cleanupToastResources(evicted.id)
         }
-        scheduleToastDismiss(id: toast.id, remaining: resolvedDuration)
+        if isToastStackPaused {
+            toastTimers[toast.id] = ToastTimerRecord(task: nil, remaining: resolvedDuration, startedAt: nil)
+        } else {
+            scheduleToastDismiss(id: toast.id, remaining: resolvedDuration)
+        }
         return toast.id
     }
 
@@ -477,6 +484,28 @@ public final class AppCoordinatorStore {
         scheduleToastDismiss(id: id, remaining: remaining)
     }
 
+    public func pauseAllToasts() {
+        isToastStackPaused = true
+        for toast in toasts {
+            pauseToast(toast.id)
+        }
+    }
+
+    public func resumeAllToasts() {
+        isToastStackPaused = false
+        for toast in toasts {
+            resumeToast(toast.id)
+        }
+    }
+
+    public func dismissAllToasts() {
+        isToastStackPaused = false
+        for toast in toasts {
+            cleanupToastResources(toast.id)
+        }
+        toasts.removeAll()
+    }
+
     public func triggerToastAction(_ id: UUID) {
         let action = toastActions.removeValue(forKey: id)
         dismissToast(id)
@@ -486,6 +515,9 @@ public final class AppCoordinatorStore {
     public func dismissToast(_ id: UUID) {
         cleanupToastResources(id)
         toasts.removeAll { $0.id == id }
+        if toasts.isEmpty {
+            isToastStackPaused = false
+        }
     }
 
     private func scheduleToastDismiss(id: UUID, remaining: Double) {

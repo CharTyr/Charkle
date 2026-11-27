@@ -12,6 +12,7 @@ public struct AdvancedAboutSettingsPane: View {
     public let library: LibraryStore
     public let syncAndAI: SyncAndAIStore
     public let appUpdater: AppUpdateStore?
+    public let coordinator: AppCoordinatorStore?
 
     @State private var draftSyncConfig: DriveSyncConfig = DriveSyncConfig()
     @State private var didLoadDraft: Bool = false
@@ -21,11 +22,13 @@ public struct AdvancedAboutSettingsPane: View {
     public init(
         library: LibraryStore,
         syncAndAI: SyncAndAIStore,
-        appUpdater: AppUpdateStore? = nil
+        appUpdater: AppUpdateStore? = nil,
+        coordinator: AppCoordinatorStore? = nil
     ) {
         self.library = library
         self.syncAndAI = syncAndAI
         self.appUpdater = appUpdater
+        self.coordinator = coordinator
     }
 
     private var resolvedUpdater: AppUpdateStore {
@@ -83,8 +86,8 @@ public struct AdvancedAboutSettingsPane: View {
                         .toggleStyle(.switch)
                         .controlSize(.small)
                         .disabled(snap.cliPath == nil)
-                        .onChange(of: draftSyncConfig.useGDirectIPAcceleration) { _, _ in
-                            persistSyncIfReady()
+                        .onChange(of: draftSyncConfig.useGDirectIPAcceleration) { _, newVal in
+                            persistSyncIfReady(message: newVal ? "已开启网络受限时 gdirect 兜底" : "已关闭 gdirect 网络兜底")
                         }
                 }
 
@@ -283,7 +286,15 @@ public struct AdvancedAboutSettingsPane: View {
                     "",
                     isOn: Binding(
                         get: { updater.autoCheckUpdates },
-                        set: { updater.autoCheckUpdates = $0 }
+                        set: { newVal in
+                            guard updater.autoCheckUpdates != newVal else { return }
+                            updater.autoCheckUpdates = newVal
+                            coordinator?.showToast(
+                                newVal ? "已开启启动时自动检查更新" : "已关闭启动时自动检查更新",
+                                icon: "arrow.triangle.2.circlepath",
+                                tone: .success
+                            )
+                        }
                     )
                 )
                 .labelsHidden()
@@ -299,6 +310,11 @@ public struct AdvancedAboutSettingsPane: View {
                 ) {
                     Button("恢复提醒") {
                         updater.clearSkippedVersion()
+                        coordinator?.showToast(
+                            "已恢复 v\(skipped) 更新提醒",
+                            icon: "bell.badge",
+                            tone: .success
+                        )
                     }
                     .buttonStyle(SettingsSecondaryButtonStyle())
                     .fixedSize()
@@ -533,7 +549,7 @@ public struct AdvancedAboutSettingsPane: View {
                     get: { draftSyncConfig.mode == .gdirectMount ? .gdirectMount : .directAPIWithGDirect },
                     set: { newMode in
                         draftSyncConfig.mode = newMode
-                        persistSyncIfReady()
+                        persistSyncIfReady(message: newMode == .gdirectMount ? "已切换为 gdirect 挂载模式" : "已切换为 Google Drive 正常直连")
                     }
                 )) {
                     Text("正常直连（推荐）").tag(DriveTransportMode.directAPIWithGDirect)
@@ -562,7 +578,7 @@ public struct AdvancedAboutSettingsPane: View {
                         get: { gdirectEmail ?? snap.accounts.first ?? "" },
                         set: { newEmail in
                             draftSyncConfig.selectedGDirectAccount = newEmail
-                            persistSyncIfReady()
+                            persistSyncIfReady(message: "已切换本机 gdirect 账号为 \(newEmail)")
                         }
                     )) {
                         ForEach(snap.accounts, id: \.self) { email in
@@ -580,7 +596,7 @@ public struct AdvancedAboutSettingsPane: View {
                     .foregroundStyle(.secondary)
                 TextField(NSHomeDirectory() + "/GoogleDrive", text: $draftSyncConfig.mountPath)
                     .textFieldStyle(.roundedBorder)
-                    .onSubmit { persistSyncIfReady() }
+                    .onSubmit { persistSyncIfReady(message: "已更新本地挂载目录") }
             }
 
             HStack(spacing: 8) {
@@ -625,9 +641,16 @@ public struct AdvancedAboutSettingsPane: View {
         .frame(width: 500)
     }
 
-    private func persistSyncIfReady() {
+    private func persistSyncIfReady(message: String? = nil) {
         guard didLoadDraft else { return }
         let snapshot = draftSyncConfig
-        Task { await syncAndAI.saveSyncConfig(snapshot, quiet: true) }
+        guard snapshot != syncAndAI.syncConfig else { return }
+        Task {
+            await syncAndAI.saveSyncConfig(
+                snapshot,
+                quiet: message == nil,
+                successMessage: message
+            )
+        }
     }
 }

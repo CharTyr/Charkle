@@ -34,14 +34,38 @@ public final class SyncAndAIStore {
     public var cacheStats: CacheStats = CacheStats()
     public var externalAgentConfig: ExternalAgentConfig = ExternalAgentConfig()
 
+    public struct SettingsFeedbackEvent: Equatable, Sendable {
+        public let id: UInt64
+        public let message: String
+        public let isError: Bool
+    }
+
     public var lastSyncReport: SyncReport?
     public var lastMigrationReport: StorageMigrationReport?
     public var sharedFolders: [RemoteDriveFile] = []
     public var isLoadingSharedFolders: Bool = false
-    public var statusMessage: String?
-    public var errorMessage: String?
+    public private(set) var lastFeedbackEvent: SettingsFeedbackEvent?
+    public var statusMessage: String? {
+        didSet {
+            if let message = statusMessage?.trimmingCharacters(in: .whitespacesAndNewlines), !message.isEmpty {
+                feedbackSequence &+= 1
+                lastFeedbackEvent = SettingsFeedbackEvent(id: feedbackSequence, message: message, isError: false)
+            }
+        }
+    }
+    public var errorMessage: String? {
+        didSet {
+            if let message = errorMessage?.trimmingCharacters(in: .whitespacesAndNewlines), !message.isEmpty {
+                feedbackSequence &+= 1
+                lastFeedbackEvent = SettingsFeedbackEvent(id: feedbackSequence, message: message, isError: true)
+            }
+        }
+    }
     public var isBusy: Bool = false
     public var isMigrating: Bool = false
+
+    @ObservationIgnored
+    private var feedbackSequence: UInt64 = 0
 
     @ObservationIgnored
     private static let syncStatusDecoder = JSONDecoder()
@@ -245,13 +269,19 @@ public final class SyncAndAIStore {
         }
     }
 
-    public func saveSyncConfig(_ config: DriveSyncConfig, quiet: Bool = true) async {
+    public func saveSyncConfig(
+        _ config: DriveSyncConfig,
+        quiet: Bool = true,
+        successMessage: String? = nil
+    ) async {
         errorMessage = nil
         do {
             try await engine.saveSyncConfig(config)
             syncConfig = config
             syncStatus = await engine.syncStatus()
-            if !quiet {
+            if let successMessage {
+                statusMessage = successMessage
+            } else if !quiet {
                 statusMessage = "已更新云同步设置"
             }
         } catch {
@@ -518,33 +548,37 @@ public final class SyncAndAIStore {
             errorMessage = "至少需要保留一个存储后端。"
             return
         }
+        let removedName = list.first(where: { $0.id == id })?.name
         list.removeAll { $0.id == id }
         next.backends = list
         next.synchronizePrimaryFields()
-        await saveSyncConfig(next, quiet: false)
+        let message = removedName.map { "已移除同步后端「\($0)」" } ?? "已移除同步后端"
+        await saveSyncConfig(next, quiet: false, successMessage: message)
     }
 
     public func setBackendEnabled(id: UUID, enabled: Bool) async {
         var next = syncConfig
         var list = next.resolvedBackends
         guard let idx = list.firstIndex(where: { $0.id == id }) else { return }
+        let backendName = list[idx].name
         list[idx].isEnabled = enabled
         next.backends = list
         next.synchronizePrimaryFields()
-        await saveSyncConfig(next, quiet: true)
+        let message = enabled ? "已启用同步后端「\(backendName)」" : "已暂停同步后端「\(backendName)」"
+        await saveSyncConfig(next, quiet: false, successMessage: message)
     }
 
     public func setPrimaryBackend(id: UUID) async {
         var next = syncConfig
         var list = next.resolvedBackends
-        guard list.contains(where: { $0.id == id }) else { return }
+        guard let target = list.first(where: { $0.id == id }) else { return }
         for idx in list.indices {
             list[idx].isPrimary = (list[idx].id == id)
             if list[idx].id == id { list[idx].isEnabled = true }
         }
         next.backends = list
         next.synchronizePrimaryFields()
-        await saveSyncConfig(next, quiet: false)
+        await saveSyncConfig(next, quiet: false, successMessage: "已将「\(target.name)」设为主同步后端")
     }
 
     @discardableResult
@@ -604,13 +638,20 @@ public final class SyncAndAIStore {
         }
     }
 
-    public func saveAIConfig(_ config: AIProviderConfig, apiKey: String?, quiet: Bool = false) async {
+    public func saveAIConfig(
+        _ config: AIProviderConfig,
+        apiKey: String?,
+        quiet: Bool = false,
+        successMessage: String? = nil
+    ) async {
         errorMessage = nil
         do {
             try await engine.saveAIConfig(config, apiKey: apiKey)
             aiConfig = config
             hasStoredAIKey = await engine.hasStoredAIKey(for: config.provider)
-            if !quiet {
+            if let successMessage {
+                statusMessage = successMessage
+            } else if !quiet {
                 statusMessage = "已保存 AI 配置（密钥仅存于 macOS 钥匙串）"
             }
         } catch {
@@ -756,14 +797,17 @@ public final class SyncAndAIStore {
     public func saveTypeSafeConfig(
         _ config: TypeSafeExperimentalConfig,
         apiKey: String?,
-        quiet: Bool = false
+        quiet: Bool = false,
+        successMessage: String? = nil
     ) async {
         errorMessage = nil
         do {
             try await engine.saveTypeSafeConfig(config, apiKey: apiKey)
             typeSafeConfig = await engine.typeSafeConfig()
             hasStoredTypeSafeKey = await engine.hasStoredTypeSafeKey()
-            if !quiet {
+            if let successMessage {
+                statusMessage = successMessage
+            } else if !quiet {
                 statusMessage = "已保存 TypeSafe (Jev) 实验配置（密钥仅存于 macOS 钥匙串）"
             }
         } catch {
@@ -797,9 +841,12 @@ public final class SyncAndAIStore {
     }
 
     public func setCacheBudgetGB(_ gb: Double) async {
-        let bytes = Int64(max(2, min(100, gb)) * 1024 * 1024 * 1024)
+        let clamped = max(2, min(100, gb))
+        let bytes = Int64(clamped * 1024 * 1024 * 1024)
         await engine.setCacheBudgetBytes(bytes)
         cacheStats = await engine.cacheStats()
+        errorMessage = nil
+        statusMessage = "临时原件缓存上限已调整为 \(Int(clamped.rounded())) GB"
     }
 
     public func evictCacheNow() async {

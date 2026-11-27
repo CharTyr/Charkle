@@ -59,7 +59,15 @@ public struct ExtensionsSettingsPane: View {
                             "",
                             isOn: Binding(
                                 get: { bridge.isEnabled },
-                                set: { bridge.isEnabled = $0 }
+                                set: { newVal in
+                                    guard bridge.isEnabled != newVal else { return }
+                                    bridge.isEnabled = newVal
+                                    coordinator.showToast(
+                                        newVal ? "已开启浏览器扩展本地桥接" : "已关闭浏览器扩展本地桥接",
+                                        icon: "puzzlepiece.extension",
+                                        tone: .success
+                                    )
+                                }
                             )
                         )
                         .labelsHidden()
@@ -78,7 +86,15 @@ public struct ExtensionsSettingsPane: View {
                         "",
                         isOn: Binding(
                             get: { bridge.allowLocalAutoPair },
-                            set: { bridge.allowLocalAutoPair = $0 }
+                            set: { newVal in
+                                guard bridge.allowLocalAutoPair != newVal else { return }
+                                bridge.allowLocalAutoPair = newVal
+                                coordinator.showToast(
+                                    newVal ? "已开启同机扩展自动免密配对" : "已切换为手动令牌校验",
+                                    icon: "lock.shield",
+                                    tone: .success
+                                )
+                            }
                         )
                     )
                     .labelsHidden()

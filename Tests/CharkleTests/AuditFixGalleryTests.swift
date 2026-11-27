@@ -354,4 +354,51 @@ struct AuditFixGalleryTests {
         hoverState.setNodeHovered(nodeA, hovering: true)
         #expect(hoverState.effectiveHoveredNodeID == nodeA)
     }
+
+    @Test("CharkleToastDeckLayout bounds height for unlimited toast bursts with monotonic 2.5D depth recession and capped expansion")
+    @MainActor
+    func toastDeckLayout25DAndUnlimitedBurstBounds() {
+        let d0 = CharkleToastDeckLayout.collapsedCardStyle(depth: 0, reduceMotion: false)
+        let d1 = CharkleToastDeckLayout.collapsedCardStyle(depth: 1, reduceMotion: false)
+        let d2 = CharkleToastDeckLayout.collapsedCardStyle(depth: 2, reduceMotion: false)
+        let d3 = CharkleToastDeckLayout.collapsedCardStyle(depth: 3, reduceMotion: false)
+        let d4 = CharkleToastDeckLayout.collapsedCardStyle(depth: 4, reduceMotion: false)
+        let d20 = CharkleToastDeckLayout.collapsedCardStyle(depth: 20, reduceMotion: false)
+
+        // Frontmost card is crisp, interactive, unscaled, and anchored at y=0
+        #expect(d0.isVisible && d0.allowsHitTesting)
+        #expect(d0.scale == 1.0 && d0.opacity == 1.0 && d0.yOffset == 0 && d0.tiltDegrees == 0)
+
+        // Back layers recede monotonically upward and backward in 2.5D
+        #expect(d1.isVisible && !d1.allowsHitTesting)
+        #expect(d0.scale > d1.scale && d1.scale > d2.scale && d2.scale > d3.scale && d3.scale > d4.scale)
+        #expect(d0.opacity > d1.opacity && d1.opacity > d2.opacity && d2.opacity > d3.opacity && d3.opacity > 0)
+        #expect(d0.yOffset > d1.yOffset && d1.yOffset > d2.yOffset && d2.yOffset > d3.yOffset)
+        #expect(d1.tiltDegrees > 0 && d2.tiltDegrees > d1.tiltDegrees && d3.tiltDegrees > d2.tiltDegrees)
+
+        // Depth 4+ fades completely behind the deck so 20+ rapid toasts never grow the deck height
+        #expect(!d4.isVisible && d4.opacity == 0.0 && !d4.allowsHitTesting)
+        #expect(!d20.isVisible && d20.opacity == 0.0)
+        let height4 = CharkleToastDeckLayout.collapsedDeckHeight(frontHeight: 38, toastCount: 4)
+        let height50 = CharkleToastDeckLayout.collapsedDeckHeight(frontHeight: 38, toastCount: 50)
+        #expect(height4 == height50)
+        #expect(height50 <= 70)
+
+        // Reduce motion disables 3D tilt and blur while preserving clean vertical recession
+        let reducedD2 = CharkleToastDeckLayout.collapsedCardStyle(depth: 2, reduceMotion: true)
+        #expect(reducedD2.tiltDegrees == 0 && reducedD2.blurRadius == 0 && reducedD2.yOffset < 0)
+
+        // Hover-expanded stack fans upward cleanly and caps visible items at maxVisibleExpanded (5)
+        let heights = Array(repeating: CGFloat(40), count: 12)
+        let exp0 = CharkleToastDeckLayout.expandedCardStyle(depth: 0, heightsFromFront: heights, reduceMotion: false)
+        let exp1 = CharkleToastDeckLayout.expandedCardStyle(depth: 1, heightsFromFront: heights, reduceMotion: false)
+        let exp4 = CharkleToastDeckLayout.expandedCardStyle(depth: 4, heightsFromFront: heights, reduceMotion: false)
+        let exp5 = CharkleToastDeckLayout.expandedCardStyle(depth: 5, heightsFromFront: heights, reduceMotion: false)
+        #expect(exp0.yOffset == 0 && exp0.allowsHitTesting && exp0.scale == 1.0)
+        #expect(exp1.yOffset == -48 && exp1.allowsHitTesting)
+        #expect(exp4.isVisible && exp4.allowsHitTesting)
+        #expect(!exp5.isVisible && exp5.opacity == 0.0 && !exp5.allowsHitTesting)
+        #expect(CharkleToastDeckLayout.hiddenOverflowCount(totalCount: 12, isExpanded: false) == 8)
+        #expect(CharkleToastDeckLayout.hiddenOverflowCount(totalCount: 12, isExpanded: true) == 7)
+    }
 }

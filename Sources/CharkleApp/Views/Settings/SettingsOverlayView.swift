@@ -179,6 +179,15 @@ public struct SettingsContentShell: View {
             }
             await syncAndAI.loadAll()
         }
+        .onChange(of: syncAndAI.lastFeedbackEvent) { _, event in
+            guard let event else { return }
+            coordinator.showToast(
+                event.message,
+                icon: event.isError ? "exclamationmark.triangle.fill" : "checkmark.circle.fill",
+                tone: event.isError ? .error : .success,
+                duration: event.isError ? 4.2 : nil
+            )
+        }
     }
 
     // MARK: - Left Navigation Rail
@@ -285,9 +294,7 @@ public struct SettingsContentShell: View {
     // MARK: - Right Content Column
 
     private var contentColumn: some View {
-        let hasFeedbackBanner = syncAndAI.statusMessage != nil || syncAndAI.errorMessage != nil
-
-        return VStack(spacing: 0) {
+        VStack(spacing: 0) {
             // Fixed pane title header + close button
             HStack(spacing: 10) {
                 Text(coordinator.selectedSettingsTab.label)
@@ -314,24 +321,11 @@ public struct SettingsContentShell: View {
 
             ScrollView(.vertical) {
                 VStack(alignment: .leading, spacing: 18) {
-                    if let status = syncAndAI.statusMessage {
-                        feedbackBanner(status, isError: false)
-                            .transition(CharkleMotion.originTransition(anchor: .top, scale: 0.97, reduced: reduceMotion))
-                    }
-                    if let err = syncAndAI.errorMessage {
-                        feedbackBanner(err, isError: true)
-                            .transition(CharkleMotion.originTransition(anchor: .top, scale: 0.97, reduced: reduceMotion))
-                    }
-
                     activePane
                 }
                 .padding(.horizontal, 24)
                 .padding(.vertical, 18)
                 .charkleCleanScrollbars(hidden: false)
-                .animation(
-                    CharkleMotion.enterExit(hasFeedbackBanner, reduced: reduceMotion),
-                    value: "\(syncAndAI.statusMessage ?? "")|\(syncAndAI.errorMessage ?? "")"
-                )
             }
             .scrollIndicators(.automatic)
         }
@@ -371,7 +365,12 @@ public struct SettingsContentShell: View {
             ExtensionsSettingsPane(coordinator: coordinator, syncAndAI: syncAndAI)
         case .advancedAbout:
             if let resolvedLibrary = library ?? fallbackLibrary {
-                AdvancedAboutSettingsPane(library: resolvedLibrary, syncAndAI: syncAndAI, appUpdater: appUpdater)
+                AdvancedAboutSettingsPane(
+                    library: resolvedLibrary,
+                    syncAndAI: syncAndAI,
+                    appUpdater: appUpdater,
+                    coordinator: coordinator
+                )
             } else {
                 Color.clear
                     .onAppear {
@@ -381,34 +380,5 @@ public struct SettingsContentShell: View {
                     }
             }
         }
-    }
-
-    private func feedbackBanner(_ text: String, isError: Bool) -> some View {
-        let tint = isError
-            ? SettingsPalette.destructiveInk(for: colorScheme)
-            : SettingsPalette.positiveInk(for: colorScheme)
-        let shape = RoundedRectangle(cornerRadius: CharkleTheme.Radius.settingsInner, style: .continuous)
-        return HStack(spacing: 8) {
-            Image(systemName: isError ? "exclamationmark.circle.fill" : "checkmark.circle.fill")
-                .foregroundStyle(tint)
-            Text(text)
-                .font(.system(size: 12, weight: .medium))
-                .fixedSize(horizontal: false, vertical: true)
-            Spacer()
-            Button {
-                if isError { syncAndAI.errorMessage = nil } else { syncAndAI.statusMessage = nil }
-            } label: {
-                Image(systemName: "xmark")
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundStyle(.secondary)
-            }
-            .buttonStyle(.plain)
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 9)
-        .background(tint.opacity(0.11), in: shape)
-        .overlay(
-            shape.strokeBorder(tint.opacity(0.22), lineWidth: CharkleTheme.hairlineWidth)
-        )
     }
 }

@@ -30,7 +30,15 @@ public struct NotchShelfSettingsPane: View {
                 ) {
                     Toggle("", isOn: Binding(
                         get: { coordinator.notchShelfEnabled },
-                        set: { coordinator.notchShelfEnabled = $0 }
+                        set: { newVal in
+                            guard coordinator.notchShelfEnabled != newVal else { return }
+                            coordinator.notchShelfEnabled = newVal
+                            coordinator.showToast(
+                                newVal ? "已启用屏幕顶部灵感浮窗" : "已关闭屏幕顶部灵感浮窗",
+                                icon: "macwindow",
+                                tone: .success
+                            )
+                        }
                     ))
                     .labelsHidden()
                     .toggleStyle(.switch)
@@ -45,7 +53,15 @@ public struct NotchShelfSettingsPane: View {
                 ) {
                     Toggle("", isOn: Binding(
                         get: { coordinator.notchHoverTriggerEnabled },
-                        set: { coordinator.notchHoverTriggerEnabled = $0 }
+                        set: { newVal in
+                            guard coordinator.notchHoverTriggerEnabled != newVal else { return }
+                            coordinator.notchHoverTriggerEnabled = newVal
+                            coordinator.showToast(
+                                newVal ? "已开启悬停顶部自动展开" : "已关闭悬停顶部自动展开",
+                                icon: "macwindow",
+                                tone: .success
+                            )
+                        }
                     ))
                     .labelsHidden()
                     .toggleStyle(.switch)
@@ -61,7 +77,15 @@ public struct NotchShelfSettingsPane: View {
                 ) {
                     Picker("", selection: Binding(
                         get: { coordinator.notchPresentationMode },
-                        set: { coordinator.notchPresentationMode = $0 }
+                        set: { newMode in
+                            guard coordinator.notchPresentationMode != newMode else { return }
+                            coordinator.notchPresentationMode = newMode
+                            coordinator.showToast(
+                                "刘海浮窗形态已切换为「\(newMode.shortLabel)」",
+                                icon: "macwindow",
+                                tone: .success
+                            )
+                        }
                     )) {
                         ForEach(NotchShelfPresentationMode.allCases, id: \.self) { mode in
                             Text(mode.shortLabel).tag(mode)
@@ -82,8 +106,19 @@ public struct NotchShelfSettingsPane: View {
                     Picker("", selection: Binding(
                         get: { coordinator.defaultNotchTargetMode },
                         set: { newMode in
+                            guard coordinator.defaultNotchTargetMode != newMode else { return }
                             coordinator.defaultNotchTargetMode = newMode
                             onSyncDefaultNotchTarget(newMode)
+                            let targetName: String = switch newMode {
+                            case .inbox: "收件箱"
+                            case .folder: "文件夹"
+                            case .activeMoodboard: "活跃情绪板"
+                            }
+                            coordinator.showToast(
+                                "默认收纳目标已设为「\(targetName)」",
+                                icon: "tray.and.arrow.down",
+                                tone: .success
+                            )
                         }
                     )) {
                         Text("收件箱").tag(NotchTargetMode.inbox)
@@ -147,7 +182,15 @@ public struct NotchShelfSettingsPane: View {
                 ) {
                     Toggle("", isOn: Binding(
                         get: { coordinator.launchInMinimalCaptureMode },
-                        set: { coordinator.launchInMinimalCaptureMode = $0 }
+                        set: { newVal in
+                            guard coordinator.launchInMinimalCaptureMode != newVal else { return }
+                            coordinator.launchInMinimalCaptureMode = newVal
+                            coordinator.showToast(
+                                newVal ? "已开启启动时直接进入极简刘海模式" : "已关闭启动时进入极简刘海模式",
+                                icon: "bolt.circle.fill",
+                                tone: .success
+                            )
+                        }
                     ))
                     .labelsHidden()
                     .toggleStyle(.switch)
@@ -162,7 +205,15 @@ public struct NotchShelfSettingsPane: View {
                 ) {
                     Toggle("", isOn: Binding(
                         get: { coordinator.enterMinimalModeOnWindowClose },
-                        set: { coordinator.enterMinimalModeOnWindowClose = $0 }
+                        set: { newVal in
+                            guard coordinator.enterMinimalModeOnWindowClose != newVal else { return }
+                            coordinator.enterMinimalModeOnWindowClose = newVal
+                            coordinator.showToast(
+                                newVal ? "已开启关闭主窗自动转入极简模式" : "已关闭关闭主窗自动转入极简模式",
+                                icon: "xmark.circle",
+                                tone: .success
+                            )
+                        }
                     ))
                     .labelsHidden()
                     .toggleStyle(.switch)

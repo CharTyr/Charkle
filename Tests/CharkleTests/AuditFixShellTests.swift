@@ -155,4 +155,51 @@ struct AuditFixShellTests {
         let pinterest = try readSource("Sources/CharkleApp/Views/Pinterest/PinterestExploreWorkspaceView.swift")
         #expect(pinterest.contains("coordinator.isModalOverlayPresented"))
     }
+
+    @Test("Toast overlay anchors bottom-right with tight width hugging, bottom-up entry, and 2.5D depth stack")
+    func toastOverlayBottomRight25DContracts() throws {
+        let toastOverlay = try readSource("Sources/CharkleApp/DesignSystem/CharkleToastOverlay.swift")
+        let coordinator = try readSource("Sources/CharkleApp/Stores/AppCoordinatorStore.swift")
+
+        // Must never greedily expand pill to 380pt before Liquid Glass (caused trailing blank space)
+        #expect(!toastOverlay.contains(".frame(maxWidth: 380, alignment: .leading)"))
+        // Must anchor bottom-right and pop up from bottom edge
+        #expect(toastOverlay.contains("alignment: .bottomTrailing"))
+        #expect(toastOverlay.contains(".move(edge: .bottom)"))
+        #expect(toastOverlay.contains("CharkleToastDeckLayout"))
+        #expect(toastOverlay.contains("rotation3DEffect"))
+        // Coordinator supports deep stack + stack hover pause/resume + dismiss all
+        #expect(coordinator.contains("public static let maxQueuedToasts"))
+        #expect(coordinator.contains("public func pauseAllToasts()"))
+        #expect(coordinator.contains("public func resumeAllToasts()"))
+        #expect(coordinator.contains("public func dismissAllToasts()"))
+    }
+
+    @Test("All Settings panes and SyncAndAIStore feedback route through the Toast notification system")
+    func settingsFeedbackRoutesToToastContracts() throws {
+        let syncAndAI = try readSource("Sources/CharkleApp/Stores/SyncAndAIStore.swift")
+        let settingsOverlay = try readSource("Sources/CharkleApp/Views/Settings/SettingsOverlayView.swift")
+        let general = try readSource("Sources/CharkleApp/Views/Settings/GeneralSettingsPane.swift")
+        let notch = try readSource("Sources/CharkleApp/Views/Settings/NotchShelfSettingsPane.swift")
+        let capture = try readSource("Sources/CharkleApp/Views/Settings/CaptureShortcutsSettingsPane.swift")
+        let extensions = try readSource("Sources/CharkleApp/Views/Settings/ExtensionsSettingsPane.swift")
+        let advanced = try readSource("Sources/CharkleApp/Views/Settings/AdvancedAboutSettingsPane.swift")
+        let syncPane = try readSource("Sources/CharkleApp/Views/Settings/SyncSettingsPane.swift")
+        let aiPane = try readSource("Sources/CharkleApp/Views/Settings/AISettingsPane.swift")
+
+        // SyncAndAIStore emits monotonic feedback events bridged into Toast by SettingsContentShell
+        #expect(syncAndAI.contains("public private(set) var lastFeedbackEvent: SettingsFeedbackEvent?"))
+        #expect(settingsOverlay.contains(".onChange(of: syncAndAI.lastFeedbackEvent)"))
+        #expect(settingsOverlay.contains("coordinator.showToast("))
+        #expect(!settingsOverlay.contains("private func feedbackBanner("))
+
+        // Direct interactive controls across all Settings panes emit clear toast / feedback messages
+        #expect(general.contains("coordinator.showToast("))
+        #expect(notch.contains("coordinator.showToast("))
+        #expect(capture.contains("已启用系统全局快捷键"))
+        #expect(extensions.contains("已开启浏览器扩展本地桥接"))
+        #expect(advanced.contains("已开启启动时自动检查更新"))
+        #expect(syncPane.contains("已开启同步轻量化预览图"))
+        #expect(aiPane.contains("已开启导入时自动 AI 分析"))
+    }
 }
