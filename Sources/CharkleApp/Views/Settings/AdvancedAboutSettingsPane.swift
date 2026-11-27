@@ -35,8 +35,8 @@ public struct AdvancedAboutSettingsPane: View {
     public var body: some View {
         let snap = syncAndAI.gdirectSnapshot
         let healthyNodeCount = snap.endpoints.filter(\.healthy).count
-        let appVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.5.0"
-        let buildNumber = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "12"
+        let appVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.5.1"
+        let buildNumber = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "13"
 
         VStack(alignment: .leading, spacing: 18) {
             SettingsSection("Google Drive 高级通道（gdirect）") {

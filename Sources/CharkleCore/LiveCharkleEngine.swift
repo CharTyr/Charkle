@@ -258,6 +258,61 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         }
     }
 
+    /// Replaces an asset's cover thumbnail (`grid520` + `preview1400`) using a user-selected video frame
+    /// or custom image, updates extracted dominant colors, and queues thumbnail cloud sync.
+    public func updateAssetCoverImage(id: UUID, imageData: Data) async throws -> AssetRecord {
+        guard !imageData.isEmpty else {
+            throw LibraryDatabaseError("封面图片数据为空。")
+        }
+        guard var current = try await database.asset(id: id) else {
+            throw DriveTransportError.fileNotFound(id.uuidString)
+        }
+
+        let decodedImage: CGImage? = autoreleasepool {
+            guard let source = CGImageSourceCreateWithData(imageData as CFData, [kCGImageSourceShouldCache: false] as CFDictionary) else {
+                return nil
+            }
+            let opts: [CFString: Any] = [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceThumbnailMaxPixelSize: 1_600,
+                kCGImageSourceShouldCacheImmediately: true
+            ]
+            return CGImageSourceCreateThumbnailAtIndex(source, 0, opts as CFDictionary)
+                ?? CGImageSourceCreateImageAtIndex(source, 0, nil)
+        }
+        guard let cgImage = decodedImage else {
+            throw LibraryDatabaseError("无法解析所选视频帧图片。")
+        }
+
+        let originalKind = current.mediaKind
+        let originalPixelWidth = current.pixelWidth
+        let originalPixelHeight = current.pixelHeight
+        try media.writeCustomPoster(cgImage, for: &current)
+        let updatedColors = current.dominantColors
+        let updatedWidth = (originalKind == .video && originalPixelWidth > 0 && originalPixelHeight > 0)
+            ? originalPixelWidth
+            : current.pixelWidth
+        let updatedHeight = (originalKind == .video && originalPixelWidth > 0 && originalPixelHeight > 0)
+            ? originalPixelHeight
+            : current.pixelHeight
+
+        let currentSyncConfig = await syncConfig()
+        return try await database.transaction { store in
+            guard var latest = try store.asset(id: id) else {
+                throw DriveTransportError.fileNotFound(id.uuidString)
+            }
+            latest.dominantColors = updatedColors
+            latest.pixelWidth = updatedWidth
+            latest.pixelHeight = updatedHeight
+            let saved = try store.saveAssetLocally(latest)
+            if currentSyncConfig.syncThumbnails {
+                try store.markProjection("thumbnails", id: id)
+            }
+            return saved
+        }
+    }
+
     public func refreshRichAsset(id: UUID) async throws -> AssetRecord {
         guard var current = try await database.asset(id: id) else {
             throw DriveTransportError.fileNotFound(id.uuidString)

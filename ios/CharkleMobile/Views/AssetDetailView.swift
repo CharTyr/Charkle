@@ -1,8 +1,10 @@
+import AVFoundation
 import AVKit
 import CharkleCore
 import PDFKit
 import SwiftUI
 import UIKit
+import WebKit
 
 /// Transient non-destructive preview transform state (rotation & mirroring), matching macOS Quick Look.
 struct PreviewTransformState: Equatable {
@@ -922,7 +924,7 @@ private struct FilmstripThumbCell: View {
                 }
             }
             .clipped()
-            .task(id: asset.id) {
+            .task(id: "\(asset.id.uuidString)-\(thumbnails.revision)") {
                 if let hit = thumbnails.cachedImage(for: asset.id, tier: .grid520) {
                     image = hit
                     return
@@ -949,9 +951,19 @@ private struct AssetStageContentView: View {
     var body: some View {
         Group {
             if asset.mediaKind == .video, let localOriginalURL {
-                VideoPlayer(player: AVPlayer(url: localOriginalURL))
-                    .clipShape(RoundedRectangle(cornerRadius: MobileTheme.Radius.cardOuter, style: .continuous))
-                    .padding(12)
+                MobileLocalVideoStageView(
+                    assetID: asset.id,
+                    videoURL: localOriginalURL,
+                    isActivePage: isActivePage,
+                    onSetCoverFrame: { jpegData, ts in
+                        _ = await store.updateAssetCoverImage(
+                            assetID: asset.id,
+                            imageData: jpegData,
+                            timestampSeconds: ts
+                        )
+                    }
+                )
+                .padding(12)
             } else if asset.mediaKind == .document,
                       (asset.fileName as NSString).pathExtension.lowercased() == "pdf",
                       let localOriginalURL {
@@ -983,7 +995,7 @@ private struct AssetStageContentView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .task(id: asset.id) {
+        .task(id: "\(asset.id.uuidString)-\(store.thumbnails.revision)") {
             if let preview = await store.thumbnails.loadImage(for: asset.id, tier: .preview1400) {
                 image = preview
             } else if let grid = await store.thumbnails.loadImage(for: asset.id, tier: .grid520) {
@@ -1012,9 +1024,34 @@ private struct AssetStageContentView: View {
 
     private func socialPostStage(_ post: SocialPostMetadata) -> some View {
         let attachments = post.effectiveAttachments
+        let hasInlineStreamVideo = post.platform.isVideoPlatform
+            || (post.hasVideo && attachments.contains(where: { $0.kind == .video || $0.kind == .gif }))
         return ScrollView {
             VStack(alignment: .leading, spacing: 14) {
-                if let image {
+                if hasInlineStreamVideo {
+                    MobileStreamingVideoPlayerView(
+                        playbackKey: "\(asset.id.uuidString):\(post.originalURL)",
+                        coverImage: image,
+                        durationText: post.formattedVideoDuration,
+                        watchURL: URL(string: post.originalURL),
+                        openActionLabel: post.platform.openActionLabel,
+                        isActivePage: isActivePage,
+                        onSetCoverFrame: { jpegData, ts in
+                            _ = await store.updateAssetCoverImage(
+                                assetID: asset.id,
+                                imageData: jpegData,
+                                timestampSeconds: ts
+                            )
+                        },
+                        resolvePlan: {
+                            await VideoPlatformResolver.resolvePlaybackPlan(for: post)
+                        }
+                    )
+                    .aspectRatio(16.0 / 9.0, contentMode: .fit)
+                    .frame(maxWidth: 680)
+                    .clipShape(RoundedRectangle(cornerRadius: MobileTheme.Radius.cardOuter, style: .continuous))
+                    .frame(maxWidth: .infinity)
+                } else if let image {
                     Image(uiImage: image)
                         .resizable()
                         .scaledToFit()
@@ -1260,9 +1297,48 @@ private struct AssetStageContentView: View {
 
     private func webPageStage(_ web: WebPageRichMetadata) -> some View {
         let attachments = web.attachments
+        let externalURL = URL(string: web.canonicalURL) ?? asset.externalWebURL
+        let hasStreamableVideo = web.hasVideo
+            || attachments.contains(where: { $0.kind == .video })
+            || (externalURL.flatMap { VideoPlatformResolver.embedPlayer(for: $0) } != nil)
+        let formattedDur: String? = {
+            guard let secs = web.durationSeconds ?? asset.durationSeconds, secs > 0 else { return nil }
+            let total = Int(secs.rounded())
+            let h = total / 3600
+            let m = (total % 3600) / 60
+            let s = total % 60
+            return h > 0 ? String(format: "%d:%02d:%02d", h, m, s) : String(format: "%d:%02d", m, s)
+        }()
+
         return ScrollView {
             VStack(alignment: .leading, spacing: 14) {
-                if let image {
+                if hasStreamableVideo {
+                    MobileStreamingVideoPlayerView(
+                        playbackKey: "web:\(asset.id.uuidString):\(web.canonicalURL)",
+                        coverImage: image,
+                        durationText: formattedDur,
+                        watchURL: externalURL,
+                        openActionLabel: "在浏览器打开",
+                        isActivePage: isActivePage,
+                        onSetCoverFrame: { jpegData, ts in
+                            _ = await store.updateAssetCoverImage(
+                                assetID: asset.id,
+                                imageData: jpegData,
+                                timestampSeconds: ts
+                            )
+                        },
+                        resolvePlan: {
+                            await VideoPlatformResolver.resolveWebPagePlaybackPlan(
+                                for: web,
+                                fallbackURL: externalURL
+                            )
+                        }
+                    )
+                    .aspectRatio(16.0 / 9.0, contentMode: .fit)
+                    .frame(maxWidth: 680)
+                    .clipShape(RoundedRectangle(cornerRadius: MobileTheme.Radius.cardOuter, style: .continuous))
+                    .frame(maxWidth: .infinity)
+                } else if let image {
                     Image(uiImage: image)
                         .resizable()
                         .scaledToFit()
@@ -1463,6 +1539,523 @@ private struct AssetStageContentView: View {
             }
             .padding(16)
         }
+    }
+}
+
+// MARK: - Zero-Download Streaming & Local Video Players (iOS Preview + Frame-to-Cover Capture)
+
+@MainActor
+private final class MobileVideoFrameCaptureBridge {
+    var captureCurrentFrame: (@MainActor () async -> (jpegData: Data, timestampSeconds: Double?)?)?
+}
+
+private struct MobileLocalVideoStageView: View {
+    let assetID: UUID
+    let videoURL: URL
+    let isActivePage: Bool
+    let onSetCoverFrame: @MainActor (Data, Double?) async -> Void
+
+    @Environment(\.colorScheme) private var colorScheme
+    @State private var captureBridge = MobileVideoFrameCaptureBridge()
+    @State private var isCapturingCover = false
+
+    var body: some View {
+        VStack(spacing: 10) {
+            MobileDirectStreamPlayerController(
+                stream: VideoStreamPlaybackPlan.DirectStream(url: videoURL),
+                isActive: isActivePage,
+                captureBridge: captureBridge,
+                onPlaybackFailed: {}
+            )
+            .clipShape(RoundedRectangle(cornerRadius: MobileTheme.Radius.cardOuter, style: .continuous))
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            HStack {
+                Spacer()
+                Button {
+                    guard !isCapturingCover else { return }
+                    MobileHaptics.light()
+                    isCapturingCover = true
+                    Task { @MainActor in
+                        defer { isCapturingCover = false }
+                        if let captured = await captureBridge.captureCurrentFrame?() {
+                            await onSetCoverFrame(captured.jpegData, captured.timestampSeconds)
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        if isCapturingCover {
+                            ProgressView().controlSize(.mini)
+                        } else {
+                            Image(systemName: "camera.viewfinder")
+                                .font(.system(size: 13, weight: .semibold))
+                        }
+                        Text("设当前帧为封面")
+                            .font(.system(size: 13, weight: .semibold))
+                    }
+                    .foregroundStyle(.primary)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .background(MobileTheme.surfaceElevated(for: colorScheme), in: Capsule())
+                    .overlay(Capsule().strokeBorder(MobileTheme.hairline(for: colorScheme), lineWidth: 0.75))
+                }
+                .buttonStyle(MobileTactileButtonStyle())
+                .disabled(isCapturingCover)
+                Spacer()
+            }
+        }
+    }
+}
+
+private struct MobileStreamingVideoPlayerView: View {
+    let playbackKey: String
+    let coverImage: UIImage?
+    let durationText: String?
+    let watchURL: URL?
+    let openActionLabel: String
+    let isActivePage: Bool
+    var onSetCoverFrame: (@MainActor (_ jpegData: Data, _ timestampSeconds: Double?) async -> Void)? = nil
+    let resolvePlan: () async -> VideoStreamPlaybackPlan
+
+    @State private var plan: VideoStreamPlaybackPlan?
+    @State private var isResolving: Bool = true
+    @State private var directStreamIndex: Int = 0
+    @State private var useEmbedMode: Bool = false
+    @State private var allDirectStreamsFailed: Bool = false
+    @State private var captureBridge = MobileVideoFrameCaptureBridge()
+    @State private var isCapturingCover: Bool = false
+
+    private var activeDirectStream: VideoStreamPlaybackPlan.DirectStream? {
+        guard isActivePage,
+              !useEmbedMode,
+              !allDirectStreamsFailed,
+              let streams = plan?.directStreams,
+              directStreamIndex >= 0,
+              directStreamIndex < streams.count else {
+            return nil
+        }
+        return streams[directStreamIndex]
+    }
+
+    private var canToggleModes: Bool {
+        guard let plan else { return false }
+        return !plan.directStreams.isEmpty && !allDirectStreamsFailed && plan.embedPlayer != nil
+    }
+
+    private var isPlayerMounted: Bool {
+        activeDirectStream != nil
+            || (plan?.embedPlayer != nil && (useEmbedMode || allDirectStreamsFailed || (plan?.directStreams.isEmpty == true)))
+    }
+
+    var body: some View {
+        ZStack {
+            Color.black
+
+            if !isActivePage {
+                coverSurface
+            } else if let stream = activeDirectStream {
+                MobileDirectStreamPlayerController(
+                    stream: stream,
+                    isActive: isActivePage,
+                    captureBridge: captureBridge,
+                    onPlaybackFailed: handleDirectStreamFailure
+                )
+            } else if let embed = plan?.embedPlayer, (useEmbedMode || allDirectStreamsFailed || (plan?.directStreams.isEmpty == true)) {
+                MobileEmbedStreamWebView(
+                    embed: embed,
+                    isActive: isActivePage,
+                    captureBridge: captureBridge
+                )
+            } else {
+                coverSurface
+            }
+
+            if isActivePage && isResolving {
+                coverSurface
+                    .overlay {
+                        HStack(spacing: 8) {
+                            ProgressView()
+                                .controlSize(.small)
+                                .tint(.white)
+                            Text("正在连接流式播放…")
+                                .font(.system(size: 12.5, weight: .semibold))
+                                .foregroundStyle(.white)
+                        }
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 8)
+                        .background(.black.opacity(0.68), in: Capsule(style: .continuous))
+                        .overlay(Capsule().strokeBorder(.white.opacity(0.22), lineWidth: 0.75))
+                    }
+            } else if isActivePage && plan?.hasPlayableSource == false {
+                coverSurface
+                    .overlay {
+                        VStack(spacing: 10) {
+                            Image(systemName: "play.slash")
+                                .font(.system(size: 22, weight: .medium))
+                                .foregroundStyle(.white.opacity(0.85))
+                            Text("暂无法直接流式播放此视频")
+                                .font(.system(size: 12.5, weight: .medium))
+                                .foregroundStyle(.white.opacity(0.92))
+                            if let watchURL {
+                                Button {
+                                    UIApplication.shared.open(watchURL)
+                                } label: {
+                                    Label(openActionLabel, systemImage: "arrow.up.right.square")
+                                        .font(.system(size: 12, weight: .semibold))
+                                        .foregroundStyle(.white)
+                                        .padding(.horizontal, 12)
+                                        .padding(.vertical, 6)
+                                        .background(Color.accentColor, in: Capsule())
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                        .padding(16)
+                        .background(.black.opacity(0.65), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    }
+            }
+
+            if isActivePage && !isResolving && isPlayerMounted && (canToggleModes || onSetCoverFrame != nil) {
+                VStack {
+                    HStack(spacing: 6) {
+                        Spacer()
+                        if let onSetCoverFrame {
+                            Button {
+                                guard !isCapturingCover else { return }
+                                MobileHaptics.light()
+                                isCapturingCover = true
+                                Task { @MainActor in
+                                    defer { isCapturingCover = false }
+                                    if let captured = await captureBridge.captureCurrentFrame?() {
+                                        await onSetCoverFrame(captured.jpegData, captured.timestampSeconds)
+                                    }
+                                }
+                            } label: {
+                                HStack(spacing: 4) {
+                                    if isCapturingCover {
+                                        ProgressView().controlSize(.mini).tint(.white)
+                                    } else {
+                                        Image(systemName: "camera.viewfinder")
+                                            .font(.system(size: 11, weight: .semibold))
+                                    }
+                                    Text("设当前帧为封面")
+                                        .font(.system(size: 11, weight: .semibold))
+                                }
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 5)
+                                .background(.black.opacity(0.62), in: Capsule(style: .continuous))
+                                .overlay(Capsule().strokeBorder(.white.opacity(0.22), lineWidth: 0.75))
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(isCapturingCover)
+                        }
+                        if canToggleModes {
+                            Button {
+                                MobileHaptics.light()
+                                useEmbedMode.toggle()
+                            } label: {
+                                Label(
+                                    useEmbedMode ? "原生流式" : "网页播放器",
+                                    systemImage: useEmbedMode ? "play.rectangle" : "globe"
+                                )
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 5)
+                                .background(.black.opacity(0.62), in: Capsule(style: .continuous))
+                                .overlay(Capsule().strokeBorder(.white.opacity(0.22), lineWidth: 0.75))
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(10)
+                    Spacer()
+                }
+            }
+        }
+        .task(id: "\(playbackKey):\(isActivePage)") {
+            guard isActivePage else {
+                isResolving = false
+                return
+            }
+            if plan != nil {
+                isResolving = false
+                return
+            }
+            isResolving = true
+            directStreamIndex = 0
+            useEmbedMode = false
+            allDirectStreamsFailed = false
+
+            try? await Task.sleep(for: .milliseconds(120))
+            guard !Task.isCancelled else { return }
+
+            let resolved = await resolvePlan()
+            guard !Task.isCancelled else { return }
+
+            plan = resolved
+            if resolved.directStreams.isEmpty && resolved.embedPlayer != nil {
+                useEmbedMode = true
+            }
+            isResolving = false
+        }
+    }
+
+    @ViewBuilder
+    private var coverSurface: some View {
+        ZStack {
+            if let coverImage {
+                Image(uiImage: coverImage)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .clipped()
+            } else {
+                Color.black
+            }
+
+            if let durationText {
+                VStack {
+                    Spacer()
+                    HStack {
+                        Spacer()
+                        Text(durationText)
+                            .font(.system(size: 11.5, weight: .semibold).monospacedDigit())
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3.5)
+                            .background(.black.opacity(0.75), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                            .padding(10)
+                    }
+                }
+            }
+        }
+    }
+
+    private func handleDirectStreamFailure() {
+        let count = plan?.directStreams.count ?? 0
+        if directStreamIndex + 1 < count {
+            directStreamIndex += 1
+        } else {
+            allDirectStreamsFailed = true
+            if plan?.embedPlayer != nil {
+                useEmbedMode = true
+            }
+        }
+    }
+}
+
+private struct MobileDirectStreamPlayerController: UIViewControllerRepresentable {
+    let stream: VideoStreamPlaybackPlan.DirectStream
+    let isActive: Bool
+    let captureBridge: MobileVideoFrameCaptureBridge
+    let onPlaybackFailed: @MainActor () -> Void
+
+    @MainActor
+    final class Coordinator {
+        var currentStream: VideoStreamPlaybackPlan.DirectStream?
+        var loadTask: Task<Void, Never>?
+        var statusObservation: NSKeyValueObservation?
+        var videoOutput: AVPlayerItemVideoOutput?
+        weak var captureBridge: MobileVideoFrameCaptureBridge?
+        var onPlaybackFailed: (@MainActor () -> Void)?
+        var didReportFailure = false
+
+        func attach(
+            stream: VideoStreamPlaybackPlan.DirectStream,
+            to controller: AVPlayerViewController,
+            isActive: Bool,
+            captureBridge: MobileVideoFrameCaptureBridge,
+            onPlaybackFailed: @escaping @MainActor () -> Void
+        ) {
+            teardown(controller)
+            currentStream = stream
+            self.captureBridge = captureBridge
+            self.onPlaybackFailed = onPlaybackFailed
+            didReportFailure = false
+
+            loadTask = Task { @MainActor [weak controller, weak self] in
+                guard !Task.isCancelled, let controller, let self else { return }
+                try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
+                try? AVAudioSession.sharedInstance().setActive(true)
+
+                let options: [String: Any]? = stream.httpHeaders.isEmpty
+                    ? nil
+                    : ["AVURLAssetHTTPHeaderFieldsKey": stream.httpHeaders]
+                let asset = AVURLAsset(url: stream.url, options: options)
+                let playable = (try? await asset.load(.isPlayable)) ?? false
+                guard !Task.isCancelled else { return }
+                guard playable else {
+                    self.reportFailureOnce()
+                    return
+                }
+
+                let item = AVPlayerItem(asset: asset)
+                item.preferredForwardBufferDuration = 12
+                let output = VideoFrameCapture.makeVideoOutput()
+                item.add(output)
+                self.videoOutput = output
+
+                self.statusObservation = item.observe(\.status, options: [.new]) { [weak self] observedItem, _ in
+                    if observedItem.status == .failed {
+                        Task { @MainActor [weak self] in
+                            self?.reportFailureOnce()
+                        }
+                    }
+                }
+                let player = AVPlayer(playerItem: item)
+                player.automaticallyWaitsToMinimizeStalling = true
+                controller.player = player
+                self.captureBridge?.captureCurrentFrame = { [weak player, weak output] in
+                    guard let player,
+                          let result = await VideoFrameCapture.captureCurrentFrameJPEG(from: player, videoOutput: output) else {
+                        return nil
+                    }
+                    return (result.jpegData, result.timestampSeconds)
+                }
+                if isActive {
+                    player.play()
+                }
+            }
+        }
+
+        private func reportFailureOnce() {
+            guard !didReportFailure else { return }
+            didReportFailure = true
+            onPlaybackFailed?()
+        }
+
+        func teardown(_ controller: AVPlayerViewController) {
+            loadTask?.cancel()
+            loadTask = nil
+            statusObservation?.invalidate()
+            statusObservation = nil
+            captureBridge?.captureCurrentFrame = nil
+            videoOutput = nil
+            controller.player?.pause()
+            controller.player?.replaceCurrentItem(with: nil)
+            controller.player = nil
+        }
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    func makeUIViewController(context: Context) -> AVPlayerViewController {
+        let vc = AVPlayerViewController()
+        vc.showsPlaybackControls = true
+        vc.entersFullScreenWhenPlaybackBegins = false
+        vc.allowsPictureInPicturePlayback = true
+        vc.view.backgroundColor = .black
+        context.coordinator.attach(
+            stream: stream,
+            to: vc,
+            isActive: isActive,
+            captureBridge: captureBridge,
+            onPlaybackFailed: onPlaybackFailed
+        )
+        return vc
+    }
+
+    func updateUIViewController(_ uiViewController: AVPlayerViewController, context: Context) {
+        if context.coordinator.currentStream != stream {
+            context.coordinator.attach(
+                stream: stream,
+                to: uiViewController,
+                isActive: isActive,
+                captureBridge: captureBridge,
+                onPlaybackFailed: onPlaybackFailed
+            )
+            return
+        }
+        if !isActive {
+            uiViewController.player?.pause()
+        }
+    }
+
+    static func dismantleUIViewController(_ uiViewController: AVPlayerViewController, coordinator: Coordinator) {
+        coordinator.teardown(uiViewController)
+    }
+}
+
+private struct MobileEmbedStreamWebView: UIViewRepresentable {
+    let embed: VideoStreamPlaybackPlan.EmbedPlayer
+    let isActive: Bool
+    let captureBridge: MobileVideoFrameCaptureBridge
+
+    @MainActor
+    final class Coordinator {
+        var loadedEmbed: VideoStreamPlaybackPlan.EmbedPlayer?
+        weak var captureBridge: MobileVideoFrameCaptureBridge?
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    func makeUIView(context: Context) -> WKWebView {
+        let config = WKWebViewConfiguration()
+        config.allowsInlineMediaPlayback = true
+        config.allowsPictureInPictureMediaPlayback = true
+        config.mediaTypesRequiringUserActionForPlayback = []
+        let webView = WKWebView(frame: .zero, configuration: config)
+        webView.isOpaque = false
+        webView.backgroundColor = .black
+        webView.scrollView.isScrollEnabled = false
+        webView.scrollView.contentInsetAdjustmentBehavior = .never
+        if let ua = embed.userAgent {
+            webView.customUserAgent = ua
+        }
+        try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
+        try? AVAudioSession.sharedInstance().setActive(true)
+        context.coordinator.captureBridge = captureBridge
+        registerSnapshotBridge(for: webView)
+        loadEmbed(embed, into: webView, coordinator: context.coordinator)
+        return webView
+    }
+
+    func updateUIView(_ uiView: WKWebView, context: Context) {
+        context.coordinator.captureBridge = captureBridge
+        registerSnapshotBridge(for: uiView)
+        if context.coordinator.loadedEmbed != embed {
+            loadEmbed(embed, into: uiView, coordinator: context.coordinator)
+        }
+        if !isActive {
+            uiView.evaluateJavaScript("document.querySelectorAll('video,audio').forEach(e=>e.pause());", completionHandler: nil)
+        }
+    }
+
+    static func dismantleUIView(_ uiView: WKWebView, coordinator: Coordinator) {
+        coordinator.captureBridge?.captureCurrentFrame = nil
+        uiView.stopLoading()
+        uiView.loadHTMLString("", baseURL: nil)
+        coordinator.loadedEmbed = nil
+    }
+
+    private func registerSnapshotBridge(for webView: WKWebView) {
+        captureBridge.captureCurrentFrame = { [weak webView] in
+            guard let webView else { return nil }
+            let config = WKSnapshotConfiguration()
+            config.afterScreenUpdates = false
+            guard let snapshot = try? await webView.takeSnapshot(configuration: config),
+                  let cgImage = snapshot.cgImage,
+                  let jpeg = VideoFrameCapture.encodeJPEG(cgImage) else {
+                return nil
+            }
+            return (jpeg, nil)
+        }
+    }
+
+    private func loadEmbed(
+        _ embed: VideoStreamPlaybackPlan.EmbedPlayer,
+        into webView: WKWebView,
+        coordinator: Coordinator
+    ) {
+        coordinator.loadedEmbed = embed
+        let (html, baseURL) = VideoPlatformResolver.embedHTML(for: embed)
+        webView.loadHTMLString(html, baseURL: baseURL)
     }
 }
 

@@ -749,6 +749,25 @@ public final class LibraryStore {
         }
     }
 
+    @discardableResult
+    public func updateAssetCoverImage(assetID: UUID, imageData: Data) async -> AssetRecord? {
+        do {
+            let updated = try await engine.updateAssetCoverImage(id: assetID, imageData: imageData)
+            allAssetsByID[updated.id] = updated
+            if let idx = visibleAssetIndexByID[updated.id], idx < assets.count, assets[idx].id == updated.id {
+                isUpdatingAssetsInPlace = true
+                assets[idx] = updated
+                isUpdatingAssetsInPlace = false
+            }
+            rebuildRecentActivityCache()
+            thumbnailLoader.invalidate(assetID: updated.id)
+            return updated
+        } catch {
+            lastError = error.localizedDescription
+            return nil
+        }
+    }
+
     /// Extracts a single photo, video, or GIF from a saved social post (X / Threads / Bluesky)
     /// into a standalone media asset while preserving full originating post author, text, and link.
     @discardableResult

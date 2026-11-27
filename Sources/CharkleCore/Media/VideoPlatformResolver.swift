@@ -1,5 +1,8 @@
+import AVFoundation
+import CoreImage
 import CryptoKit
 import Foundation
+import ImageIO
 
 /// Parsed identity of a YouTube or Bilibili video URL.
 public nonisolated enum VideoPlatformReference: Equatable, Hashable, Sendable {
@@ -54,6 +57,62 @@ public nonisolated enum VideoPlatformDownloadError: LocalizedError, Sendable {
         case .downloadFailed(let detail):
             "视频保存失败：\(detail)"
         }
+    }
+}
+
+/// Zero-download streaming playback descriptor for bookmarked video-site items
+/// (YouTube, Bilibili, Vimeo, Dailymotion, and generic rich webpages with discovered video streams).
+public nonisolated struct VideoStreamPlaybackPlan: Equatable, Hashable, Sendable {
+    public struct DirectStream: Equatable, Hashable, Sendable {
+        public let url: URL
+        public let httpHeaders: [String: String]
+        public let isHLS: Bool
+
+        public init(url: URL, httpHeaders: [String: String] = [:], isHLS: Bool = false) {
+            self.url = url
+            self.httpHeaders = httpHeaders
+            self.isHLS = isHLS
+        }
+    }
+
+    public struct EmbedPlayer: Equatable, Hashable, Sendable {
+        public let url: URL
+        public let referer: String
+        public let userAgent: String?
+        public let useIframeWrapper: Bool
+
+        public init(
+            url: URL,
+            referer: String,
+            userAgent: String? = nil,
+            useIframeWrapper: Bool = true
+        ) {
+            self.url = url
+            self.referer = referer
+            self.userAgent = userAgent
+            self.useIframeWrapper = useIframeWrapper
+        }
+    }
+
+    /// Ordered native `AVPlayer` streaming candidates (HTTP Range MP4 or HLS `.m3u8`).
+    public let directStreams: [DirectStream]
+    /// Official embedded `WKWebView` streaming player fallback (zero disk download).
+    public let embedPlayer: EmbedPlayer?
+    /// Canonical watch URL for external browser fallback.
+    public let watchURL: URL?
+
+    public init(
+        directStreams: [DirectStream] = [],
+        embedPlayer: EmbedPlayer? = nil,
+        watchURL: URL? = nil
+    ) {
+        self.directStreams = directStreams
+        self.embedPlayer = embedPlayer
+        self.watchURL = watchURL
+    }
+
+    public var hasPlayableSource: Bool {
+        !directStreams.isEmpty || embedPlayer != nil
     }
 }
 
@@ -806,6 +865,382 @@ public nonisolated enum VideoPlatformResolver {
         return joined
     }
 
+    // MARK: - 1.5 Zero-Download Inline Streaming Playback Plan (Preview-Time Only)
+
+    /// Resolves an inline zero-download streaming plan for a bookmarked social/video post:
+    /// - Tier 1: Native `AVPlayer` HTTP Range MP4 / HLS `.m3u8` streams with required site headers (`Referer`, `User-Agent`).
+    /// - Tier 2: Official embedded `WKWebView` streaming player (YouTube embed with valid origin/Referer to avoid Error 153,
+    ///   Bilibili HTML5 player, Vimeo/Dailymotion embeds).
+    public static func resolvePlaybackPlan(for post: SocialPostMetadata) async -> VideoStreamPlaybackPlan {
+        let watchURL = URL(string: post.originalURL)
+        switch post.platform {
+        case .bilibili:
+            return await resolveBilibiliPlaybackPlan(for: post, watchURL: watchURL)
+        case .youtube:
+            return await resolveYouTubePlaybackPlan(for: post, watchURL: watchURL)
+        default:
+            var streams: [VideoStreamPlaybackPlan.DirectStream] = []
+            var seen = Set<String>()
+            var headers: [String: String] = ["User-Agent": browserUA]
+            if post.platform == .xiaohongshu {
+                headers["Referer"] = "https://www.xiaohongshu.com/"
+            } else if let watchURL {
+                headers["Referer"] = watchURL.absoluteString
+            }
+            for att in post.effectiveAttachments where att.kind == .video || att.kind == .gif {
+                guard let url = URL(string: att.url),
+                      WebBookmark.isSafeRemoteFetchURL(url),
+                      seen.insert(url.absoluteString).inserted else { continue }
+                let isHLS = url.pathExtension.lowercased() == "m3u8" || url.absoluteString.lowercased().contains(".m3u8")
+                streams.append(.init(url: url, httpHeaders: headers, isHLS: isHLS))
+            }
+            let embed = watchURL.flatMap { embedPlayer(for: $0) }
+            return VideoStreamPlaybackPlan(directStreams: streams, embedPlayer: embed, watchURL: watchURL)
+        }
+    }
+
+    /// Resolves an inline zero-download streaming plan for any generic rich webpage bookmark (`WebPageRichMetadata`).
+    public static func resolveWebPagePlaybackPlan(
+        for web: WebPageRichMetadata,
+        fallbackURL: URL? = nil
+    ) async -> VideoStreamPlaybackPlan {
+        let canonicalURL = URL(string: web.canonicalURL) ?? fallbackURL
+        var directStreams: [VideoStreamPlaybackPlan.DirectStream] = []
+        var seen = Set<String>()
+        var embedCandidate: VideoStreamPlaybackPlan.EmbedPlayer? = canonicalURL.flatMap { embedPlayer(for: $0) }
+
+        var headers: [String: String] = ["User-Agent": browserUA]
+        if let canonicalURL {
+            headers["Referer"] = canonicalURL.absoluteString
+        }
+
+        for att in web.attachments where att.kind == .video {
+            guard let url = URL(string: att.url),
+                  WebBookmark.isSafeRemoteFetchURL(url) else { continue }
+            if looksLikeDirectVideoStreamURL(url), seen.insert(url.absoluteString).inserted {
+                let isHLS = url.pathExtension.lowercased() == "m3u8" || url.absoluteString.lowercased().contains(".m3u8")
+                directStreams.append(.init(url: url, httpHeaders: headers, isHLS: isHLS))
+            } else if embedCandidate == nil, let discoveredEmbed = embedPlayer(for: url) {
+                embedCandidate = discoveredEmbed
+            }
+        }
+
+        #if os(macOS)
+        if directStreams.isEmpty, web.hasVideo, let pageStr = canonicalURL?.absoluteString,
+           let ytdlpStream = await resolveDirectStreamURLViaYtDlpIfAvailable(pageURL: pageStr) {
+            directStreams.append(ytdlpStream)
+        }
+        #endif
+
+        return VideoStreamPlaybackPlan(
+            directStreams: directStreams,
+            embedPlayer: embedCandidate,
+            watchURL: canonicalURL
+        )
+    }
+
+    /// Pure URL recognizer returning a clean embed player descriptor for major video platforms
+    /// (YouTube, Bilibili, Vimeo, Dailymotion, or explicit `/embed/` player URLs).
+    public static func embedPlayer(
+        for url: URL,
+        bvidOverride: String? = nil,
+        cidOverride: Int64? = nil
+    ) -> VideoStreamPlaybackPlan.EmbedPlayer? {
+        guard WebBookmark.isSafeRemoteFetchURL(url),
+              let host = url.host()?.lowercased() else {
+            return nil
+        }
+
+        if let parsed = VideoPlatformURLParser.parse(url) {
+            switch parsed {
+            case .youtube(let videoID, _):
+                // Supply `origin=https://charkle.app` + matching Referer/baseURL to avoid YouTube Error 153 in WKWebView.
+                let embedStr = "https://www.youtube.com/embed/\(videoID)?autoplay=1&playsinline=1&rel=0&modestbranding=1&origin=https://charkle.app"
+                if let embedURL = URL(string: embedStr) {
+                    return .init(
+                        url: embedURL,
+                        referer: "https://charkle.app",
+                        userAgent: browserUA,
+                        useIframeWrapper: true
+                    )
+                }
+            case .bilibili(let parsedBV, let parsedAID, _, let page, _):
+                var items: [URLQueryItem] = []
+                if let bv = bvidOverride?.nilIfEmpty ?? parsedBV {
+                    items.append(URLQueryItem(name: "bvid", value: bv))
+                } else if let aid = parsedAID {
+                    items.append(URLQueryItem(name: "aid", value: "\(aid)"))
+                }
+                if let cid = cidOverride, cid > 0 {
+                    items.append(URLQueryItem(name: "cid", value: "\(cid)"))
+                }
+                if let page, page > 1 {
+                    items.append(URLQueryItem(name: "page", value: "\(page)"))
+                }
+                if !items.isEmpty {
+                    items.append(URLQueryItem(name: "autoplay", value: "1"))
+                    items.append(URLQueryItem(name: "danmaku", value: "0"))
+                    items.append(URLQueryItem(name: "high_quality", value: "1"))
+                    var comps = URLComponents(string: "https://player.bilibili.com/player.html")
+                    comps?.queryItems = items
+                    if let embedURL = comps?.url {
+                        return .init(
+                            url: embedURL,
+                            referer: "https://www.bilibili.com/",
+                            userAgent: browserUA,
+                            useIframeWrapper: true
+                        )
+                    }
+                }
+            }
+        }
+
+        let segments = url.pathComponents.filter { $0 != "/" && !$0.isEmpty }
+
+        // Vimeo (`vimeo.com/<digits>` or `player.vimeo.com/video/<digits>`)
+        if host == "vimeo.com" || host == "www.vimeo.com" || host == "player.vimeo.com" {
+            let numericID = segments.reversed().first(where: { $0.count >= 5 && $0.allSatisfy(\.isNumber) })
+            if let numericID,
+               let embedURL = URL(string: "https://player.vimeo.com/video/\(numericID)?autoplay=1&playsinline=1") {
+                return .init(
+                    url: embedURL,
+                    referer: "https://vimeo.com/",
+                    userAgent: browserUA,
+                    useIframeWrapper: true
+                )
+            }
+        }
+
+        // Dailymotion (`dailymotion.com/video/<id>` or `dai.ly/<id>`)
+        if host == "dailymotion.com" || host == "www.dailymotion.com" || host == "dai.ly" || host == "geo.dailymotion.com" {
+            let videoCode: String? = {
+                if host == "dai.ly", let first = segments.first, !first.isEmpty { return first }
+                if let idx = segments.firstIndex(of: "video"), idx + 1 < segments.count { return segments[idx + 1] }
+                return URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "video" })?.value
+            }()
+            if let videoCode,
+               videoCode.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "_" || $0 == "-") }),
+               let embedURL = URL(string: "https://geo.dailymotion.com/player.html?video=\(videoCode)") {
+                return .init(
+                    url: embedURL,
+                    referer: "https://www.dailymotion.com/",
+                    userAgent: browserUA,
+                    useIframeWrapper: true
+                )
+            }
+        }
+
+        // Explicit embed / player URLs discovered from `og:video` / JSON-LD `embedUrl`
+        let lowerPath = url.path.lowercased()
+        if (host.hasPrefix("player.") || lowerPath.contains("/embed/") || lowerPath.contains("player.html"))
+            && !looksLikeDirectVideoStreamURL(url) {
+            let origin = "\(url.scheme ?? "https")://\(host)/"
+            return .init(
+                url: url,
+                referer: origin,
+                userAgent: browserUA,
+                useIframeWrapper: true
+            )
+        }
+
+        return nil
+    }
+
+    /// Generates clean full-bleed responsive iframe HTML with explicit `strict-origin-when-cross-origin`
+    /// Referer policy and non-nil `baseURL` (prevents YouTube Error 153 and Bilibili Referer rejection in `WKWebView`).
+    public static func embedHTML(for embed: VideoStreamPlaybackPlan.EmbedPlayer) -> (html: String, baseURL: URL) {
+        let escapedSrc = embed.url.absoluteString
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+          <meta name="referrer" content="strict-origin-when-cross-origin">
+          <style>
+            html, body {
+              margin: 0;
+              padding: 0;
+              width: 100%;
+              height: 100%;
+              background: #000;
+              overflow: hidden;
+            }
+            iframe {
+              position: fixed;
+              inset: 0;
+              width: 100%;
+              height: 100%;
+              border: 0;
+              background: #000;
+            }
+          </style>
+        </head>
+        <body>
+          <iframe
+            src="\(escapedSrc)"
+            referrerpolicy="strict-origin-when-cross-origin"
+            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share; fullscreen"
+            allowfullscreen
+            webkitallowfullscreen>
+          </iframe>
+        </body>
+        </html>
+        """
+        let baseURL = URL(string: embed.referer) ?? URL(string: "https://charkle.app")!
+        return (html, baseURL)
+    }
+
+    /// Returns `true` when `url` points directly to a playable media stream rather than an HTML watch/embed page.
+    public static func looksLikeDirectVideoStreamURL(_ url: URL) -> Bool {
+        let ext = url.pathExtension.lowercased()
+        if ["mp4", "m4v", "mov", "m3u8", "webm"].contains(ext) {
+            return true
+        }
+        let lower = url.absoluteString.lowercased()
+        return lower.contains(".mp4?")
+            || lower.contains(".m3u8?")
+            || lower.contains(".mov?")
+            || lower.contains("mime=video")
+            || lower.contains("/videoplayback?")
+    }
+
+    private static func resolveBilibiliPlaybackPlan(
+        for post: SocialPostMetadata,
+        watchURL: URL?
+    ) async -> VideoStreamPlaybackPlan {
+        var bvid = post.videoID?.nilIfEmpty
+        var aid: Int64? = nil
+        var cid = post.videoCID
+        var page: Int? = nil
+
+        if let origURL = watchURL,
+           case .bilibili(let parsedBV, let parsedAID, let shortURL, let parsedPage, _) = VideoPlatformURLParser.parse(origURL) {
+            bvid = bvid ?? parsedBV
+            aid = parsedAID
+            page = parsedPage
+            if bvid == nil, aid == nil, let shortURL,
+               let expanded = await expandShortRedirect(shortURL),
+               case .bilibili(let rbv, let raid, _, let rpage, _) = VideoPlatformURLParser.parse(expanded) {
+                bvid = rbv
+                aid = raid
+                page = page ?? rpage
+            }
+        }
+
+        if cid == nil || cid == 0 || bvid == nil {
+            if let fresh = await fetchBilibiliViewInfo(bvid: bvid, aid: aid, page: page) {
+                bvid = fresh.bvid
+                aid = fresh.aid
+                cid = fresh.cid
+            }
+        }
+
+        var directStreams: [VideoStreamPlaybackPlan.DirectStream] = []
+        if let resolvedBVID = bvid, let resolvedCID = cid, resolvedCID > 0 {
+            let referer = "https://www.bilibili.com/video/\(resolvedBVID)"
+            let headers = [
+                "Referer": referer,
+                "User-Agent": browserUA
+            ]
+            let urls = await fetchBilibiliProgressiveStreamURLs(bvid: resolvedBVID, cid: resolvedCID)
+            directStreams = urls.map { .init(url: $0, httpHeaders: headers, isHLS: false) }
+        }
+
+        let canonicalForEmbed: URL? = {
+            if let bvid {
+                let suffix = (page ?? 1) > 1 ? "?p=\(page!)" : ""
+                return URL(string: "https://www.bilibili.com/video/\(bvid)\(suffix)")
+            }
+            return watchURL
+        }()
+        let embed = canonicalForEmbed.flatMap { embedPlayer(for: $0, bvidOverride: bvid, cidOverride: cid) }
+
+        return VideoStreamPlaybackPlan(
+            directStreams: directStreams,
+            embedPlayer: embed,
+            watchURL: canonicalForEmbed ?? watchURL
+        )
+    }
+
+    private static func resolveYouTubePlaybackPlan(
+        for post: SocialPostMetadata,
+        watchURL: URL?
+    ) async -> VideoStreamPlaybackPlan {
+        let videoID: String? = {
+            if let id = post.videoID, VideoPlatformURLParser.isValidYouTubeID(id) {
+                return id
+            }
+            if let url = watchURL,
+               case .youtube(let parsedID, _) = VideoPlatformURLParser.parse(url) {
+                return parsedID
+            }
+            return nil
+        }()
+
+        let canonicalURL = videoID.flatMap { URL(string: "https://www.youtube.com/watch?v=\($0)") } ?? watchURL
+        let embed = canonicalURL.flatMap { embedPlayer(for: $0) }
+
+        guard let videoID else {
+            return VideoStreamPlaybackPlan(directStreams: [], embedPlayer: embed, watchURL: canonicalURL)
+        }
+
+        var directStreams: [VideoStreamPlaybackPlan.DirectStream] = []
+        var seen = Set<String>()
+
+        // Try native InnerTube streams (preferring adaptive HLS `.m3u8` up to 1080p, then progressive muxed MP4)
+        for profile in [YouTubeClientProfile.ios, .android, .tvEmbedded] {
+            guard let payload = await fetchYouTubePlayerResponse(videoID: videoID, client: profile),
+                  let streamingData = payload["streamingData"] as? [String: Any] else {
+                continue
+            }
+
+            let headers = [
+                "User-Agent": profile.userAgent,
+                "Referer": "https://www.youtube.com/"
+            ]
+
+            if let hlsStr = streamingData["hlsManifestUrl"] as? String,
+               let hlsURL = URL(string: hlsStr),
+               WebBookmark.isSafeRemoteFetchURL(hlsURL),
+               seen.insert(hlsURL.absoluteString).inserted {
+                directStreams.append(.init(url: hlsURL, httpHeaders: headers, isHLS: true))
+            }
+
+            if let formats = streamingData["formats"] as? [[String: Any]] {
+                let progressiveMP4s: [(url: URL, qualityRank: Int)] = formats.compactMap { entry in
+                    guard let urlStr = entry["url"] as? String,
+                          let streamURL = URL(string: urlStr),
+                          WebBookmark.isSafeRemoteFetchURL(streamURL) else {
+                        return nil
+                    }
+                    let mime = ((entry["mimeType"] as? String) ?? "").lowercased()
+                    guard mime.contains("video/mp4") else { return nil }
+                    let height = intValue(entry["height"]) ?? 0
+                    let bitrate = intValue(entry["bitrate"]) ?? 0
+                    return (streamURL, height * 10_000 + bitrate / 1_000)
+                }
+                .sorted { $0.qualityRank > $1.qualityRank }
+
+                for item in progressiveMP4s where seen.insert(item.url.absoluteString).inserted {
+                    directStreams.append(.init(url: item.url, httpHeaders: headers, isHLS: false))
+                }
+            }
+
+            if !directStreams.isEmpty { break }
+        }
+
+        return VideoStreamPlaybackPlan(
+            directStreams: directStreams,
+            embedPlayer: embed,
+            watchURL: canonicalURL
+        )
+    }
+
     // MARK: - 2. Explicit On-Demand Video Download (Triggered ONLY When User Saves Video as Standalone Asset)
 
     public static func downloadVideo(
@@ -1114,6 +1549,71 @@ public nonisolated enum VideoPlatformResolver {
     }
 
     #if os(macOS)
+    /// Optional macOS zero-download helper: resolves a direct streaming URL via `yt-dlp -g` for generic video sites.
+    private static func resolveDirectStreamURLViaYtDlpIfAvailable(pageURL: String) async -> VideoStreamPlaybackPlan.DirectStream? {
+        let candidates = [
+            "/opt/homebrew/bin/yt-dlp",
+            "/usr/local/bin/yt-dlp",
+            "/usr/bin/yt-dlp"
+        ]
+        guard let binary = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
+            return nil
+        }
+
+        return await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let proc = Process()
+                proc.executableURL = URL(fileURLWithPath: binary)
+                proc.arguments = [
+                    "--no-playlist",
+                    "--no-warnings",
+                    "-g",
+                    "-f", "best[ext=mp4]/best[protocol*=m3u8]/best",
+                    pageURL
+                ]
+                let outPipe = Pipe()
+                proc.standardOutput = outPipe
+                proc.standardError = Pipe()
+                do {
+                    try proc.run()
+                    let deadline = Date().addingTimeInterval(6.0)
+                    while proc.isRunning && Date() < deadline {
+                        Thread.sleep(forTimeInterval: 0.05)
+                    }
+                    if proc.isRunning {
+                        proc.terminate()
+                        continuation.resume(returning: nil)
+                        return
+                    }
+                    guard proc.terminationStatus == 0 else {
+                        continuation.resume(returning: nil)
+                        return
+                    }
+                    let data = outPipe.fileHandleForReading.readDataToEndOfFile()
+                    let firstLine = String(data: data, encoding: .utf8)?
+                        .split(whereSeparator: \.isNewline)
+                        .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+                        .first(where: { $0.hasPrefix("https://") || $0.hasPrefix("http://") })
+                    guard let firstLine,
+                          let streamURL = URL(string: firstLine),
+                          WebBookmark.isSafeRemoteFetchURL(streamURL) else {
+                        continuation.resume(returning: nil)
+                        return
+                    }
+                    let isHLS = streamURL.pathExtension.lowercased() == "m3u8"
+                        || streamURL.absoluteString.lowercased().contains(".m3u8")
+                    continuation.resume(returning: .init(
+                        url: streamURL,
+                        httpHeaders: ["Referer": pageURL, "User-Agent": browserUA],
+                        isHLS: isHLS
+                    ))
+                } catch {
+                    continuation.resume(returning: nil)
+                }
+            }
+        }
+    }
+
     /// Optional macOS fallback when a video platform enforces cipher/DASH-only streams and `yt-dlp` is installed locally.
     private static func downloadViaYtDlpIfAvailable(
         pageURL: String,
@@ -1286,5 +1786,108 @@ private extension String {
     var nilIfEmpty: String? {
         let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+}
+
+// MARK: - Cross-Platform Video Frame Capture Helper (Local MP4/MOV, Progressive HTTP MP4, HLS .m3u8)
+
+/// Captures a crisp video frame at the active playhead for setting as a Charkle asset cover.
+/// Works across local video files, progressive HTTP MP4 streams, and adaptive HLS (`.m3u8`) streams
+/// without downloading the full video to disk.
+public nonisolated enum VideoFrameCapture {
+    private static let sharedCIContext = CIContext(options: [.useSoftwareRenderer: false])
+
+    public static func makeVideoOutput() -> AVPlayerItemVideoOutput {
+        AVPlayerItemVideoOutput(pixelBufferAttributes: [
+            kCVPixelBufferPixelFormatTypeKey as String: Int(kCVPixelFormatType_32BGRA)
+        ])
+    }
+
+    public static func encodeJPEG(_ cgImage: CGImage) -> Data? {
+        MediaArtwork.encode(cgImage, type: .jpeg)
+    }
+
+    public static func formattedTimestamp(_ seconds: Double) -> String {
+        guard seconds.isFinite && seconds >= 0 else { return "00:00" }
+        let total = Int(seconds.rounded())
+        let h = total / 3600
+        let m = (total % 3600) / 60
+        let s = total % 60
+        if h > 0 {
+            return String(format: "%d:%02d:%02d", h, m, s)
+        }
+        return String(format: "%02d:%02d", m, s)
+    }
+
+    @MainActor
+    public static func captureCurrentFrameJPEG(
+        from player: AVPlayer,
+        videoOutput: AVPlayerItemVideoOutput?
+    ) async -> (jpegData: Data, timestampSeconds: Double)? {
+        guard let item = player.currentItem else { return nil }
+        let currentTime = player.currentTime()
+        let seconds = currentTime.isNumeric ? max(0, currentTime.seconds) : 0
+        let asset = item.asset
+
+        // Determine if the video track has a non-identity rotation transform (e.g. vertical iPhone video);
+        // for rotated non-HLS tracks, AVAssetImageGenerator applies the exact preferredTrackTransform.
+        var hasTrackRotation = false
+        if let tracks = try? await asset.loadTracks(withMediaType: .video),
+           let firstTrack = tracks.first,
+           let preferred = try? await firstTrack.load(.preferredTransform) {
+            hasTrackRotation = abs(preferred.b) > 0.01 || abs(preferred.c) > 0.01 || preferred.a < 0 || preferred.d < 0
+        }
+
+        // 1. Instant zero-network CVPixelBuffer snapshot (works for HLS `.m3u8`, HTTP MP4, and local videos).
+        if !hasTrackRotation,
+           let videoOutput,
+           let pixelBuffer = videoOutput.copyPixelBuffer(forItemTime: currentTime, itemTimeForDisplay: nil) {
+            let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+            let extent = ciImage.extent
+            if extent.width > 0, extent.height > 0,
+               let cgImage = sharedCIContext.createCGImage(ciImage, from: extent),
+               let jpeg = encodeJPEG(cgImage) {
+                return (jpeg, seconds)
+            }
+        }
+
+        // 2. Precision AVAssetImageGenerator fallback off-main (handles rotated portrait videos & freshly scrubbed frames).
+        let targetTime = currentTime.isNumeric ? currentTime : CMTime(seconds: 0, preferredTimescale: 600)
+        let assetBox = UncheckedAVAssetBox(asset)
+        if let jpeg = await generateFrameJPEGOffMain(assetBox: assetBox, at: targetTime) {
+            return (jpeg, seconds)
+        }
+
+        // 3. Final pixel-buffer fallback (e.g. rotated HLS stream where AVAssetImageGenerator isn't supported).
+        if let videoOutput,
+           let pixelBuffer = videoOutput.copyPixelBuffer(forItemTime: currentTime, itemTimeForDisplay: nil) {
+            let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+            let extent = ciImage.extent
+            if extent.width > 0, extent.height > 0,
+               let cgImage = sharedCIContext.createCGImage(ciImage, from: extent),
+               let jpeg = encodeJPEG(cgImage) {
+                return (jpeg, seconds)
+            }
+        }
+
+        return nil
+    }
+
+    private nonisolated final class UncheckedAVAssetBox: @unchecked Sendable {
+        let asset: AVAsset
+        init(_ asset: AVAsset) { self.asset = asset }
+    }
+
+    @concurrent
+    private static func generateFrameJPEGOffMain(assetBox: UncheckedAVAssetBox, at targetTime: CMTime) async -> Data? {
+        let generator = AVAssetImageGenerator(asset: assetBox.asset)
+        generator.appliesPreferredTrackTransform = true
+        generator.maximumSize = CGSize(width: 1_600, height: 1_600)
+        generator.requestedTimeToleranceBefore = CMTime(seconds: 0.25, preferredTimescale: 600)
+        generator.requestedTimeToleranceAfter = CMTime(seconds: 0.25, preferredTimescale: 600)
+        guard let result = try? await generator.image(at: targetTime) else {
+            return nil
+        }
+        return encodeJPEG(result.image)
     }
 }

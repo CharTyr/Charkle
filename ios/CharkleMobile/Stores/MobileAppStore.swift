@@ -1257,6 +1257,29 @@ final class MobileAppStore {
     }
 
     @discardableResult
+    func updateAssetCoverImage(assetID: UUID, imageData: Data, timestampSeconds: Double? = nil) async -> AssetRecord? {
+        do {
+            let updated = try await engine.updateAssetCoverImage(id: assetID, imageData: imageData)
+            if let idx = assets.firstIndex(where: { $0.id == updated.id }) {
+                assets[idx] = updated
+            }
+            if let idx = inboxAssets.firstIndex(where: { $0.id == updated.id }) {
+                inboxAssets[idx] = updated
+            }
+            thumbnails.invalidate(assetIDs: [updated.id])
+            if let ts = timestampSeconds, ts > 0 {
+                showToast("已将 \(VideoFrameCapture.formattedTimestamp(ts)) 画面设为素材封面", tone: .success)
+            } else {
+                showToast("已将当前画面设为素材封面", tone: .success)
+            }
+            return updated
+        } catch {
+            showToast("更新封面失败：\(error.localizedDescription)", tone: .error)
+            return nil
+        }
+    }
+
+    @discardableResult
     func extractAllMediaFromLinkAsset(_ asset: AssetRecord, quiet: Bool = false) async -> [AssetRecord] {
         if asset.richMetadata?.socialPost != nil {
             return await extractAllMediaFromSocialPost(postAsset: asset, quiet: quiet)

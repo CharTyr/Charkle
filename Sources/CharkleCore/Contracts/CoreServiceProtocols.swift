@@ -63,6 +63,7 @@ public protocol CharkleEngineProtocol: Sendable {
     ) async throws -> DeduplicationCleanupResult
     func markAssetOpened(id: UUID) async
     func refreshRichAsset(id: UUID) async throws -> AssetRecord
+    func updateAssetCoverImage(id: UUID, imageData: Data) async throws -> AssetRecord
     func upgradeLegacyXiaohongshuCoversIfNeeded() async -> [UUID]
 
     func quickJump(query: String, limit: Int) async throws -> [QuickJumpMatch]
@@ -261,6 +262,13 @@ public extension CharkleEngineProtocol {
     func deleteSmartFolder(id: UUID) async throws -> [SmartFolderRecord] { [] }
 
     func refreshRichAsset(id: UUID) async throws -> AssetRecord {
+        guard let asset = try await fetchAsset(id: id) else {
+            throw NSError(domain: "CharkleCore", code: 404, userInfo: [NSLocalizedDescriptionKey: "Asset not found"])
+        }
+        return asset
+    }
+
+    func updateAssetCoverImage(id: UUID, imageData: Data) async throws -> AssetRecord {
         guard let asset = try await fetchAsset(id: id) else {
             throw NSError(domain: "CharkleCore", code: 404, userInfo: [NSLocalizedDescriptionKey: "Asset not found"])
         }

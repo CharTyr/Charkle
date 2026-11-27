@@ -1,7 +1,7 @@
 import Foundation
 
 extension CharkleExternalAgentService {
-    public static let serverVersion = "1.5.0"
+    public static let serverVersion = "1.5.1"
     public static let supportedProtocolVersions: [String] = [
         "2025-11-25",
         "2025-06-18",

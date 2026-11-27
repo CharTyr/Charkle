@@ -1,5 +1,6 @@
 import CharkleCanvas
 import CharkleCore
+import CoreGraphics
 import Foundation
 import Testing
 
@@ -469,5 +470,119 @@ struct NativeRedesignRegressionTests {
         #expect(!iosInbox.contains("ForEach(store.flattenedFolders)"))
         #expect(!iosCapture.contains("ForEach(store.flattenedFolders)"))
         #expect(!iosPinterest.contains("ForEach(store.flattenedFolders)"))
+    }
+
+    @Test("Video-site bookmarks resolve zero-download streaming playback plans and embed HTML cleanly on macOS & iOS")
+    func videoBookmarkInlineStreamingContracts() throws {
+        // 1. YouTube embed player includes valid origin + strict-origin-when-cross-origin Referer (avoids Error 153)
+        let ytURL = try #require(URL(string: "https://www.youtube.com/watch?v=dQw4w9WgXcQ"))
+        let ytEmbed = try #require(VideoPlatformResolver.embedPlayer(for: ytURL))
+        #expect(ytEmbed.url.absoluteString.contains("youtube.com/embed/dQw4w9WgXcQ"))
+        #expect(ytEmbed.url.absoluteString.contains("origin=https://charkle.app"))
+        let ytRendered = VideoPlatformResolver.embedHTML(for: ytEmbed)
+        #expect(ytRendered.baseURL.scheme == "https")
+        #expect(ytRendered.html.contains("strict-origin-when-cross-origin"))
+        #expect(ytRendered.html.contains("<iframe"))
+
+        // 2. Bilibili embed player preserves bvid, cid, and page with bilibili.com Referer
+        let biliURL = try #require(URL(string: "https://www.bilibili.com/video/BV1xx411c7mD?p=2"))
+        let biliEmbed = try #require(VideoPlatformResolver.embedPlayer(for: biliURL, cidOverride: 987654))
+        #expect(biliEmbed.url.absoluteString.contains("player.bilibili.com/player.html"))
+        #expect(biliEmbed.url.absoluteString.contains("bvid=BV1xx411c7mD"))
+        #expect(biliEmbed.url.absoluteString.contains("cid=987654"))
+        #expect(biliEmbed.url.absoluteString.contains("page=2"))
+        #expect(biliEmbed.referer.contains("bilibili.com"))
+
+        // 3. Generic video platforms (Vimeo, Dailymotion) and direct stream URL classifier
+        let vimeoURL = try #require(URL(string: "https://vimeo.com/123456789"))
+        let vimeoEmbed = try #require(VideoPlatformResolver.embedPlayer(for: vimeoURL))
+        #expect(vimeoEmbed.url.absoluteString.contains("player.vimeo.com/video/123456789"))
+
+        let dmURL = try #require(URL(string: "https://www.dailymotion.com/video/x8abcde"))
+        let dmEmbed = try #require(VideoPlatformResolver.embedPlayer(for: dmURL))
+        #expect(dmEmbed.url.absoluteString.contains("geo.dailymotion.com/player.html?video=x8abcde"))
+
+        #expect(VideoPlatformResolver.looksLikeDirectVideoStreamURL(try #require(URL(string: "https://cdn.example.com/reel.mp4"))))
+        #expect(VideoPlatformResolver.looksLikeDirectVideoStreamURL(try #require(URL(string: "https://cdn.example.com/master.m3u8?token=1"))))
+        #expect(!VideoPlatformResolver.looksLikeDirectVideoStreamURL(ytURL))
+
+        // 4. Both macOS Quick Look and iOS AssetDetailView wire zero-download streaming players with AVURLAsset headers + WKWebView fallback
+        let macRich = try readSource("Sources/CharkleApp/Views/QuickLookRichViewers.swift")
+        let macQL = try readSource("Sources/CharkleApp/Views/QuickLookOverlayView.swift")
+        let iosDetail = try readSource("ios/CharkleMobile/Views/AssetDetailView.swift")
+
+        #expect(macRich.contains("struct QuickLookStreamingVideoView"))
+        #expect(macRich.contains("AVURLAssetHTTPHeaderFieldsKey"))
+        #expect(macRich.contains("EmbedStreamWebPlayerViewMac"))
+        #expect(macRich.contains("resolvePlaybackPlan(for: post)"))
+        #expect(macQL.contains("QuickLookStreamingVideoView"))
+        #expect(macQL.contains("resolveWebPagePlaybackPlan"))
+
+        #expect(iosDetail.contains("MobileStreamingVideoPlayerView"))
+        #expect(iosDetail.contains("AVURLAssetHTTPHeaderFieldsKey"))
+        #expect(iosDetail.contains("MobileEmbedStreamWebView"))
+        #expect(iosDetail.contains("resolvePlaybackPlan(for: post)"))
+        #expect(iosDetail.contains("resolveWebPagePlaybackPlan"))
+    }
+
+    @Test("Picking a video frame updates asset cover thumbnails, dominant colors, and dual-platform UI hooks")
+    func videoFrameCoverSelectionContracts() async throws {
+        // 1. LiveCharkleEngine end-to-end cover replacement updates grid520/preview1400 and dominantColors
+        let tempDir = FileManager.default.temporaryDirectory
+            .appending(path: "charkle-cover-frame-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let engine = try LiveCharkleEngine.make(appSupportDirectory: tempDir)
+        let imported = try await engine.ingest(
+            [.colorSwatch(hex: "#1A4FD6", title: "ClipCoverSeed")],
+            targetFolderID: nil,
+            targetBoardID: nil
+        )
+        let asset = try #require(imported.first)
+
+        // Replace cover with a crisp 160x90 solid crimson frame (simulating captured video frame)
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let ctx = try #require(CGContext(
+            data: nil,
+            width: 160,
+            height: 90,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ))
+        ctx.setFillColor(red: 0.90, green: 0.18, blue: 0.18, alpha: 1.0)
+        ctx.fill(CGRect(x: 0, y: 0, width: 160, height: 90))
+        let crimsonFrame = try #require(ctx.makeImage())
+        let crimsonJPEG = try #require(VideoFrameCapture.encodeJPEG(crimsonFrame))
+        let updated = try await engine.updateAssetCoverImage(id: asset.id, imageData: crimsonJPEG)
+
+        #expect(updated.id == asset.id)
+        let topHex = updated.dominantColors.first?.hex.uppercased() ?? ""
+        #expect(topHex.hasPrefix("#E") || topHex.hasPrefix("#D") || topHex.hasPrefix("#F"))
+        let gridURL = await engine.thumbnailURL(for: asset.id, tier: .grid520)
+        #expect(gridURL != nil)
+        #expect(VideoFrameCapture.formattedTimestamp(84) == "01:24")
+        #expect(VideoFrameCapture.formattedTimestamp(3725) == "1:02:05")
+
+        // 2. Dual-platform UI capture bridges & immediate filmstrip/gallery invalidation wiring
+        let macRich = try readSource("Sources/CharkleApp/Views/QuickLookRichViewers.swift")
+        let macQL = try readSource("Sources/CharkleApp/Views/QuickLookOverlayView.swift")
+        let macStore = try readSource("Sources/CharkleApp/Stores/LibraryStore.swift")
+        let iosDetail = try readSource("ios/CharkleMobile/Views/AssetDetailView.swift")
+        let iosStore = try readSource("ios/CharkleMobile/Stores/MobileAppStore.swift")
+
+        #expect(macStore.contains("func updateAssetCoverImage"))
+        #expect(macRich.contains("StreamingFrameCaptureBridge"))
+        #expect(macRich.contains("takeSnapshot(configuration:"))
+        #expect(macQL.contains("applyCapturedCoverFrame"))
+        #expect(macQL.contains("设当前帧为封面"))
+
+        #expect(iosStore.contains("func updateAssetCoverImage"))
+        #expect(iosDetail.contains("MobileVideoFrameCaptureBridge"))
+        #expect(iosDetail.contains("MobileLocalVideoStageView"))
+        #expect(iosDetail.contains("takeSnapshot(configuration:"))
+        #expect(iosDetail.contains("thumbnails.revision"))
     }
 }

@@ -49,6 +49,8 @@ public struct QuickLookOverlayView: View {
     @State private var inspectorDragStartWidth: CGFloat = AppCoordinatorStore.defaultInspectorWidth
     @State private var isInspectorDividerHovered: Bool = false
     @State private var isDraggingInspectorDivider: Bool = false
+    @State private var localVideoCaptureBridge = StreamingFrameCaptureBridge()
+    @State private var isCapturingCoverFrame: Bool = false
 
     private var activeAccent: Color {
         CharkleTheme.accent(for: colorScheme, source: accentSource)
@@ -608,6 +610,9 @@ public struct QuickLookOverlayView: View {
                             coordinator.showToast("已重新获取推文媒体", icon: "arrow.clockwise")
                         }
                     }
+                },
+                onSetCoverFrame: { jpegData, timestampSeconds in
+                    await applyCapturedCoverFrame(jpegData: jpegData, timestampSeconds: timestampSeconds)
                 }
             )
             .id(asset.id)
@@ -627,7 +632,7 @@ public struct QuickLookOverlayView: View {
                 }
             case .video:
                 if let url = originalURL {
-                    QuickLookVideoPlayerView(url: url)
+                    QuickLookVideoPlayerView(url: url, captureBridge: localVideoCaptureBridge)
                         .id(asset.id)
                         .frame(maxWidth: 1020, maxHeight: 640)
                         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
@@ -772,41 +777,91 @@ public struct QuickLookOverlayView: View {
     }
 
     private var webBookmarkDetailCard: some View {
-        VStack(spacing: 0) {
-            ZStack(alignment: .bottomTrailing) {
-                Group {
-                    if let img = highResImage ?? library.thumbnailLoader.cachedImage(for: asset.id, tier: .grid520) {
-                        Image(nsImage: img)
-                            .resizable()
-                            .interpolation(.high)
-                            .aspectRatio(contentMode: .fit)
-                    } else {
-                        AssetThumbnailSurface(
-                            asset: asset,
-                            loader: library.thumbnailLoader,
-                            tier: .preview1400,
-                            cornerRadius: 0,
-                            contentMode: .fit,
-                            enableHoverPlayback: false
-                        )
-                    }
+        let webMeta = asset.richMetadata?.webPage
+        let externalURL = asset.externalWebURL
+        let hasStreamableVideo: Bool = {
+            if let webMeta {
+                if webMeta.hasVideo || webMeta.attachments.contains(where: { $0.kind == .video }) {
+                    return true
                 }
-                .frame(maxWidth: 780, maxHeight: 460)
-                .contentShape(Rectangle())
-                .onTapGesture {
-                    if let url = asset.externalWebURL {
-                        NSWorkspace.shared.open(url)
-                    }
-                }
+            }
+            if let externalURL, VideoPlatformResolver.embedPlayer(for: externalURL) != nil {
+                return true
+            }
+            return false
+        }()
 
-                if let url = asset.externalWebURL {
-                    Button {
-                        NSWorkspace.shared.open(url)
-                    } label: {
-                        Label("在默认浏览器中打开", systemImage: "safari")
+        return VStack(spacing: 0) {
+            if hasStreamableVideo {
+                let thumbURL = webMeta?.attachments.first(where: { $0.kind == .video })?.thumbnailURL.flatMap(URL.init(string:))
+                    ?? webMeta?.attachments.first(where: { $0.kind == .photo }).flatMap { URL(string: $0.url) }
+                let formattedDur: String? = {
+                    guard let secs = webMeta?.durationSeconds ?? asset.durationSeconds, secs > 0 else { return nil }
+                    let total = Int(secs.rounded())
+                    let h = total / 3600
+                    let m = (total % 3600) / 60
+                    let s = total % 60
+                    return h > 0 ? String(format: "%d:%02d:%02d", h, m, s) : String(format: "%d:%02d", m, s)
+                }()
+                QuickLookStreamingVideoView(
+                    playbackKey: "web:\(asset.id.uuidString):\(asset.sourceURL ?? "")",
+                    coverURL: thumbURL,
+                    fallbackCoverImage: highResImage ?? library.thumbnailLoader.cachedImage(for: asset.id, tier: .grid520),
+                    durationText: formattedDur,
+                    watchURL: externalURL,
+                    openActionLabel: "在默认浏览器中打开",
+                    onSetCoverFrame: { jpegData, timestampSeconds in
+                        await applyCapturedCoverFrame(jpegData: jpegData, timestampSeconds: timestampSeconds)
+                    },
+                    resolvePlan: {
+                        if let webMeta {
+                            return await VideoPlatformResolver.resolveWebPagePlaybackPlan(
+                                for: webMeta,
+                                fallbackURL: externalURL
+                            )
+                        }
+                        let embed = externalURL.flatMap { VideoPlatformResolver.embedPlayer(for: $0) }
+                        return VideoStreamPlaybackPlan(directStreams: [], embedPlayer: embed, watchURL: externalURL)
                     }
-                    .buttonStyle(.charkle(.accent, size: .sm))
-                    .padding(16)
+                )
+                .aspectRatio(16.0 / 9.0, contentMode: .fit)
+                .frame(maxWidth: 780)
+            } else {
+                ZStack(alignment: .bottomTrailing) {
+                    Group {
+                        if let img = highResImage ?? library.thumbnailLoader.cachedImage(for: asset.id, tier: .grid520) {
+                            Image(nsImage: img)
+                                .resizable()
+                                .interpolation(.high)
+                                .aspectRatio(contentMode: .fit)
+                        } else {
+                            AssetThumbnailSurface(
+                                asset: asset,
+                                loader: library.thumbnailLoader,
+                                tier: .preview1400,
+                                cornerRadius: 0,
+                                contentMode: .fit,
+                                enableHoverPlayback: false
+                            )
+                        }
+                    }
+                    .frame(maxWidth: 780, maxHeight: 460)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        if let url = externalURL {
+                            NSWorkspace.shared.open(url)
+                        }
+                    }
+
+                    if let url = externalURL {
+                        Button {
+                            NSWorkspace.shared.open(url)
+                        } label: {
+                            Label("在默认浏览器中打开", systemImage: "safari")
+                        }
+                        .buttonStyle(.charkle(.accent, size: .sm))
+                        .padding(16)
+                    }
                 }
             }
 
@@ -815,27 +870,63 @@ public struct QuickLookOverlayView: View {
                     Circle()
                         .fill(Color(charkleHex: asset.dominantColors.first?.hex ?? "#5C6B73"))
                         .frame(width: 10, height: 10)
-                    Text(asset.sourceDomain ?? "网页书签")
+                    Text(webMeta?.siteName ?? asset.sourceDomain ?? "网页书签")
                         .font(.system(size: 12, weight: .semibold, design: .monospaced))
                         .foregroundStyle(.secondary)
+                    if let author = webMeta?.authorName, !author.isEmpty {
+                        Text("· \(author)")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
                     Spacer()
+                    if hasStreamableVideo, let webMeta, !webMeta.attachments.isEmpty {
+                        Button {
+                            let target = asset
+                            Task {
+                                let extracted = await library.extractAllMediaFromLinkAsset(target)
+                                if !extracted.isEmpty {
+                                    coordinator.showToast("已保存网页视频为独立素材", icon: "film.stack")
+                                } else if let err = library.lastError {
+                                    coordinator.showToast(err, icon: "exclamationmark.triangle", tone: .warning)
+                                }
+                            }
+                        } label: {
+                            Label("保存视频为独立素材", systemImage: "film.stack")
+                        }
+                        .buttonStyle(.charkle(.accent, size: .sm))
+                    }
+                    if hasStreamableVideo, let url = externalURL {
+                        Button {
+                            NSWorkspace.shared.open(url)
+                        } label: {
+                            Label("在浏览器中打开", systemImage: "safari")
+                        }
+                        .buttonStyle(.charkle(.standard, size: .sm))
+                    }
                 }
                 Text(asset.title)
                     .font(.system(size: 18, weight: .semibold))
-                if let urlStr = asset.sourceURL {
-                    Text(urlStr)
-                        .font(.system(size: 11.5, design: .monospaced))
+                if let summary = webMeta?.summary, !summary.isEmpty {
+                    Text(summary)
+                        .font(.system(size: 13))
                         .foregroundStyle(.secondary)
-                        .lineLimit(2)
+                        .lineSpacing(4)
+                        .lineLimit(4)
                         .textSelection(.enabled)
-                }
-                if !asset.notes.isEmpty {
-                    Divider()
+                } else if !asset.notes.isEmpty {
                     Text(asset.notes)
                         .font(.system(size: 13))
                         .foregroundStyle(.secondary)
                         .lineSpacing(4)
                         .lineLimit(4)
+                }
+                if let urlStr = asset.sourceURL {
+                    Text(urlStr)
+                        .font(.system(size: 11.5, design: .monospaced))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(2)
+                        .textSelection(.enabled)
                 }
             }
             .padding(22)
@@ -956,6 +1047,44 @@ public struct QuickLookOverlayView: View {
                         }
                     }
                     .animation(CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion), value: hasActiveVisualTransform)
+
+                    hudDivider
+                }
+
+                if asset.mediaKind == .video && !asset.isSocialPost {
+                    Button {
+                        guard !isCapturingCoverFrame else { return }
+                        isCapturingCoverFrame = true
+                        Task { @MainActor in
+                            defer { isCapturingCoverFrame = false }
+                            if let captured = await localVideoCaptureBridge.captureCurrentFrame?() {
+                                await applyCapturedCoverFrame(
+                                    jpegData: captured.jpegData,
+                                    timestampSeconds: captured.timestampSeconds
+                                )
+                            } else {
+                                coordinator.showToast("视频尚未就绪，请稍后再截取封面", icon: "exclamationmark.triangle", tone: .warning)
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 5) {
+                            if isCapturingCoverFrame {
+                                ProgressView().controlSize(.mini).tint(.white)
+                            } else {
+                                Image(systemName: "camera.viewfinder")
+                                    .font(.system(size: 11.5, weight: .semibold))
+                            }
+                            Text("设当前帧为封面")
+                                .font(.system(size: 11.5, weight: .semibold))
+                        }
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 4.5)
+                        .background(Color.white.opacity(0.14), in: Capsule(style: .continuous))
+                    }
+                    .buttonStyle(CharkleTactileButtonStyle())
+                    .disabled(isCapturingCoverFrame)
+                    .help("将当前播放位置的视频画面设为素材封面")
 
                     hudDivider
                 }
@@ -1241,6 +1370,25 @@ public struct QuickLookOverlayView: View {
             .frame(width: 1, height: 16)
     }
 
+    @MainActor
+    private func applyCapturedCoverFrame(jpegData: Data, timestampSeconds: Double?) async {
+        if await library.updateAssetCoverImage(assetID: asset.id, imageData: jpegData) != nil {
+            if let fresh = NSImage(data: jpegData) {
+                highResImage = fresh
+            }
+            if let ts = timestampSeconds, ts > 0 {
+                coordinator.showToast(
+                    "已将 \(VideoFrameCapture.formattedTimestamp(ts)) 画面设为素材封面",
+                    icon: "photo.badge.checkmark"
+                )
+            } else {
+                coordinator.showToast("已将当前画面设为素材封面", icon: "photo.badge.checkmark")
+            }
+        } else if let err = library.lastError {
+            coordinator.showToast(err, icon: "exclamationmark.triangle", tone: .warning)
+        }
+    }
+
     private func stepChevronButton(systemName: String, delta: Int) -> some View {
         Button {
             onStep(delta)
@@ -1316,10 +1464,48 @@ struct QuickLookVideoPlayerView: NSViewRepresentable {
     let url: URL
     var autoPlay: Bool = true
     var isPlaybackSuspended: Bool = false
+    var captureBridge: StreamingFrameCaptureBridge? = nil
 
+    @MainActor
     final class Coordinator {
         var currentURL: URL?
         var wasSuspended: Bool = false
+        var videoOutput: AVPlayerItemVideoOutput?
+        weak var captureBridge: StreamingFrameCaptureBridge?
+
+        func attach(url: URL, to view: AVPlayerView, autoPlay: Bool, isSuspended: Bool, captureBridge: StreamingFrameCaptureBridge?) {
+            teardown(view)
+            currentURL = url
+            wasSuspended = isSuspended
+            self.captureBridge = captureBridge
+
+            let item = AVPlayerItem(url: url)
+            let output = VideoFrameCapture.makeVideoOutput()
+            item.add(output)
+            videoOutput = output
+
+            let player = AVPlayer(playerItem: item)
+            view.player = player
+            self.captureBridge?.captureCurrentFrame = { [weak player, weak output] in
+                guard let player,
+                      let result = await VideoFrameCapture.captureCurrentFrameJPEG(from: player, videoOutput: output) else {
+                    return nil
+                }
+                return (result.jpegData, result.timestampSeconds)
+            }
+            if autoPlay && !isSuspended {
+                player.play()
+            }
+        }
+
+        func teardown(_ view: AVPlayerView) {
+            captureBridge?.captureCurrentFrame = nil
+            videoOutput = nil
+            view.player?.pause()
+            view.player?.replaceCurrentItem(with: nil)
+            view.player = nil
+            currentURL = nil
+        }
     }
 
     func makeCoordinator() -> Coordinator {
@@ -1329,27 +1515,25 @@ struct QuickLookVideoPlayerView: NSViewRepresentable {
     func makeNSView(context: Context) -> AVPlayerView {
         let view = AVPlayerView()
         view.controlsStyle = .floating
-        let player = AVPlayer(url: url)
-        view.player = player
-        context.coordinator.currentURL = url
-        context.coordinator.wasSuspended = isPlaybackSuspended
-        if autoPlay && !isPlaybackSuspended {
-            player.play()
-        }
+        context.coordinator.attach(
+            url: url,
+            to: view,
+            autoPlay: autoPlay,
+            isSuspended: isPlaybackSuspended,
+            captureBridge: captureBridge
+        )
         return view
     }
 
     func updateNSView(_ nsView: AVPlayerView, context: Context) {
         if context.coordinator.currentURL != url {
-            context.coordinator.currentURL = url
-            context.coordinator.wasSuspended = isPlaybackSuspended
-            nsView.player?.pause()
-            nsView.player?.replaceCurrentItem(with: nil)
-            let player = AVPlayer(url: url)
-            nsView.player = player
-            if autoPlay && !isPlaybackSuspended {
-                player.play()
-            }
+            context.coordinator.attach(
+                url: url,
+                to: nsView,
+                autoPlay: autoPlay,
+                isSuspended: isPlaybackSuspended,
+                captureBridge: captureBridge
+            )
             return
         }
         if context.coordinator.wasSuspended != isPlaybackSuspended {
@@ -1361,10 +1545,7 @@ struct QuickLookVideoPlayerView: NSViewRepresentable {
     }
 
     static func dismantleNSView(_ nsView: AVPlayerView, coordinator: Coordinator) {
-        nsView.player?.pause()
-        nsView.player?.replaceCurrentItem(with: nil)
-        nsView.player = nil
-        coordinator.currentURL = nil
+        coordinator.teardown(nsView)
     }
 }
 
