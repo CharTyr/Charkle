@@ -66,6 +66,7 @@
 ### 当前待推进 / 进行中重点任务
 | 任务目录 | 目标平台 | 状态 | 核心内容 |
 | :--- | :--- | :--- | :--- |
+| [`11-27-windows-shelf-presentation-modes-and-core-hardening`](../.trellis/tasks/11-27-windows-shelf-presentation-modes-and-core-hardening/prd.md) | Windows | **待落地** | 边缘浮窗「托盘展开形态」三档设置（始终完整 / 拖放极简 / 默认仅收集）+ Rust Core 多后端同步/WebDAV 凭据防串与稳定性对齐（对应 `dev` `935ed96`–`e45d340`） |
 | [`11-27-android-m3-expressive-app`](../.trellis/tasks/11-27-android-m3-expressive-app/prd.md) | Android | **主干已落地，持续完善** | Phase 0–3：UniFFI 桥接 `charkle-core` + Material 3 Expressive 原生 UI + 对齐 iOS v1.5 能力 + Android 原生分享/磁贴/Glance 微件 |
 | [`11-23-web-windows-mcp-cli-v2-parity`](../.trellis/tasks/11-23-web-windows-mcp-cli-v2-parity/prd.md) | Web | **待对齐** | Web 端 `external-agent-service.ts` 与 `mcp-stdio.ts` 补齐 20 工具 MCP v2 契约（Windows 侧已在 `v1.2.2+` 完成） |
 | [`11-23-web-design-motion-polish`](../.trellis/tasks/11-23-web-design-motion-polish/prd.md) | Web | **部分完成/待收口** | Web 端 `DESIGN.md` 交互细节、动效与桌面端体验持续对齐 |
