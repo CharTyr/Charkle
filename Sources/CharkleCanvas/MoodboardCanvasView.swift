@@ -237,6 +237,7 @@ public struct MoodboardCanvasView: View {
                     freeformInfiniteStage
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .clipped()
+                        .allowsHitTesting(!isAnyLocalModalPresented)
 
                     if document.nodes.isEmpty && document.inkStrokes.isEmpty {
                         emptyBoardPlaceholder
@@ -294,9 +295,13 @@ public struct MoodboardCanvasView: View {
             }
             .onAppear {
                 liveDocRef.update(document)
+                hoverState.setSuspended(isAnyLocalModalPresented)
                 syncCameraFromDocument()
                 ensureFreeformModeIfLegacy()
                 prefetchBoardThumbnails()
+            }
+            .onChange(of: isAnyLocalModalPresented) { _, suspended in
+                hoverState.setSuspended(suspended)
             }
             .onChange(of: document.id) { _, _ in
                 liveDocRef.update(document)
@@ -320,21 +325,21 @@ public struct MoodboardCanvasView: View {
             .focusable()
             .focusEffectDisabled()
             .onKeyPress(.escape) {
-                guard !isEditingTextInWindow else { return .ignored }
+                guard !isAnyLocalModalPresented, !isEditingTextInWindow else { return .ignored }
                 return handleEscapeKey() ? .handled : .ignored
             }
             .onKeyPress(.delete) {
-                guard !isEditingTextInWindow else { return .ignored }
+                guard !isAnyLocalModalPresented, !isEditingTextInWindow else { return .ignored }
                 deleteCurrentSelection()
                 return .handled
             }
             .onKeyPress(.deleteForward) {
-                guard !isEditingTextInWindow else { return .ignored }
+                guard !isAnyLocalModalPresented, !isEditingTextInWindow else { return .ignored }
                 deleteCurrentSelection()
                 return .handled
             }
             .onKeyPress(characters: CharacterSet(charactersIn: "acxvhperACXVHPER")) { press in
-                guard !isEditingTextInWindow else { return .ignored }
+                guard !isAnyLocalModalPresented, !isEditingTextInWindow else { return .ignored }
                 let lower = press.characters.lowercased()
                 let mods = press.modifiers.intersection([.command, .option, .control, .shift])
                 if mods == [.command] {
@@ -433,7 +438,7 @@ public struct MoodboardCanvasView: View {
         }
         let nodesByID = Dictionary(uniqueKeysWithValues: document.nodes.map { ($0.id, $0) })
         let groupChildCounts = computeGroupChildCounts(nodes: sortedNodes)
-        let allowNodeHitTesting = activeTool != .pen && activeTool != .eraser && activeTool != .pan && !isSpaceKeyPanning
+        let allowNodeHitTesting = !isAnyLocalModalPresented && activeTool != .pen && activeTool != .eraser && activeTool != .pan && !isSpaceKeyPanning
 
         return ZStack {
             // 1. GPU-tiled architectural dot grid (1 cached CGImage tile + GPU offset, zero Path loop)
@@ -499,6 +504,10 @@ public struct MoodboardCanvasView: View {
                     selectedNodeIDs: selectedNodeIDs,
                     allowNodeHitTesting: allowNodeHitTesting,
                     onHoverChanged: { nodeID, hovering in
+                        guard !isAnyLocalModalPresented else {
+                            hoverState.clearAll()
+                            return
+                        }
                         hoverState.setNodeHovered(nodeID, hovering: hovering)
                     },
                     nodeBuilder: { node in
@@ -1597,6 +1606,10 @@ public struct MoodboardCanvasView: View {
                 .contentShape(Circle())
                 .offset(offset)
                 .onHover { hovering in
+                    guard !isAnyLocalModalPresented else {
+                        hoverState.clearAll()
+                        return
+                    }
                     hoverState.setPortHovered(node.id, hovering: hovering)
                 }
                 .highPriorityGesture(
@@ -1783,6 +1796,7 @@ public struct MoodboardCanvasView: View {
                 isSelected: isSelected,
                 isSwapTarget: swappingNodeID == node.id,
                 isAutoEditorial: isAutoMode,
+                isHoverSuspended: isAnyLocalModalPresented,
                 heroNamespace: heroNamespace,
                 onToggleHero: { toggleHeroWeight(nodeID: node.id) },
                 onTriggerSwap: { callbacks.onSelectSwapTarget(swappingNodeID == node.id ? nil : node.id) },
@@ -1843,6 +1857,7 @@ public struct MoodboardCanvasView: View {
                 style: style,
                 fontSize: fontSize,
                 isSelected: isSelected,
+                isHoverSuspended: isAnyLocalModalPresented,
                 onUpdate: { newTitle, newText, newStyle, newFontSize in
                     updateNote(boardID: expectedBoardID, nodeID: node.id, title: newTitle, text: newText, style: newStyle, fontSize: newFontSize)
                 },
@@ -1856,6 +1871,7 @@ public struct MoodboardCanvasView: View {
                 tint: tint,
                 itemCount: enclosedCount,
                 isSelected: isSelected,
+                isHoverSuspended: isAnyLocalModalPresented,
                 onUpdate: { newTitle, newTint in
                     updateGroupFrame(boardID: expectedBoardID, nodeID: node.id, title: newTitle, tint: newTint)
                 },
@@ -3514,19 +3530,38 @@ internal final class FreeformCameraState {
 /// Decoupled hover + active-panning tracker so cursor crossing cards during trackpad glide
 /// never invalidates `MoodboardCanvasView` or triggers connector-port flicker.
 @Observable
-private final class FreeformHoverState {
+internal final class FreeformHoverState {
     var hoveredNodeID: UUID?
     var hoveredPortNodeID: UUID?
     var isActivelyPanning: Bool = false
+    var isSuspended: Bool = false
 
     @ObservationIgnored private var panIdleTask: Task<Void, Never>?
 
     var effectiveHoveredNodeID: UUID? {
-        if isActivelyPanning { return nil }
+        if isSuspended || isActivelyPanning { return nil }
         return hoveredPortNodeID ?? hoveredNodeID
     }
 
+    func setSuspended(_ suspended: Bool) {
+        if isSuspended != suspended {
+            isSuspended = suspended
+        }
+        if suspended {
+            clearAll()
+        }
+    }
+
+    func clearAll() {
+        if hoveredNodeID != nil { hoveredNodeID = nil }
+        if hoveredPortNodeID != nil { hoveredPortNodeID = nil }
+    }
+
     func setNodeHovered(_ id: UUID, hovering: Bool) {
+        guard !isSuspended else {
+            clearAll()
+            return
+        }
         if hovering {
             if hoveredNodeID != id { hoveredNodeID = id }
         } else if hoveredNodeID == id {
@@ -3535,6 +3570,10 @@ private final class FreeformHoverState {
     }
 
     func setPortHovered(_ id: UUID, hovering: Bool) {
+        guard !isSuspended else {
+            clearAll()
+            return
+        }
         if hovering {
             if hoveredPortNodeID != id { hoveredPortNodeID = id }
         } else if hoveredPortNodeID == id {

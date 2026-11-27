@@ -152,6 +152,7 @@ public struct BoardPaletteHeaderStrip: View {
 struct BoardAssetNodeView: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.charkleOverlayInteractionSuspended) private var isOverlayInteractionSuspended
 
     let node: BoardNode
     let asset: AssetRecord?
@@ -159,6 +160,7 @@ struct BoardAssetNodeView: View {
     let isSelected: Bool
     let isSwapTarget: Bool
     let isAutoEditorial: Bool
+    let isHoverSuspended: Bool
     let heroNamespace: Namespace.ID
     let onToggleHero: () -> Void
     let onTriggerSwap: () -> Void
@@ -196,8 +198,13 @@ struct BoardAssetNodeView: View {
     private let outerRadius: CGFloat = 12
     private var innerBadgeRadius: CGFloat { 6 }
 
+    private var hoverDisabled: Bool {
+        isHoverSuspended || isOverlayInteractionSuspended
+    }
+
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: outerRadius, style: .continuous)
+        let effectiveHovered = isHovered && !hoverDisabled
         ZStack {
             if let asset {
                 AssetThumbnailSurface(
@@ -205,8 +212,9 @@ struct BoardAssetNodeView: View {
                     loader: loader,
                     tier: weight >= 2 ? .preview1400 : .grid520,
                     cornerRadius: outerRadius,
-                    isHovered: isHovered,
-                    crop: crop
+                    isHovered: effectiveHovered,
+                    crop: crop,
+                    enableHoverPlayback: !hoverDisabled
                 )
                 .scaleEffect(
                     x: node.flipHorizontal ? -1 : 1,
@@ -229,7 +237,7 @@ struct BoardAssetNodeView: View {
             }
 
             // Hover quick controls (clean, restrained, never permanent clutter)
-            if isHovered || isSwapTarget {
+            if effectiveHovered || isSwapTarget {
                 VStack {
                     HStack(spacing: 6) {
                         if weight >= 2 || isAutoEditorial {
@@ -335,8 +343,15 @@ struct BoardAssetNodeView: View {
         )
         .contentShape(shape)
         .onHover { hovering in
+            let next = hoverDisabled ? false : hovering
+            guard isHovered != next else { return }
             withAnimation(CanvasMotion.accessible(CanvasMotion.hoverPress, reduced: reduceMotion)) {
-                isHovered = hovering
+                isHovered = next
+            }
+        }
+        .onChange(of: hoverDisabled) { _, disabled in
+            if disabled && isHovered {
+                isHovered = false
             }
         }
         .contextMenu {
@@ -438,6 +453,7 @@ struct BoardNoteNodeView: View {
     }
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.charkleOverlayInteractionSuspended) private var isOverlayInteractionSuspended
 
     let node: BoardNode
     let title: String?
@@ -445,8 +461,13 @@ struct BoardNoteNodeView: View {
     let style: NoteStyle
     let fontSize: Double
     let isSelected: Bool
+    let isHoverSuspended: Bool
     let onUpdate: (String?, String, NoteStyle, Double) -> Void
     let onDelete: () -> Void
+
+    private var hoverDisabled: Bool {
+        isHoverSuspended || isOverlayInteractionSuspended
+    }
 
     @State private var draftTitle: String = ""
     @State private var draftText: String = ""
@@ -504,7 +525,7 @@ struct BoardNoteNodeView: View {
                         }
                     }
 
-                if isHovered || isSelected {
+                if (isHovered && !hoverDisabled) || isSelected {
                     HStack(spacing: 3) {
                         ForEach(NoteStyle.allCases, id: \.self) { candidate in
                             let c = NoteStylePalette.colors(for: candidate)
@@ -593,8 +614,15 @@ struct BoardNoteNodeView: View {
             }
         }
         .onHover { hovering in
+            let next = hoverDisabled ? false : hovering
+            guard isHovered != next else { return }
             withAnimation(CanvasMotion.accessible(CanvasMotion.hoverPress, reduced: reduceMotion)) {
-                isHovered = hovering
+                isHovered = next
+            }
+        }
+        .onChange(of: hoverDisabled) { _, disabled in
+            if disabled && isHovered {
+                isHovered = false
             }
         }
         .contextMenu {
@@ -627,14 +655,20 @@ struct BoardNoteNodeView: View {
 struct BoardGroupFrameView: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.charkleOverlayInteractionSuspended) private var isOverlayInteractionSuspended
 
     let title: String
     let tint: GroupTint
     let itemCount: Int
     let isSelected: Bool
+    let isHoverSuspended: Bool
     let onUpdate: (String, GroupTint) -> Void
     let onReflowInside: () -> Void
     let onDelete: () -> Void
+
+    private var hoverDisabled: Bool {
+        isHoverSuspended || isOverlayInteractionSuspended
+    }
 
     @State private var draftTitle: String = ""
     @State private var lastCommittedTitle: String? = nil
@@ -697,7 +731,7 @@ struct BoardGroupFrameView: View {
 
                 Spacer()
 
-                if isHovered || isSelected {
+                if (isHovered && !hoverDisabled) || isSelected {
                     HStack(spacing: 6) {
                         if itemCount > 0 {
                             Button(action: onReflowInside) {
@@ -769,8 +803,15 @@ struct BoardGroupFrameView: View {
             }
         }
         .onHover { hovering in
+            let next = hoverDisabled ? false : hovering
+            guard isHovered != next else { return }
             withAnimation(CanvasMotion.accessible(CanvasMotion.hoverPress, reduced: reduceMotion)) {
-                isHovered = hovering
+                isHovered = next
+            }
+        }
+        .onChange(of: hoverDisabled) { _, disabled in
+            if disabled && isHovered {
+                isHovered = false
             }
         }
         .contextMenu {

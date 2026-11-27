@@ -133,4 +133,26 @@ struct AuditFixShellTests {
         let oauthSheet = try readSource("Sources/CharkleApp/Views/Settings/GoogleOAuthSetupSheet.swift")
         #expect(oauthSheet.contains("SettingsSheetFeedbackBanner"))
     }
+
+    @Test("Modal overlays suspend underlying workspace hover and pointer interaction across gallery, moodboard, Pinterest, and dividers")
+    func modalOverlayHoverSuspensionContracts() throws {
+        let mainWindow = try readSource("Sources/CharkleApp/Views/MainWindowView.swift")
+        #expect(mainWindow.contains(".allowsHitTesting(!isMainWorkspaceOverlayPresented)"))
+        #expect(mainWindow.contains(".environment(\\.charkleOverlayInteractionSuspended, isMainWorkspaceOverlayPresented)"))
+        #expect(mainWindow.contains("isOverlayPresented: isMainWorkspaceOverlayPresented"))
+        #expect(mainWindow.contains("isSuspended: isMainWorkspaceOverlayPresented"))
+
+        let moodboard = try readSource("Sources/CharkleCanvas/MoodboardCanvasView.swift")
+        #expect(moodboard.contains("hoverState.setSuspended(isAnyLocalModalPresented)"))
+        #expect(moodboard.contains("isHoverSuspended: isAnyLocalModalPresented"))
+
+        let nodeViews = try readSource("Sources/CharkleCanvas/MoodboardNodeViews.swift")
+        #expect(nodeViews.contains("let isHoverSuspended: Bool"))
+
+        let thumbnail = try readSource("Sources/CharkleCanvas/ThumbnailImageLoader.swift")
+        #expect(thumbnail.contains("charkleOverlayInteractionSuspended"))
+
+        let pinterest = try readSource("Sources/CharkleApp/Views/Pinterest/PinterestExploreWorkspaceView.swift")
+        #expect(pinterest.contains("coordinator.isModalOverlayPresented"))
+    }
 }

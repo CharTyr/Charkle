@@ -158,7 +158,7 @@ public struct PinterestExploreWorkspaceView: View {
                 fastPickMode: controller.fastPickMode,
                 isDark: colorScheme == .dark,
                 accentColor: activeNSAccent,
-                isInteractionSuspended: controller.activeDetailPin != nil || controller.isLoginSheetPresented || controller.isBoardImportSheetPresented,
+                isInteractionSuspended: coordinator.isModalOverlayPresented || controller.activeDetailPin != nil || controller.isLoginSheetPresented || controller.isBoardImportSheetPresented,
                 excludedCanvasRects: excludedCanvasRects,
                 cameraCommand: cameraCommand,
                 onOpenDetail: { pin in

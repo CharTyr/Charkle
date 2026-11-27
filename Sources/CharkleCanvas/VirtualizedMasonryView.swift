@@ -1023,11 +1023,18 @@ internal final class MasonryScrollView: NSScrollView {
         layer?.actions = MasonryStaticLayerAssets.noImplicitActions
     }
 
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        if masonryDocument.isOverlayPresented { return nil }
+        return super.hitTest(point)
+    }
+
     override func magnify(with event: NSEvent) {
+        guard !masonryDocument.isOverlayPresented else { return }
         masonryDocument.handleMagnifyGesture(event)
     }
 
     override func scrollWheel(with event: NSEvent) {
+        guard !masonryDocument.isOverlayPresented else { return }
         if event.modifierFlags.contains(.command) && !event.modifierFlags.contains(.option) {
             // Ignore trailing trackpad momentum so zooming halts crisply when fingers lift
             if !event.momentumPhase.isEmpty { return }
@@ -2291,7 +2298,7 @@ internal final class MasonryDocumentView: NSView, NSDraggingSource {
     private var topInset: CGFloat = 76
     private var bottomInset: CGFloat = 96
     private var activeQuickLookID: UUID?
-    private var isOverlayPresented: Bool = false
+    internal private(set) var isOverlayPresented: Bool = false
     private var isDarkMode: Bool = false
     private var reduceMotion: Bool = false
     private var callbacks = MasonryCallbacks()
@@ -2365,6 +2372,8 @@ internal final class MasonryDocumentView: NSView, NSDraggingSource {
     internal var activeTileHasImageContentsForTesting: [UUID: Bool] {
         activeTiles.mapValues(\.hasImageContentsForTesting)
     }
+    internal var hoveredAssetIDForTesting: UUID? { hoveredAssetID }
+    internal var isHoverOverlayHiddenForTesting: Bool { hoverOverlayLayer.isHidden }
     private let tilesContainerLayer = CALayer()
     private let hoverMediaPreview = HoverMediaPreviewLayerController()
     private let hoverOverlayLayer = MasonryHoverOverlayLayer()
@@ -2427,11 +2436,18 @@ internal final class MasonryDocumentView: NSView, NSDraggingSource {
         registerForDraggedTypes([.fileURL, .URL, .png, .tiff, .string])
     }
 
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        if isOverlayPresented { return nil }
+        return super.hitTest(point)
+    }
+
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         if let existing = trackingAreaRef {
             removeTrackingArea(existing)
+            trackingAreaRef = nil
         }
+        guard !isOverlayPresented else { return }
         let area = NSTrackingArea(
             rect: .zero,
             options: [.mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
@@ -2440,6 +2456,12 @@ internal final class MasonryDocumentView: NSView, NSDraggingSource {
         )
         addTrackingArea(area)
         trackingAreaRef = area
+    }
+
+    private func clearHoverState() {
+        hoveredAssetID = nil
+        hoverOverlayLayer.hide()
+        hoverMediaPreview.stop()
     }
 
     override func viewDidMoveToWindow() {
@@ -2678,8 +2700,14 @@ internal final class MasonryDocumentView: NSView, NSDraggingSource {
         self.isOverlayPresented = isOverlayPresented
         if activeQuickLookID != nil || isOverlayPresented {
             suspendHoverAndTransientInteractions()
+            if isOverlayPresented {
+                pointerMode = .none
+            }
         } else if overlayChanged {
             refreshHoverForCurrentMouseLocation()
+        }
+        if overlayChanged {
+            updateTrackingAreas()
         }
         self.isDarkMode = isDarkMode
         self.reduceMotion = reduceMotion
@@ -3893,7 +3921,7 @@ internal final class MasonryDocumentView: NSView, NSDraggingSource {
             }
         }
 
-        // Keep hover overlay & muted hover media preview aligned if still visible and not live-scrolling/pinching/reflowing/covered
+        // Keep hover overlay & muted hover media preview aligned if still visible and not occluded/scrolling/pinching/reflowing
         if !isOverlayPresented, !isLiveScrolling, !isPinching, !isInPaneTransition, let hoveredID = hoveredAssetID, let tile = activeTiles[hoveredID], let asset = tile.boundAsset {
             hoverOverlayLayer.show(
                 for: asset,
@@ -3950,6 +3978,8 @@ internal final class MasonryDocumentView: NSView, NSDraggingSource {
                 isDark: isDarkMode,
                 scale: scale
             )
+        } else if isOverlayPresented {
+            clearHoverState()
         }
         CATransaction.commit()
     }
@@ -3993,22 +4023,16 @@ internal final class MasonryDocumentView: NSView, NSDraggingSource {
 
     private func refreshHoverForCurrentMouseLocation() {
         guard !isOverlayPresented, !isLiveScrolling, !isPinching, !isInPaneTransition, let window else {
-            hoveredAssetID = nil
-            hoverOverlayLayer.hide()
-            hoverMediaPreview.stop()
+            clearHoverState()
             return
         }
         guard window.occlusionState.contains(.visible), NSApp?.isHidden != true else {
-            hoveredAssetID = nil
-            hoverOverlayLayer.hide()
-            hoverMediaPreview.stop()
+            clearHoverState()
             return
         }
         let loc = convert(window.mouseLocationOutsideOfEventStream, from: nil)
         guard visibleRect.contains(loc), let hit = hitTestCard(at: loc) else {
-            hoveredAssetID = nil
-            hoverOverlayLayer.hide()
-            hoverMediaPreview.stop()
+            clearHoverState()
             return
         }
         hoveredAssetID = hit.asset.id
@@ -4024,13 +4048,15 @@ internal final class MasonryDocumentView: NSView, NSDraggingSource {
     }
 
     override func mouseMoved(with event: NSEvent) {
-        guard !isOverlayPresented, !isLiveScrolling, !isPinching, !isInPaneTransition else { return }
+        guard !isOverlayPresented else {
+            clearHoverState()
+            return
+        }
+        guard !isLiveScrolling, !isPinching, !isInPaneTransition else { return }
         let point = convert(event.locationInWindow, from: nil)
         guard let hit = hitTestCard(at: point) else {
             if hoveredAssetID != nil {
-                hoveredAssetID = nil
-                hoverOverlayLayer.hide()
-                hoverMediaPreview.stop()
+                clearHoverState()
             }
             return
         }
@@ -4049,9 +4075,7 @@ internal final class MasonryDocumentView: NSView, NSDraggingSource {
     }
 
     override func mouseExited(with event: NSEvent) {
-        hoveredAssetID = nil
-        hoverOverlayLayer.hide()
-        hoverMediaPreview.stop()
+        clearHoverState()
     }
 
     // MARK: - Selection, Double-Click, Marquee & Drag Out
@@ -4129,6 +4153,7 @@ internal final class MasonryDocumentView: NSView, NSDraggingSource {
     }
 
     override func mouseDown(with event: NSEvent) {
+        guard !isOverlayPresented else { return }
         hoverMediaPreview.stop()
         window?.makeFirstResponder(self)
         let point = convert(event.locationInWindow, from: nil)
@@ -4160,6 +4185,7 @@ internal final class MasonryDocumentView: NSView, NSDraggingSource {
     }
 
     override func mouseDragged(with event: NSEvent) {
+        guard !isOverlayPresented else { return }
         let point = convert(event.locationInWindow, from: nil)
         switch pointerMode {
         case .none:
@@ -4228,6 +4254,10 @@ internal final class MasonryDocumentView: NSView, NSDraggingSource {
 
     override func mouseUp(with event: NSEvent) {
         stopMarqueeAutoscrollTimer()
+        guard !isOverlayPresented else {
+            pointerMode = .none
+            return
+        }
         switch pointerMode {
         case .none:
             break
@@ -4383,6 +4413,7 @@ internal final class MasonryDocumentView: NSView, NSDraggingSource {
     }
 
     override func menu(for event: NSEvent) -> NSMenu? {
+        guard !isOverlayPresented else { return nil }
         let point = convert(event.locationInWindow, from: nil)
         let menu = NSMenu()
 
@@ -4547,7 +4578,7 @@ internal final class MasonryDocumentView: NSView, NSDraggingSource {
     // MARK: - Keyboard Shortcuts (When Masonry Is Focused)
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        guard window?.firstResponder === self else { return super.performKeyEquivalent(with: event) }
+        guard !isOverlayPresented, window?.firstResponder === self else { return super.performKeyEquivalent(with: event) }
         // Ignore Caps Lock / NumPad / Function flags so ⌘A/⌘C/⌘X/⌘V work reliably with Chinese IME switch
         let flags = event.modifierFlags.intersection([.command, .option, .control, .shift])
         if flags == .command, let chars = event.charactersIgnoringModifiers?.lowercased() {
@@ -4574,6 +4605,10 @@ internal final class MasonryDocumentView: NSView, NSDraggingSource {
     }
 
     override func keyDown(with event: NSEvent) {
+        guard !isOverlayPresented else {
+            super.keyDown(with: event)
+            return
+        }
         let primaryModifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
 
         // 2D spatial arrow-key navigation (with optional Shift range extension)

@@ -1760,14 +1760,21 @@ public struct SidebarView: View {
 /// Isolates per-row hover state so hovering over folders in the sidebar only re-renders the
 /// entered/exited row instead of invalidating the entire `SidebarView` tree.
 private struct SidebarFolderRowHoverWrapper<Content: View>: View {
+    @Environment(\.charkleOverlayInteractionSuspended) private var isOverlayInteractionSuspended
     @State private var isHovered: Bool = false
     let content: (Bool) -> Content
 
     var body: some View {
-        content(isHovered)
+        content(isHovered && !isOverlayInteractionSuspended)
             .onHover { hovering in
-                if isHovered != hovering {
-                    isHovered = hovering
+                let next = isOverlayInteractionSuspended ? false : hovering
+                if isHovered != next {
+                    isHovered = next
+                }
+            }
+            .onChange(of: isOverlayInteractionSuspended) { _, suspended in
+                if suspended && isHovered {
+                    isHovered = false
                 }
             }
     }

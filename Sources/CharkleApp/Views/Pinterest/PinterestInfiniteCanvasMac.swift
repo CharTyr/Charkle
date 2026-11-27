@@ -77,13 +77,19 @@ final class PinterestSpatialNSView: NSView {
     }
     var isInteractionSuspended: Bool = false {
         didSet {
+            guard oldValue != isInteractionSuspended else { return }
             if isInteractionSuspended {
                 resetDragCursorIfNeeded()
                 dragStartPoint = nil
                 lastDragPoint = nil
                 isDraggingCanvas = false
                 stopAnimationLoop()
+                if hoveredPinID != nil {
+                    hoveredPinID = nil
+                    updateVisibleTileBadges()
+                }
             }
+            updateTrackingAreas()
         }
     }
     var excludedCanvasRects: [CGRect] = []
@@ -180,7 +186,9 @@ final class PinterestSpatialNSView: NSView {
         super.updateTrackingAreas()
         if let existing = trackingAreaRef {
             removeTrackingArea(existing)
+            trackingAreaRef = nil
         }
+        guard !isInteractionSuspended else { return }
         let area = NSTrackingArea(
             rect: bounds,
             options: [.activeInKeyWindow, .mouseMoved, .mouseEnteredAndExited, .inVisibleRect],

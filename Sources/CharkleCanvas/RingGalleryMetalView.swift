@@ -1320,7 +1320,13 @@ public final class RingGalleryMTKView: MTKView, MTKViewDelegate {
         return nil
     }
 
+    public override func hitTest(_ point: NSPoint) -> NSView? {
+        if isOverlayPresented { return nil }
+        return super.hitTest(point)
+    }
+
     public override func mouseDown(with event: NSEvent) {
+        guard !isOverlayPresented else { return }
         window?.makeFirstResponder(self)
         offsetAnim = nil
         scrollSnapWorkItem?.cancel()
@@ -1439,6 +1445,7 @@ public final class RingGalleryMTKView: MTKView, MTKViewDelegate {
     }
 
     public override func rightMouseDown(with event: NSEvent) {
+        guard !isOverlayPresented else { return }
         guard let hit = hitTestCard(at: event), hit.assetIndex < assets.count else {
             super.rightMouseDown(with: event)
             return
@@ -1449,7 +1456,7 @@ public final class RingGalleryMTKView: MTKView, MTKViewDelegate {
     }
 
     public override func scrollWheel(with event: NSEvent) {
-        guard !assets.isEmpty else { return }
+        guard !isOverlayPresented, !assets.isEmpty else { return }
         offsetAnim = nil
         scrollSnapWorkItem?.cancel()
 

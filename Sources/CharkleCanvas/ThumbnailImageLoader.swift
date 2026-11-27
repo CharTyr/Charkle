@@ -740,6 +740,21 @@ public final class ThumbnailImageLoader {
     }
 }
 
+// MARK: - Modal Overlay Interaction Suspension Environment
+
+private struct CharkleOverlayInteractionSuspendedKey: EnvironmentKey {
+    static let defaultValue: Bool = false
+}
+
+public extension EnvironmentValues {
+    /// `true` while a full-window modal overlay (Settings, Quick Look, Jump Anywhere, Onboarding, etc.)
+    /// covers the underlying workspace so hover previews and hover chrome stay completely inert.
+    var charkleOverlayInteractionSuspended: Bool {
+        get { self[CharkleOverlayInteractionSuspendedKey.self] }
+        set { self[CharkleOverlayInteractionSuspendedKey.self] = newValue }
+    }
+}
+
 // MARK: - Gallery-Grade Media Thumbnail Surface (With Procedural 7-Kind Fallbacks)
 
 public struct AssetThumbnailSurface: View {
@@ -750,6 +765,7 @@ public struct AssetThumbnailSurface: View {
     }
 
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.charkleOverlayInteractionSuspended) private var isOverlayInteractionSuspended
 
     public let asset: AssetRecord
     public let loader: ThumbnailImageLoader
@@ -785,7 +801,8 @@ public struct AssetThumbnailSurface: View {
     }
 
     private var shouldPlayHoverPreview: Bool {
-        enableHoverPlayback
+        !isOverlayInteractionSuspended
+            && enableHoverPlayback
             && crop == nil
             && HoverMediaPreviewLayerController.supportsHoverPlayback(asset)
             && (isHovered || isPointerHovering)
@@ -803,7 +820,7 @@ public struct AssetThumbnailSurface: View {
                 if let image = displayImage {
                     croppedImageView(image)
                 } else {
-                    ProceduralMediaFallbackCard(asset: asset, isHovered: isHovered || isPointerHovering)
+                    ProceduralMediaFallbackCard(asset: asset, isHovered: !isOverlayInteractionSuspended && (isHovered || isPointerHovering))
                 }
             }
             .overlay {
@@ -821,9 +838,19 @@ public struct AssetThumbnailSurface: View {
             .clipShape(shape)
             .contentShape(shape)
             .onHover { hovering in
-                guard canHoverPlay else { return }
+                guard canHoverPlay, !isOverlayInteractionSuspended else {
+                    if isPointerHovering {
+                        isPointerHovering = false
+                    }
+                    return
+                }
                 if isPointerHovering != hovering {
                     isPointerHovering = hovering
+                }
+            }
+            .onChange(of: isOverlayInteractionSuspended) { _, suspended in
+                if suspended && isPointerHovering {
+                    isPointerHovering = false
                 }
             }
             .onDisappear {

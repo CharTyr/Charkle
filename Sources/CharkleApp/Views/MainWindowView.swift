@@ -80,6 +80,10 @@ public struct MainWindowView: View {
         )
     }
 
+    private var isMainWorkspaceOverlayPresented: Bool {
+        coordinator.isModalOverlayPresented || showInboxBatchTriageSheet
+    }
+
     public init(
         coordinator: AppCoordinatorStore,
         library: LibraryStore,
@@ -283,6 +287,8 @@ public struct MainWindowView: View {
                 }
             }
             .ignoresSafeArea(.container, edges: .top)
+            .allowsHitTesting(!isMainWorkspaceOverlayPresented)
+            .environment(\.charkleOverlayInteractionSuspended, isMainWorkspaceOverlayPresented)
             .animation(CharkleMotion.accessible(CharkleMotion.drawerEase, reduced: reduceMotion), value: isSidebarVisible)
             .animation(
                 isDraggingSidebarDivider ? nil : CharkleMotion.accessible(CharkleMotion.drawerEase, reduced: reduceMotion),
@@ -627,7 +633,7 @@ public struct MainWindowView: View {
                     folders: library.folders,
                     boards: moodboards.boards,
                     activeMoodboardID: coordinator.activeMoodboardID,
-                    isOverlayPresented: coordinator.isModalOverlayPresented || showInboxBatchTriageSheet,
+                    isOverlayPresented: isMainWorkspaceOverlayPresented,
                     loader: library.thumbnailLoader,
                     selectedAssetIDs: Binding(
                         get: { library.selectedAssetIDs },
@@ -3050,7 +3056,7 @@ public struct MainWindowView: View {
                 swappingNodeID: moodboards.swappingNodeID,
                 canUndo: moodboards.canUndo,
                 canRedo: moodboards.canRedo,
-                isOverlayPresented: coordinator.isModalOverlayPresented || showInboxBatchTriageSheet,
+                isOverlayPresented: isMainWorkspaceOverlayPresented,
                 heroNamespace: heroNamespace,
                 callbacks: MoodboardCanvasCallbacks(
                     onCommitDocument: { nextDoc in
@@ -4391,6 +4397,7 @@ private extension MainWindowView {
         .overlay {
             PaneResizeHandleView(
                 isCollapsed: coordinator.isSidebarCollapsed,
+                isSuspended: isMainWorkspaceOverlayPresented,
                 onHoverChanged: { hovering in
                     if isSidebarDividerHovered != hovering {
                         isSidebarDividerHovered = hovering
@@ -4482,6 +4489,7 @@ private extension MainWindowView {
         .frame(minHeight: 0, maxHeight: .infinity)
         .overlay {
             PaneResizeHandleView(
+                isSuspended: isMainWorkspaceOverlayPresented,
                 onHoverChanged: { hovering in
                     if isInspectorDividerHovered != hovering {
                         isInspectorDividerHovered = hovering
@@ -4532,6 +4540,7 @@ private extension MainWindowView {
 /// and optional drag-right-to-expand from a collapsed icon rail.
 struct PaneResizeHandleView: NSViewRepresentable {
     var isCollapsed: Bool = false
+    var isSuspended: Bool = false
     let onHoverChanged: (Bool) -> Void
     let onDragBegan: () -> Void
     let onDragChanged: (CGFloat) -> Void
@@ -4546,13 +4555,21 @@ struct PaneResizeHandleView: NSViewRepresentable {
 
     func updateNSView(_ nsView: PaneResizeHandleNSView, context: Context) {
         let collapsedChanged = nsView.isCollapsed != isCollapsed
+        let suspendedChanged = nsView.isSuspended != isSuspended
         nsView.isCollapsed = isCollapsed
+        nsView.isSuspended = isSuspended
         nsView.onHoverChanged = onHoverChanged
         nsView.onDragBegan = onDragBegan
         nsView.onDragChanged = onDragChanged
         nsView.onDragEnded = onDragEnded
         nsView.onDoubleClick = onDoubleClick
-        if collapsedChanged {
+        if suspendedChanged {
+            if isSuspended {
+                nsView.cancelActiveInteractionForSuspension()
+            }
+            nsView.updateTrackingAreas()
+        }
+        if collapsedChanged || suspendedChanged {
             nsView.window?.invalidateCursorRects(for: nsView)
         }
     }
@@ -4560,6 +4577,7 @@ struct PaneResizeHandleView: NSViewRepresentable {
 
 final class PaneResizeHandleNSView: NSView {
     var isCollapsed: Bool = false
+    var isSuspended: Bool = false
     var onHoverChanged: ((Bool) -> Void)?
     var onDragBegan: (() -> Void)?
     var onDragChanged: ((CGFloat) -> Void)?
@@ -4572,10 +4590,25 @@ final class PaneResizeHandleNSView: NSView {
 
     override var mouseDownCanMoveWindow: Bool { false }
 
-    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { !isSuspended }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        if isSuspended { return nil }
+        return super.hitTest(point)
+    }
+
+    func cancelActiveInteractionForSuspension() {
+        if isDragging {
+            isDragging = false
+            NSCursor.pop()
+            onDragEnded?()
+        }
+        onHoverChanged?(false)
+    }
 
     override func resetCursorRects() {
         super.resetCursorRects()
+        guard !isSuspended else { return }
         addCursorRect(bounds, cursor: isCollapsed ? .resizeRight : .resizeLeftRight)
     }
 
@@ -4583,7 +4616,9 @@ final class PaneResizeHandleNSView: NSView {
         super.updateTrackingAreas()
         if let existing = trackingAreaRef {
             removeTrackingArea(existing)
+            trackingAreaRef = nil
         }
+        guard !isSuspended else { return }
         let area = NSTrackingArea(
             rect: bounds,
             options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
@@ -4595,6 +4630,7 @@ final class PaneResizeHandleNSView: NSView {
     }
 
     override func mouseEntered(with event: NSEvent) {
+        guard !isSuspended else { return }
         onHoverChanged?(true)
     }
 
@@ -4605,6 +4641,7 @@ final class PaneResizeHandleNSView: NSView {
     }
 
     override func mouseDown(with event: NSEvent) {
+        guard !isSuspended else { return }
         if !isCollapsed && event.clickCount == 2 {
             onDoubleClick?()
             return

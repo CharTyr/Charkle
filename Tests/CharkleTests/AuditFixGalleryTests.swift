@@ -1,5 +1,5 @@
 import AppKit
-import CharkleCanvas
+@testable import CharkleCanvas
 @testable import CharkleCore
 import Foundation
 import Testing
@@ -161,5 +161,197 @@ struct AuditFixGalleryTests {
         let encoded = CharkleDragIdentifiers.encode(assetIDs: ids)
         let decoded = CharkleDragIdentifiers.decodeAssetIDs(from: encoded)
         #expect(decoded == ids)
+    }
+
+    @Test("RingGalleryMTKView blocks pointer hit testing while a modal overlay is presented")
+    @MainActor
+    func ringGalleryBlocksHitTestingDuringOverlay() {
+        let loader = ThumbnailImageLoader(engine: PlaceholderCharkleEngine())
+        let view = RingGalleryMTKView(loader: loader)
+        view.frame = CGRect(x: 0, y: 0, width: 800, height: 600)
+        let asset = AssetRecord(
+            title: "Ring Card",
+            fileName: "ring-card.jpg",
+            mediaKind: .image,
+            pixelWidth: 800,
+            pixelHeight: 1000
+        )
+        let callbacks = RingGalleryInteractionCallbacks(
+            onFrontAssetChanged: { _ in },
+            onOpenQuickLook: { _ in }
+        )
+
+        view.configure(
+            assets: [asset],
+            selectedAssetID: asset.id,
+            params: .default,
+            isDarkMode: false,
+            reduceMotion: false,
+            isOverlayPresented: false,
+            topSafeInset: 64,
+            loaderInvalidationVersion: 0,
+            callbacks: callbacks
+        )
+        #expect(view.hitTest(CGPoint(x: 400, y: 300)) != nil)
+
+        view.configure(
+            assets: [asset],
+            selectedAssetID: asset.id,
+            params: .default,
+            isDarkMode: false,
+            reduceMotion: false,
+            isOverlayPresented: true,
+            topSafeInset: 64,
+            loaderInvalidationVersion: 0,
+            callbacks: callbacks
+        )
+        #expect(view.hitTest(CGPoint(x: 400, y: 300)) == nil)
+        view.teardown()
+    }
+
+    @Test("MasonryDocumentView clears hover, removes tracking areas, and ignores mouseMoved while a modal overlay is presented")
+    @MainActor
+    func masonryDocumentViewSuppressesHoverDuringOverlay() throws {
+        let assets: [AssetRecord] = (0..<6).map { i in
+            AssetRecord(
+                title: "Inbox Item \(i)",
+                fileName: "inbox-\(i).jpg",
+                mediaKind: .image,
+                pixelWidth: 800,
+                pixelHeight: 900 + (i % 3) * 120
+            )
+        }
+        let loader = ThumbnailImageLoader(engine: PlaceholderCharkleEngine())
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 900, height: 700),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        let scrollView = MasonryScrollView(frame: NSRect(x: 0, y: 0, width: 900, height: 700))
+        window.contentView = scrollView
+        scrollView.layoutSubtreeIfNeeded()
+
+        let doc = scrollView.masonryDocument
+        doc.loader = loader
+        let signature = MasonryAssetsSignature(
+            revision: 1,
+            count: assets.count,
+            firstID: assets.first?.id,
+            lastID: assets.last?.id
+        )
+
+        func apply(overlayPresented: Bool) {
+            doc.applyState(
+                assets: assets,
+                signature: signature,
+                folders: [],
+                loaderInvalidationVersion: 0,
+                selectedIDs: [],
+                cutIDs: [],
+                layoutMode: .verticalMasonry,
+                targetColumnWidth: 228,
+                topInset: 76,
+                bottomInset: 44,
+                sideChromeWidth: nil,
+                isLivePaneResizing: false,
+                activeQuickLookID: nil,
+                isOverlayPresented: overlayPresented,
+                revealRequest: nil,
+                isDarkMode: false,
+                reduceMotion: true,
+                callbacks: MasonryCallbacks()
+            )
+        }
+
+        apply(overlayPresented: false)
+        scrollView.layoutSubtreeIfNeeded()
+        doc.updateTrackingAreas()
+
+        let expectedLayout = MasonryLayoutEngine.compute(
+            assets: assets,
+            layoutMode: .verticalMasonry,
+            containerWidth: scrollView.contentView.bounds.width,
+            targetColumnWidth: 228,
+            spacing: 12,
+            horizontalPadding: 20,
+            topInset: 76,
+            bottomInset: 44
+        )
+        let firstItem = try #require(expectedLayout.items.first)
+        let secondItem = try #require(expectedLayout.items.dropFirst().first)
+
+        func sendMouseMoved(toDocPoint docPoint: CGPoint) throws {
+            let winPoint = doc.convert(docPoint, to: nil)
+            let event = try #require(NSEvent.mouseEvent(
+                with: .mouseMoved,
+                location: winPoint,
+                modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: window.windowNumber,
+                context: nil,
+                eventNumber: 1,
+                clickCount: 0,
+                pressure: 0
+            ))
+            doc.mouseMoved(with: event)
+        }
+
+        // 1. Normal state: tracking area active, hitTest succeeds, mouseMoved hovers Card 0
+        #expect(!doc.trackingAreas.isEmpty)
+        #expect(scrollView.hitTest(NSPoint(x: 150, y: 200)) != nil)
+        try sendMouseMoved(toDocPoint: CGPoint(x: firstItem.rect.midX, y: firstItem.rect.midY))
+        #expect(doc.hoveredAssetIDForTesting == firstItem.id)
+        #expect(!doc.isHoverOverlayHiddenForTesting)
+
+        // 2. Settings / modal overlay opens: existing hover clears immediately, tracking areas removed,
+        //    hitTest returns nil, and subsequent mouseMoved over Card 1 produces zero hover response
+        apply(overlayPresented: true)
+        #expect(doc.hoveredAssetIDForTesting == nil)
+        #expect(doc.isHoverOverlayHiddenForTesting)
+        #expect(doc.trackingAreas.isEmpty)
+        #expect(scrollView.hitTest(NSPoint(x: 150, y: 200)) == nil)
+        #expect(doc.hitTest(NSPoint(x: firstItem.rect.midX, y: firstItem.rect.midY)) == nil)
+
+        try sendMouseMoved(toDocPoint: CGPoint(x: secondItem.rect.midX, y: secondItem.rect.midY))
+        #expect(doc.hoveredAssetIDForTesting == nil)
+        #expect(doc.isHoverOverlayHiddenForTesting)
+
+        // 3. Overlay closes: tracking areas & hover resume cleanly
+        apply(overlayPresented: false)
+        #expect(!doc.trackingAreas.isEmpty)
+        #expect(scrollView.hitTest(NSPoint(x: 150, y: 200)) != nil)
+        try sendMouseMoved(toDocPoint: CGPoint(x: secondItem.rect.midX, y: secondItem.rect.midY))
+        #expect(doc.hoveredAssetIDForTesting == secondItem.id)
+        #expect(!doc.isHoverOverlayHiddenForTesting)
+
+        doc.releaseOffscreenResources()
+    }
+
+    @Test("FreeformHoverState clears active moodboard hover and ignores new hover events while overlay-suspended")
+    @MainActor
+    func moodboardHoverStateSuspendsDuringOverlay() {
+        let hoverState = FreeformHoverState()
+        let nodeA = UUID()
+        let nodeB = UUID()
+
+        hoverState.setNodeHovered(nodeA, hovering: true)
+        hoverState.setPortHovered(nodeB, hovering: true)
+        #expect(hoverState.effectiveHoveredNodeID == nodeB)
+
+        hoverState.setSuspended(true)
+        #expect(hoverState.hoveredNodeID == nil)
+        #expect(hoverState.hoveredPortNodeID == nil)
+        #expect(hoverState.effectiveHoveredNodeID == nil)
+
+        hoverState.setNodeHovered(nodeA, hovering: true)
+        hoverState.setPortHovered(nodeB, hovering: true)
+        #expect(hoverState.hoveredNodeID == nil)
+        #expect(hoverState.hoveredPortNodeID == nil)
+        #expect(hoverState.effectiveHoveredNodeID == nil)
+
+        hoverState.setSuspended(false)
+        hoverState.setNodeHovered(nodeA, hovering: true)
+        #expect(hoverState.effectiveHoveredNodeID == nodeA)
     }
 }
