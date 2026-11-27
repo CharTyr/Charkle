@@ -1,13 +1,14 @@
 /**
  * Pure, DOM-free multi-platform social media collector utilities for Charkle Extension.
  *
- * Covers 6 visual/illustration social platforms:
+ * Covers 7 visual/video social platforms:
  * - X / Twitter (`x.com`, `twitter.com`)
  * - Bluesky (`bsky.app`)
  * - Pixiv (`pixiv.net`)
  * - Threads (`threads.net`, `threads.com`)
  * - Instagram (`instagram.com`)
  * - Xiaohongshu (`xiaohongshu.com`)
+ * - Douyin (`douyin.com`)
  */
 
 export {
@@ -22,6 +23,19 @@ export {
   resolveTweetOrganizationFolderName,
   upgradeTwitterMediaUrl,
 } from './x-author-media.js';
+
+export {
+  extractDouyinCollectionsFromPayload,
+  extractDouyinPostsFromPayload,
+  extractDouyinShareCopyUrl,
+  isHeicImageUrl,
+  normalizeDouyinAwemeItem,
+  normalizeDouyinPostUrl,
+  parseDouyinMetricCount,
+  pickBestDouyinImageUrl,
+  pickBestDouyinVideoUrl,
+  upgradeDouyinHttpsUrl,
+} from './douyin-parser.js';
 
 const BSKY_HOSTS = new Set(['bsky.app', 'www.bsky.app']);
 const PIXIV_HOSTS = new Set(['pixiv.net', 'www.pixiv.net', 'touch.pixiv.net']);
@@ -785,6 +799,7 @@ const PLATFORM_NOUN = {
   threads: '贴文',
   instagram: '贴文',
   xiaohongshu: '笔记',
+  douyin: '作品',
 };
 
 const PLATFORM_LABEL = {
@@ -794,6 +809,7 @@ const PLATFORM_LABEL = {
   threads: 'Threads',
   instagram: 'Instagram',
   xiaohongshu: '小红书',
+  douyin: '抖音',
 };
 
 export function buildCreatorRootFolderName(platform, authorHandle = '', authorName = '', fallback = '') {
@@ -801,12 +817,14 @@ export function buildCreatorRootFolderName(platform, authorHandle = '', authorNa
   const cleanName = sanitizeSegment(authorName, 36);
   const label = PLATFORM_LABEL[platform] || '社交';
 
-  if (platform === 'pixiv' || platform === 'xiaohongshu') {
-    if (cleanName && cleanHandle && /^\d+$/.test(cleanHandle)) {
+  if (platform === 'pixiv' || platform === 'xiaohongshu' || platform === 'douyin') {
+    if (cleanName && cleanHandle && /^\d+$/.test(cleanHandle) && platform === 'pixiv') {
       return `${cleanName} (${label})`.slice(0, 64);
     }
     if (cleanName) return cleanName.slice(0, 64);
-    if (cleanHandle) return `${label} #${cleanHandle}`.slice(0, 64);
+    if (cleanHandle && !cleanHandle.startsWith('MS4wLjAB')) {
+      return `${label} #${cleanHandle}`.slice(0, 64);
+    }
     return fallback || `${label} 作品`;
   }
 
@@ -867,6 +885,7 @@ export function filterCreatorMediaPost(
       normAuthor !== 'i' &&
       post.platform !== 'pixiv' &&
       post.platform !== 'xiaohongshu' &&
+      post.platform !== 'douyin' &&
       normAuthor !== normTarget
     ) {
       return null;

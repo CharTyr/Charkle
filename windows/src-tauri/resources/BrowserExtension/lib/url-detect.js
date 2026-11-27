@@ -47,6 +47,16 @@ const XHS_HOSTS = new Set([
 
 const XHS_SHORT_HOSTS = new Set(['xhslink.com', 'www.xhslink.com']);
 
+const DOUYIN_HOSTS = new Set([
+  'douyin.com',
+  'www.douyin.com',
+  'm.douyin.com',
+  'iesdouyin.com',
+  'www.iesdouyin.com',
+]);
+
+const DOUYIN_SHORT_HOSTS = new Set(['v.douyin.com', 'www.v.douyin.com']);
+
 const PIXIV_HOSTS = new Set(['pixiv.net', 'www.pixiv.net', 'touch.pixiv.net']);
 
 const INSTAGRAM_HOSTS = new Set(['instagram.com', 'www.instagram.com', 'm.instagram.com']);
@@ -122,6 +132,10 @@ export function isValidXhsNoteId(candidate) {
   return typeof candidate === 'string' && /^[a-zA-Z0-9]{16,40}$/.test(candidate);
 }
 
+export function isValidDouyinAwemeId(candidate) {
+  return typeof candidate === 'string' && /^\d{15,22}$/.test(candidate.trim());
+}
+
 /**
  * Normalizes a user-supplied Charkle server URL (Desktop loopback or self-hosted Web).
  */
@@ -171,13 +185,20 @@ export function isSameOriginUrl(urlA, urlB) {
   }
 }
 
+function normalizeCandidateWebUrl(rawUrl) {
+  const trimmed = String(rawUrl ?? '').trim();
+  if (!trimmed) return '';
+  if (trimmed.startsWith('//')) return `https:${trimmed}`;
+  return trimmed;
+}
+
 /**
- * Classifies a URL into rich Charkle sources (X, Xiaohongshu, Threads, Bluesky, GitHub Repo, or Web Bookmark).
+ * Classifies a URL into rich Charkle sources (X, Xiaohongshu, Douyin, Threads, Bluesky, GitHub Repo, or Web Bookmark).
  */
 export function detectSpecialSource(rawUrl) {
   let u;
   try {
-    u = new URL(String(rawUrl ?? '').trim());
+    u = new URL(normalizeCandidateWebUrl(rawUrl));
   } catch {
     return {
       kind: 'unknown',
@@ -275,6 +296,50 @@ export function detectSpecialSource(rawUrl) {
         actionLabel: '收藏小红书笔记',
         hostname: 'xiaohongshu.com',
         postID: noteID,
+      };
+    }
+  }
+
+  // Douyin video / photo-note / modal post or v.douyin.com short share link
+  if (DOUYIN_SHORT_HOSTS.has(host) && parts.length >= 1) {
+    return {
+      kind: 'douyin',
+      label: '抖音作品',
+      badgeText: '抖音作品',
+      actionLabel: '收藏抖音作品',
+      hostname: 'v.douyin.com',
+      postID: parts.join('/'),
+    };
+  }
+  if (DOUYIN_HOSTS.has(host)) {
+    let awemeID = null;
+    if (
+      parts.length >= 2 &&
+      (parts[0].toLowerCase() === 'video' || parts[0].toLowerCase() === 'note') &&
+      isValidDouyinAwemeId(parts[1])
+    ) {
+      awemeID = parts[1];
+    } else if (
+      parts.length >= 3 &&
+      parts[0].toLowerCase() === 'share' &&
+      (parts[1].toLowerCase() === 'video' || parts[1].toLowerCase() === 'note') &&
+      isValidDouyinAwemeId(parts[2])
+    ) {
+      awemeID = parts[2];
+    } else {
+      const modalId = (u.searchParams.get('modal_id') || '').trim();
+      if (isValidDouyinAwemeId(modalId)) {
+        awemeID = modalId;
+      }
+    }
+    if (awemeID) {
+      return {
+        kind: 'douyin',
+        label: '抖音作品',
+        badgeText: '抖音作品',
+        actionLabel: '收藏抖音作品',
+        hostname: 'douyin.com',
+        postID: awemeID,
       };
     }
   }
@@ -403,7 +468,7 @@ export function detectSpecialSource(rawUrl) {
 export function detectBookmarkCollectionPage(rawUrl) {
   let u;
   try {
-    u = new URL(String(rawUrl ?? '').trim());
+    u = new URL(normalizeCandidateWebUrl(rawUrl));
   } catch {
     return {
       supported: false,
@@ -586,6 +651,69 @@ export function detectBookmarkCollectionPage(rawUrl) {
     }
   }
 
+  // Douyin favorites, collection folders, likes & author profile (1:1 aligned with Xiaohongshu)
+  if (DOUYIN_HOSTS.has(host)) {
+    const isSingleDouyinPost =
+      (parts.length >= 2 && (p0 === 'video' || p0 === 'note') && isValidDouyinAwemeId(parts[1])) ||
+      (parts.length >= 3 && p0 === 'share' && (p1 === 'video' || p1 === 'note') && isValidDouyinAwemeId(parts[2]));
+    if (!isSingleDouyinPost) {
+      const showTab = (u.searchParams.get('showTab') || u.searchParams.get('tab') || '').toLowerCase();
+      const collectsId = (u.searchParams.get('collects_id') || u.searchParams.get('collection_id') || '').trim();
+      if (parts.length >= 2 && p0 === 'user') {
+        const userSeg = parts[1];
+        if (
+          showTab === 'favorite_collection' ||
+          showTab === 'collect' ||
+          showTab === 'collection' ||
+          showTab === 'favorites' ||
+          Boolean(collectsId)
+        ) {
+          return {
+            supported: true,
+            isCollectionRoute: true,
+            platform: 'douyin',
+            pageKind: collectsId ? 'board' : 'collect',
+            authorHandle: userSeg === 'self' ? '' : userSeg,
+            collectionId: collectsId || null,
+            label: collectsId ? '抖音收藏夹' : '抖音收藏页',
+            suggestedFolderName: '抖音收藏',
+          };
+        }
+        if (showTab === 'like' || showTab === 'likes') {
+          return {
+            supported: true,
+            isCollectionRoute: true,
+            platform: 'douyin',
+            pageKind: 'likes',
+            authorHandle: userSeg === 'self' ? '' : userSeg,
+            label: '抖音喜欢页',
+            suggestedFolderName: '抖音喜欢',
+          };
+        }
+        return {
+          supported: true,
+          isCollectionRoute: true,
+          platform: 'douyin',
+          pageKind: 'profile',
+          authorHandle: userSeg === 'self' ? '' : userSeg,
+          label: userSeg === 'self' ? '抖音个人主页（自动切至收藏）' : '抖音作者主页',
+          suggestedFolderName: '抖音收藏',
+        };
+      }
+      if (parts.length >= 1 && (p0 === 'collection' || p0 === 'collects' || p0 === 'favorites')) {
+        return {
+          supported: true,
+          isCollectionRoute: true,
+          platform: 'douyin',
+          pageKind: 'board',
+          collectionId: parts[1] || collectsId || null,
+          label: '抖音收藏夹',
+          suggestedFolderName: '抖音收藏',
+        };
+      }
+    }
+  }
+
   // Bluesky author profile / media / likes
   const bskyProfile = detectBlueskyProfileUrl(u.href);
   if (bskyProfile) {
@@ -694,7 +822,7 @@ export function detectBookmarkCollectionPage(rawUrl) {
  * Computes a stable canonical deduplication key matching Charkle macOS `SocialPostResolver.canonicalDedupKey`.
  */
 export function canonicalDedupKey(rawUrl) {
-  const trimmed = String(rawUrl ?? '').trim();
+  const trimmed = normalizeCandidateWebUrl(rawUrl);
   if (!trimmed) return null;
   const info = detectSpecialSource(trimmed);
   if (info.kind === 'x' && info.postID) {
@@ -702,6 +830,9 @@ export function canonicalDedupKey(rawUrl) {
   }
   if (info.kind === 'xiaohongshu' && info.postID && info.hostname === 'xiaohongshu.com') {
     return `xhs:${info.postID.toLowerCase()}`;
+  }
+  if (info.kind === 'douyin' && info.postID && info.hostname === 'douyin.com') {
+    return `douyin:${info.postID}`;
   }
   if (info.kind === 'threads' && info.postID) {
     return `threads:${info.postID}`;

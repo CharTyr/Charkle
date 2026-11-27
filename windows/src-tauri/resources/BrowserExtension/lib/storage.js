@@ -26,6 +26,9 @@ export const DEFAULT_CONFIG = Object.freeze({
   authorMediaIncludeVideos: true,
   authorMediaSkipRetweets: true,
   xhsProfileCollectMode: 'media', // 'media' | 'bookmarks'
+  douyinProfileCollectMode: 'media', // 'media' | 'bookmarks'
+  douyinContentFilter: 'all', // 'all' | 'video' | 'image'
+  douyinAutoClassify: true,
   cachedFolders: [],
   cachedBoards: [],
   lastConnectedUser: null,
@@ -77,6 +80,13 @@ export async function saveConfig(patch, storageOverride) {
   if (next.xhsProfileCollectMode !== 'media' && next.xhsProfileCollectMode !== 'bookmarks') {
     next.xhsProfileCollectMode = 'media';
   }
+  if (next.douyinProfileCollectMode !== 'media' && next.douyinProfileCollectMode !== 'bookmarks') {
+    next.douyinProfileCollectMode = 'media';
+  }
+  if (!['all', 'video', 'image'].includes(next.douyinContentFilter)) {
+    next.douyinContentFilter = 'all';
+  }
+  next.douyinAutoClassify = next.douyinAutoClassify !== false;
 
   const area = getStorageArea(storageOverride);
   if (area) {
