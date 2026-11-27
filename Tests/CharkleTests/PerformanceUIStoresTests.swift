@@ -97,9 +97,9 @@ struct PerformanceUIStoresTests {
         #expect(smartSheet.contains("@State private var cachedLiveMatchCount: Int = 0"))
         #expect(smartSheet.contains(".onChange(of: draftRule)"))
 
-        // SyncAndAIStore & MoodboardStore equality guards, decoder reuse, and CLI probe caching
+        // SyncAndAIStore & MoodboardStore equality guards, decoder reuse, and MCP helper probe caching
         #expect(syncStore.contains("private static let syncStatusDecoder = JSONDecoder()"))
-        #expect(syncStore.contains("ensureCLIProbeCacheFresh()"))
+        #expect(syncStore.contains("ensureHelperProbeCacheFresh()"))
         #expect(syncStore.contains("if self.syncStatus != decoded"))
         #expect(moodStore.contains("if fetched != boards"))
         #expect(moodStore.contains("candidateRefreshTask?.cancel()"))

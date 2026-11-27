@@ -1,13 +1,15 @@
 import AppKit
 import CharkleCore
+import Darwin
 import Foundation
 import SafariServices
 import os
 
 private let bridgeLogger = Logger(subsystem: "com.charkle.app", category: "ExtensionBridge")
 
-/// Main-actor controller managing the local loopback HTTP bridge (`http://127.0.0.1:41937`)
-/// for Charkle's Safari and Chrome browser extensions.
+/// Main-actor controller managing Charkle's embedded HTTP server (`port 41937+`) powering BOTH:
+/// 1. Same-machine loopback browser extension bridge (`Chrome / Edge / Arc / Safari`)
+/// 2. Streamable HTTP MCP endpoint (`/api/v1/mcp` + `/api/v1/mcp/download/<ticket>`) for local & cross-machine AI Agents.
 @Observable
 public final class ExtensionBridgeController {
     private static let enabledKey = "charkle.extensionBridge.enabled"
@@ -18,11 +20,7 @@ public final class ExtensionBridgeController {
     public var isEnabled: Bool {
         didSet {
             UserDefaults.standard.set(isEnabled, forKey: Self.enabledKey)
-            if isEnabled {
-                startIfEnabled()
-            } else {
-                stop()
-            }
+            syncServerLifecycle()
         }
     }
 
@@ -39,8 +37,19 @@ public final class ExtensionBridgeController {
     public private(set) var isRunning: Bool = false
     public private(set) var port: UInt16 = LocalExtensionBridgeServer.defaultPort
     public private(set) var baseURL: String = "http://127.0.0.1:\(LocalExtensionBridgeServer.defaultPort)"
+    public private(set) var httpMCPEnabled: Bool
+    public private(set) var allowsRemoteMCP: Bool
     public private(set) var accessToken: String
     public private(set) var lastError: String?
+
+    public var mcpLocalEndpointURL: String {
+        "\(baseURL)/api/v1/mcp"
+    }
+
+    public var mcpRemoteEndpointURL: String? {
+        guard allowsRemoteMCP, port > 0, let ip = Self.localLANIPv4Address() else { return nil }
+        return "http://\(ip):\(port)/api/v1/mcp"
+    }
 
     @ObservationIgnored
     private let server: LocalExtensionBridgeServer
@@ -57,11 +66,13 @@ public final class ExtensionBridgeController {
     @ObservationIgnored
     private var pendingIngestCount: Int = 0
     @ObservationIgnored
-    private let onRefreshLibrary: @MainActor (_ createdCount: Int, _ targetBoardID: UUID?) async -> Void
+    private var pendingMCPMutation: Bool = false
+    @ObservationIgnored
+    private let onRefreshLibrary: @MainActor (_ createdCount: Int, _ targetBoardID: UUID?, _ isMCPMutation: Bool) async -> Void
 
     public init(
         engine: any CharkleEngineProtocol,
-        onRefreshLibrary: @escaping @MainActor (_ createdCount: Int, _ targetBoardID: UUID?) async -> Void
+        onRefreshLibrary: @escaping @MainActor (_ createdCount: Int, _ targetBoardID: UUID?, _ isMCPMutation: Bool) async -> Void
     ) {
         let defaults = UserDefaults.standard
         if defaults.object(forKey: Self.enabledKey) == nil {
@@ -75,11 +86,19 @@ public final class ExtensionBridgeController {
         let resolvedAutoPair = defaults.bool(forKey: Self.autoPairKey)
         self.allowLocalAutoPair = resolvedAutoPair
 
+        let agentCfg = ExternalAgentConfigStore.load()
+        self.httpMCPEnabled = agentCfg.httpMCPEnabled
+        self.allowsRemoteMCP = agentCfg.allowRemoteHTTPMCP
+
         let keychain = KeychainStore()
         self.keychain = keychain
         let resolvedToken = Self.loadOrMigrateToken(keychain: keychain, defaults: defaults)
         self.accessToken = resolvedToken
         self.onRefreshLibrary = onRefreshLibrary
+
+        let mcpService: CharkleExternalAgentService? = (engine as? LiveCharkleEngine).map {
+            CharkleExternalAgentService(engine: $0, notifyOnWrite: false)
+        }
 
         let box = WeakControllerBox()
         let mutationHandler: @Sendable (LocalExtensionBridgeServer.MutationKind, Int, UUID?, UUID?) -> Void = { kind, count, _, boardID in
@@ -91,13 +110,18 @@ public final class ExtensionBridgeController {
             engine: engine,
             token: resolvedToken,
             allowLocalAutoPair: resolvedAutoPair,
+            mcpService: mcpService,
+            allowRemoteMCP: agentCfg.allowRemoteHTTPMCP,
             onLibraryMutated: mutationHandler
         )
         box.value = self
     }
 
+    private var shouldRunHTTPServer: Bool {
+        isEnabled || httpMCPEnabled
+    }
+
     private static func loadOrMigrateToken(keychain: KeychainStore, defaults: UserDefaults) -> String {
-        // 1. Prefer Keychain-stored token and scrub any lingering legacy plaintext UserDefaults copy.
         if let data = try? keychain.read(Self.tokenKey),
            let stored = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
            stored.count >= 24 {
@@ -107,7 +131,6 @@ public final class ExtensionBridgeController {
             return stored
         }
 
-        // 2. Transparent one-time migration from legacy UserDefaults key so paired extensions stay connected.
         if let legacy = defaults.string(forKey: Self.tokenKey)?.trimmingCharacters(in: .whitespacesAndNewlines),
            legacy.count >= 24 {
             do {
@@ -119,7 +142,6 @@ public final class ExtensionBridgeController {
             return legacy
         }
 
-        // 3. Generate a fresh token and persist strictly to Keychain.
         let fresh = LocalExtensionBridgeServer.generateToken()
         do {
             try keychain.save(Data(fresh.utf8), for: Self.tokenKey)
@@ -130,8 +152,57 @@ public final class ExtensionBridgeController {
         return fresh
     }
 
+    public func applyHTTPMCPConfig(_ config: ExternalAgentConfig) {
+        let remoteChanged = allowsRemoteMCP != config.allowRemoteHTTPMCP
+        httpMCPEnabled = config.httpMCPEnabled
+        allowsRemoteMCP = config.allowRemoteHTTPMCP
+
+        if !shouldRunHTTPServer {
+            stop()
+            return
+        }
+
+        if remoteChanged {
+            let allowRemote = config.allowRemoteHTTPMCP
+            lifecycleGeneration &+= 1
+            let generation = lifecycleGeneration
+            startTask?.cancel()
+            startTask = Task { [weak self] in
+                guard let self else { return }
+                do {
+                    let status = try await self.server.updateAllowRemoteMCP(allowRemote)
+                    let finalStatus: LocalExtensionBridgeServer.StatusSnapshot
+                    if status.isRunning {
+                        finalStatus = status
+                    } else {
+                        finalStatus = try await self.server.start()
+                    }
+                    guard !Task.isCancelled, self.shouldRunHTTPServer, self.lifecycleGeneration == generation else { return }
+                    self.isRunning = finalStatus.isRunning
+                    self.port = finalStatus.port
+                    self.baseURL = finalStatus.baseURL
+                    self.lastError = nil
+                } catch {
+                    guard !Task.isCancelled, self.lifecycleGeneration == generation else { return }
+                    self.isRunning = false
+                    self.lastError = error.localizedDescription
+                }
+            }
+        } else if !isRunning {
+            startIfEnabled()
+        }
+    }
+
+    private func syncServerLifecycle() {
+        if shouldRunHTTPServer {
+            startIfEnabled()
+        } else {
+            stop()
+        }
+    }
+
     public func startIfEnabled() {
-        guard isEnabled else { return }
+        guard shouldRunHTTPServer else { return }
         lifecycleGeneration &+= 1
         let generation = lifecycleGeneration
         startTask?.cancel()
@@ -139,7 +210,7 @@ public final class ExtensionBridgeController {
             guard let self else { return }
             do {
                 let status = try await self.server.start()
-                guard !Task.isCancelled, self.isEnabled, self.lifecycleGeneration == generation else {
+                guard !Task.isCancelled, self.shouldRunHTTPServer, self.lifecycleGeneration == generation else {
                     await self.server.stop()
                     return
                 }
@@ -147,12 +218,12 @@ public final class ExtensionBridgeController {
                 self.port = status.port
                 self.baseURL = status.baseURL
                 self.lastError = nil
-                bridgeLogger.info("Browser extension bridge listening on \(status.baseURL, privacy: .public)")
+                bridgeLogger.info("Embedded HTTP bridge & MCP listening on \(status.baseURL, privacy: .public) (remoteMCP=\(status.allowsRemoteMCP, privacy: .public))")
             } catch {
                 guard !Task.isCancelled, self.lifecycleGeneration == generation else { return }
                 self.isRunning = false
                 self.lastError = error.localizedDescription
-                bridgeLogger.error("Browser extension bridge failed to start: \(error.localizedDescription, privacy: .public)")
+                bridgeLogger.error("Embedded HTTP bridge failed to start: \(error.localizedDescription, privacy: .public)")
             }
         }
     }
@@ -195,7 +266,6 @@ public final class ExtensionBridgeController {
         return fresh
     }
 
-    /// Opens Safari's Extensions preferences directly on Charkle's embedded Safari Web Extension.
     public func openSafariExtensionPreferences() {
         SFSafariApplication.showPreferencesForExtension(withIdentifier: Self.safariExtensionBundleIdentifier) { error in
             if error != nil {
@@ -208,7 +278,6 @@ public final class ExtensionBridgeController {
         }
     }
 
-    /// Locates the bundled Chrome/Edge/Arc unpacked browser extension folder (`BrowserExtension/`).
     public static func bundledBrowserExtensionDirectoryURL() -> URL? {
         let fm = FileManager.default
         if let bundleRes = Bundle.main.resourceURL {
@@ -217,7 +286,6 @@ public final class ExtensionBridgeController {
                 return bundled
             }
         }
-        // Development fallback: walk up from executable or cwd to repo root `Resources/BrowserExtension`.
         let cwd = URL(fileURLWithPath: fm.currentDirectoryPath, isDirectory: true)
         let devCandidate = cwd.appending(path: "Resources/BrowserExtension", directoryHint: .isDirectory)
         if fm.fileExists(atPath: devCandidate.appending(path: "manifest.json").path) {
@@ -226,34 +294,75 @@ public final class ExtensionBridgeController {
         return nil
     }
 
-    /// Returns whether the embedded Safari Web Extension `.appex` exists inside `Charkle.app/Contents/PlugIns/`.
     public static func isSafariExtensionEmbedded() -> Bool {
         guard let plugInsURL = Bundle.main.builtInPlugInsURL else { return false }
         let appex = plugInsURL.appending(path: "CharkleSafariExtension.appex", directoryHint: .isDirectory)
         return FileManager.default.fileExists(atPath: appex.path)
     }
 
+    /// Detects the primary non-loopback IPv4 interface address (LAN or Tailscale) for display in Settings.
+    public static func localLANIPv4Address() -> String? {
+        var ifaddr: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&ifaddr) == 0, let first = ifaddr else { return nil }
+        defer { freeifaddrs(ifaddr) }
+
+        var preferred: String?
+        var fallback: String?
+        var cursor: UnsafeMutablePointer<ifaddrs>? = first
+        while let current = cursor {
+            let flags = Int32(current.pointee.ifa_flags)
+            let isUp = (flags & IFF_UP) != 0 && (flags & IFF_RUNNING) != 0
+            let isLoopback = (flags & IFF_LOOPBACK) != 0
+            if isUp && !isLoopback, let addr = current.pointee.ifa_addr, addr.pointee.sa_family == UInt8(AF_INET) {
+                var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+                let res = getnameinfo(
+                    addr,
+                    socklen_t(addr.pointee.sa_len),
+                    &host,
+                    socklen_t(host.count),
+                    nil,
+                    0,
+                    NI_NUMERICHOST
+                )
+                if res == 0 {
+                    let ip = String(decoding: host.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
+                    let ifName = String(cString: current.pointee.ifa_name)
+                    if ifName.hasPrefix("en") && preferred == nil {
+                        preferred = ip
+                    } else if fallback == nil {
+                        fallback = ip
+                    }
+                }
+            }
+            cursor = current.pointee.ifa_next
+        }
+        return preferred ?? fallback
+    }
+
     private func handleMutation(kind: LocalExtensionBridgeServer.MutationKind, count: Int, targetBoardID: UUID?) {
         if kind == .ingest {
             pendingIngestCount += max(1, count)
+        } else if kind == .mcpMutation {
+            pendingMCPMutation = true
         }
         if let targetBoardID, !pendingBoardRefreshIDs.contains(targetBoardID) {
             pendingBoardRefreshIDs.append(targetBoardID)
         }
-        // Coalesce rapid batch bookmark imports into smooth ~450ms UI refreshes without dropping multi-board targets.
         refreshDebounceTask?.cancel()
         refreshDebounceTask = Task { @MainActor [weak self] in
             try? await Task.sleep(for: .milliseconds(450))
             guard let self, !Task.isCancelled else { return }
             let countToReport = self.pendingIngestCount
             let boardsToRefresh = self.pendingBoardRefreshIDs
+            let wasMCP = self.pendingMCPMutation
             self.pendingIngestCount = 0
             self.pendingBoardRefreshIDs.removeAll()
+            self.pendingMCPMutation = false
             if boardsToRefresh.isEmpty {
-                await self.onRefreshLibrary(countToReport, nil)
+                await self.onRefreshLibrary(countToReport, nil, wasMCP)
             } else {
                 for (index, boardID) in boardsToRefresh.enumerated() {
-                    await self.onRefreshLibrary(index == 0 ? countToReport : 0, boardID)
+                    await self.onRefreshLibrary(index == 0 ? countToReport : 0, boardID, wasMCP)
                 }
             }
         }

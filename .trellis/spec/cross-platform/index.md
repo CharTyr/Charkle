@@ -76,27 +76,30 @@
 
 ---
 
-## 3. External Agent & MCP Safety Policy (20 Tools · 4+2 Resources · 4 Prompts)
+## 3. External Agent Pure MCP v2 Safety & Contract (10 Tools · 5+2 Resources · 5 Prompts)
 
-- **Protocol & Transport**:
-  - JSON-RPC 2.0 single & batch requests over stdio (`NDJSON` and split-chunk-safe `Content-Length` framing) or HTTP; negotiates `protocolVersion` against `["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"]`; advertises `tools`, `resources`, `prompts`, and `logging`.
-  - Every tool emits complete MCP Tool Annotations (`title`, `readOnlyHint`, `destructiveHint: false`, `idempotentHint`, `openWorldHint`) while keeping total `tools/list` JSON schema budget lean (`< 18 KB`).
-  - **Low-Token Wire Conventions (v1.2.2+)**:
-    - MCP tool text payloads default to compact JSON (no pretty whitespace); `charkle` CLI auto-switches to compact single-line JSON when stdout is piped/non-TTY (opt-in `--pretty` / `--human`).
-    - Every ID parameter (`asset_id`, `asset_ids`, `folder_id`, `board_id`, `seed_asset_ids`, `unlike_asset_ids`, `exclude_asset_ids`) and resource URI (`charkle://assets/{asset_id}`, `charkle://boards/{board_id}`) accepts both canonical UUIDs and unambiguous **8+ character short ID prefixes** (backed by primary-key prefix lookup; ambiguous prefixes fail explicitly with candidate IDs).
-    - `detail` supports `"visual"` (ultra-lean manifest auto-selected whenever `render_contact_sheet: true`), `"compact"`, `"standard"`, and `"full"`.
-    - Parent folder queries default to `include_subfolders: true` (opt-out with `false` / `--no-subfolders`).
-    - Canonical low-token Agent Skill lives at `Resources/AgentSkill/charkle/SKILL.md`.
-- **Read Tools (12)**:
-  - `library_overview` (semantic atlas: counts incl. untagged/trashed, compact folders with `recursiveAssetCount` / `topTags` / `palette` / `dominantAspect`, smart folders, top tags, aspect/media mix, boards, optional `compact` / `include_folder_profiles`), `search_assets` (FTS + CJK word-boundary terms + Pinyin, `include_subfolders` default `true`, `tags`/`any_tags`/`exclude_tags`/`exclude_asset_ids`, `media_kinds`, `aspect_shape`, `color_hex`/`color_tolerance`, CIELAB `tone: dark|light|warm|cool|vivid|muted|high_contrast`, `smart_folder_*`, `only_trashed`, `sort_by`, `diversify`, auto `facets`, one-shot `render_contact_sheet` + `sheet_max_width` `[512..1920]`, pagination), `list_inbox` (paginated, one-shot `render_contact_sheet`), `get_asset` (single `asset_id` or batch `asset_ids` 1–12 finalists with hydrated EXIF, AI generation prompts, social post, GitHub repo metadata, optional `include_image: true`), `render_contact_sheet` (1–24 assets, `max_width` `[512..1920]` default `1024`, multi-intent `queries[]` 2–6 directions in one Contact Sheet, `tone`, `diversify`, `include_image`), `find_similar_assets` (with `unlike_asset_ids` repulsion, `diversify`, one-shot `render_contact_sheet`), `semantic_search` (bilingual EN↔ZH visual expansion, CIELAB tone/aspect extraction, multi-direction `queries[]`, `seed_asset_ids`, `unlike_asset_ids`, `visual_rerank`, Round-Robin visual `diversify`, auto `facets`, one-shot `render_contact_sheet`), `quick_jump`, `suggest_folder`, `list_boards`, `get_board_context` (with node frames, crops, connectors, candidate pool), `export_board_image` (high-res `preview1400` tiles, optional `include_image`).
-- **Safe Write Tools (8)**:
-  - `organize_assets` (explicit `ai_description` overwrite, tags, suggested tags, rating, notes, folder/Inbox, offline pin), `create_folder`, `update_folder` (rename, move, appearance — never delete), `ingest_asset` (single/batch files or directories, URLs, text; returns post-patch tagged assets), `compose_moodboard`, `patch_moodboard` (non-overlapping placement below existing content, locked-card protection, sections, notes), `trash_assets`, `analyze_assets` (local Vision/EXIF/AI-prompt analysis + optional live rich-metadata refresh).
-- **Resources (4 static + 2 templates)**:
-  - Static: `charkle://library/overview`, `charkle://boards`, `charkle://folders`, `charkle://smart-folders`
+- **Protocol & Dual Transport (CLI Subcommands Retired)**:
+  - Pure MCP v2 JSON-RPC 2.0 single & batch requests over **local `stdio`** (`charkle mcp`, works even when the desktop app is closed) AND **Streamable HTTP** (`POST /api/v1/mcp` + `GET /api/v1/mcp/download/<ticket>`, enabling cross-machine & Web/Cloudflare Agents). Negotiates `protocolVersion` against `["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"]`; advertises `tools`, `resources`, `prompts`, and `logging`.
+  - Every tool emits complete MCP Tool Annotations (`title`, `readOnlyHint`, `destructiveHint: false`, `idempotentHint`, `openWorldHint`) with a lean `tools/list` schema budget (`< 12 KB`).
+  - **Low-Token & Cross-Machine Wire Conventions (MCP v2)**:
+    - Tool text payloads default to compact JSON; disk `output_path` is strictly retired (all Contact Sheets & Moodboard snapshots return inline MCP `image` blocks).
+    - Every ID parameter and dynamic resource URI accepts both canonical UUIDs and unambiguous **8+ character short ID prefixes**.
+    - Remote HTTP MCP requires **Scoped Bearer Tokens** (`ExternalAgentToken`, stored strictly as SHA-256 hash + display prefix; completely separate from browser-extension tokens), hides server local filesystem paths, forbids server `file_path` reads on `ingest_assets`, and issues short-lived signed `downloadURL` tickets (`GET /api/v1/mcp/download/<ticket>`). Even when `allowRemoteHTTPMCP` binds HTTP on `0.0.0.0`, all browser-extension endpoints remain strictly loopback-only (`127.0.0.1`).
+    - Canonical Pure MCP v2 Agent Skill lives at `Resources/AgentSkill/charkle/SKILL.md`.
+- **3-Tier Permission Boundaries (`ExternalAgentAccessLevel`)**:
+  - `readOnly`: read tools + `deduplicate_assets(action:"scan")` + `rollback_run(action:"list")`.
+  - `inboxAndEnrich`: adds `ingest_assets` (to Inbox/existing folders, no board writes) and `organize_assets` restricted to Inbox assets or pure enrichment (`ai_description` / `add_suggested_tags` / `analyze`), forbidding `trashed` and curated folder moves.
+  - `readWriteOrganize`: full safe organize, `manage_folder` (create/update only), `save_moodboard`, `deduplicate_assets(action:"merge")` (soft Trash only), and `rollback_run(action:"rollback")`.
+- **Read Tools (4)**:
+  - `library_overview` (semantic atlas: counts, compact folders with `recursiveAssetCount`/`topTags`/`palette`/`dominantAspect`, smart folders, canonical `topTags`, `taxonomy`, boards, permissions), `query_assets` (6-in-1 recall + inline Contact Sheet: `query`/`queries[]`/`asset_ids`, `only_inbox`, folder recursion default `true`, tags/any_tags/exclude_tags, CIELAB `tone`, `seed_asset_ids`, `unlike_asset_ids`, `diversify`, `contact_sheet`, `include_folder_suggestions`, stateful `session_id` seen-tracking, auto `facets` & 0-match `relaxationHints`), `inspect_assets` (1–12 finalists with hydrated EXIF/AI prompt/social/GitHub/OCR, optional `include_image`, normalized `crop_box` detail zoom, and HTTP `include_download_url`), `get_board` (lists all boards when selector omitted; reads board context + optional inline PNG `include_snapshot`).
+- **Safe Write Tools (6 — All Emit `runID` for Compensating HLC Rollback)**:
+  - `ingest_assets` (`web_url(s)`, cross-machine `inline_files` Base64 up to 16 MB/file & 32 MB/batch, `text`, and stdio-only `file_path(s)`), `organize_assets` (heterogeneous `items[]` up to 50 per-asset mutations OR uniform `asset_ids[]`, `dry_run: true` impact diff, canonical tag folding, `ai_description`, `add_suggested_tags`, `analyze`, `refresh_rich_metadata`, soft `trashed`), `manage_folder` (`action: "create" | "update"`, `reuse_existing` default `true`, never delete), `save_moodboard` (create via `sections`/`asset_ids`/`prompt` OR non-destructive patch preserving locked nodes), `deduplicate_assets` (`action: "scan"` with comparison Contact Sheet + `action: "merge"` always `.moveToTrash` with lossless metadata/board-ref merge), `rollback_run` (`action: "list" | "rollback"` restoring assets, folders, and moodboards via compensating HLC ops).
+- **Resources (5 static + 2 templates)**:
+  - Static: `charkle://library/overview`, `charkle://library/taxonomy`, `charkle://boards`, `charkle://folders`, `charkle://smart-folders`
   - Dynamic templates: `charkle://assets/{asset_id}`, `charkle://boards/{board_id}`
-- **Prompts (4)**:
-  - `triage_inbox`, `curate_moodboard`, `extract_design_tokens`, `inspect_ai_prompts`
-- **Non-Negotiable Invariant**: Permanent deletion of assets and deletion of folders are **STRICTLY FORBIDDEN** through any External Agent / MCP / CLI surface (`trash_assets` is soft-trash only). Channel switches (`mcpEnabled` / `cliEnabled`) and access level (`readOnly` / `readWriteOrganize`) are enforced independently.
+- **Prompts (5)**:
+  - `triage_inbox`, `curate_moodboard`, `deduplicate_library`, `extract_design_tokens`, `inspect_ai_prompts`
+- **Non-Negotiable Invariant**: Permanent deletion of assets and deletion of folders are **STRICTLY FORBIDDEN** through any MCP surface (`trashed: true` and `deduplicate_assets(action:"merge")` are soft Trash only).
 
 ---
 

@@ -21,10 +21,11 @@ public final class SyncAndAIStore {
     public var isTestingTypeSafe: Bool = false
     public var isRebuildingVisualIndex: Bool = false
     public var rebuildVisualIndexProgress: (completed: Int, total: Int)? = nil
-    public var cliLinkRevision: Int = 0
     public var isRunningExternalAgentSelfCheck: Bool = false
     public var externalAgentSelfCheckPassed: Bool? = nil
     public var externalAgentSelfCheckSummary: String? = nil
+    public var lastCreatedAgentTokenPlaintext: String? = nil
+    public var lastCreatedAgentTokenName: String? = nil
     public var chatGPTSession: ChatGPTAccountSession = ChatGPTAccountSession()
     public var chatGPTModels: [ChatGPTModelInfo] = []
     public var isSigningInChatGPT: Bool = false
@@ -70,13 +71,11 @@ public final class SyncAndAIStore {
     @ObservationIgnored
     private static let syncStatusDecoder = JSONDecoder()
     @ObservationIgnored
-    private var cachedCLIProbeRevision: Int = -1
-    @ObservationIgnored
-    private var cachedHelperCLIPathValue: String?
+    private var cachedHelperMCPPathValue: String?
     @ObservationIgnored
     private var cachedBundledHelperAvailableValue: Bool = false
     @ObservationIgnored
-    private var cachedCLILinkStatusValue: CLILinkStatus = .notLinked
+    public var onExternalAgentConfigChanged: (@MainActor (ExternalAgentConfig) -> Void)?
 
     @ObservationIgnored
     private nonisolated(unsafe) var syncProgressObserver: NSObjectProtocol?
@@ -862,23 +861,25 @@ public final class SyncAndAIStore {
         }
     }
 
-    // MARK: - External Agent (MCP & CLI) Configuration
+    // MARK: - External Agent (Pure MCP v2: stdio + Streamable HTTP) Configuration
 
     public func saveExternalAgentConfig(_ config: ExternalAgentConfig, quiet: Bool = false) {
         do {
             try ExternalAgentConfigStore.save(config)
             externalAgentConfig = config
+            onExternalAgentConfigChanged?(config)
             errorMessage = nil
             if !quiet {
-                switch (config.mcpEnabled, config.cliEnabled) {
+                switch (config.mcpEnabled, config.httpMCPEnabled) {
                 case (true, true):
-                    statusMessage = "MCP 与 CLI 服务均已开启 · 权限：\(config.accessLevel.displayTitle)"
+                    let remoteNote = config.allowRemoteHTTPMCP ? "（含跨机器远程）" : "（仅本机）"
+                    statusMessage = "本机与 HTTP MCP\(remoteNote) 已开启 · 本机权限：\(config.accessLevel.displayTitle)"
                 case (true, false):
-                    statusMessage = "已开启 MCP 服务（CLI 已关闭）· 权限：\(config.accessLevel.displayTitle)"
+                    statusMessage = "已开启本机 MCP（stdio）· 权限：\(config.accessLevel.displayTitle)"
                 case (false, true):
-                    statusMessage = "已开启 CLI 命令行服务（MCP 已关闭）· 权限：\(config.accessLevel.displayTitle)"
+                    statusMessage = "已开启 HTTP MCP 服务"
                 case (false, false):
-                    statusMessage = "已关闭 MCP 与 CLI 外部接入服务"
+                    statusMessage = "已关闭所有外部 MCP 接入服务"
                 }
             }
         } catch {
@@ -887,112 +888,94 @@ public final class SyncAndAIStore {
         }
     }
 
-    private func ensureCLIProbeCacheFresh() {
-        let rev = cliLinkRevision
-        guard cachedCLIProbeRevision != rev || cachedHelperCLIPathValue == nil else { return }
+    public func createExternalAgentToken(name: String, accessLevel: ExternalAgentAccessLevel) {
+        let minted = ExternalAgentToken.mint(name: name, accessLevel: accessLevel)
+        var updated = externalAgentConfig
+        updated.tokens.insert(minted.record, at: 0)
+        do {
+            try ExternalAgentConfigStore.save(updated)
+            externalAgentConfig = updated
+            onExternalAgentConfigChanged?(updated)
+            lastCreatedAgentTokenPlaintext = minted.plaintext
+            lastCreatedAgentTokenName = minted.record.name
+            errorMessage = nil
+            statusMessage = "已生成远程 MCP 密钥「\(minted.record.name)」，请立即复制保存（明文仅显示一次）"
+        } catch {
+            statusMessage = nil
+            errorMessage = "生成远程 MCP 密钥失败：\(error.localizedDescription)"
+        }
+    }
+
+    public func revokeExternalAgentToken(id: UUID) {
+        var updated = externalAgentConfig
+        let removedName = updated.tokens.first(where: { $0.id == id })?.name
+        updated.tokens.removeAll { $0.id == id }
+        do {
+            try ExternalAgentConfigStore.save(updated)
+            externalAgentConfig = updated
+            onExternalAgentConfigChanged?(updated)
+            errorMessage = nil
+            statusMessage = "已吊销 MCP 密钥\(removedName.map { "「\($0)」" } ?? "")"
+        } catch {
+            statusMessage = nil
+            errorMessage = "吊销密钥失败：\(error.localizedDescription)"
+        }
+    }
+
+    public func setExternalAgentTokenEnabled(id: UUID, enabled: Bool) {
+        var updated = externalAgentConfig
+        guard let idx = updated.tokens.firstIndex(where: { $0.id == id }) else { return }
+        updated.tokens[idx].isEnabled = enabled
+        saveExternalAgentConfig(updated, quiet: true)
+        statusMessage = enabled
+            ? "已启用密钥「\(updated.tokens[idx].name)」"
+            : "已暂停密钥「\(updated.tokens[idx].name)」"
+    }
+
+    public func updateExternalAgentTokenScope(id: UUID, accessLevel: ExternalAgentAccessLevel) {
+        var updated = externalAgentConfig
+        guard let idx = updated.tokens.firstIndex(where: { $0.id == id }) else { return }
+        updated.tokens[idx].accessLevel = accessLevel
+        saveExternalAgentConfig(updated, quiet: true)
+        statusMessage = "已更新密钥「\(updated.tokens[idx].name)」权限为：\(accessLevel.displayTitle)"
+    }
+
+    public func clearCreatedAgentTokenBanner() {
+        lastCreatedAgentTokenPlaintext = nil
+        lastCreatedAgentTokenName = nil
+    }
+
+    private func ensureHelperProbeCacheFresh() {
+        guard cachedHelperMCPPathValue == nil else { return }
         let fm = FileManager.default
         let bundled = Bundle.main.bundleURL
             .appending(path: "Contents/Helpers/charkle")
             .path
-        let resolvedPath: String
-        let helperAvailable: Bool
         if fm.isExecutableFile(atPath: bundled) {
-            resolvedPath = bundled
-            helperAvailable = true
-        } else {
-            let appApplications = "/Applications/Charkle.app/Contents/Helpers/charkle"
-            if fm.isExecutableFile(atPath: appApplications) {
-                resolvedPath = appApplications
-                helperAvailable = true
-            } else {
-                resolvedPath = bundled
-                helperAvailable = false
-            }
+            cachedHelperMCPPathValue = bundled
+            cachedBundledHelperAvailableValue = true
+            return
         }
-
-        let linkURL = URL(fileURLWithPath: NSHomeDirectory())
-            .appending(path: ".local/bin/charkle")
-        let linkPath = linkURL.path
-        let currentHelper = URL(fileURLWithPath: resolvedPath).resolvingSymlinksInPath().path
-
-        let status: CLILinkStatus
-        if let dest = try? fm.destinationOfSymbolicLink(atPath: linkPath) {
-            if !fm.isExecutableFile(atPath: linkPath) {
-                status = .broken
-            } else {
-                let destURL = dest.hasPrefix("/")
-                    ? URL(fileURLWithPath: dest)
-                    : URL(fileURLWithPath: dest, relativeTo: linkURL.deletingLastPathComponent())
-                let resolvedDest = destURL.resolvingSymlinksInPath().path
-                if helperAvailable && resolvedDest != currentHelper {
-                    status = .linkedStale(target: dest)
-                } else {
-                    status = .linkedCurrent
-                }
-            }
-        } else {
-            status = fm.isExecutableFile(atPath: linkPath) ? .linkedCurrent : .notLinked
+        let appApplications = "/Applications/Charkle.app/Contents/Helpers/charkle"
+        if fm.isExecutableFile(atPath: appApplications) {
+            cachedHelperMCPPathValue = appApplications
+            cachedBundledHelperAvailableValue = true
+            return
         }
-
-        cachedHelperCLIPathValue = resolvedPath
-        cachedBundledHelperAvailableValue = helperAvailable
-        cachedCLILinkStatusValue = status
-        cachedCLIProbeRevision = rev
+        cachedHelperMCPPathValue = bundled
+        cachedBundledHelperAvailableValue = false
     }
 
-    public func resolvedHelperCLIPath() -> String {
-        ensureCLIProbeCacheFresh()
-        return cachedHelperCLIPathValue ?? Bundle.main.bundleURL
+    public func resolvedHelperMCPPath() -> String {
+        ensureHelperProbeCacheFresh()
+        return cachedHelperMCPPathValue ?? Bundle.main.bundleURL
             .appending(path: "Contents/Helpers/charkle")
             .path
     }
 
     public var isBundledHelperAvailable: Bool {
-        _ = cliLinkRevision
-        ensureCLIProbeCacheFresh()
+        ensureHelperProbeCacheFresh()
         return cachedBundledHelperAvailableValue
-    }
-
-    public enum CLILinkStatus: Equatable, Sendable {
-        case notLinked
-        case linkedCurrent
-        case linkedStale(target: String)
-        case broken
-    }
-
-    public var cliLinkStatus: CLILinkStatus {
-        _ = cliLinkRevision
-        ensureCLIProbeCacheFresh()
-        return cachedCLILinkStatusValue
-    }
-
-    public var isCLILinkedInLocalBin: Bool {
-        switch cliLinkStatus {
-        case .linkedCurrent, .linkedStale: true
-        case .notLinked, .broken: false
-        }
-    }
-
-    public func installCLIInLocalBin() {
-        let sourcePath = resolvedHelperCLIPath()
-        guard FileManager.default.isExecutableFile(atPath: sourcePath) else {
-            errorMessage = "未在当前应用包中找到 charkle 助手程序，请先使用正式打包后的 Charkle.app 运行。"
-            return
-        }
-        let localBin = URL(fileURLWithPath: NSHomeDirectory()).appending(path: ".local/bin", directoryHint: .isDirectory)
-        let targetURL = localBin.appending(path: "charkle")
-        do {
-            try FileManager.default.createDirectory(at: localBin, withIntermediateDirectories: true)
-            if FileManager.default.fileExists(atPath: targetURL.path) || (try? FileManager.default.attributesOfItem(atPath: targetURL.path)) != nil {
-                try FileManager.default.removeItem(at: targetURL)
-            }
-            try FileManager.default.createSymbolicLink(atPath: targetURL.path, withDestinationPath: sourcePath)
-            cliLinkRevision &+= 1
-            errorMessage = nil
-            statusMessage = "已链接终端命令至 ~/.local/bin/charkle，可直接运行 charkle doctor"
-        } catch {
-            errorMessage = "创建命令行链接失败：\(error.localizedDescription)"
-        }
     }
 
     public func runExternalAgentSelfCheck() async {
@@ -1000,9 +983,9 @@ public final class SyncAndAIStore {
         isRunningExternalAgentSelfCheck = true
         defer { isRunningExternalAgentSelfCheck = false }
 
-        let helperPath = resolvedHelperCLIPath()
+        cachedHelperMCPPathValue = nil
+        let helperPath = resolvedHelperMCPPath()
         let helperExists = FileManager.default.isExecutableFile(atPath: helperPath)
-        cliLinkRevision &+= 1
 
         if helperExists {
             let outcome = await Self.runHelperDoctorProcess(helperPath: helperPath)
@@ -1028,11 +1011,11 @@ public final class SyncAndAIStore {
             let prompts = (caps?["promptCount"] as? Int) ?? 0
             externalAgentSelfCheckPassed = ok
             externalAgentSelfCheckSummary = ok
-                ? "开发态内核自检通过（\(tools) 工具 / \(prompts) 工作流），打包为 Charkle.app 后即内嵌独立原生助手"
+                ? "开发态 MCP v2 内核自检通过（\(tools) 工具 / \(prompts) 工作流），打包为 Charkle.app 后即内嵌独立 stdio 助手"
                 : "内核自检未通过"
         } else {
             externalAgentSelfCheckPassed = false
-            externalAgentSelfCheckSummary = "未找到原生 charkle 助手程序"
+            externalAgentSelfCheckSummary = "未找到原生 charkle MCP 助手程序"
         }
     }
 

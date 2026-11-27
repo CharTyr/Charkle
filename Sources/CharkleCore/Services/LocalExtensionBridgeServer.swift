@@ -10,33 +10,45 @@ public actor LocalExtensionBridgeServer {
     public enum MutationKind: String, Sendable {
         case ingest
         case folderCreate
+        case mcpMutation
     }
 
     public struct StatusSnapshot: Equatable, Sendable {
         public let isRunning: Bool
         public let port: UInt16
         public let baseURL: String
+        public let allowsRemoteMCP: Bool
 
-        public init(isRunning: Bool, port: UInt16) {
+        public init(isRunning: Bool, port: UInt16, allowsRemoteMCP: Bool = false) {
             self.isRunning = isRunning
             self.port = port
+            self.allowsRemoteMCP = allowsRemoteMCP
             self.baseURL = port > 0 ? "http://127.0.0.1:\(port)" : ""
+        }
+
+        public var mcpEndpointURL: String {
+            port > 0 ? "\(baseURL)/api/v1/mcp" : ""
         }
     }
 
     public static let defaultPort: UInt16 = 41937
     public static let fallbackPortCount: UInt16 = 10
     private static let maxRequestBodyBytes = 48 * 1024 * 1024
+    private static let maxDownloadBytes = 64 * 1024 * 1024
+    private static let downloadTicketTTLSeconds: TimeInterval = 600
 
     private let engine: any CharkleEngineProtocol
+    private let mcpService: CharkleExternalAgentService?
     private var token: String
     private var allowLocalAutoPair: Bool
+    private var allowRemoteMCP: Bool
     private var listener: NWListener?
     private var boundPort: UInt16 = 0
     private let preferredPort: UInt16
     private let allowEphemeralPort: Bool
     private let ioQueue = DispatchQueue(label: "com.charkle.extension.bridge.io", qos: .userInitiated)
     private let activeSessions = Mutex<[UUID: HTTPConnectionSession]>([:])
+    private var downloadTickets: [String: (assetID: UUID, expiresAt: Date)] = [:]
     private let onLibraryMutated: (@Sendable (MutationKind, Int, UUID?, UUID?) -> Void)?
 
     public init(
@@ -45,11 +57,15 @@ public actor LocalExtensionBridgeServer {
         allowLocalAutoPair: Bool = true,
         preferredPort: UInt16 = LocalExtensionBridgeServer.defaultPort,
         allowEphemeralPort: Bool = false,
+        mcpService: CharkleExternalAgentService? = nil,
+        allowRemoteMCP: Bool = false,
         onLibraryMutated: (@Sendable (MutationKind, Int, UUID?, UUID?) -> Void)? = nil
     ) {
         self.engine = engine
+        self.mcpService = mcpService
         self.token = token
         self.allowLocalAutoPair = allowLocalAutoPair
+        self.allowRemoteMCP = allowRemoteMCP
         self.preferredPort = preferredPort
         self.allowEphemeralPort = allowEphemeralPort
         self.onLibraryMutated = onLibraryMutated
@@ -73,14 +89,26 @@ public actor LocalExtensionBridgeServer {
         self.allowLocalAutoPair = enabled
     }
 
+    @discardableResult
+    public func updateAllowRemoteMCP(_ enabled: Bool) async throws -> StatusSnapshot {
+        guard allowRemoteMCP != enabled else { return status() }
+        let wasRunning = listener != nil && boundPort > 0
+        allowRemoteMCP = enabled
+        if wasRunning {
+            stop()
+            return try await start()
+        }
+        return status()
+    }
+
     public func status() -> StatusSnapshot {
-        StatusSnapshot(isRunning: listener != nil && boundPort > 0, port: boundPort)
+        StatusSnapshot(isRunning: listener != nil && boundPort > 0, port: boundPort, allowsRemoteMCP: allowRemoteMCP)
     }
 
     @discardableResult
     public func start() async throws -> StatusSnapshot {
         if listener != nil && boundPort > 0 {
-            return StatusSnapshot(isRunning: true, port: boundPort)
+            return StatusSnapshot(isRunning: true, port: boundPort, allowsRemoteMCP: allowRemoteMCP)
         }
 
         let candidatePorts: [NWEndpoint.Port]
@@ -99,7 +127,7 @@ public actor LocalExtensionBridgeServer {
                 let (startedListener, actualPort) = try await bindListener(on: candidatePort)
                 self.listener = startedListener
                 self.boundPort = actualPort
-                return StatusSnapshot(isRunning: true, port: actualPort)
+                return StatusSnapshot(isRunning: true, port: actualPort, allowsRemoteMCP: allowRemoteMCP)
             } catch {
                 lastError = error
             }
@@ -108,7 +136,7 @@ public actor LocalExtensionBridgeServer {
         throw lastError ?? NSError(
             domain: "com.charkle.extension.bridge",
             code: 1,
-            userInfo: [NSLocalizedDescriptionKey: "无法在 127.0.0.1 绑定本地扩展桥接端口。"]
+            userInfo: [NSLocalizedDescriptionKey: "无法绑定本地 / MCP HTTP 桥接端口。"]
         )
     }
 
@@ -116,6 +144,7 @@ public actor LocalExtensionBridgeServer {
         listener?.cancel()
         listener = nil
         boundPort = 0
+        downloadTickets.removeAll()
         let sessionsToCancel = activeSessions.withLock { map -> [HTTPConnectionSession] in
             let list = Array(map.values)
             map.removeAll()
@@ -129,7 +158,8 @@ public actor LocalExtensionBridgeServer {
     private func bindListener(on port: NWEndpoint.Port) async throws -> (NWListener, UInt16) {
         let params = NWParameters.tcp
         params.allowLocalEndpointReuse = true
-        params.requiredLocalEndpoint = NWEndpoint.hostPort(host: .ipv4(.loopback), port: port)
+        let bindHost: NWEndpoint.Host = allowRemoteMCP ? .ipv4(.any) : .ipv4(.loopback)
+        params.requiredLocalEndpoint = NWEndpoint.hostPort(host: bindHost, port: port)
         let created = try NWListener(using: params)
 
         let actualPort: UInt16 = try await withCheckedThrowingContinuation { cont in
@@ -238,7 +268,33 @@ public actor LocalExtensionBridgeServer {
                     "app": "charkle-macos",
                     "name": "Charkle macOS",
                     "port": Int(boundPort),
-                    "autoPair": allowLocalAutoPair
+                    "autoPair": request.isLoopbackClient ? allowLocalAutoPair : false,
+                    "mcpHTTP": mcpService != nil
+                ]
+            )
+        }
+
+        // Streamable HTTP MCP Endpoint (`/api/v1/mcp`) — strictly authenticated by Scoped MCP Bearer Tokens,
+        // completely isolated from browser extension tokens & auto-pairing.
+        if path == "/api/v1/mcp" {
+            return await handleHTTPMCP(request: request, corsHeaders: corsHeaders)
+        }
+
+        // Short-lived signed asset download endpoint issued by `inspect_assets(include_download_url: true)`.
+        if request.method == "GET" && path.hasPrefix("/api/v1/mcp/download/") {
+            let ticket = String(path.dropFirst("/api/v1/mcp/download/".count))
+            return await handleMCPAssetDownload(ticket: ticket, request: request, corsHeaders: corsHeaders)
+        }
+
+        // Security invariant: ALL browser-extension routes (including auto-pair) remain strictly loopback-only
+        // even when `allowRemoteMCP` binds the HTTP listener on `0.0.0.0`.
+        guard request.isLoopbackClient else {
+            return HTTPResponse.json(
+                status: 403,
+                extraHeaders: corsHeaders,
+                body: [
+                    "error": "该接口仅限本机访问；跨机器 AI 请访问 /api/v1/mcp 并携带 MCP 作用域密钥。",
+                    "code": "LOOPBACK_ONLY"
                 ]
             )
         }
@@ -332,6 +388,199 @@ public actor LocalExtensionBridgeServer {
                 body: ["error": error.localizedDescription, "code": "INTERNAL_ERROR"]
             )
         }
+    }
+
+    // MARK: - Streamable HTTP MCP (`/api/v1/mcp`) & Signed Asset Downloads
+
+    private func handleHTTPMCP(request: HTTPRequest, corsHeaders: [String: String]) async -> HTTPResponse {
+        var headers = corsHeaders
+        headers["Allow"] = "POST, OPTIONS"
+        if request.method == "GET" || request.method == "DELETE" {
+            return HTTPResponse.json(
+                status: 405,
+                extraHeaders: headers,
+                body: [
+                    "error": "Stateless Streamable HTTP MCP accepts POST JSON-RPC 2.0 requests.",
+                    "code": "METHOD_NOT_ALLOWED"
+                ]
+            )
+        }
+        guard request.method == "POST" else {
+            return HTTPResponse.json(status: 405, extraHeaders: headers, body: ["error": "Method not allowed."])
+        }
+        guard let mcpService else {
+            return HTTPResponse.json(
+                status: 503,
+                extraHeaders: corsHeaders,
+                body: ["error": "Charkle HTTP MCP 服务当前未挂载。", "code": "MCP_UNAVAILABLE"]
+            )
+        }
+
+        let policy = mcpService.currentPolicy()
+        guard policy.httpMCPEnabled else {
+            return HTTPResponse.json(
+                status: 403,
+                extraHeaders: corsHeaders,
+                body: [
+                    "error": "HTTP MCP 服务已在 Charkle「设置 → 外部 Agent」中关闭。",
+                    "code": "MCP_HTTP_DISABLED"
+                ]
+            )
+        }
+        if !request.isLoopbackClient && !policy.allowRemoteHTTPMCP {
+            return HTTPResponse.json(
+                status: 403,
+                extraHeaders: corsHeaders,
+                body: [
+                    "error": "未开启跨机器远程 MCP 接入；请在 Charkle「设置 → 外部 Agent」中开启「允许跨机器远程接入」。",
+                    "code": "REMOTE_MCP_DISABLED"
+                ]
+            )
+        }
+
+        guard let bearer = Self.extractBearerToken(from: request.headers["authorization"]),
+              let matchedToken = policy.matchingToken(for: bearer) else {
+            return HTTPResponse.json(
+                status: 401,
+                extraHeaders: corsHeaders,
+                body: [
+                    "error": "无效或已禁用的 MCP 密钥，请在 Charkle「设置 → 外部 Agent」创建并复制有效密钥。",
+                    "code": "MCP_UNAUTHORIZED"
+                ]
+            )
+        }
+
+        let resolvedBaseURL = Self.resolveRequestBaseURL(headers: request.headers, boundPort: boundPort)
+        let ctx = ExternalAgentRequestContext(
+            transport: .http,
+            scopedAccessLevel: matchedToken.accessLevel,
+            actorLabel: "http:\(matchedToken.name)",
+            issueDownloadURL: { [weak self] assetID in
+                await self?.issueDownloadURL(for: assetID, baseURL: resolvedBaseURL)
+            }
+        )
+
+        let replyData = await mcpService.handleJSONRPC(request.body, context: ctx)
+        if Self.looksLikeMutatingMCPCall(request.body) {
+            onLibraryMutated?(.mcpMutation, 0, nil, nil)
+        }
+
+        guard let replyData else {
+            return HTTPResponse(status: 204, headers: corsHeaders, body: Data())
+        }
+        var respHeaders = corsHeaders
+        respHeaders["Content-Type"] = "application/json; charset=utf-8"
+        respHeaders["Cache-Control"] = "no-store"
+        return HTTPResponse(status: 200, headers: respHeaders, body: replyData)
+    }
+
+    private func issueDownloadURL(for assetID: UUID, baseURL: String) -> String {
+        let now = Date()
+        downloadTickets = downloadTickets.filter { $0.value.expiresAt > now }
+        if downloadTickets.count >= 256 {
+            let overflow = downloadTickets.sorted { $0.value.expiresAt < $1.value.expiresAt }.prefix(64)
+            for (k, _) in overflow { downloadTickets.removeValue(forKey: k) }
+        }
+        let ticket = Self.generateToken()
+        downloadTickets[ticket] = (assetID: assetID, expiresAt: now.addingTimeInterval(Self.downloadTicketTTLSeconds))
+        return "\(baseURL)/api/v1/mcp/download/\(ticket)"
+    }
+
+    private func handleMCPAssetDownload(
+        ticket rawTicket: String,
+        request: HTTPRequest,
+        corsHeaders: [String: String]
+    ) async -> HTTPResponse {
+        guard let mcpService else {
+            return HTTPResponse.json(status: 503, extraHeaders: corsHeaders, body: ["error": "MCP unavailable."])
+        }
+        let policy = mcpService.currentPolicy()
+        guard policy.httpMCPEnabled else {
+            return HTTPResponse.json(status: 403, extraHeaders: corsHeaders, body: ["error": "HTTP MCP disabled."])
+        }
+        if !request.isLoopbackClient && !policy.allowRemoteHTTPMCP {
+            return HTTPResponse.json(status: 403, extraHeaders: corsHeaders, body: ["error": "Remote MCP disabled."])
+        }
+
+        let now = Date()
+        downloadTickets = downloadTickets.filter { $0.value.expiresAt > now }
+        let ticket = rawTicket.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !ticket.isEmpty, let entry = downloadTickets[ticket], entry.expiresAt > now else {
+            return HTTPResponse.json(status: 404, extraHeaders: corsHeaders, body: ["error": "Download link expired or invalid.", "code": "DOWNLOAD_TICKET_EXPIRED"])
+        }
+
+        do {
+            guard let asset = try await engine.fetchAsset(id: entry.assetID) else {
+                return HTTPResponse.json(status: 404, extraHeaders: corsHeaders, body: ["error": "Asset not found."])
+            }
+            let fileURL: URL
+            var contentType = asset.mimeType.isEmpty ? "application/octet-stream" : asset.mimeType
+            let preview1400 = await engine.thumbnailURL(for: entry.assetID, tier: .preview1400)
+            let fallbackGrid: URL? = if preview1400 == nil {
+                await engine.thumbnailURL(for: entry.assetID, tier: .grid520)
+            } else {
+                nil
+            }
+            if let orig = try? await engine.originalURL(for: entry.assetID),
+               FileManager.default.fileExists(atPath: orig.path) {
+                fileURL = orig
+            } else if let preview = preview1400 ?? fallbackGrid {
+                fileURL = preview
+                contentType = "image/jpeg"
+            } else {
+                return HTTPResponse.json(status: 404, extraHeaders: corsHeaders, body: ["error": "Asset file unavailable locally."])
+            }
+
+            let attrs = try FileManager.default.attributesOfItem(atPath: fileURL.path)
+            if let size = attrs[.size] as? Int64, size > Int64(Self.maxDownloadBytes) {
+                return HTTPResponse.json(status: 413, extraHeaders: corsHeaders, body: ["error": "Asset exceeds 64 MB HTTP MCP download cap."])
+            }
+            let data = try Data(contentsOf: fileURL)
+            let safeName = asset.fileName.filter { $0 != "\"" && $0 != "\r" && $0 != "\n" && $0 != "/" && $0 != "\\" }
+            var headers = corsHeaders
+            headers["Content-Type"] = contentType
+            headers["Cache-Control"] = "private, no-store"
+            headers["Content-Disposition"] = "attachment; filename=\"\(safeName.isEmpty ? "asset" : safeName)\""
+            return HTTPResponse(status: 200, headers: headers, body: data)
+        } catch {
+            return HTTPResponse.json(status: 500, extraHeaders: corsHeaders, body: ["error": error.localizedDescription])
+        }
+    }
+
+    private static func extractBearerToken(from header: String?) -> String? {
+        guard let header else { return nil }
+        let trimmed = header.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.lowercased().hasPrefix("bearer ") else { return nil }
+        let supplied = String(trimmed.dropFirst(7)).trimmingCharacters(in: .whitespacesAndNewlines)
+        return supplied.isEmpty ? nil : supplied
+    }
+
+    private static func resolveRequestBaseURL(headers: [String: String], boundPort: UInt16) -> String {
+        let protoRaw = (headers["x-forwarded-proto"] ?? "http").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let proto = (protoRaw == "https") ? "https" : "http"
+        if let rawHost = headers["x-forwarded-host"] ?? headers["host"] {
+            let cleanHost = rawHost.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !cleanHost.isEmpty && !hasLineBreakOrControl(cleanHost) && !cleanHost.contains("/") {
+                return "\(proto)://\(cleanHost)"
+            }
+        }
+        return "http://127.0.0.1:\(boundPort)"
+    }
+
+    private static func looksLikeMutatingMCPCall(_ body: Data) -> Bool {
+        guard let parsed = try? JSONSerialization.jsonObject(with: body) else { return false }
+        let mutatingTools: Set<String> = [
+            "ingest_assets", "organize_assets", "manage_folder", "save_moodboard", "deduplicate_assets", "rollback_run"
+        ]
+        func checkObj(_ obj: [String: Any]) -> Bool {
+            guard (obj["method"] as? String) == "tools/call",
+                  let params = obj["params"] as? [String: Any],
+                  let name = params["name"] as? String else { return false }
+            return mutatingTools.contains(name)
+        }
+        if let dict = parsed as? [String: Any] { return checkObj(dict) }
+        if let arr = parsed as? [[String: Any]] { return arr.contains(where: checkObj) }
+        return false
     }
 
     // MARK: - Route Handlers
@@ -1596,6 +1845,7 @@ private nonisolated struct HTTPRequest: Sendable {
     let rawTarget: String
     let headers: [String: String]
     let body: Data
+    let isLoopbackClient: Bool
 
     var pathWithoutQuery: String {
         if let q = rawTarget.firstIndex(of: "?") {
@@ -1626,6 +1876,7 @@ private nonisolated struct HTTPResponse: Sendable {
         case 401: "Unauthorized"
         case 403: "Forbidden"
         case 404: "Not Found"
+        case 405: "Method Not Allowed"
         case 411: "Length Required"
         case 413: "Payload Too Large"
         case 501: "Not Implemented"
@@ -1884,7 +2135,8 @@ private nonisolated final class HTTPConnectionSession: @unchecked Sendable {
             method: method,
             rawTarget: rawTarget,
             headers: headers,
-            body: body
+            body: body,
+            isLoopbackClient: Self.isLoopbackEndpoint(connection.endpoint)
         )
         completed = true
         cancelReadTimeout()
@@ -1892,6 +2144,29 @@ private nonisolated final class HTTPConnectionSession: @unchecked Sendable {
         Task { [self] in
             let response = await self.handler(req)
             self.send(response)
+        }
+    }
+
+    private static func isLoopbackEndpoint(_ endpoint: NWEndpoint) -> Bool {
+        guard case .hostPort(let host, _) = endpoint else { return true }
+        switch host {
+        case .ipv4(let addr):
+            return addr == .loopback || addr.rawValue.first == 127
+        case .ipv6(let addr):
+            if addr == .loopback { return true }
+            let bytes = Array(addr.rawValue)
+            if bytes.count == 16,
+               bytes[0..<10].allSatisfy({ $0 == 0 }),
+               bytes[10] == 0xFF, bytes[11] == 0xFF,
+               bytes[12] == 127 {
+                return true
+            }
+            return false
+        case .name(let name, _):
+            let lower = name.lowercased()
+            return lower == "localhost" || lower == "127.0.0.1" || lower == "::1"
+        @unknown default:
+            return false
         }
     }
 

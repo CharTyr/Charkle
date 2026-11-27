@@ -79,9 +79,9 @@ public final class CharkleRuntime {
         self.moodboards = moodboardStore
         self.syncAndAI = syncStore
         let coordinatorStore = self.coordinator
-        self.extensionBridge = ExtensionBridgeController(engine: resolvedEngine) { createdCount, targetBoardID in
+        let bridge = ExtensionBridgeController(engine: resolvedEngine) { createdCount, targetBoardID, isMCPMutation in
             await libraryStore.refreshAll()
-            if targetBoardID != nil {
+            if targetBoardID != nil || isMCPMutation {
                 await moodboardStore.refreshBoards()
             }
             if createdCount > 0 {
@@ -91,6 +91,10 @@ public final class CharkleRuntime {
                     tone: .success
                 )
             }
+        }
+        self.extensionBridge = bridge
+        syncStore.onExternalAgentConfigChanged = { [weak bridge] cfg in
+            bridge?.applyHTTPMCPConfig(cfg)
         }
         self.appUpdater = AppUpdateStore()
 

@@ -1,0 +1,9 @@
+{
+  "id": "11-27-windows-web-pure-mcp-v2-parity",
+  "title": "Windows & Web Parity: Pure MCP v2 (10 Tools, stdio + Streamable HTTP, Scoped Tokens, Rollback)",
+  "status": "open",
+  "priority": "P1",
+  "platforms": ["windows", "web"],
+  "canonicalReferencePlatform": "macos",
+  "createdAt": "2026-11-27"
+}

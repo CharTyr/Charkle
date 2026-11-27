@@ -66,19 +66,29 @@ struct AuditFixSyncAITests {
         // Absent file -> default config
         let absent = ExternalAgentConfigStore.load(in: dir)
         #expect(absent.mcpEnabled == true)
-        #expect(absent.cliEnabled == true)
+        #expect(absent.httpMCPEnabled == true)
+        #expect(absent.allowRemoteHTTPMCP == false)
         #expect(absent.accessLevel == .readOnly)
 
-        // Corrupt existing file -> fail closed (both channels disabled, readOnly)
+        // Legacy v1 JSON migrates cleanly
+        let legacyJSON = Data(#"{"enabled":false,"accessLevel":"readWriteOrganize"}"#.utf8)
+        let legacyDecoded = try JSONDecoder().decode(ExternalAgentConfig.self, from: legacyJSON)
+        #expect(legacyDecoded.mcpEnabled == false)
+        #expect(legacyDecoded.httpMCPEnabled == false)
+        #expect(legacyDecoded.accessLevel == .readWriteOrganize)
+
+        // Corrupt existing file -> fail closed (both MCP transports disabled, readOnly, empty tokens)
         let url = ExternalAgentConfigStore.configURL(in: dir)
         try Data("{corrupt json".utf8).write(to: url)
         let corrupt = ExternalAgentConfigStore.load(in: dir)
         #expect(corrupt.mcpEnabled == false)
-        #expect(corrupt.cliEnabled == false)
+        #expect(corrupt.httpMCPEnabled == false)
+        #expect(corrupt.allowRemoteHTTPMCP == false)
         #expect(corrupt.accessLevel == .readOnly)
+        #expect(corrupt.tokens.isEmpty)
     }
 
-    @Test("MCP JSON-RPC suppresses replies to id-less notifications, returns -32602 for unknown tools, -32001 when disabled, and enforces output_path security")
+    @Test("MCP v2 JSON-RPC suppresses replies to id-less notifications, returns -32602 for unknown tools, -32001 when disabled, and rejects retired output_path")
     func mcpJsonRpcComplianceAndOutputPathBoundary() async throws {
         let dir = try BackendFixture.directory()
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -115,47 +125,24 @@ struct AuditFixSyncAITests {
         let unknownErr = try #require(unknownResp["error"] as? [String: Any])
         #expect(unknownErr["code"] as? Int == -32602)
 
-        // 3. `output_path` MUST be rejected in `.readOnly` mode for both contact sheets and board exports
-        try ExternalAgentConfigStore.save(ExternalAgentConfig(mcpEnabled: true, cliEnabled: true, accessLevel: .readOnly), in: appSupport)
-        let readOnlySheetPath = dir.appending(path: "readonly-sheet.jpg").path
-        let roSheetOut = await service.callTool(name: "render_contact_sheet", arguments: ["only_inbox": true, "output_path": readOnlySheetPath])
+        // 3. Retired disk-write `output_path` MUST be rejected in EVERY access level (images are inline MCP blocks only)
+        try ExternalAgentConfigStore.save(ExternalAgentConfig(enabled: true, accessLevel: .readWriteOrganize), in: appSupport)
+        let blockedSheetPath = dir.appending(path: "sheet.jpg").path
+        let roSheetOut = await service.callTool(name: "query_assets", arguments: ["only_inbox": true, "contact_sheet": true, "output_path": blockedSheetPath])
         #expect(roSheetOut.isError == true)
-        #expect(!FileManager.default.fileExists(atPath: readOnlySheetPath))
+        #expect(!FileManager.default.fileExists(atPath: blockedSheetPath))
 
-        let readOnlyBoardPath = dir.appending(path: "readonly-board.png").path
-        let roBoardOut = await service.callTool(name: "export_board_image", arguments: ["board_id": board.id.uuidString, "output_path": readOnlyBoardPath])
+        let blockedBoardPath = dir.appending(path: "board.png").path
+        let roBoardOut = await service.callTool(name: "get_board", arguments: ["board_id": board.id.uuidString, "include_snapshot": true, "output_path": blockedBoardPath])
         #expect(roBoardOut.isError == true)
-        #expect(!FileManager.default.fileExists(atPath: readOnlyBoardPath))
+        #expect(!FileManager.default.fileExists(atPath: blockedBoardPath))
 
-        // 4. Even in `.readWriteOrganize`, block configDirectory, dotfiles, wrong extension, and symlink escape
-        try ExternalAgentConfigStore.save(ExternalAgentConfig(mcpEnabled: true, cliEnabled: true, accessLevel: .readWriteOrganize), in: appSupport)
-
-        let insideConfig = appSupport.appending(path: "pwn.png").path
-        #expect(await service.callTool(name: "export_board_image", arguments: ["board_id": board.id.uuidString, "output_path": insideConfig]).isError == true)
-
-        let dotfilePath = dir.appending(path: ".hidden.png").path
-        #expect(await service.callTool(name: "export_board_image", arguments: ["board_id": board.id.uuidString, "output_path": dotfilePath]).isError == true)
-
-        let wrongExtPath = dir.appending(path: "sheet.txt").path
-        #expect(await service.callTool(name: "render_contact_sheet", arguments: ["only_inbox": true, "output_path": wrongExtPath]).isError == true)
-
-        let symlinkDir = dir.appending(path: "escape-link")
-        try FileManager.default.createSymbolicLink(at: symlinkDir, withDestinationURL: appSupport)
-        let escapedPath = symlinkDir.appending(path: "escaped.png").path
-        #expect(await service.callTool(name: "export_board_image", arguments: ["board_id": board.id.uuidString, "output_path": escapedPath]).isError == true)
-
-        // Valid write path outside protected roots succeeds
-        let allowedPath = dir.appending(path: "safe-sheet.jpg").path
-        let okSheet = await service.callTool(name: "render_contact_sheet", arguments: ["only_inbox": true, "output_path": allowedPath])
-        #expect(okSheet.isError == false)
-        #expect(FileManager.default.fileExists(atPath: allowedPath))
-
-        // 5. `ingest_asset` validates malformed `web_urls` cleanly
-        let badURLOut = await service.callTool(name: "ingest_asset", arguments: ["web_urls": ["not-a-url"]])
+        // 4. `ingest_assets` validates malformed `web_urls` cleanly
+        let badURLOut = await service.callTool(name: "ingest_assets", arguments: ["web_urls": ["not-a-url"]])
         #expect(badURLOut.isError == true)
 
-        // 6. Disabled MCP returns JSON-RPC error -32001 on `tools/call`
-        try ExternalAgentConfigStore.save(ExternalAgentConfig(mcpEnabled: false, cliEnabled: true, accessLevel: .readOnly), in: appSupport)
+        // 5. Disabled stdio MCP returns JSON-RPC error -32001 on `tools/call`
+        try ExternalAgentConfigStore.save(ExternalAgentConfig(mcpEnabled: false, httpMCPEnabled: true, accessLevel: .readOnly), in: appSupport)
         let disabledResp = try #require(try await sendRPC([
             "jsonrpc": "2.0",
             "id": 3,
