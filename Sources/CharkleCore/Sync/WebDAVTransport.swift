@@ -305,12 +305,22 @@ public final actor WebDAVTransport: DriveTransport {
     public func trashFile(fileID: String) async throws {
         let isCollection = knownFolderIDs.contains(fileID)
         let req = makeRequest(for: url(forRelativePath: fileID, isDirectory: isCollection), method: "DELETE")
-        let (data, response) = try await dataWithRetry(for: req)
-        if let http = response as? HTTPURLResponse, http.statusCode == 404 {
-            knownFolderIDs.remove(fileID)
-            return
+        var (data, response) = try await dataWithRetry(for: req)
+        if let http = response as? HTTPURLResponse {
+            if http.statusCode == 404 {
+                knownFolderIDs.remove(fileID)
+                return
+            }
+            if !isCollection, [301, 302, 307, 308, 405, 409].contains(http.statusCode) {
+                let dirReq = makeRequest(for: url(forRelativePath: fileID, isDirectory: true), method: "DELETE")
+                (data, response) = try await dataWithRetry(for: dirReq)
+                if let retryHTTP = response as? HTTPURLResponse, retryHTTP.statusCode == 404 {
+                    knownFolderIDs.remove(fileID)
+                    return
+                }
+            }
         }
-        try validate(response, data: data, allowed: [200, 204])
+        try validate(response, data: data, allowed: [200, 202, 204])
         knownFolderIDs.remove(fileID)
     }
 
@@ -319,19 +329,41 @@ public final actor WebDAVTransport: DriveTransport {
     private func snapshot() async throws -> [String: RemoteDriveFile] {
         let rootRel = rootPathSegments.joined(separator: "/")
         var result: [String: RemoteDriveFile] = [:]
-        var queue = [rootRel]
+        var frontier = [rootRel]
         var visited = Set<String>()
-        var idx = 0
 
-        while idx < queue.count {
-            let folderID = queue[idx]
-            idx += 1
-            guard visited.insert(folderID).inserted else { continue }
-            let entries = try await listFiles(inFolderID: folderID)
-            for item in entries {
-                result[item.id] = item
-                if item.isFolder && !item.name.hasPrefix(".") {
-                    queue.append(item.id)
+        while !frontier.isEmpty {
+            let wave = frontier.filter { visited.insert($0).inserted }
+            frontier.removeAll(keepingCapacity: true)
+            guard !wave.isEmpty else { break }
+
+            let waveEntries = try await withThrowingTaskGroup(of: [RemoteDriveFile].self) { group -> [[RemoteDriveFile]] in
+                var nextIdx = 0
+                let concurrency = 4
+                let enqueue: (inout ThrowingTaskGroup<[RemoteDriveFile], Error>) -> Void = { grp in
+                    guard nextIdx < wave.count else { return }
+                    let folderID = wave[nextIdx]
+                    nextIdx += 1
+                    grp.addTask {
+                        try await self.listFiles(inFolderID: folderID)
+                    }
+                }
+                for _ in 0..<min(concurrency, wave.count) { enqueue(&group) }
+                var collected: [[RemoteDriveFile]] = []
+                collected.reserveCapacity(wave.count)
+                while let entries = try await group.next() {
+                    collected.append(entries)
+                    enqueue(&group)
+                }
+                return collected
+            }
+
+            for entries in waveEntries {
+                for item in entries {
+                    result[item.id] = item
+                    if item.isFolder && !item.name.hasPrefix(".") {
+                        frontier.append(item.id)
+                    }
                 }
             }
         }
@@ -519,7 +551,7 @@ public final actor WebDAVTransport: DriveTransport {
         var results: [RemoteDriveFile] = []
 
         for entry in delegate.entries {
-            guard let resolved = URL(string: entry.href, relativeTo: baseURL)?.standardized else { continue }
+            guard let resolved = Self.resolveHref(entry.href, relativeTo: baseURL) else { continue }
             let itemPath = normalizeSlashPath(resolved.path)
             let rel: String
             if basePath == "/" {
@@ -559,6 +591,25 @@ public final actor WebDAVTransport: DriveTransport {
         }
 
         return results.sorted { ($0.name, $0.id) < ($1.name, $1.id) }
+    }
+
+    private static func resolveHref(_ rawHref: String, relativeTo baseURL: URL) -> URL? {
+        let trimmed = rawHref.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        if let direct = URL(string: trimmed, relativeTo: baseURL)?.standardized {
+            return direct
+        }
+        var allowedPreservingEscapes = CharacterSet.urlPathAllowed
+        allowedPreservingEscapes.insert(charactersIn: "/%?&#=@:+$,;!'()*")
+        if let encoded = trimmed.addingPercentEncoding(withAllowedCharacters: allowedPreservingEscapes),
+           let fallback = URL(string: encoded, relativeTo: baseURL)?.standardized {
+            return fallback
+        }
+        if let fullEncoded = trimmed.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
+           let fallback = URL(string: fullEncoded, relativeTo: baseURL)?.standardized {
+            return fallback
+        }
+        return URL(string: trimmed, encodingInvalidCharacters: true)?.standardized
     }
 
     private static func normalizeSlashPath(_ path: String) -> String {

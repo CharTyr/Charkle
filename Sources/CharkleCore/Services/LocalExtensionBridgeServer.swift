@@ -1066,25 +1066,35 @@ public actor LocalExtensionBridgeServer {
             let authorPrefix: String = (job.platform == .pixiv || job.platform == .xiaohongshu)
                 ? resolvedAuthorName
                 : "@\(resolvedHandle)"
-            for (idx, asset) in ingested.enumerated() {
-                let baseTitle: String = {
-                    if !cleanSnippet.isEmpty {
-                        return "\(authorPrefix) · \(cleanSnippet)"
-                    }
-                    return "\(authorPrefix) · \(job.postID)"
-                }()
+            let baseTitle: String = {
+                if !cleanSnippet.isEmpty {
+                    return "\(authorPrefix) · \(cleanSnippet)"
+                }
+                return "\(authorPrefix) · \(job.postID)"
+            }()
+            let patches: [AssetBatchPatch] = ingested.enumerated().map { idx, asset in
                 let finalTitle = totalCount > 1 ? "\(baseTitle) (\(idx + 1)/\(totalCount))" : baseTitle
-                let patch = AssetBatchPatch(
+                return AssetBatchPatch(
                     assetIDs: [asset.id],
                     title: finalTitle,
                     notes: formattedNotes,
                     sourceURL: job.originalURL,
                     addTags: sortedTags
                 )
-                if let updated = try? await engine.updateAssets(patch).first {
-                    createdAssets.append(updated)
-                } else {
-                    createdAssets.append(asset)
+            }
+            if let live = engine as? LiveCharkleEngine, patches.count > 1,
+               let updatedBatch = try? await live.updateAssetsBatch(patches) {
+                let updatedByID = Dictionary(uniqueKeysWithValues: updatedBatch.map { ($0.id, $0) })
+                for asset in ingested {
+                    createdAssets.append(updatedByID[asset.id] ?? asset)
+                }
+            } else {
+                for (asset, patch) in zip(ingested, patches) {
+                    if let updated = try? await engine.updateAssets(patch).first {
+                        createdAssets.append(updated)
+                    } else {
+                        createdAssets.append(asset)
+                    }
                 }
             }
             tweetsImported += 1
@@ -1142,10 +1152,31 @@ public actor LocalExtensionBridgeServer {
     }
 
     private func fetchExistingSourceKeys() async throws -> (sources: Set<String>, keys: Set<String>, mediaKeys: Set<String>) {
-        let assets = try await engine.fetchAssets(matching: FilterCriteria())
         var sources = Set<String>()
         var keys = Set<String>()
         var mediaKeys = Set<String>()
+        if let live = engine as? LiveCharkleEngine {
+            let rows = try await live.fetchAssetSourceKeys(includeTrashed: false)
+            for row in rows {
+                let isRealMedia = row.mediaKind == .image || row.mediaKind == .animatedImage || row.mediaKind == .video
+                if let src = row.sourceURL?.trimmingCharacters(in: .whitespacesAndNewlines), !src.isEmpty {
+                    sources.insert(src)
+                    if let key = SocialPostResolver.canonicalDedupKey(for: src) {
+                        keys.insert(key)
+                        if isRealMedia { mediaKeys.insert(key) }
+                    }
+                }
+                if let orig = row.socialOriginalURL?.trimmingCharacters(in: .whitespacesAndNewlines), !orig.isEmpty {
+                    sources.insert(orig)
+                    if let key = SocialPostResolver.canonicalDedupKey(for: orig) {
+                        keys.insert(key)
+                        if isRealMedia { mediaKeys.insert(key) }
+                    }
+                }
+            }
+            return (sources, keys, mediaKeys)
+        }
+        let assets = try await engine.fetchAssets(matching: FilterCriteria())
         for asset in assets {
             let isRealMedia = asset.mediaKind == .image || asset.mediaKind == .animatedImage || asset.mediaKind == .video
             if let src = asset.sourceURL?.trimmingCharacters(in: .whitespacesAndNewlines), !src.isEmpty {

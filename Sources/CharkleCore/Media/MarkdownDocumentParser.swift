@@ -159,18 +159,48 @@ public nonisolated struct MarkdownURLContext: Hashable, Sendable {
 /// ordered & task lists, GitHub callout alerts (`> [!NOTE]`), `<details><summary>`, and relative GitHub URL resolution
 /// while keeping fenced code blocks strictly untouched.
 public nonisolated enum MarkdownDocumentParser {
+    private static let maxDetailsNestingDepth = 8
+    private static let summaryTagRegex = try? NSRegularExpression(pattern: #"<summary\b[^>]*>([\s\S]*?)<\/summary>"#, options: [.caseInsensitive])
+    private static let nestedHeadingRegex = try? NSRegularExpression(pattern: #"<h([1-6])\b[^>]*>([\s\S]*?)<\/h\1>"#, options: [.caseInsensitive])
+    private static let htmlImgPatternRegex = try? NSRegularExpression(
+        pattern: #"(?:<a\b[^>]*href\s*=\s*["']([^"']+)["'][^>]*>\s*(<img\b[^>]*>)\s*<\/a>)|(<img\b[^>]*>)"#,
+        options: [.caseInsensitive]
+    )
+    private static let standaloneMDImagesRegex = try? NSRegularExpression(
+        pattern: #"(?:\[!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)\]\(([^)\s]+)\))|(?:!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\))"#
+    )
+    private static let brTagRegex = try? NSRegularExpression(pattern: #"<br\s*\/?>"#, options: [.caseInsensitive])
+    private static let htmlAnchorRegex = try? NSRegularExpression(pattern: #"<a\b[^>]*href\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>"#, options: [.caseInsensitive])
+    private static let mdLinkRegex = try? NSRegularExpression(pattern: #"(?<!!)\[([^\]]+)\]\(([^)\s]+)\)"#)
+    private static let htmlTagStripRegex = try? NSRegularExpression(pattern: #"<\/?[a-zA-Z][^>]*>"#, options: [.caseInsensitive])
+    private static let numericEntityRegex = try? NSRegularExpression(pattern: #"&#(x?[0-9A-Fa-f]+);"#)
+    private static let alignAttrRegex = try? NSRegularExpression(pattern: #"align\s*=\s*["']?(center|right|left)["']?"#, options: [.caseInsensitive])
+    private static let sourceTagRegex = try? NSRegularExpression(pattern: #"<source\b[^>]*\/?>"#, options: [.caseInsensitive])
+    private static let pictureFigureTagRegex = try? NSRegularExpression(pattern: #"<\/?(?:picture|figure)\b[^>]*>"#, options: [.caseInsensitive])
+    private static let inlineTagRegexes: [String: NSRegularExpression] = {
+        let tags = ["strong", "b", "em", "i", "code", "kbd", "del", "s"]
+        var map: [String: NSRegularExpression] = [:]
+        for tag in tags {
+            if let r = try? NSRegularExpression(pattern: #"<\#(tag)\b[^>]*>([\s\S]*?)<\/\#(tag)>"#, options: [.caseInsensitive]) {
+                map[tag] = r
+            }
+        }
+        return map
+    }()
+
     public static func parse(
         _ markdown: String,
         urlContext: MarkdownURLContext = MarkdownURLContext()
     ) -> [MarkdownBlock] {
         var nextID = 0
-        return parseInternal(markdown, urlContext: urlContext, nextID: &nextID)
+        return parseInternal(markdown, urlContext: urlContext, nextID: &nextID, depth: 0)
     }
 
     private static func parseInternal(
         _ markdown: String,
         urlContext: MarkdownURLContext,
-        nextID: inout Int
+        nextID: inout Int,
+        depth: Int
     ) -> [MarkdownBlock] {
         let normalized = markdown
             .replacingOccurrences(of: "\r\n", with: "\n")
@@ -218,7 +248,11 @@ public nonisolated enum MarkdownDocumentParser {
                 let collected = collectHTMLBlock(lines: lines, startIndex: i, tag: "details")
                 i = collected.nextIndex
                 let (summary, innerBody) = splitDetailsBlock(collected.html)
-                let children = parseInternal(innerBody, urlContext: urlContext, nextID: &nextID)
+                let children: [MarkdownBlock] = if depth + 1 < maxDetailsNestingDepth {
+                    parseInternal(innerBody, urlContext: urlContext, nextID: &nextID, depth: depth + 1)
+                } else {
+                    innerBody.isEmpty ? [] : [.paragraph(id: allocID(), text: convertInlineHTMLToMarkdown(innerBody, urlContext: urlContext), alignment: .leading)]
+                }
                 result.append(.details(id: allocID(), summary: summary, children: children))
                 continue
             }
@@ -559,17 +593,31 @@ public nonisolated enum MarkdownDocumentParser {
             depth += (opens - closes)
             idx += 1
             if depth <= 0 {
-                break
+                return (collected.joined(separator: "\n"), idx)
+            }
+        }
+        // Unclosed block guard: for simple container tags like `<p>` / `<div>`, stop at the first blank line
+        // instead of swallowing the rest of the entire Markdown document.
+        if tag == "p" || tag == "div" {
+            if let blankOffset = collected.dropFirst().firstIndex(where: { $0.trimmingCharacters(in: .whitespaces).isEmpty }) {
+                let bounded = Array(collected[..<blankOffset])
+                return (bounded.joined(separator: "\n"), startIndex + bounded.count)
+            }
+            if collected.count > 1 {
+                return (lines[startIndex], startIndex + 1)
             }
         }
         return (collected.joined(separator: "\n"), idx)
     }
 
     private static func extractAlignment(from html: String) -> MarkdownAlignment {
-        guard let match = firstRegexMatch(in: html, pattern: #"align\s*=\s*["']?(center|right|left)["']?"#) else {
+        guard let regex = alignAttrRegex,
+              let matchObj = regex.firstMatch(in: html, range: NSRange(html.startIndex..., in: html)),
+              matchObj.numberOfRanges >= 2,
+              let range = Range(matchObj.range(at: 1), in: html) else {
             return .leading
         }
-        switch match.lowercased() {
+        switch html[range].lowercased() {
         case "center": return .center
         case "right": return .trailing
         default: return .leading
@@ -590,7 +638,7 @@ public nonisolated enum MarkdownDocumentParser {
     private static func splitDetailsBlock(_ html: String) -> (summary: String, body: String) {
         var inner = stripOuterTag(html, tag: "details")
         var summary = "展开详情"
-        if let regex = try? NSRegularExpression(pattern: #"<summary\b[^>]*>([\s\S]*?)<\/summary>"#, options: [.caseInsensitive]),
+        if let regex = summaryTagRegex,
            let match = regex.firstMatch(in: inner, range: NSRange(inner.startIndex..., in: inner)),
            let fullRange = Range(match.range(at: 0), in: inner),
            let innerRange = Range(match.range(at: 1), in: inner) {
@@ -620,11 +668,11 @@ public nonisolated enum MarkdownDocumentParser {
         allocID: () -> Int
     ) {
         // Strip <source ...> inside <picture> so only the real <img> renders
-        var working = replaceRegex(in: innerHTML, pattern: #"<source\b[^>]*\/?>"#, with: "")
-        working = replaceRegex(in: working, pattern: #"<\/?(?:picture|figure)\b[^>]*>"#, with: "")
+        var working = replaceCompiledRegex(in: innerHTML, regex: sourceTagRegex, with: "")
+        working = replaceCompiledRegex(in: working, regex: pictureFigureTagRegex, with: "")
 
         // Extract any nested <h1..h6> inside a <div>/<center>
-        if let headingRegex = try? NSRegularExpression(pattern: #"<h([1-6])\b[^>]*>([\s\S]*?)<\/h\1>"#, options: [.caseInsensitive]) {
+        if let headingRegex = nestedHeadingRegex {
             let matches = headingRegex.matches(in: working, range: NSRange(working.startIndex..., in: working))
             if !matches.isEmpty {
                 var cursor = working.startIndex
@@ -637,7 +685,8 @@ public nonisolated enum MarkdownDocumentParser {
                         appendHTMLContainerBlocks(innerHTML: before, alignment: alignment, urlContext: urlContext, into: &result, allocID: allocID)
                     }
                     let level = Int(working[levelR]) ?? 2
-                    let headingAlign = extractAlignment(from: String(working[fullR])) == .leading ? alignment : extractAlignment(from: String(working[fullR]))
+                    let extractedAlign = extractAlignment(from: String(working[fullR]))
+                    let headingAlign = extractedAlign == .leading ? alignment : extractedAlign
                     let text = convertInlineHTMLToMarkdown(String(working[textR]), urlContext: urlContext).trimmingCharacters(in: .whitespacesAndNewlines)
                     if !text.isEmpty {
                         result.append(.heading(id: allocID(), level: level, text: text, alignment: headingAlign))
@@ -653,11 +702,10 @@ public nonisolated enum MarkdownDocumentParser {
         }
 
         // Extract linked images (<a href="..."><img ...></a>) and standalone <img ...>
-        let imgPattern = #"(?:<a\b[^>]*href\s*=\s*["']([^"']+)["'][^>]*>\s*(<img\b[^>]*>)\s*<\/a>)|(<img\b[^>]*>)"#
         var images: [MarkdownImageItem] = []
         var remainder = working
 
-        if let regex = try? NSRegularExpression(pattern: imgPattern, options: [.caseInsensitive]) {
+        if let regex = htmlImgPatternRegex {
             let matches = regex.matches(in: working, range: NSRange(working.startIndex..., in: working))
             if !matches.isEmpty {
                 var mutable = working
@@ -749,8 +797,7 @@ public nonisolated enum MarkdownDocumentParser {
         allocID: () -> Int
     ) -> [MarkdownImageItem]? {
         // Matches `[![alt](img)](link)` or `![alt](img)` repeated with only spaces between
-        let pattern = #"(?:\[!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)\]\(([^)\s]+)\))|(?:!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\))"#
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        guard let regex = standaloneMDImagesRegex else { return nil }
         let matches = regex.matches(in: trimmed, range: NSRange(trimmed.startIndex..., in: trimmed))
         guard !matches.isEmpty else { return nil }
 
@@ -890,34 +937,36 @@ public nonisolated enum MarkdownDocumentParser {
         var s = input
 
         // Convert <br> / <br/> / <br /> to newline
-        s = replaceRegex(in: s, pattern: #"<br\s*\/?>"#, with: "\n")
+        if s.contains("<") {
+            s = replaceCompiledRegex(in: s, regex: brTagRegex, with: "\n")
 
-        // Convert <a href="...">label</a> -> [label](resolvedURL)
-        if let anchorRegex = try? NSRegularExpression(pattern: #"<a\b[^>]*href\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>"#, options: [.caseInsensitive]) {
-            let matches = anchorRegex.matches(in: s, range: NSRange(s.startIndex..., in: s))
-            for m in matches.reversed() {
-                guard let fullR = Range(m.range(at: 0), in: s),
-                      let hrefR = Range(m.range(at: 1), in: s),
-                      let labelR = Range(m.range(at: 2), in: s) else { continue }
-                let href = urlContext.resolveLinkURL(decodeHTMLEntities(String(s[hrefR])))
-                let rawLabel = String(s[labelR]).trimmingCharacters(in: .whitespacesAndNewlines)
-                let label = stripAllHTMLTags(rawLabel).replacingOccurrences(of: "\n", with: " ")
-                let replacement = label.isEmpty ? href : "[\(label)](\(href))"
-                s.replaceSubrange(fullR, with: replacement)
+            // Convert <a href="...">label</a> -> [label](resolvedURL)
+            if let anchorRegex = htmlAnchorRegex {
+                let matches = anchorRegex.matches(in: s, range: NSRange(s.startIndex..., in: s))
+                for m in matches.reversed() {
+                    guard let fullR = Range(m.range(at: 0), in: s),
+                          let hrefR = Range(m.range(at: 1), in: s),
+                          let labelR = Range(m.range(at: 2), in: s) else { continue }
+                    let href = urlContext.resolveLinkURL(decodeHTMLEntities(String(s[hrefR])))
+                    let rawLabel = String(s[labelR]).trimmingCharacters(in: .whitespacesAndNewlines)
+                    let label = stripAllHTMLTags(rawLabel).replacingOccurrences(of: "\n", with: " ")
+                    let replacement = label.isEmpty ? href : "[\(label)](\(href))"
+                    s.replaceSubrange(fullR, with: replacement)
+                }
             }
+
+            // Convert <strong> / <b> -> **...**
+            s = replaceTagWrapping(in: s, tags: ["strong", "b"], prefix: "**", suffix: "**")
+            // Convert <em> / <i> -> *...*
+            s = replaceTagWrapping(in: s, tags: ["em", "i"], prefix: "*", suffix: "*")
+            // Convert <code> / <kbd> -> `...`
+            s = replaceTagWrapping(in: s, tags: ["code", "kbd"], prefix: "`", suffix: "`")
+            // Convert <del> / <s> -> ~~...~~
+            s = replaceTagWrapping(in: s, tags: ["del", "s"], prefix: "~~", suffix: "~~")
         }
 
-        // Convert <strong> / <b> -> **...**
-        s = replaceTagWrapping(in: s, tags: ["strong", "b"], prefix: "**", suffix: "**")
-        // Convert <em> / <i> -> *...*
-        s = replaceTagWrapping(in: s, tags: ["em", "i"], prefix: "*", suffix: "*")
-        // Convert <code> / <kbd> -> `...`
-        s = replaceTagWrapping(in: s, tags: ["code", "kbd"], prefix: "`", suffix: "`")
-        // Convert <del> / <s> -> ~~...~~
-        s = replaceTagWrapping(in: s, tags: ["del", "s"], prefix: "~~", suffix: "~~")
-
         // Resolve relative Markdown links `[label](href)`
-        if let mdLinkRegex = try? NSRegularExpression(pattern: #"(?<!!)\[([^\]]+)\]\(([^)\s]+)\)"#) {
+        if s.contains("]("), let mdLinkRegex {
             let matches = mdLinkRegex.matches(in: s, range: NSRange(s.startIndex..., in: s))
             for m in matches.reversed() {
                 guard let fullR = Range(m.range(at: 0), in: s),
@@ -930,7 +979,9 @@ public nonisolated enum MarkdownDocumentParser {
         }
 
         // Strip any remaining inline wrapper tags (<span>, <sup>, <sub>, <p>, <div>, </img>, etc.)
-        s = stripRemainingNonCodeHTMLTags(s)
+        if s.contains("<") {
+            s = stripRemainingNonCodeHTMLTags(s)
+        }
 
         // Decode HTML entities (&amp;, &middot;, &nbsp;, &#39;, etc.)
         s = decodeHTMLEntities(s)
@@ -945,7 +996,7 @@ public nonisolated enum MarkdownDocumentParser {
     private static func replaceTagWrapping(in input: String, tags: [String], prefix: String, suffix: String) -> String {
         var s = input
         for tag in tags {
-            guard let regex = try? NSRegularExpression(pattern: #"<\#(tag)\b[^>]*>([\s\S]*?)<\/\#(tag)>"#, options: [.caseInsensitive]) else { continue }
+            guard let regex = inlineTagRegexes[tag] else { continue }
             let matches = regex.matches(in: s, range: NSRange(s.startIndex..., in: s))
             for m in matches.reversed() {
                 guard let fullR = Range(m.range(at: 0), in: s),
@@ -958,7 +1009,7 @@ public nonisolated enum MarkdownDocumentParser {
     }
 
     private static func stripAllHTMLTags(_ input: String) -> String {
-        replaceRegex(in: input, pattern: #"<\/?[a-zA-Z][^>]*>"#, with: "")
+        replaceCompiledRegex(in: input, regex: htmlTagStripRegex, with: "")
     }
 
     /// Strips remaining HTML tags while preserving inline backtick code spans (e.g. `` `<div>` ``).
@@ -998,7 +1049,7 @@ public nonisolated enum MarkdownDocumentParser {
             }
         }
         // Numeric entities &#123; and &#x1F600;
-        if let regex = try? NSRegularExpression(pattern: #"&#(x?[0-9A-Fa-f]+);"#) {
+        if s.contains("&#"), let regex = numericEntityRegex {
             let matches = regex.matches(in: s, range: NSRange(s.startIndex..., in: s))
             for m in matches.reversed() {
                 guard let fullR = Range(m.range(at: 0), in: s),
@@ -1030,10 +1081,8 @@ public nonisolated enum MarkdownDocumentParser {
         return String(text[range])
     }
 
-    private static func replaceRegex(in text: String, pattern: String, with template: String) -> String {
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
-            return text
-        }
+    private static func replaceCompiledRegex(in text: String, regex: NSRegularExpression?, with template: String) -> String {
+        guard let regex else { return text }
         return regex.stringByReplacingMatches(in: text, range: NSRange(text.startIndex..., in: text), withTemplate: template)
     }
 }

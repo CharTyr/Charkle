@@ -33,6 +33,9 @@ public final class PinterestImageCache {
     private var prefetchQueue: [(url: URL, maxPixelSize: Int)] = []
     private var activePrefetchCount: Int = 0
     private let maxConcurrentPrefetches: Int = 6
+    #if os(iOS)
+    private var memoryWarningObserver: (any NSObjectProtocol)?
+    #endif
 
     private nonisolated static let session: URLSession = {
         let config = URLSessionConfiguration.default
@@ -47,7 +50,19 @@ public final class PinterestImageCache {
         return URLSession(configuration: config)
     }()
 
-    private init() {}
+    private init() {
+        #if os(iOS)
+        memoryWarningObserver = NotificationCenter.default.addObserver(
+            forName: UIApplication.didReceiveMemoryWarningNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.clearMemoryCache()
+            }
+        }
+        #endif
+    }
 
     /// Instant synchronous memory-cache hit on `@MainActor` for zero-flicker viewport recycling.
     public func cachedImage(for url: URL) -> PinterestPlatformImage? {
@@ -147,6 +162,7 @@ public final class PinterestImageCache {
 
     public func clearMemoryCache() {
         cache.removeAllObjects()
+        prefetchQueue.removeAll(keepingCapacity: false)
     }
 
     private static func makePlatformImage(from cgImage: CGImage) -> PinterestPlatformImage {

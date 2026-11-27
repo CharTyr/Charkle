@@ -398,7 +398,7 @@ public nonisolated enum PureRefCodec {
 
     private static func decodeV1Structured(bytes: [UInt8], data: Data, version: String) throws -> PureRefScene? {
         guard bytes.count >= headerSize else { return nil }
-        let fileLength = Int(readUInt64BE(bytes, at: 16))
+        guard let fileLength = Int(exactly: readUInt64BE(bytes, at: 16)) else { return nil }
         let canvasX = readDoubleBE(bytes, at: 112)
         let canvasY = readDoubleBE(bytes, at: 120)
         let canvasW = readDoubleBE(bytes, at: 128)
@@ -421,10 +421,11 @@ public nonisolated enum PureRefCodec {
             var refCursor = fileLength
             while refCursor + 20 <= bytes.count {
                 let refID = readUInt32BE(bytes, at: refCursor)
-                let start = Int(readUInt64BE(bytes, at: refCursor + 4))
-                let end = Int(readUInt64BE(bytes, at: refCursor + 12))
+                let startOpt = Int(exactly: readUInt64BE(bytes, at: refCursor + 4))
+                let endOpt = Int(exactly: readUInt64BE(bytes, at: refCursor + 12))
                 refCursor += 20
-                if start >= headerSize && end > start && end <= fileLength {
+                if let start = startOpt, let end = endOpt,
+                   start >= headerSize && end > start && end <= fileLength {
                     refByTransformID[refID] = (start, end)
                     if end > maxImageEndOffset {
                         maxImageEndOffset = end
@@ -568,8 +569,8 @@ public nonisolated enum PureRefCodec {
         let clampedStart = max(headerSize, start)
         guard clampedStart + 12 + textItemTypeUTF16BE.count <= limit else { return nil }
         for offset in clampedStart...(limit - 12 - textItemTypeUTF16BE.count) {
-            let endAddr = Int(readUInt64BE(bytes, at: offset))
-            guard endAddr > offset + 12, endAddr <= limit else { continue }
+            guard let endAddr = Int(exactly: readUInt64BE(bytes, at: offset)),
+                  endAddr > offset + 12, endAddr <= limit else { continue }
             let typeLen = Int(readUInt32BE(bytes, at: offset + 8))
             if typeLen == imageItemTypeUTF16BE.count,
                offset + 12 + typeLen <= limit,
@@ -587,7 +588,7 @@ public nonisolated enum PureRefCodec {
 
     private static func parseV1ImageItem(bytes: [UInt8], cursor: inout Int, limit: Int) -> RawV1ImageItem? {
         guard cursor + 12 <= limit else { return nil }
-        let endAddress = Int(readUInt64BE(bytes, at: cursor))
+        guard let endAddress = Int(exactly: readUInt64BE(bytes, at: cursor)) else { return nil }
         let typeLen = Int(readUInt32BE(bytes, at: cursor + 8))
         guard endAddress > cursor + 12 + typeLen, endAddress <= limit else { return nil }
 
@@ -672,9 +673,11 @@ public nonisolated enum PureRefCodec {
         )
     }
 
-    private static func parseV1TextItem(bytes: [UInt8], cursor: inout Int, limit: Int) -> PureRefTextNote? {
-        guard cursor + 12 <= limit else { return nil }
-        let endAddress = Int(readUInt64BE(bytes, at: cursor))
+    private static let maxTextNoteNestingDepth = 16
+
+    private static func parseV1TextItem(bytes: [UInt8], cursor: inout Int, limit: Int, depth: Int = 0) -> PureRefTextNote? {
+        guard depth < maxTextNoteNestingDepth, cursor + 12 <= limit else { return nil }
+        guard let endAddress = Int(exactly: readUInt64BE(bytes, at: cursor)) else { return nil }
         let typeLen = Int(readUInt32BE(bytes, at: cursor + 8))
         guard endAddress > cursor + 12 + typeLen, endAddress <= limit else { return nil }
 
@@ -709,9 +712,9 @@ public nonisolated enum PureRefCodec {
 
         cursor = endAddress
         var children: [PureRefTextNote] = []
-        if childCount > 0 && childCount <= 128 {
+        if childCount > 0 && childCount <= 128 && depth + 1 < maxTextNoteNestingDepth {
             for _ in 0..<childCount {
-                guard let child = parseV1TextItem(bytes: bytes, cursor: &cursor, limit: limit) else { break }
+                guard let child = parseV1TextItem(bytes: bytes, cursor: &cursor, limit: limit, depth: depth + 1) else { break }
                 children.append(child)
             }
         }
@@ -1706,33 +1709,61 @@ public nonisolated enum PureRefCodec {
     }
 
     public static func inspectImageDimensions(_ data: Data) -> (width: Int, height: Int)? {
-        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+        guard let source = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
               let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
               let w = props[kCGImagePropertyPixelWidth] as? Int,
               let h = props[kCGImagePropertyPixelHeight] as? Int,
               w > 0, h > 0 else {
             return nil
         }
+        let orientation = (props[kCGImagePropertyOrientation] as? Int)
+            ?? (props[kCGImagePropertyOrientation] as? NSNumber)?.intValue
+            ?? 1
+        if (5...8).contains(orientation) {
+            return (h, w)
+        }
         return (w, h)
     }
 
     public static func convertToPNG(_ data: Data) -> Data? {
-        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
-              let cgImage = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
-            return nil
+        autoreleasepool {
+            guard let source = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary) else {
+                return nil
+            }
+            let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]
+            let orientation = (props?[kCGImagePropertyOrientation] as? Int)
+                ?? (props?[kCGImagePropertyOrientation] as? NSNumber)?.intValue
+                ?? 1
+            let cgImage: CGImage?
+            if orientation != 1,
+               let rawW = props?[kCGImagePropertyPixelWidth] as? Int,
+               let rawH = props?[kCGImagePropertyPixelHeight] as? Int,
+               rawW > 0, rawH > 0 {
+                let thumbOpts: [CFString: Any] = [
+                    kCGImageSourceCreateThumbnailFromImageAlways: true,
+                    kCGImageSourceCreateThumbnailWithTransform: true,
+                    kCGImageSourceThumbnailMaxPixelSize: max(rawW, rawH),
+                    kCGImageSourceShouldCacheImmediately: true
+                ]
+                cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, thumbOpts as CFDictionary)
+                    ?? CGImageSourceCreateImageAtIndex(source, 0, nil)
+            } else {
+                cgImage = CGImageSourceCreateImageAtIndex(source, 0, nil)
+            }
+            guard let cgImage else { return nil }
+            let mutable = NSMutableData()
+            guard let dest = CGImageDestinationCreateWithData(
+                mutable as CFMutableData,
+                UTType.png.identifier as CFString,
+                1,
+                nil
+            ) else {
+                return nil
+            }
+            CGImageDestinationAddImage(dest, cgImage, nil)
+            guard CGImageDestinationFinalize(dest) else { return nil }
+            return mutable as Data
         }
-        let mutable = NSMutableData()
-        guard let dest = CGImageDestinationCreateWithData(
-            mutable as CFMutableData,
-            UTType.png.identifier as CFString,
-            1,
-            nil
-        ) else {
-            return nil
-        }
-        CGImageDestinationAddImage(dest, cgImage, nil)
-        guard CGImageDestinationFinalize(dest) else { return nil }
-        return mutable as Data
     }
 
     private static func computeCanvasRect(placements: [PureRefImagePlacement], notes: [PureRefTextNote]) -> BoardRect {

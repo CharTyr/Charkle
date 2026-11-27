@@ -611,7 +611,7 @@ public nonisolated struct MediaPipeline: Sendable {
         try autoreleasepool {
             guard let grid = MediaArtwork.resize(image, maxSide: 720),
                   let jpeg = MediaArtwork.encode(grid, type: .jpeg) else {
-                return
+                throw LibraryDatabaseError("Could not encode custom poster thumbnail for \(asset.fileName).")
             }
             asset.pixelWidth = image.width
             asset.pixelHeight = image.height

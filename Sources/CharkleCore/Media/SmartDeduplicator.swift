@@ -613,7 +613,12 @@ public nonisolated enum SmartDeduplicator {
         "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content", "utm_id",
         "fbclid", "gclid", "dclid", "msclkid", "igshid", "mc_cid", "mc_eid",
         "ref", "ref_src", "ref_url", "spm", "spm_id_from", "from", "share_source",
-        "share_medium", "share_session_id", "s", "t", "xsec_token", "xsec_source"
+        "share_medium", "share_session_id", "xsec_token", "xsec_source"
+    ]
+
+    private static let socialShortTrackingParams: Set<String> = ["s", "t"]
+    private static let socialShortTrackingHosts: Set<String> = [
+        "x.com", "twitter.com", "mobile.twitter.com", "youtube.com", "m.youtube.com", "youtu.be"
     ]
 
     public static func canonicalBookmarkKey(for asset: AssetRecord) -> String? {
@@ -642,10 +647,17 @@ public nonisolated enum SmartDeduplicator {
         while path.count > 1 && path.hasSuffix("/") {
             path.removeLast()
         }
+        let stripShortSocialParams = socialShortTrackingHosts.contains(host)
         let filteredQuery: [URLQueryItem] = (comps.queryItems ?? [])
             .filter { item in
                 let lower = item.name.lowercased()
-                return !lower.hasPrefix("utm_") && !trackingQueryParams.contains(lower)
+                if lower.hasPrefix("utm_") || trackingQueryParams.contains(lower) {
+                    return false
+                }
+                if stripShortSocialParams && socialShortTrackingParams.contains(lower) {
+                    return false
+                }
+                return true
             }
             .sorted { ($0.name.lowercased(), $0.value ?? "") < ($1.name.lowercased(), $1.value ?? "") }
 
@@ -1220,17 +1232,27 @@ public nonisolated enum SmartDeduplicator {
                     }
                 }
             } else {
-                var pBuckets: [[UInt16: [Int]]] = Array(repeating: [:], count: 4)
-                var dBuckets: [[UInt16: [Int]]] = Array(repeating: [:], count: 4)
+                // 8 overlapping 16-bit bands (4 aligned + 4 half-band rotated by 8 bits) dramatically boost recall
+                // across 4k+ libraries when bit differences straddle a 16-bit band boundary.
+                var pBuckets: [[UInt16: [Int]]] = Array(repeating: [:], count: 8)
+                var dBuckets: [[UInt16: [Int]]] = Array(repeating: [:], count: 8)
                 var flatIndices: [Int] = []
 
                 for (pos, entry) in fpReps.enumerated() {
                     if entry.fp.lumaStdDev < 3.5 { flatIndices.append(pos) }
+                    let pRot = (entry.fp.pHash >> 8) | (entry.fp.pHash << 56)
+                    let dRot = (entry.fp.dHash >> 8) | (entry.fp.dHash << 56)
                     for band in 0..<4 {
-                        let pSlice = UInt16((entry.fp.pHash >> UInt64(band * 16)) & 0xFFFF)
-                        let dSlice = UInt16((entry.fp.dHash >> UInt64(band * 16)) & 0xFFFF)
+                        let shift = UInt64(band * 16)
+                        let pSlice = UInt16((entry.fp.pHash >> shift) & 0xFFFF)
+                        let dSlice = UInt16((entry.fp.dHash >> shift) & 0xFFFF)
                         pBuckets[band][pSlice, default: []].append(pos)
                         dBuckets[band][dSlice, default: []].append(pos)
+
+                        let pRotSlice = UInt16((pRot >> shift) & 0xFFFF)
+                        let dRotSlice = UInt16((dRot >> shift) & 0xFFFF)
+                        pBuckets[band + 4][pRotSlice, default: []].append(pos)
+                        dBuckets[band + 4][dRotSlice, default: []].append(pos)
                     }
                 }
 
@@ -1244,27 +1266,51 @@ public nonisolated enum SmartDeduplicator {
                     checkVisualPair(fpReps[lo], fpReps[hi])
                 }
 
-                for band in 0..<4 {
-                    for bucketList in pBuckets[band].values where bucketList.count >= 2 && bucketList.count <= 256 {
+                func evaluateBucket(_ bucketList: [Int], secondaryShift: UInt64) {
+                    guard bucketList.count >= 2 else { return }
+                    if bucketList.count <= 256 {
                         for a in 0..<bucketList.count {
                             for b in (a + 1)..<bucketList.count { checkIndexPair(bucketList[a], bucketList[b]) }
                         }
+                        return
                     }
-                    for bucketList in dBuckets[band].values where bucketList.count >= 2 && bucketList.count <= 256 {
-                        for a in 0..<bucketList.count {
-                            for b in (a + 1)..<bucketList.count { checkIndexPair(bucketList[a], bucketList[b]) }
+                    // Sub-bucket oversized buckets by a secondary combined slice instead of dropping them outright.
+                    var subBuckets: [UInt16: [Int]] = [:]
+                    for pos in bucketList {
+                        let fp = fpReps[pos].fp
+                        let secondary = UInt16(((fp.pHash >> secondaryShift) ^ (fp.dHash >> ((secondaryShift + 16) % 64))) & 0xFFFF)
+                        subBuckets[secondary, default: []].append(pos)
+                    }
+                    for subList in subBuckets.values where subList.count >= 2 {
+                        let capped = min(subList.count, 256)
+                        for a in 0..<capped {
+                            for b in (a + 1)..<capped { checkIndexPair(subList[a], subList[b]) }
                         }
                     }
                 }
-                if flatIndices.count >= 2 && flatIndices.count <= 512 {
-                    for a in 0..<flatIndices.count {
-                        for b in (a + 1)..<flatIndices.count { checkIndexPair(flatIndices[a], flatIndices[b]) }
+
+                for band in 0..<8 {
+                    let secondaryShift = UInt64(((band + 2) % 4) * 16)
+                    for bucketList in pBuckets[band].values {
+                        evaluateBucket(bucketList, secondaryShift: secondaryShift)
+                    }
+                    for bucketList in dBuckets[band].values {
+                        evaluateBucket(bucketList, secondaryShift: secondaryShift)
+                    }
+                }
+                if flatIndices.count >= 2 {
+                    let cappedFlat = min(flatIndices.count, 512)
+                    for a in 0..<cappedFlat {
+                        for b in (a + 1)..<cappedFlat { checkIndexPair(flatIndices[a], flatIndices[b]) }
                     }
                 }
             }
         }
 
         // 3. Anti-chaining clustering
+        let effectiveAntiChainSensitivity: DeduplicationSensitivity =
+            (bucket == .designFile || bucket == .model3D) && sensitivity == .relaxed ? .balanced : sensitivity
+        let antiChainThresholds = effectiveAntiChainSensitivity.thresholds
         verifiedEdges.sort { $0.similarity > $1.similarity }
         var parent = Array(0..<repIndices.count)
         var clusterMembers: [[Int]] = (0..<repIndices.count).map { [$0] }
@@ -1284,11 +1330,22 @@ public nonisolated enum SmartDeduplicator {
             let rb = find(edge.b)
             guard ra != rb else { continue }
 
-            if edge.kind == .nearIdentical,
-               let fpA = items[repIndices[ra]].fingerprint,
-               let fpB = items[repIndices[rb]].fingerprint,
-               visualSimilarity(between: fpA, and: fpB, sensitivity: sensitivity) == nil {
-                continue
+            if edge.kind == .nearIdentical {
+                if bucket == .video,
+                   let dA = items[repIndices[ra]].asset.durationSeconds,
+                   let dB = items[repIndices[rb]].asset.durationSeconds,
+                   dA > 0.2, dB > 0.2 {
+                    let maxDiff = max(
+                        antiChainThresholds.videoDurationAbsSeconds,
+                        min(dA, dB) * antiChainThresholds.videoDurationRelRatio
+                    )
+                    if abs(dA - dB) > maxDiff { continue }
+                }
+                if let fpA = items[repIndices[ra]].fingerprint,
+                   let fpB = items[repIndices[rb]].fingerprint,
+                   visualSimilarity(between: fpA, and: fpB, sensitivity: effectiveAntiChainSensitivity) == nil {
+                    continue
+                }
             }
 
             let keepRoot = clusterMembers[ra].count >= clusterMembers[rb].count ? ra : rb

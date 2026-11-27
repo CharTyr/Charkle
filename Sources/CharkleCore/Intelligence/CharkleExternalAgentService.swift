@@ -1,4 +1,5 @@
 import Foundation
+import Vision
 
 /// Grounded External Agent Service powering BOTH:
 /// 1. Native Swift **MCP Server (`charkle mcp`)** over stdio JSON-RPC 2.0 (single + batch, tools, resources, templates, prompts)
@@ -1097,13 +1098,14 @@ public nonisolated struct CharkleExternalAgentService: Sendable {
         }
         // Apply negative visual repulsion when `unlike_asset_ids` is provided
         if !unlikeIDs.isEmpty && !matches.isEmpty {
-            let vectors = (try? await engine.database.vectors()) ?? [:]
-            let unlikePrints = unlikeIDs.compactMap { vectors[$0]?.featurePrint }
-            if !unlikePrints.isEmpty {
+            let featurePrints = (try? await engine.database.featurePrints()) ?? [:]
+            let unlikeObs = unlikeIDs.compactMap { featurePrints[$0].flatMap(VisionAnalyzer.unarchiveFeaturePrint) }
+            if !unlikeObs.isEmpty {
                 matches = matches.map { item -> ScoredAsset in
-                    guard let fp = vectors[item.asset.id]?.featurePrint else { return item }
-                    let maxNeg = unlikePrints
-                        .compactMap { VisionAnalyzer.visualDistance(between: fp, and: $0) }
+                    guard let fp = featurePrints[item.asset.id],
+                          let candidateObs = VisionAnalyzer.unarchiveFeaturePrint(fp) else { return item }
+                    let maxNeg = unlikeObs
+                        .compactMap { VisionAnalyzer.visualDistance(between: candidateObs, and: $0) }
                         .map { VisionAnalyzer.visualSimilarity(forDistance: $0) }
                         .max() ?? 0.0
                     guard maxNeg >= 0.42 else { return item }
@@ -1372,17 +1374,22 @@ public nonisolated struct CharkleExternalAgentService: Sendable {
 
         let folders = try await engine.fetchFolders()
         let folderPathByID = Self.buildFolderPaths(folders)
+        let targetIDs = Array(ids.prefix(20))
+        let loadedAssets = try await engine.database.assets(ids: targetIDs)
+        let assetsByID = Dictionary(uniqueKeysWithValues: loadedAssets.map { ($0.id, $0) })
+        let suggestionsByID = try await engine.suggestFolders(for: targetIDs)
         var recommendations: [[String: Any]] = []
+        recommendations.reserveCapacity(targetIDs.count)
 
-        for uuid in ids.prefix(20) {
-            guard let asset = try await engine.fetchAsset(id: uuid) else {
+        for uuid in targetIDs {
+            guard let asset = assetsByID[uuid] else {
                 recommendations.append([
                     "assetID": uuid.uuidString,
                     "found": false
                 ])
                 continue
             }
-            if let suggestion = try await engine.suggestFolder(for: uuid) {
+            if let suggestion = suggestionsByID[uuid] {
                 recommendations.append([
                     "assetID": uuid.uuidString,
                     "assetTitle": asset.title,
@@ -2714,22 +2721,23 @@ public nonisolated struct CharkleExternalAgentService: Sendable {
         guard assets.count > 1, limit > 1 else {
             return Array(assets.prefix(limit))
         }
-        let vectors = (try? await engine.database.vectors()) ?? [:]
+        let featurePrints = (try? await engine.database.featurePrints()) ?? [:]
         let probePool = Array(assets.prefix(max(limit * 6, 96)))
 
-        // 1. First filter visual near-duplicates in relevance order
+        // 1. First filter visual near-duplicates in relevance order using pre-unarchived Vision observations
         var deduped: [AssetRecord] = []
         deduped.reserveCapacity(min(probePool.count, limit * 3))
         var selectedHashes = Set<String>()
-        var selectedPrints: [Data] = []
+        var selectedPrints: [VNFeaturePrintObservation] = []
         for candidate in probePool {
             if !candidate.contentHash.isEmpty && selectedHashes.contains(candidate.contentHash) {
                 continue
             }
             var duplicate = false
-            if let fp = vectors[candidate.id]?.featurePrint {
+            let candidateObs = featurePrints[candidate.id].flatMap(VisionAnalyzer.unarchiveFeaturePrint)
+            if let candidateObs {
                 for chosenPrint in selectedPrints {
-                    if let dist = VisionAnalyzer.visualDistance(between: fp, and: chosenPrint), dist < 0.22 {
+                    if let dist = VisionAnalyzer.visualDistance(between: candidateObs, and: chosenPrint), dist < 0.22 {
                         duplicate = true
                         break
                     }
@@ -2738,7 +2746,7 @@ public nonisolated struct CharkleExternalAgentService: Sendable {
             if duplicate { continue }
             deduped.append(candidate)
             if !candidate.contentHash.isEmpty { selectedHashes.insert(candidate.contentHash) }
-            if let fp = vectors[candidate.id]?.featurePrint { selectedPrints.append(fp) }
+            if let candidateObs { selectedPrints.append(candidateObs) }
             if deduped.count >= max(limit * 3, 48) { break }
         }
 

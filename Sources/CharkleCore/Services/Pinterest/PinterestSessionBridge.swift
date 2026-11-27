@@ -37,6 +37,7 @@ public final class PinterestSessionBridge: NSObject, WKNavigationDelegate {
     private let dataStore: WKWebsiteDataStore = .default()
     private var backgroundWebView: WKWebView?
     private var isHomeContextReady: Bool = false
+    private var warmContextGeneration: UInt64 = 0
     private var pendingReadyContinuations: [CheckedContinuation<Void, Error>] = []
 
     private static let homeURL = URL(string: "https://www.pinterest.com/")!
@@ -127,6 +128,8 @@ public final class PinterestSessionBridge: NSObject, WKNavigationDelegate {
 
     /// Signs out of Pinterest by clearing Pinterest cookies and website data cleanly.
     public func signOut() async {
+        warmContextGeneration &+= 1
+        failPendingReadyContinuations(with: PinterestSessionError.sessionExpired)
         let cookies = await allPinterestCookies()
         for cookie in cookies {
             await dataStore.httpCookieStore.deleteCookie(cookie)
@@ -143,10 +146,12 @@ public final class PinterestSessionBridge: NSObject, WKNavigationDelegate {
         #endif
         backgroundWebView = nil
         isHomeContextReady = false
+        failPendingReadyContinuations(with: PinterestSessionError.sessionExpired)
     }
 
     /// Resets the warm background context so freshly completed login cookies take effect immediately.
     public func resetWarmContext() {
+        warmContextGeneration &+= 1
         backgroundWebView?.stopLoading()
         backgroundWebView?.navigationDelegate = nil
         #if canImport(UIKit)
@@ -154,6 +159,16 @@ public final class PinterestSessionBridge: NSObject, WKNavigationDelegate {
         #endif
         backgroundWebView = nil
         isHomeContextReady = false
+        failPendingReadyContinuations(with: PinterestSessionError.sessionExpired)
+    }
+
+    private func failPendingReadyContinuations(with error: Error) {
+        guard !pendingReadyContinuations.isEmpty else { return }
+        let waiting = pendingReadyContinuations
+        pendingReadyContinuations.removeAll()
+        for cont in waiting {
+            cont.resume(throwing: error)
+        }
     }
 
     // MARK: - Feeds, Search, Boards, Pin Detail & Similar Pins
@@ -491,18 +506,20 @@ public final class PinterestSessionBridge: NSObject, WKNavigationDelegate {
         }
 
         isHomeContextReady = false
+        let generation = warmContextGeneration
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             pendingReadyContinuations.append(continuation)
             if pendingReadyContinuations.count == 1 {
                 webView.load(URLRequest(url: Self.homeURL, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 20))
                 Task { @MainActor [weak self] in
                     try? await Task.sleep(for: .seconds(18))
-                    guard let self, !self.isHomeContextReady, !self.pendingReadyContinuations.isEmpty else { return }
-                    let waiting = self.pendingReadyContinuations
-                    self.pendingReadyContinuations.removeAll()
-                    for cont in waiting {
-                        cont.resume(throwing: PinterestSessionError.networkFailure("加载 Pinterest 会话超时，请检查网络连接。"))
-                    }
+                    guard let self,
+                          self.warmContextGeneration == generation,
+                          !self.isHomeContextReady,
+                          !self.pendingReadyContinuations.isEmpty else { return }
+                    self.failPendingReadyContinuations(
+                        with: PinterestSessionError.networkFailure("加载 Pinterest 会话超时，请检查网络连接。")
+                    )
                 }
             }
         }

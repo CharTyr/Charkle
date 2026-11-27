@@ -18,6 +18,8 @@ public nonisolated struct ExtractedImageMetadata: Hashable, Sendable {
 public nonisolated enum ImageMetadataExtractor {
     private static let maxPNGChunkScanCount = 4_096
     private static let maxPNGTextChunkBytes = 1_500_000
+    private static let midjourneySeedRegex = try? NSRegularExpression(pattern: #"--seed\s+(\d+)"#)
+    private static let loraTagRegex = try? NSRegularExpression(pattern: #"<lora:([^:>]+)(?::([^>]+))?>"#)
 
     public static func extract(from url: URL) -> ExtractedImageMetadata {
         autoreleasepool {
@@ -307,6 +309,7 @@ public nonisolated enum ImageMetadataExtractor {
             return nil
         }
         let flagIdx = payload.index(after: nul1)
+        guard flagIdx < payload.endIndex else { return nil }
         let methodIdx = payload.index(after: flagIdx)
         guard methodIdx < payload.endIndex else { return nil }
         let isCompressed = payload[flagIdx] == 1
@@ -872,7 +875,7 @@ public nonisolated enum ImageMetadataExtractor {
             modelName = "Midjourney Niji"
         }
         var seed: String?
-        if let sRegex = try? NSRegularExpression(pattern: #"--seed\s+(\d+)"#),
+        if let sRegex = midjourneySeedRegex,
            let m = sRegex.firstMatch(in: cleanPrompt, range: NSRange(cleanPrompt.startIndex..., in: cleanPrompt)),
            let r = Range(m.range(at: 1), in: cleanPrompt) {
             seed = String(cleanPrompt[r])
@@ -1002,7 +1005,7 @@ public nonisolated enum ImageMetadataExtractor {
     }
 
     private static func extractLoraTags(from prompt: String) -> [String] {
-        guard let regex = try? NSRegularExpression(pattern: #"<lora:([^:>]+)(?::([^>]+))?>"#) else { return [] }
+        guard let regex = loraTagRegex else { return [] }
         let matches = regex.matches(in: prompt, range: NSRange(prompt.startIndex..., in: prompt))
         var out: [String] = []
         for m in matches {

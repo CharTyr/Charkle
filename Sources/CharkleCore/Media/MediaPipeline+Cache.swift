@@ -16,14 +16,16 @@ extension MediaPipeline {
         keeping: Set<UUID>,
         canEvictCloudOriginals: Bool = true
     ) async throws -> CacheStats {
-        let plan = try await database.transaction { [self] store -> EvictionPlan in
-            try store.removeDeletedMedia(using: self)
+        try await database.removeDeletedMedia(using: self)
+        // Enumerate Originals/ outside SQLite write lock so filesystem I/O never holds BEGIN IMMEDIATE.
+        let files = originalEntries()
+        let totalSize = files.reduce(Int64(0)) { $0 + $1.bytes }
+
+        let plan = try await database.transaction { store -> EvictionPlan in
             let originalBudget = CacheStats().budgetBytes
             let budget: Int64 = try store.state("cacheBudgetBytes") ?? originalBudget
             let syncCfg: DriveSyncConfig? = try store.state("driveConfig")
             let pinned = try store.protectedAssetIDs()
-            let files = originalEntries()
-            let totalSize = files.reduce(Int64(0)) { $0 + $1.bytes }
             let pinnedFiles = files.filter { pinned.contains($0.id) }
             let pinnedBytes = pinnedFiles.reduce(Int64(0)) { $0 + $1.bytes }
 

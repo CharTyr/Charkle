@@ -3,26 +3,48 @@ import Foundation
 private actor VisionConcurrencyGate {
     private let limit: Int
     private var active = 0
-    private var waiters: [CheckedContinuation<Void, Never>] = []
+    private var waiters: [(id: UUID, continuation: CheckedContinuation<Bool, Never>)] = []
 
     init(limit: Int) {
         self.limit = max(1, limit)
     }
 
-    func acquire() async {
+    func acquire() async -> Bool {
+        if Task.isCancelled { return false }
         if active < limit {
             active += 1
-            return
+            return true
         }
-        await withCheckedContinuation { continuation in
-            waiters.append(continuation)
+        let waiterID = UUID()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                if Task.isCancelled {
+                    continuation.resume(returning: false)
+                    return
+                }
+                if active < limit {
+                    active += 1
+                    continuation.resume(returning: true)
+                    return
+                }
+                waiters.append((waiterID, continuation))
+            }
+        } onCancel: {
+            Task { await self.cancelWaiter(id: waiterID) }
+        }
+    }
+
+    private func cancelWaiter(id: UUID) {
+        if let idx = waiters.firstIndex(where: { $0.id == id }) {
+            let waiter = waiters.remove(at: idx)
+            waiter.continuation.resume(returning: false)
         }
     }
 
     func release() {
         if !waiters.isEmpty {
             let next = waiters.removeFirst()
-            next.resume()
+            next.continuation.resume(returning: true)
         } else {
             active = max(0, active - 1)
         }
@@ -30,7 +52,11 @@ private actor VisionConcurrencyGate {
 }
 
 public nonisolated struct IntelligenceEngine: Sendable {
+    #if os(iOS)
+    private static let visionGate = VisionConcurrencyGate(limit: 2)
+    #else
     private static let visionGate = VisionConcurrencyGate(limit: 3)
+    #endif
     private static let visionQueue = DispatchQueue(
         label: "com.charkle.core.vision",
         qos: .userInitiated,
@@ -57,7 +83,9 @@ public nonisolated struct IntelligenceEngine: Sendable {
         includeOCR: Bool = true,
         includeFeaturePrint: Bool = true
     ) async -> LocalAnalysisResult {
-        await Self.visionGate.acquire()
+        guard await Self.visionGate.acquire() else {
+            return LocalAnalysisResult()
+        }
         if Task.isCancelled {
             await Self.visionGate.release()
             return LocalAnalysisResult()

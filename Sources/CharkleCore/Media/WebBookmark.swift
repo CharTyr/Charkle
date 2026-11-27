@@ -1357,8 +1357,30 @@ public nonisolated struct WebBookmark: Sendable {
         return String(compact.prefix(maxLength))
     }
 
+    private final class RegexCache: @unchecked Sendable {
+        private let lock = NSLock()
+        private var cache: [String: NSRegularExpression] = [:]
+
+        func compiled(_ pattern: String) -> NSRegularExpression? {
+            lock.lock()
+            if let existing = cache[pattern] {
+                lock.unlock()
+                return existing
+            }
+            lock.unlock()
+            guard let created = try? NSRegularExpression(pattern: pattern) else { return nil }
+            lock.lock()
+            if cache.count >= 64 { cache.removeAll(keepingCapacity: true) }
+            cache[pattern] = created
+            lock.unlock()
+            return created
+        }
+    }
+
+    private static let regexCache = RegexCache()
+
     private static func matches(_ pattern: String, _ input: String) -> [[String]] {
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
+        guard let regex = regexCache.compiled(pattern) else { return [] }
         return regex.matches(in: input, range: NSRange(input.startIndex..., in: input)).map { hit in
             (0..<hit.numberOfRanges).map { index in
                 Range(hit.range(at: index), in: input).map { String(input[$0]) } ?? ""
@@ -1405,12 +1427,59 @@ private struct WebPageSnapshotResult: Sendable {
 /// enforces a strict timeout, and tears down immediately after snapshot capture.
 @MainActor
 private final class WebPageSnapshotter: NSObject, WKNavigationDelegate {
+    #if os(iOS)
+    private static let maxConcurrentSnapshots = 2
+    #else
+    private static let maxConcurrentSnapshots = 3
+    #endif
+    private static var activeSnapshots = 0
+    private static var slotWaiters: [(id: UUID, continuation: CheckedContinuation<Bool, Never>)] = []
+
     private var webView: WKWebView?
     private var continuation: CheckedContinuation<WebPageSnapshotResult?, Never>?
     private var timeoutTask: Task<Void, Never>?
     private var settleTask: Task<Void, Never>?
     private var isCompleted = false
     private var isCapturing = false
+
+    private static func acquireSlot() async -> Bool {
+        if Task.isCancelled { return false }
+        if activeSnapshots < maxConcurrentSnapshots {
+            activeSnapshots += 1
+            return true
+        }
+        let waiterID = UUID()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                if Task.isCancelled {
+                    continuation.resume(returning: false)
+                    return
+                }
+                if activeSnapshots < maxConcurrentSnapshots {
+                    activeSnapshots += 1
+                    continuation.resume(returning: true)
+                    return
+                }
+                slotWaiters.append((waiterID, continuation))
+            }
+        } onCancel: {
+            Task { @MainActor in
+                if let idx = slotWaiters.firstIndex(where: { $0.id == waiterID }) {
+                    let waiter = slotWaiters.remove(at: idx)
+                    waiter.continuation.resume(returning: false)
+                }
+            }
+        }
+    }
+
+    private static func releaseSlot() {
+        while !slotWaiters.isEmpty {
+            let next = slotWaiters.removeFirst()
+            next.continuation.resume(returning: true)
+            return
+        }
+        activeSnapshots = max(0, activeSnapshots - 1)
+    }
 
     static func canCaptureInCurrentProcess() -> Bool {
         guard ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil else { return false }
@@ -1424,6 +1493,8 @@ private final class WebPageSnapshotter: NSObject, WKNavigationDelegate {
 
     static func capture(url: URL, timeoutSeconds: Double = 6.5) async -> WebPageSnapshotResult? {
         guard canCaptureInCurrentProcess(), WebBookmark.isSafeRemoteFetchURL(url) else { return nil }
+        guard await acquireSlot() else { return nil }
+        defer { releaseSlot() }
         let runner = WebPageSnapshotter()
         return await withTaskCancellationHandler {
             await runner.run(url: url, timeoutSeconds: timeoutSeconds)
@@ -1551,6 +1622,7 @@ private final class WebPageSnapshotter: NSObject, WKNavigationDelegate {
         })();
         """
         let probed = (try? await wv.evaluateJavaScript(probeJS)) as? [String: Any]
+        guard !isCompleted, !Task.isCancelled else { return }
         let domTitle = probed?["title"] as? String
         let domDesc = probed?["desc"] as? String
         let domSite = probed?["siteName"] as? String
@@ -1565,6 +1637,7 @@ private final class WebPageSnapshotter: NSObject, WKNavigationDelegate {
 
         do {
             let platformImage = try await wv.takeSnapshot(configuration: snapConfig)
+            guard !isCompleted, !Task.isCancelled else { return }
             #if canImport(AppKit)
             let snapshotCGImage = platformImage.cgImage(forProposedRect: nil, context: nil, hints: nil)
             #elseif canImport(UIKit)
@@ -1572,8 +1645,13 @@ private final class WebPageSnapshotter: NSObject, WKNavigationDelegate {
             #else
             let snapshotCGImage: CGImage? = nil
             #endif
-            guard let cgImage = snapshotCGImage,
-                  !Self.isVisuallyBlank(cgImage) else {
+            guard let cgImage = snapshotCGImage else {
+                finish(with: nil)
+                return
+            }
+            let blank = await WebPageSnapshotPixelAnalyzer.isVisuallyBlankOffMain(cgImage)
+            guard !isCompleted, !Task.isCancelled else { return }
+            guard !blank else {
                 finish(with: nil)
                 return
             }
@@ -1613,9 +1691,16 @@ private final class WebPageSnapshotter: NSObject, WKNavigationDelegate {
         continuation = nil
         cont?.resume(returning: result)
     }
+}
 
+private nonisolated enum WebPageSnapshotPixelAnalyzer {
     /// Rejects solid blank white/black canvases produced when a blocked or empty page fails silently.
-    private static func isVisuallyBlank(_ image: CGImage) -> Bool {
+    @concurrent
+    static func isVisuallyBlankOffMain(_ image: CGImage) async -> Bool {
+        isVisuallyBlank(image)
+    }
+
+    static func isVisuallyBlank(_ image: CGImage) -> Bool {
         let sampleW = 32
         let sampleH = 20
         guard let space = CGColorSpace(name: CGColorSpace.sRGB),

@@ -146,7 +146,7 @@ public nonisolated enum BoardImageRenderer {
             for (idx, swatch) in swatches.enumerated() {
                 let x = pad + CGFloat(idx) * (swWidth + swGap)
                 let chipRect = cgRect(CGRect(x: x, y: cursorY, width: swWidth, height: 34))
-                let chipPath = CGPath(roundedRect: chipRect, cornerWidth: 8, cornerHeight: 8, transform: nil)
+                let chipPath = safeRoundedRectPath(chipRect, radius: 8)
                 let rgb = hexToRGB(swatch.hex) ?? (0.5, 0.5, 0.5)
                 ctx.saveGState()
                 ctx.addPath(chipPath)
@@ -202,7 +202,7 @@ public nonisolated enum BoardImageRenderer {
             switch item.node.kind {
             case .groupFrame(let title, let tint):
                 let fill = groupFillColor(tint: tint, dark: options.darkAppearance)
-                let path = CGPath(roundedRect: rect, cornerWidth: 14, cornerHeight: 14, transform: nil)
+                let path = safeRoundedRectPath(rect, radius: 14)
                 ctx.saveGState()
                 ctx.addPath(path)
                 ctx.setFillColor(fill)
@@ -227,7 +227,7 @@ public nonisolated enum BoardImageRenderer {
                 let noteTextColor = style == .ink
                     ? CGColor(red: 0.95, green: 0.95, blue: 0.97, alpha: 1.0)
                     : fgPrimary
-                let path = CGPath(roundedRect: rect, cornerWidth: 12, cornerHeight: 12, transform: nil)
+                let path = safeRoundedRectPath(rect, radius: 12)
                 ctx.saveGState()
                 ctx.addPath(path)
                 ctx.setFillColor(noteFill)
@@ -264,7 +264,7 @@ public nonisolated enum BoardImageRenderer {
                 )
 
             case .assetRef(let assetID, let crop, _, _):
-                let path = CGPath(roundedRect: rect, cornerWidth: 10, cornerHeight: 10, transform: nil)
+                let path = safeRoundedRectPath(rect, radius: 10)
                 ctx.saveGState()
                 ctx.addPath(path)
                 ctx.clip()
@@ -700,6 +700,22 @@ public nonisolated enum BoardImageRenderer {
         case .sage: return dark ? CGColor(red: 0.16, green: 0.23, blue: 0.18, alpha: 1.0) : CGColor(red: 0.91, green: 0.95, blue: 0.91, alpha: 1.0)
         case .slate: return dark ? CGColor(red: 0.16, green: 0.20, blue: 0.27, alpha: 1.0) : CGColor(red: 0.91, green: 0.94, blue: 0.98, alpha: 1.0)
         }
+    }
+
+    private static func safeRoundedRectPath(_ rect: CGRect, radius: CGFloat) -> CGPath {
+        let safeW = rect.width.isFinite ? max(1, rect.width) : 1
+        let safeH = rect.height.isFinite ? max(1, rect.height) : 1
+        let safeRect = CGRect(
+            x: rect.origin.x.isFinite ? rect.origin.x : 0,
+            y: rect.origin.y.isFinite ? rect.origin.y : 0,
+            width: safeW,
+            height: safeH
+        )
+        let clamped = max(0, min(radius, safeW * 0.5, safeH * 0.5))
+        if clamped <= 0.01 {
+            return CGPath(rect: safeRect, transform: nil)
+        }
+        return CGPath(roundedRect: safeRect, cornerWidth: clamped, cornerHeight: clamped, transform: nil)
     }
 
     private static func hexToRGB(_ hex: String) -> (r: CGFloat, g: CGFloat, b: CGFloat)? {

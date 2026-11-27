@@ -5,6 +5,29 @@ nonisolated enum SearchText {
     private static let posixLocale = Locale(identifier: "en_US_POSIX")
     private static let zhCNLocale = Locale(identifier: "zh_CN")
 
+    private final class PinyinCache: @unchecked Sendable {
+        private let lock = NSLock()
+        private var entries: [String: (full: String, initials: String)] = [:]
+
+        func get(_ key: String) -> (full: String, initials: String)? {
+            lock.lock()
+            let value = entries[key]
+            lock.unlock()
+            return value
+        }
+
+        func set(_ key: String, value: (full: String, initials: String)) {
+            lock.lock()
+            if entries.count >= 2_048 {
+                entries.removeAll(keepingCapacity: true)
+            }
+            entries[key] = value
+            lock.unlock()
+        }
+    }
+
+    private static let pinyinCache = PinyinCache()
+
     @inline(__always)
     static func hasHanScalar(_ scalar: UnicodeScalar) -> Bool {
         let value = scalar.value
@@ -46,6 +69,9 @@ nonisolated enum SearchText {
 
     static func pinyin(_ text: String) -> (full: String, initials: String) {
         guard containsHan(text) else { return ("", "") }
+        if text.count <= 128, let cached = pinyinCache.get(text) {
+            return cached
+        }
         var full: [String] = []
         var initials: [String] = []
         for phrase in text.split(whereSeparator: { !hasHan($0) }).map(String.init) {
@@ -61,7 +87,11 @@ nonisolated enum SearchText {
                 initials.append(String(word.compactMap(\.first)))
             }
         }
-        return (full.joined(separator: " "), initials.joined(separator: " "))
+        let result = (full.joined(separator: " "), initials.joined(separator: " "))
+        if text.count <= 128 {
+            pinyinCache.set(text, value: result)
+        }
+        return result
     }
 
     private static func mandarinSyllables(_ text: String) -> [String] {

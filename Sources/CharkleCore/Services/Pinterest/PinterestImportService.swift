@@ -126,8 +126,17 @@ public nonisolated enum PinterestImportService {
 
     /// Scans existing non-trashed library assets and returns the set of Pinterest Pin IDs already in Charkle.
     public static func existingImportedPinIDs(in engine: any CharkleEngineProtocol) async -> Set<String> {
-        let existing = (try? await engine.fetchAssets(matching: FilterCriteria(includeTrashed: false))) ?? []
         var ids = Set<String>()
+        if let live = engine as? LiveCharkleEngine,
+           let rows = try? await live.fetchAssetSourceKeys(includeTrashed: false) {
+            for row in rows {
+                if let source = row.sourceURL, let pinID = PinterestJSONParser.extractPinID(from: source) {
+                    ids.insert(pinID)
+                }
+            }
+            return ids
+        }
+        let existing = (try? await engine.fetchAssets(matching: FilterCriteria(includeTrashed: false))) ?? []
         for asset in existing {
             if let source = asset.sourceURL, let pinID = PinterestJSONParser.extractPinID(from: source) {
                 ids.insert(pinID)
@@ -169,21 +178,26 @@ public nonisolated enum PinterestImportService {
 
         onProgress?(0, total)
 
-        for pin in toImport {
+        let chunkSize = 4
+        for start in stride(from: 0, to: total, by: chunkSize) {
             if Task.isCancelled { break }
-            if let asset = await importSinglePin(
-                pin,
+            let slice = Array(toImport[start..<min(total, start + chunkSize)])
+            let chunkResults = await importPinChunk(
+                slice,
                 into: engine,
                 targetFolderID: targetFolderID,
                 extraTags: extraTags
-            ) {
-                importedAssets.append(asset)
-                importedPinIDs.insert(pin.id)
-            } else {
-                failedPinIDs.append(pin.id)
+            )
+            for (pin, asset) in chunkResults {
+                if let asset {
+                    importedAssets.append(asset)
+                    importedPinIDs.insert(pin.id)
+                } else {
+                    failedPinIDs.append(pin.id)
+                }
+                completed += 1
+                onProgress?(completed, total)
             }
-            completed += 1
-            onProgress?(completed, total)
         }
 
         return PinterestBatchImportReport(
@@ -337,38 +351,64 @@ public nonisolated enum PinterestImportService {
                 boardTags.append(sanitizedName)
             }
 
-            for (pinIdx, pin) in pendingPins.enumerated() {
-                if Task.isCancelled {
-                    wasCancelled = true
-                    break
+            if let singlePinImporter {
+                for (pinIdx, pin) in pendingPins.enumerated() {
+                    if Task.isCancelled {
+                        wasCancelled = true
+                        break
+                    }
+                    let created = await singlePinImporter(pin, engine, targetFolderID, boardTags)
+                    if let created {
+                        totalImportedAssets.append(created)
+                        totalImportedPinIDs.insert(pin.id)
+                        knownImportedPinIDs.insert(pin.id)
+                    } else {
+                        totalFailedPinIDs.append(pin.id)
+                    }
+
+                    onProgress?(PinterestBoardImportProgress(
+                        boardIndex: boardNum,
+                        totalBoards: totalBoards,
+                        stage: .importingPins(boardName: sanitizedName, completedInBoard: pinIdx + 1, totalInBoard: boardTotal),
+                        overallImported: totalImportedAssets.count,
+                        overallSkipped: totalSkippedPinIDs.count,
+                        overallFailed: totalFailedPinIDs.count
+                    ))
                 }
-                let created: AssetRecord?
-                if let singlePinImporter {
-                    created = await singlePinImporter(pin, engine, targetFolderID, boardTags)
-                } else {
-                    created = await importSinglePin(
-                        pin,
+            } else {
+                let chunkSize = 4
+                var completedInBoard = 0
+                for start in stride(from: 0, to: pendingPins.count, by: chunkSize) {
+                    if Task.isCancelled {
+                        wasCancelled = true
+                        break
+                    }
+                    let slice = Array(pendingPins[start..<min(pendingPins.count, start + chunkSize)])
+                    let chunkResults = await importPinChunk(
+                        slice,
                         into: engine,
                         targetFolderID: targetFolderID,
                         extraTags: boardTags
                     )
+                    for (pin, created) in chunkResults {
+                        if let created {
+                            totalImportedAssets.append(created)
+                            totalImportedPinIDs.insert(pin.id)
+                            knownImportedPinIDs.insert(pin.id)
+                        } else {
+                            totalFailedPinIDs.append(pin.id)
+                        }
+                        completedInBoard += 1
+                        onProgress?(PinterestBoardImportProgress(
+                            boardIndex: boardNum,
+                            totalBoards: totalBoards,
+                            stage: .importingPins(boardName: sanitizedName, completedInBoard: completedInBoard, totalInBoard: boardTotal),
+                            overallImported: totalImportedAssets.count,
+                            overallSkipped: totalSkippedPinIDs.count,
+                            overallFailed: totalFailedPinIDs.count
+                        ))
+                    }
                 }
-                if let created {
-                    totalImportedAssets.append(created)
-                    totalImportedPinIDs.insert(pin.id)
-                    knownImportedPinIDs.insert(pin.id)
-                } else {
-                    totalFailedPinIDs.append(pin.id)
-                }
-
-                onProgress?(PinterestBoardImportProgress(
-                    boardIndex: boardNum,
-                    totalBoards: totalBoards,
-                    stage: .importingPins(boardName: sanitizedName, completedInBoard: pinIdx + 1, totalInBoard: boardTotal),
-                    overallImported: totalImportedAssets.count,
-                    overallSkipped: totalSkippedPinIDs.count,
-                    overallFailed: totalFailedPinIDs.count
-                ))
             }
 
             if wasCancelled { break }
@@ -414,12 +454,15 @@ public nonisolated enum PinterestImportService {
         return cleaned.isEmpty ? fallback : String(cleaned.prefix(64))
     }
 
-    private static func importSinglePin(
-        _ pin: PinterestPin,
-        into engine: any CharkleEngineProtocol,
-        targetFolderID: UUID?,
-        extraTags: [String]
-    ) async -> AssetRecord? {
+    private struct DownloadedPinPayload: Sendable {
+        let index: Int
+        let pin: PinterestPin
+        let data: Data
+        let ext: String
+        let isVideo: Bool
+    }
+
+    private static func downloadPinMedia(_ pin: PinterestPin) async -> (data: Data, ext: String, isVideo: Bool)? {
         let candidateURLs: [URL] = {
             var list: [URL] = []
             if let video = pin.videoURL { list.append(video) }
@@ -431,57 +474,126 @@ public nonisolated enum PinterestImportService {
             return list
         }()
 
-        var downloaded: (data: Data, ext: String, isVideo: Bool)?
         for url in candidateURLs {
+            if Task.isCancelled { return nil }
             if let result = await fetchMediaBytes(from: url) {
-                downloaded = result
-                break
+                return result
             }
         }
-        guard let downloaded else { return nil }
+        return nil
+    }
 
-        let baseTitle = sanitizedFileStem(pin.displayTitle, fallback: "Pinterest-\(pin.id)")
-        let fileName = "\(baseTitle).\(downloaded.ext)"
+    private static func importPinChunk(
+        _ chunk: [PinterestPin],
+        into engine: any CharkleEngineProtocol,
+        targetFolderID: UUID?,
+        extraTags: [String]
+    ) async -> [(PinterestPin, AssetRecord?)] {
+        guard !chunk.isEmpty else { return [] }
 
-        let input: CaptureInput
-        var tempVideoURL: URL?
+        // 1. Download media for all pins in this bounded chunk concurrently.
+        let downloadedByIndex: [Int: DownloadedPinPayload] = await withTaskGroup(of: DownloadedPinPayload?.self) { group in
+            for (idx, pin) in chunk.enumerated() {
+                group.addTask {
+                    guard let media = await downloadPinMedia(pin) else { return nil }
+                    return DownloadedPinPayload(index: idx, pin: pin, data: media.data, ext: media.ext, isVideo: media.isVideo)
+                }
+            }
+            var map: [Int: DownloadedPinPayload] = [:]
+            for await item in group {
+                if let item { map[item.index] = item }
+            }
+            return map
+        }
+
+        // 2. Prepare CaptureInputs (cleaning up any temporary video files afterwards).
+        var tempVideoURLs: [URL] = []
         defer {
-            if let tempVideoURL { try? FileManager.default.removeItem(at: tempVideoURL) }
+            for url in tempVideoURLs { try? FileManager.default.removeItem(at: url) }
         }
 
-        if downloaded.isVideo {
-            let tmp = FileManager.default.temporaryDirectory
-                .appending(path: "charkle-pin-\(pin.id)-\(UUID().uuidString).\(downloaded.ext)")
-            guard (try? downloaded.data.write(to: tmp, options: .atomic)) != nil else { return nil }
-            tempVideoURL = tmp
-            input = .fileURL(tmp)
-        } else {
-            input = .imageData(
-                downloaded.data,
-                suggestedName: fileName,
-                sourceURL: pin.pinPageURL.absoluteString
+        var readyEntries: [(index: Int, pin: PinterestPin, input: CaptureInput)] = []
+        readyEntries.reserveCapacity(downloadedByIndex.count)
+        for idx in chunk.indices {
+            guard let item = downloadedByIndex[idx] else { continue }
+            let baseTitle = sanitizedFileStem(item.pin.displayTitle, fallback: "Pinterest-\(item.pin.id)")
+            let fileName = "\(baseTitle).\(item.ext)"
+            if item.isVideo {
+                let tmp = FileManager.default.temporaryDirectory
+                    .appending(path: "charkle-pin-\(item.pin.id)-\(UUID().uuidString).\(item.ext)")
+                guard (try? item.data.write(to: tmp, options: .atomic)) != nil else { continue }
+                tempVideoURLs.append(tmp)
+                readyEntries.append((idx, item.pin, .fileURL(tmp)))
+            } else {
+                readyEntries.append((idx, item.pin, .imageData(
+                    item.data,
+                    suggestedName: fileName,
+                    sourceURL: item.pin.pinPageURL.absoluteString
+                )))
+            }
+        }
+
+        // 3. Batch-ingest downloaded chunk in one engine.ingest call, falling back to per-item on partial failure.
+        var createdByIndex: [Int: AssetRecord] = [:]
+        if !readyEntries.isEmpty {
+            if let batchCreated = try? await engine.ingest(
+                readyEntries.map(\.input),
+                targetFolderID: targetFolderID,
+                targetBoardID: nil
+            ), batchCreated.count == readyEntries.count {
+                for (entry, asset) in zip(readyEntries, batchCreated) {
+                    createdByIndex[entry.index] = asset
+                }
+            } else {
+                for entry in readyEntries {
+                    if let single = (try? await engine.ingest([entry.input], targetFolderID: targetFolderID, targetBoardID: nil))?.first {
+                        createdByIndex[entry.index] = single
+                    }
+                }
+            }
+        }
+
+        // 4. Apply metadata patches in a single batched transaction when backed by LiveCharkleEngine.
+        var patches: [(index: Int, patch: AssetBatchPatch)] = []
+        patches.reserveCapacity(createdByIndex.count)
+        for idx in chunk.indices {
+            guard let created = createdByIndex[idx] else { continue }
+            let pin = chunk[idx]
+            let notes = composeNotes(for: pin)
+            var tags: [String] = ["Pinterest"]
+            if let board = pin.boardName?.trimmingCharacters(in: .whitespacesAndNewlines), !board.isEmpty, board.count <= 32 {
+                tags.append(board)
+            }
+            tags.append(contentsOf: extraTags)
+            let patch = AssetBatchPatch(
+                assetIDs: [created.id],
+                title: pin.displayTitle,
+                notes: notes.isEmpty ? nil : notes,
+                sourceURL: pin.pinPageURL.absoluteString,
+                addTags: tags
             )
+            patches.append((idx, patch))
         }
 
-        guard let created = (try? await engine.ingest([input], targetFolderID: targetFolderID, targetBoardID: nil))?.first else {
-            return nil
+        if let live = engine as? LiveCharkleEngine, patches.count > 1,
+           let updatedBatch = try? await live.updateAssetsBatch(patches.map(\.patch)) {
+            let updatedByID = Dictionary(uniqueKeysWithValues: updatedBatch.map { ($0.id, $0) })
+            for item in patches {
+                if let assetID = item.patch.assetIDs.first, let updated = updatedByID[assetID] {
+                    createdByIndex[item.index] = updated
+                }
+            }
+        } else {
+            for item in patches {
+                if let updated = (try? await engine.updateAssets(item.patch))?.first {
+                    createdByIndex[item.index] = updated
+                }
+            }
         }
 
-        let notes = composeNotes(for: pin)
-        var tags: [String] = ["Pinterest"]
-        if let board = pin.boardName?.trimmingCharacters(in: .whitespacesAndNewlines), !board.isEmpty, board.count <= 32 {
-            tags.append(board)
+        return chunk.enumerated().map { idx, pin in
+            (pin, createdByIndex[idx])
         }
-        tags.append(contentsOf: extraTags)
-
-        let patch = AssetBatchPatch(
-            assetIDs: [created.id],
-            title: pin.displayTitle,
-            notes: notes.isEmpty ? nil : notes,
-            sourceURL: pin.pinPageURL.absoluteString,
-            addTags: tags
-        )
-        return (try? await engine.updateAssets(patch))?.first ?? created
     }
 
     private static func fetchMediaBytes(from url: URL) async -> (data: Data, ext: String, isVideo: Bool)? {

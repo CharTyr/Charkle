@@ -182,7 +182,8 @@ public final actor ICloudDriveTransport: DriveTransport {
 
     public func accountInfo() async throws -> DriveAccountInfo {
         try verifyBaseDirectory()
-        let values = try? baseDirectory.resourceValues(forKeys: [.volumeTotalCapacityKey, .volumeAvailableCapacityKey])
+        let statsURL = securityScopedURL?.standardizedFileURL ?? baseDirectory
+        let values = try? statsURL.resourceValues(forKeys: [.volumeTotalCapacityKey, .volumeAvailableCapacityKey])
         let used: Int64? = if let total = values?.volumeTotalCapacity, let free = values?.volumeAvailableCapacity {
             Int64(max(0, total - free))
         } else { nil }
@@ -215,6 +216,14 @@ public final actor ICloudDriveTransport: DriveTransport {
     public func findOrCreateFolder(named name: String, parentID: String) async throws -> RemoteDriveFile {
         try DriveFiles.validateName(name)
         try verifyBaseDirectory()
+        if parentID == DriveFiles.rootID, let scoped = securityScopedURL?.standardizedFileURL {
+            // When bound to a security-scoped folder (e.g. iOS Files picker), stay strictly inside the granted URL.
+            let file = try metadata(scoped, parentID: DriveFiles.rootID)
+            guard file.isFolder else {
+                throw DriveTransportError.invalidResponse("iCloud Drive 授权路径不是目录：\(scoped.lastPathComponent)")
+            }
+            return file
+        }
         let parentURL = try locate(parentID)
         let path = parentURL.appending(path: name, directoryHint: .isDirectory)
         var isDir: ObjCBool = false
@@ -232,6 +241,10 @@ public final actor ICloudDriveTransport: DriveTransport {
 
     public func listFiles(inFolderID folderID: String) async throws -> [RemoteDriveFile] {
         try verifyBaseDirectory()
+        if folderID == DriveFiles.rootID, let scoped = securityScopedURL?.standardizedFileURL {
+            guard FileManager.default.fileExists(atPath: scoped.path) else { return [] }
+            return [try metadata(scoped, parentID: DriveFiles.rootID)]
+        }
         let folderURL = try locate(folderID)
         return try children(of: folderURL, parent: folderID)
     }
@@ -290,7 +303,20 @@ public final actor ICloudDriveTransport: DriveTransport {
     ) async throws -> RemoteDriveFile {
         let destination = try uploadPath(name: name, parentID: parentID, existingFileID: existingFileID)
         try coordinateWrite(at: destination) { target in
-            try DriveFiles.writeStream(from: localURL, to: target, removeOnFailure: existingFileID == nil)
+            let fm = FileManager.default
+            let temp = target.deletingLastPathComponent().appending(path: ".charkle-icloud-\(UUID().uuidString)")
+            try DriveFiles.writeStream(from: localURL, to: temp, removeOnFailure: true)
+            defer { try? fm.removeItem(at: temp) }
+            if fm.fileExists(atPath: target.path) {
+                do {
+                    _ = try fm.replaceItemAt(target, withItemAt: temp, options: .usingNewMetadataOnly)
+                } catch {
+                    try? fm.removeItem(at: target)
+                    try fm.moveItem(at: temp, to: target)
+                }
+            } else {
+                try fm.moveItem(at: temp, to: target)
+            }
         }
         return try metadata(destination, parentID: parentID)
     }
@@ -351,13 +377,16 @@ public final actor ICloudDriveTransport: DriveTransport {
 
     private func verifyBaseDirectory() throws {
         let fm = FileManager.default
+        let targetDir = securityScopedURL?.standardizedFileURL ?? baseDirectory
         var isDir: ObjCBool = false
-        if !fm.fileExists(atPath: baseDirectory.path, isDirectory: &isDir) {
-            try fm.createDirectory(at: baseDirectory, withIntermediateDirectories: true)
-            _ = fm.fileExists(atPath: baseDirectory.path, isDirectory: &isDir)
+        if !fm.fileExists(atPath: targetDir.path, isDirectory: &isDir) {
+            if securityScopedURL == nil {
+                try fm.createDirectory(at: targetDir, withIntermediateDirectories: true)
+                _ = fm.fileExists(atPath: targetDir.path, isDirectory: &isDir)
+            }
         }
         guard isDir.boolValue else {
-            throw DriveTransportError.mountPathUnavailable(baseDirectory.path)
+            throw DriveTransportError.mountPathUnavailable(targetDir.path)
         }
     }
 

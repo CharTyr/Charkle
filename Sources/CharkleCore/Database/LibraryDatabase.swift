@@ -319,13 +319,53 @@ public final actor LibraryDatabase {
         return map
     }
 
-    func assetsWithPayloadContaining(_ literal: String, includeTrashed: Bool = true) throws -> [AssetRecord] {
+    public func assets(ids: [UUID]) throws -> [AssetRecord] {
         syncExternalDataVersionIfNeeded()
-        let sql = includeTrashed
-            ? "SELECT id FROM assets WHERE instr(CAST(payload AS TEXT), ?) > 0"
-            : "SELECT id FROM assets WHERE trashed=0 AND instr(CAST(payload AS TEXT), ?) > 0"
-        let ids = try connection.query(sql, [.text(literal)]) { $0.text(0) }
+        return try hydrateAssets(forOrderedIDs: ids.map(\.uuidString))
+    }
+
+    func assetsWithPayloadContaining(
+        _ literal: String,
+        kind: MediaKind? = nil,
+        includeTrashed: Bool = true
+    ) throws -> [AssetRecord] {
+        syncExternalDataVersionIfNeeded()
+        var conditions: [String] = []
+        var args: [SQLValue] = []
+        if let kind {
+            conditions.append("kind=?")
+            args.append(.text(kind.rawValue))
+        }
+        if !includeTrashed {
+            conditions.append("trashed=0")
+        }
+        conditions.append("instr(CAST(payload AS TEXT), ?) > 0")
+        args.append(.text(literal))
+        let sql = "SELECT id FROM assets WHERE \(conditions.joined(separator: " AND "))"
+        let ids = try connection.query(sql, args) { $0.text(0) }
         return try hydrateAssets(forOrderedIDs: ids)
+    }
+
+    /// Lightweight SQLite JSON projection returning only source URLs & media kinds without decoding full `AssetRecord` payloads.
+    func fetchAssetSourceKeys(includeTrashed: Bool = false) throws -> [(sourceURL: String?, socialOriginalURL: String?, mediaKind: MediaKind)] {
+        syncExternalDataVersionIfNeeded()
+        let whereClause = includeTrashed ? "" : "WHERE trashed=0 "
+        let sql = """
+            SELECT kind,
+                   json_extract(CAST(payload AS TEXT), '$.sourceURL'),
+                   json_extract(CAST(payload AS TEXT), '$.richMetadata.socialPost.originalURL')
+            FROM assets
+            \(whereClause)
+            """
+        return try connection.query(sql) { row -> (String?, String?, MediaKind)? in
+            let rawSrc = row.text(1)
+            let rawOrig = row.text(2)
+            let src: String? = rawSrc.isEmpty ? nil : rawSrc
+            let orig: String? = rawOrig.isEmpty ? nil : rawOrig
+            guard src != nil || orig != nil else { return nil }
+            let kind = MediaKind(rawValue: row.text(0)) ?? .image
+            return (src, orig, kind)
+        }.compactMap { $0 }
     }
 
     func asset(driveID: String) throws -> AssetRecord? {
@@ -915,6 +955,23 @@ public final actor LibraryDatabase {
             (UUID(uuidString: $0.text(4)), Self.readVector($0))
         }
         return Dictionary(uniqueKeysWithValues: values.compactMap { id, vector in id.map { ($0, vector) } })
+    }
+
+    /// Lightweight projection loading ONLY serialized Apple Vision `feature_print` blobs without decoding semantic embedding vectors.
+    func featurePrints() throws -> [UUID: Data] {
+        let rows = try connection.query(
+            "SELECT asset_id, feature_print FROM asset_vectors WHERE feature_print IS NOT NULL"
+        ) { row -> (UUID, Data)? in
+            guard let id = UUID(uuidString: row.text(0)),
+                  let fp = row.blob(1), !fp.isEmpty else { return nil }
+            return (id, fp)
+        }
+        var out: [UUID: Data] = [:]
+        out.reserveCapacity(rows.count)
+        for item in rows {
+            if let (id, fp) = item { out[id] = fp }
+        }
+        return out
     }
 
     func embeddings(forModel model: String) throws -> [UUID: [Float]] {

@@ -261,8 +261,8 @@ nonisolated enum MediaArtwork {
             }
         }
         let palette: [UInt32] = [0x2563EB, 0x0F766E, 0x4F46E5, 0xB45309, 0x0369A1, 0x7C3AED, 0xBE123C, 0x334155]
-        let hash = domain.utf8.reduce(5381) { (($0 << 5) &+ $0) &+ Int($1) }
-        return palette[abs(hash) % palette.count]
+        let hash = domain.utf8.reduce(UInt64(5381)) { (($0 &<< 5) &+ $0) &+ UInt64($1) }
+        return palette[Int(hash % UInt64(palette.count))]
     }
 
     /// Clean social post card (X / Threads / Bluesky / Xiaohongshu).

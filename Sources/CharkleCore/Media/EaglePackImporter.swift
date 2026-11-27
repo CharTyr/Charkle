@@ -220,12 +220,13 @@ public nonisolated enum EaglePackImporter {
             guard ext == "eaglepack" || (allowGenericZip && ext == "zip") else {
                 throw EaglePackImportError.unsupportedPackage(resolved.lastPathComponent)
             }
-            try validateZipEntries(at: resolved)
+            try await validateZipEntries(at: resolved)
             let tempRoot = FileManager.default.temporaryDirectory
                 .appendingPathComponent("charkle-eaglepack-\(UUID().uuidString)", isDirectory: true)
             try FileManager.default.createDirectory(at: tempRoot, withIntermediateDirectories: true)
             do {
-                try extractArchive(at: resolved, to: tempRoot)
+                try await extractArchive(at: resolved, to: tempRoot)
+                try verifyExtractedTreeSafe(root: tempRoot)
             } catch {
                 try? FileManager.default.removeItem(at: tempRoot)
                 throw error
@@ -748,7 +749,7 @@ public nonisolated enum EaglePackImporter {
         }
         let children = (try? fm.contentsOfDirectory(
             at: dir,
-            includingPropertiesForKeys: [.isDirectoryKey],
+            includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey],
             options: [.skipsHiddenFiles]
         )) ?? []
         let meaningful = children.filter { child in
@@ -757,7 +758,9 @@ public nonisolated enum EaglePackImporter {
         }
         if meaningful.count == 1,
            let only = meaningful.first,
-           (try? only.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true,
+           let vals = try? only.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]),
+           vals.isSymbolicLink != true,
+           vals.isDirectory == true,
            only.pathExtension.lowercased() != "info" {
             return only
         }
@@ -788,28 +791,85 @@ public nonisolated enum EaglePackImporter {
         #endif
     }
 
-    private static func validateZipEntries(at zipURL: URL) throws {
-        // Pre-validate against path traversal (`..` / leading `/`) when `unzip` lists entries cleanly.
-        if let entries = try? listZipEntries(at: zipURL) {
-            if entries.count > maxArchiveEntries {
-                throw EaglePackImportError.extractionFailed("压缩包条目数量超出安全限制（>\(maxArchiveEntries)）")
+    private static func listZipEntriesAsync(at zipURL: URL) async throws -> [String] {
+        #if os(macOS)
+        let result = try await runProcessAsync(
+            executablePath: "/usr/bin/unzip",
+            arguments: ["-Z", "-1", zipURL.path]
+        )
+        guard result.exitCode == 0 else {
+            throw EaglePackImportError.extractionFailed(
+                result.stderr.isEmpty ? "无法读取压缩包目录" : result.stderr
+            )
+        }
+        return result.stdout.components(separatedBy: .newlines).filter { !$0.isEmpty }
+        #else
+        throw EaglePackImportError.extractionFailed("当前平台暂不支持直接解压 .eaglepack 压缩归档，请在桌面端导入后通过云端同步。")
+        #endif
+    }
+
+    private static func validateZipEntries(at zipURL: URL) async throws {
+        // Fail closed: require ZIP central directory listing to succeed before extracting anything.
+        let entries = try await listZipEntriesAsync(at: zipURL)
+        if entries.count > maxArchiveEntries {
+            throw EaglePackImportError.extractionFailed("压缩包条目数量超出安全限制（>\(maxArchiveEntries)）")
+        }
+        for entry in entries {
+            let normalized = entry.replacingOccurrences(of: "\\", with: "/")
+            if normalized.hasPrefix("/") || normalized.contains("\0") {
+                throw EaglePackImportError.unsafeArchivePath(entry)
             }
-            for entry in entries {
-                let normalized = entry.replacingOccurrences(of: "\\", with: "/")
-                if normalized.hasPrefix("/") {
-                    throw EaglePackImportError.unsafeArchivePath(entry)
-                }
-                let components = normalized.split(separator: "/")
-                if components.contains("..") {
-                    throw EaglePackImportError.unsafeArchivePath(entry)
-                }
+            let components = normalized.split(separator: "/")
+            if components.contains("..") {
+                throw EaglePackImportError.unsafeArchivePath(entry)
+            }
+        }
+        #if os(macOS)
+        // Pre-reject symlink archive entries before invoking ditto so extraction cannot traverse symlinks.
+        let modeListing = try await runProcessAsync(
+            executablePath: "/usr/bin/unzip",
+            arguments: ["-Z", "-s", zipURL.path]
+        )
+        guard modeListing.exitCode == 0 else {
+            throw EaglePackImportError.extractionFailed(
+                modeListing.stderr.isEmpty ? "无法校验压缩包权限条目" : modeListing.stderr
+            )
+        }
+        for line in modeListing.stdout.components(separatedBy: .newlines) where line.hasPrefix("l") {
+            let modePrefix = line.prefix(10)
+            if modePrefix.count == 10,
+               modePrefix.dropFirst().allSatisfy({ "rwxstST-".contains($0) }) {
+                throw EaglePackImportError.unsafeArchivePath("symlink entry")
+            }
+        }
+        #endif
+    }
+
+    private static func verifyExtractedTreeSafe(root: URL) throws {
+        let fm = FileManager.default
+        let canonicalRoot = root.resolvingSymlinksInPath().standardizedFileURL.path
+        guard let enumerator = fm.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.isSymbolicLinkKey],
+            options: []
+        ) else {
+            return
+        }
+        for case let itemURL as URL in enumerator {
+            let vals = try? itemURL.resourceValues(forKeys: [.isSymbolicLinkKey])
+            if vals?.isSymbolicLink == true {
+                throw EaglePackImportError.unsafeArchivePath(itemURL.lastPathComponent)
+            }
+            let resolvedPath = itemURL.resolvingSymlinksInPath().standardizedFileURL.path
+            guard isPath(resolvedPath, strictlyInside: canonicalRoot) else {
+                throw EaglePackImportError.unsafeArchivePath(itemURL.lastPathComponent)
             }
         }
     }
 
-    private static func extractArchive(at archiveURL: URL, to destinationDir: URL) throws {
+    private static func extractArchive(at archiveURL: URL, to destinationDir: URL) async throws {
         #if os(macOS)
-        let result = try runProcess(
+        let result = try await runProcessAsync(
             executablePath: "/usr/bin/ditto",
             arguments: ["-x", "-k", "--norsrc", "--noextattr", archiveURL.path, destinationDir.path]
         )
@@ -823,6 +883,105 @@ public nonisolated enum EaglePackImporter {
     }
 
     #if os(macOS)
+    private static func runProcessAsync(
+        executablePath: String,
+        arguments: [String]
+    ) async throws -> (exitCode: Int32, stdout: String, stderr: String) {
+        try Task.checkCancellation()
+        final class ProcState: @unchecked Sendable {
+            let lock = NSLock()
+            var process: Process?
+            var cancelled = false
+            var resumed = false
+        }
+        let state = ProcState()
+
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                let finishOnce: @Sendable (Result<(exitCode: Int32, stdout: String, stderr: String), Error>) -> Void = { outcome in
+                    state.lock.lock()
+                    let shouldResume = !state.resumed
+                    state.resumed = true
+                    state.lock.unlock()
+                    if shouldResume {
+                        continuation.resume(with: outcome)
+                    }
+                }
+
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: executablePath)
+                process.arguments = arguments
+                let outPipe = Pipe()
+                let errPipe = Pipe()
+                process.standardOutput = outPipe
+                process.standardError = errPipe
+
+                state.lock.lock()
+                if state.cancelled {
+                    state.lock.unlock()
+                    finishOnce(.failure(CancellationError()))
+                    return
+                }
+                state.process = process
+                state.lock.unlock()
+
+                let group = DispatchGroup()
+                final class DataBox: @unchecked Sendable { var data = Data() }
+                let outBox = DataBox()
+                let errBox = DataBox()
+
+                process.terminationHandler = { terminated in
+                    group.notify(queue: DispatchQueue.global(qos: .userInitiated)) {
+                        state.lock.lock()
+                        let wasCancelled = state.cancelled
+                        state.process = nil
+                        state.lock.unlock()
+                        if wasCancelled {
+                            finishOnce(.failure(CancellationError()))
+                        } else {
+                            finishOnce(.success((
+                                terminated.terminationStatus,
+                                String(data: outBox.data, encoding: .utf8) ?? "",
+                                String(data: errBox.data, encoding: .utf8) ?? ""
+                            )))
+                        }
+                    }
+                }
+
+                // Enter both pipe-drain groups BEFORE process.run() so a fast-exiting child cannot trigger
+                // terminationHandler -> group.notify before the readers are registered.
+                group.enter()
+                group.enter()
+                do {
+                    try process.run()
+                    DispatchQueue.global(qos: .userInitiated).async {
+                        outBox.data = outPipe.fileHandleForReading.readDataToEndOfFile()
+                        group.leave()
+                    }
+                    DispatchQueue.global(qos: .userInitiated).async {
+                        errBox.data = errPipe.fileHandleForReading.readDataToEndOfFile()
+                        group.leave()
+                    }
+                } catch {
+                    group.leave()
+                    group.leave()
+                    state.lock.lock()
+                    state.process = nil
+                    state.lock.unlock()
+                    finishOnce(.failure(error))
+                }
+            }
+        } onCancel: {
+            state.lock.lock()
+            state.cancelled = true
+            let p = state.process
+            state.lock.unlock()
+            if let p, p.isRunning {
+                p.terminate()
+            }
+        }
+    }
+
     private static func runProcess(
         executablePath: String,
         arguments: [String]

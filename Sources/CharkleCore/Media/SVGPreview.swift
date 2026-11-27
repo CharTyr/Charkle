@@ -42,13 +42,20 @@ nonisolated final class SVGPreview: NSObject, XMLParserDelegate {
         let path = CGMutablePath()
         switch tag {
         case "rect":
-            let rect = CGRect(x: number(a["x"]), y: number(a["y"]), width: number(a["width"]), height: number(a["height"]))
-            let radius = max(0, number(a["rx"]))
-            if radius > 0 { path.addRoundedRect(in: rect, cornerWidth: radius, cornerHeight: radius) }
+            let w = number(a["width"])
+            let h = number(a["height"])
+            guard w > 0, h > 0 else { return }
+            let rect = CGRect(x: number(a["x"]), y: number(a["y"]), width: w, height: h)
+            let rawRX = max(0, number(a["rx"], default: number(a["ry"])))
+            let rawRY = max(0, number(a["ry"], default: rawRX))
+            let rx = min(rawRX, w * 0.5)
+            let ry = min(rawRY, h * 0.5)
+            if rx > 0, ry > 0 { path.addRoundedRect(in: rect, cornerWidth: rx, cornerHeight: ry) }
             else { path.addRect(rect) }
         case "circle", "ellipse":
             let rx = number(a["rx"] ?? a["r"])
             let ry = number(a["ry"] ?? a["r"])
+            guard rx > 0, ry > 0 else { return }
             path.addEllipse(in: CGRect(x: number(a["cx"]) - rx, y: number(a["cy"]) - ry, width: 2 * rx, height: 2 * ry))
         case "line":
             path.move(to: CGPoint(x: number(a["x1"]), y: number(a["y1"])))

@@ -630,12 +630,14 @@ public nonisolated enum XPostResolver {
             }
         }
 
-        guard let (tempURL, response) = try? await mediaSession.download(for: request),
-              let http = response as? HTTPURLResponse,
-              (200..<300).contains(http.statusCode) else {
+        guard let (tempURL, response) = try? await mediaSession.download(for: request) else {
             return nil
         }
         defer { try? FileManager.default.removeItem(at: tempURL) }
+        guard let http = response as? HTTPURLResponse,
+              (200..<300).contains(http.statusCode) else {
+            return nil
+        }
 
         let finalURL = http.url ?? url
         guard WebBookmark.isSafeRemoteFetchURL(finalURL),

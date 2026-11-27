@@ -71,10 +71,14 @@ public final class PinterestExploreController {
         trayPins.reduce(0) { $0 + (selectedTrayPinIDs.contains($1.id) ? 1 : 0) }
     }
 
+    @ObservationIgnored private static let maxDetailCacheEntries = 128
     @ObservationIgnored private var hasBootstrapped: Bool = false
     @ObservationIgnored private var feedGeneration: UInt64 = 0
     @ObservationIgnored private var detailGeneration: UInt64 = 0
+    @ObservationIgnored private var detailLoadTask: Task<Void, Never>?
     @ObservationIgnored private var detailCache: [String: PinterestPinDetailResult] = [:]
+    @ObservationIgnored private var detailCacheOrder: [String] = []
+    @ObservationIgnored private var trayPinIDs: Set<String> = []
     @ObservationIgnored private var lastEdgeTriggerTime: Date = .distantPast
     @ObservationIgnored private var lastViewportCenter: CGPoint?
     @ObservationIgnored private var lastViewportTimestamp: Date = .distantPast
@@ -94,7 +98,9 @@ public final class PinterestExploreController {
         if persistTray {
             let loaded = PinterestTrayStorage.load()
             self.trayPins = loaded
-            self.selectedTrayPinIDs = Set(loaded.map(\.id))
+            let loadedIDs = Set(loaded.map(\.id))
+            self.trayPinIDs = loadedIDs
+            self.selectedTrayPinIDs = loadedIDs
         }
     }
 
@@ -153,6 +159,8 @@ public final class PinterestExploreController {
     public func signOut() async {
         feedGeneration &+= 1
         detailGeneration &+= 1
+        detailLoadTask?.cancel()
+        detailLoadTask = nil
         await PinterestSessionBridge.shared.signOut()
         account = nil
         boards = []
@@ -161,6 +169,7 @@ public final class PinterestExploreController {
         detailStack.removeAll()
         detailSimilarPins.removeAll()
         detailCache.removeAll()
+        detailCacheOrder.removeAll()
         nextBookmark = nil
         hasMore = true
         errorMessage = nil
@@ -467,19 +476,22 @@ public final class PinterestExploreController {
     // MARK: - Shopping-Cart Collection Tray
 
     public func isInTray(_ pinID: String) -> Bool {
-        trayPins.contains(where: { $0.id == pinID })
+        trayPinIDs.contains(pinID)
     }
 
     /// Toggles `pin` in/out of the shopping-cart tray. Returns `true` if newly added, `false` if removed.
     @discardableResult
     public func toggleTray(_ pin: PinterestPin) -> Bool {
-        if let idx = trayPins.firstIndex(where: { $0.id == pin.id }) {
-            trayPins.remove(at: idx)
+        if trayPinIDs.remove(pin.id) != nil {
+            if let idx = trayPins.firstIndex(where: { $0.id == pin.id }) {
+                trayPins.remove(at: idx)
+            }
             selectedTrayPinIDs.remove(pin.id)
             persistTrayIfNeeded()
             return false
         } else {
             trayPins.insert(pin, at: 0)
+            trayPinIDs.insert(pin.id)
             selectedTrayPinIDs.insert(pin.id)
             persistTrayIfNeeded()
             return true
@@ -487,7 +499,7 @@ public final class PinterestExploreController {
     }
 
     public func addToTray(_ pin: PinterestPin) {
-        guard !isInTray(pin.id) else { return }
+        guard trayPinIDs.insert(pin.id).inserted else { return }
         trayPins.insert(pin, at: 0)
         selectedTrayPinIDs.insert(pin.id)
         persistTrayIfNeeded()
@@ -495,6 +507,7 @@ public final class PinterestExploreController {
 
     public func removeFromTray(_ pinID: String) {
         trayPins.removeAll { $0.id == pinID }
+        trayPinIDs.remove(pinID)
         selectedTrayPinIDs.remove(pinID)
         persistTrayIfNeeded()
     }
@@ -508,7 +521,7 @@ public final class PinterestExploreController {
     }
 
     public func selectAllTray() {
-        selectedTrayPinIDs = Set(trayPins.map(\.id))
+        selectedTrayPinIDs = trayPinIDs
     }
 
     public func deselectAllTray() {
@@ -521,6 +534,7 @@ public final class PinterestExploreController {
         guard !toRemove.isEmpty else { return 0 }
         let before = trayPins.count
         trayPins.removeAll { toRemove.contains($0.id) }
+        trayPinIDs.subtract(toRemove)
         selectedTrayPinIDs.removeAll()
         persistTrayIfNeeded()
         return before - trayPins.count
@@ -528,6 +542,7 @@ public final class PinterestExploreController {
 
     public func clearTray() {
         trayPins.removeAll()
+        trayPinIDs.removeAll()
         selectedTrayPinIDs.removeAll()
         persistTrayIfNeeded()
     }
@@ -575,6 +590,7 @@ public final class PinterestExploreController {
         if removeImportedFromTray {
             let doneIDs = report.importedPinIDs.union(report.skippedDuplicatePinIDs)
             trayPins.removeAll { doneIDs.contains($0.id) }
+            trayPinIDs.subtract(doneIDs)
             selectedTrayPinIDs.subtract(doneIDs)
             persistTrayIfNeeded()
         }
@@ -615,6 +631,8 @@ public final class PinterestExploreController {
         }
 
         if let cached = detailCache[pin.id] {
+            detailLoadTask?.cancel()
+            detailLoadTask = nil
             replaceTopDetailPin(with: cached.pin)
             detailSimilarPins = cached.similarPins
             detailSimilarBookmark = cached.similarBookmark
@@ -637,6 +655,8 @@ public final class PinterestExploreController {
         detailStack.removeLast()
         guard let top = detailStack.last else { return }
         if let cached = detailCache[top.id] {
+            detailLoadTask?.cancel()
+            detailLoadTask = nil
             replaceTopDetailPin(with: cached.pin)
             detailSimilarPins = cached.similarPins
             detailSimilarBookmark = cached.similarBookmark
@@ -652,6 +672,8 @@ public final class PinterestExploreController {
 
     public func closePinDetail() {
         detailGeneration &+= 1
+        detailLoadTask?.cancel()
+        detailLoadTask = nil
         detailStack.removeAll()
         detailSimilarPins.removeAll()
         detailSimilarBookmark = nil
@@ -688,10 +710,13 @@ public final class PinterestExploreController {
             detailHasMoreSimilar = page.hasMore && page.bookmark != nil && !fresh.isEmpty
 
             if let existing = detailCache[currentPin.id] {
-                detailCache[currentPin.id] = PinterestPinDetailResult(
-                    pin: existing.pin,
-                    similarPins: detailSimilarPins,
-                    similarBookmark: detailSimilarBookmark
+                storeDetailCache(
+                    PinterestPinDetailResult(
+                        pin: existing.pin,
+                        similarPins: detailSimilarPins,
+                        similarBookmark: detailSimilarBookmark
+                    ),
+                    for: currentPin.id
                 )
             }
         }
@@ -699,20 +724,22 @@ public final class PinterestExploreController {
 
     private func loadActivePinDetail(for pin: PinterestPin) {
         detailGeneration &+= 1
+        detailLoadTask?.cancel()
         let gen = detailGeneration
         isLoadingDetail = true
 
-        Task { @MainActor [weak self] in
+        detailLoadTask = Task { @MainActor [weak self] in
             guard let self else { return }
             defer {
                 if self.detailGeneration == gen {
                     self.isLoadingDetail = false
+                    self.detailLoadTask = nil
                 }
             }
             do {
                 let result = try await PinterestSessionBridge.shared.fetchPinDetailAndSimilar(for: pin)
-                guard self.detailGeneration == gen else { return }
-                self.detailCache[pin.id] = result
+                guard !Task.isCancelled, self.detailGeneration == gen else { return }
+                self.storeDetailCache(result, for: pin.id)
                 self.replaceTopDetailPin(with: result.pin)
                 // Also upgrade the cached tray entry if present so tray displays enriched title/metadata.
                 if let idx = self.trayPins.firstIndex(where: { $0.id == result.pin.id }) {
@@ -726,6 +753,18 @@ public final class PinterestExploreController {
             } catch {
                 // Keep showing the pin's already-available preview & metadata cleanly.
             }
+        }
+    }
+
+    private func storeDetailCache(_ result: PinterestPinDetailResult, for pinID: String) {
+        detailCache[pinID] = result
+        if let existingIdx = detailCacheOrder.firstIndex(of: pinID) {
+            detailCacheOrder.remove(at: existingIdx)
+        }
+        detailCacheOrder.append(pinID)
+        while detailCacheOrder.count > Self.maxDetailCacheEntries {
+            let evicted = detailCacheOrder.removeFirst()
+            detailCache.removeValue(forKey: evicted)
         }
     }
 

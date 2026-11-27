@@ -1,4 +1,5 @@
 import Foundation
+import Vision
 
 /// Grounded overview of a Charkle library returned to both the built-in Moodboard Agent Harness
 /// and external MCP/CLI agents.
@@ -234,6 +235,10 @@ public nonisolated struct CharkleAgentTools: Sendable {
             queryVector = try? await provider.embed(primaryQueryText)
         }
 
+        let seedFeaturePrints = seedAssets.compactMap { seed in
+            vectors[seed.id]?.featurePrint.flatMap(VisionAnalyzer.unarchiveFeaturePrint)
+        }
+
         var scoredList: [ScoredAsset] = []
         scoredList.reserveCapacity(eligible.count)
         for asset in eligible {
@@ -246,7 +251,8 @@ public nonisolated struct CharkleAgentTools: Sendable {
                 colorTolerance: request.colorTolerance,
                 queryVector: queryVector,
                 embeddingIdentity: provider?.embeddingIdentity,
-                vectors: vectors
+                vectors: vectors,
+                predecodedSeedPrints: seedFeaturePrints
             )
             scoredList.append(scored)
         }
@@ -371,7 +377,7 @@ public nonisolated struct CharkleAgentTools: Sendable {
         request: MoodboardCurationRequest,
         recall: AgentRecallResult
     ) async throws -> VerifiedBoardCompilation {
-        let vectors = try await database.vectors()
+        let featurePrints = try await database.featurePrints()
         let excluded = Set(request.excludedAssetIDs)
         let locked = Set(request.lockedAssetIDs)
         let seeds = Set(request.seedAssetIDs)
@@ -383,15 +389,30 @@ public nonisolated struct CharkleAgentTools: Sendable {
         var primaryScored: [ScoredAsset] = []
         var verifiedSections: [MoodboardSectionDraft] = []
         var demotedDuplicates: [ScoredAsset] = []
+        var obsCache: [UUID: VNFeaturePrintObservation] = [:]
+        var missingObs = Set<UUID>()
+
+        func featurePrintObs(for id: UUID) -> VNFeaturePrintObservation? {
+            if let hit = obsCache[id] { return hit }
+            if missingObs.contains(id) { return nil }
+            guard let data = featurePrints[id],
+                  let obs = VisionAnalyzer.unarchiveFeaturePrint(data) else {
+                missingObs.insert(id)
+                return nil
+            }
+            obsCache[id] = obs
+            return obs
+        }
 
         func isNearDuplicateOfSelected(_ candidate: AssetRecord) -> Bool {
             guard !locked.contains(candidate.id) && !seeds.contains(candidate.id) else { return false }
+            let candidateObs = featurePrintObs(for: candidate.id)
             for chosen in primaryAssets {
                 if !candidate.contentHash.isEmpty && candidate.contentHash == chosen.contentHash {
                     return true
                 }
-                if let a = vectors[candidate.id]?.featurePrint,
-                   let b = vectors[chosen.id]?.featurePrint,
+                if let a = candidateObs,
+                   let b = featurePrintObs(for: chosen.id),
                    let dist = VisionAnalyzer.visualDistance(between: a, and: b),
                    dist < 0.18 {
                     return true
@@ -908,7 +929,8 @@ public nonisolated struct CharkleAgentTools: Sendable {
         colorTolerance: Double,
         queryVector: [Float]?,
         embeddingIdentity: String?,
-        vectors: [UUID: AssetVector]
+        vectors: [UUID: AssetVector],
+        predecodedSeedPrints: [VNFeaturePrintObservation]? = nil
     ) -> ScoredAsset {
         var signals: [(Double, Double, String)] = []
 
@@ -934,12 +956,18 @@ public nonisolated struct CharkleAgentTools: Sendable {
                 signals.append((best, 0.42, "语义接近"))
             }
         }
-        if let print = vectors[asset.id]?.featurePrint, !seeds.isEmpty {
-            let sims = seeds.compactMap { vectors[$0.id]?.featurePrint }
-                .compactMap { VisionAnalyzer.visualDistance(between: print, and: $0) }
-                .map { VisionAnalyzer.visualSimilarity(forDistance: $0) }
-            if let best = sims.max() {
-                signals.append((best, 0.36, "画面风格接近"))
+        if let printData = vectors[asset.id]?.featurePrint, !seeds.isEmpty {
+            let seedObsList = predecodedSeedPrints
+                ?? seeds.compactMap { vectors[$0.id]?.featurePrint.flatMap(VisionAnalyzer.unarchiveFeaturePrint) }
+            if !seedObsList.isEmpty,
+               let candidateObs = VisionAnalyzer.unarchiveFeaturePrint(printData) {
+                let best = seedObsList
+                    .compactMap { VisionAnalyzer.visualDistance(between: candidateObs, and: $0) }
+                    .map { VisionAnalyzer.visualSimilarity(forDistance: $0) }
+                    .max()
+                if let best {
+                    signals.append((best, 0.36, "画面风格接近"))
+                }
             }
         }
         let effectiveColors = targetColors.isEmpty ? seeds.flatMap { $0.dominantColors.prefix(3) } : targetColors

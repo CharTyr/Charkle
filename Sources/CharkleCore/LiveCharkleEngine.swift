@@ -5,6 +5,7 @@ import CryptoKit
 import Foundation
 import ImageIO
 import os
+import Vision
 
 private let engineLogger = Logger(subsystem: "com.charkle.core", category: "LiveCharkleEngine")
 
@@ -259,15 +260,59 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
     }
 
     /// Replaces an asset's cover thumbnail (`grid520` + `preview1400`) using a user-selected video frame
-    /// or custom image, updates extracted dominant colors, and queues thumbnail cloud sync.
+    /// or custom image, updates extracted dominant colors + Vision FeaturePrint, invalidates stale dedup
+    /// fingerprints, and queues thumbnail cloud sync.
     public func updateAssetCoverImage(id: UUID, imageData: Data) async throws -> AssetRecord {
         guard !imageData.isEmpty else {
             throw LibraryDatabaseError("封面图片数据为空。")
         }
-        guard var current = try await database.asset(id: id) else {
+        guard let current = try await database.asset(id: id) else {
             throw DriveTransportError.fileNotFound(id.uuidString)
         }
 
+        let prepared = try await Self.prepareCustomCoverOffActor(
+            imageData: imageData,
+            asset: current,
+            media: media
+        )
+        invalidateDedupFingerprint(for: id)
+
+        let currentSyncConfig = await syncConfig()
+        return try await database.transaction { store in
+            guard var latest = try store.asset(id: id) else {
+                throw DriveTransportError.fileNotFound(id.uuidString)
+            }
+            latest.dominantColors = prepared.colors
+            latest.pixelWidth = prepared.width
+            latest.pixelHeight = prepared.height
+            let saved = try store.saveAssetLocally(latest)
+            if currentSyncConfig.syncThumbnails {
+                try store.markProjection("thumbnails", id: id)
+            }
+            if let feature = prepared.featurePrint {
+                let existingVec = try store.vector(for: id)
+                let updatedVec = AssetVector(
+                    featurePrint: feature,
+                    embedding: existingVec?.embedding,
+                    embeddingModel: existingVec?.embeddingModel,
+                    precision: existingVec?.precision ?? .float16
+                )
+                if currentSyncConfig.syncEmbeddings {
+                    try store.record(.vector(id, updatedVec))
+                } else {
+                    try store.saveVector(updatedVec, for: id)
+                }
+            }
+            return saved
+        }
+    }
+
+    @concurrent
+    private static func prepareCustomCoverOffActor(
+        imageData: Data,
+        asset: AssetRecord,
+        media: MediaPipeline
+    ) async throws -> (colors: [LabColor], width: Int, height: Int, featurePrint: Data?) {
         let decodedImage: CGImage? = autoreleasepool {
             guard let source = CGImageSourceCreateWithData(imageData as CFData, [kCGImageSourceShouldCache: false] as CFDictionary) else {
                 return nil
@@ -285,32 +330,19 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
             throw LibraryDatabaseError("无法解析所选视频帧图片。")
         }
 
-        let originalKind = current.mediaKind
-        let originalPixelWidth = current.pixelWidth
-        let originalPixelHeight = current.pixelHeight
-        try media.writeCustomPoster(cgImage, for: &current)
-        let updatedColors = current.dominantColors
+        var working = asset
+        let originalKind = working.mediaKind
+        let originalPixelWidth = working.pixelWidth
+        let originalPixelHeight = working.pixelHeight
+        try media.writeCustomPoster(cgImage, for: &working)
         let updatedWidth = (originalKind == .video && originalPixelWidth > 0 && originalPixelHeight > 0)
             ? originalPixelWidth
-            : current.pixelWidth
+            : working.pixelWidth
         let updatedHeight = (originalKind == .video && originalPixelWidth > 0 && originalPixelHeight > 0)
             ? originalPixelHeight
-            : current.pixelHeight
-
-        let currentSyncConfig = await syncConfig()
-        return try await database.transaction { store in
-            guard var latest = try store.asset(id: id) else {
-                throw DriveTransportError.fileNotFound(id.uuidString)
-            }
-            latest.dominantColors = updatedColors
-            latest.pixelWidth = updatedWidth
-            latest.pixelHeight = updatedHeight
-            let saved = try store.saveAssetLocally(latest)
-            if currentSyncConfig.syncThumbnails {
-                try store.markProjection("thumbnails", id: id)
-            }
-            return saved
-        }
+            : working.pixelHeight
+        let featurePrint = VisionAnalyzer.generateFeaturePrint(for: cgImage)
+        return (working.dominantColors, updatedWidth, updatedHeight, featurePrint)
     }
 
     public func refreshRichAsset(id: UUID) async throws -> AssetRecord {
@@ -501,10 +533,17 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
     /// Idempotent and zero-overhead once migrated; skips media-bearing notes when offline rather than degrading covers.
     public func upgradeLegacyXiaohongshuCoversIfNeeded() async -> [UUID] {
         guard !isUpgradingXHSCovers else { return [] }
+        if (try? await database.state("migration.xhsLegacyCoversV1", as: Bool.self)) == true {
+            return []
+        }
         isUpgradingXHSCovers = true
         defer { isUpgradingXHSCovers = false }
 
-        guard let xhsMatches = try? await database.assetsWithPayloadContaining("\"xiaohongshu\"", includeTrashed: true) else {
+        guard let xhsMatches = try? await database.assetsWithPayloadContaining(
+            "\"xiaohongshu\"",
+            kind: .webBookmark,
+            includeTrashed: true
+        ) else {
             return []
         }
 
@@ -512,15 +551,22 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
             guard asset.richMetadata?.socialPost?.platform == .xiaohongshu else { return false }
             return asset.pixelWidth != 900 || asset.pixelHeight != 1_440
         }
-        guard !candidates.isEmpty else { return [] }
+        guard !candidates.isEmpty else {
+            try? await database.setState("migration.xhsLegacyCoversV1", true)
+            return []
+        }
 
         let stagingDir = media.staging.appending(path: "xhs-cover-upgrade-\(UUID().uuidString)", directoryHint: .isDirectory)
         try? FileManager.default.createDirectory(at: stagingDir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: stagingDir) }
 
         var upgradedIDs: [UUID] = []
+        var skippedIncomplete = false
         for var asset in candidates {
-            guard !Task.isCancelled else { break }
+            guard !Task.isCancelled else {
+                skippedIncomplete = true
+                break
+            }
             guard var meta = asset.richMetadata?.socialPost else { continue }
             var embeddedPoster: CGImage?
 
@@ -565,7 +611,9 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
                 let originalFile = media.originalPath(for: asset)
                 if FileManager.default.fileExists(atPath: originalFile.path) {
                     let ext = originalFile.pathExtension.lowercased()
-                    if ["mp4", "mov", "m4v", "webm", "jpg", "jpeg", "png", "webp", "heic"].contains(ext) {
+                    if ["mp4", "mov", "m4v", "webm"].contains(ext) {
+                        embeddedPoster = await MediaPipeline.videoPosterFrame(originalFile)
+                    } else if ["jpg", "jpeg", "png", "webp", "heic"].contains(ext) {
                         embeddedPoster = MediaPipeline.raster(originalFile)?.poster
                     }
                 }
@@ -593,13 +641,18 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
 
             // Never degrade a media-bearing note to a text-only fallback if offline / temporarily unreachable.
             if hasDeclaredMedia && embeddedPoster == nil {
+                skippedIncomplete = true
                 continue
             }
 
             let authorAvatar = await SocialPostResolver.fetchAvatarImage(from: meta.authorAvatarURL)
 
-            guard !Task.isCancelled else { break }
+            guard !Task.isCancelled else {
+                skippedIncomplete = true
+                break
+            }
             guard let card = MediaArtwork.socialPostCard(meta, embeddedMedia: embeddedPoster, authorAvatar: authorAvatar) else {
+                skippedIncomplete = true
                 continue
             }
 
@@ -627,8 +680,12 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
                     upgradedIDs.append(saved.id)
                 }
             } catch {
+                skippedIncomplete = true
                 continue
             }
+        }
+        if !skippedIncomplete && !Task.isCancelled {
+            try? await database.setState("migration.xhsLegacyCoversV1", true)
         }
         return upgradedIDs
     }
@@ -724,12 +781,17 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         }
 
         let sceneName = Self.sanitizedPureRefSceneName(from: url)
-        let scene = try PureRefCodec.decode(contentsOf: url)
-
         let stagingDir = FileManager.default.temporaryDirectory
             .appending(path: "charkle-pur-import-\(UUID().uuidString)", directoryHint: .isDirectory)
-        try FileManager.default.createDirectory(at: stagingDir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: stagingDir) }
+
+        let staged = try await Self.decodeAndStagePureRefOffActor(
+            at: url,
+            sceneName: sceneName,
+            stagingDir: stagingDir
+        )
+        let scene = staged.scene
+        let hashByImageIndex = staged.hashByImageIndex
 
         let (sceneFolder, _) = try await findOrCreateFolderForImportWithStatus(
             named: sceneName,
@@ -737,31 +799,9 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
             colorHex: nil
         )
 
-        var works: [ExpandedCaptureWork] = []
-        works.reserveCapacity(scene.images.count)
-        var hashByImageIndex: [Int: String] = [:]
-        var usedFileNames = Set<String>()
-
-        for blob in scene.images {
-            let preferredBase = Self.sanitizedPureRefAssetStem(
-                displayName: blob.displayName,
-                sourcePath: blob.sourcePath,
-                fallbackIndex: blob.index + 1,
-                sceneName: sceneName
-            )
-            var fileName = "\(preferredBase).\(blob.format.fileExtension)"
-            var suffix = 2
-            while !usedFileNames.insert(fileName.lowercased()).inserted {
-                fileName = "\(preferredBase)-\(suffix).\(blob.format.fileExtension)"
-                suffix += 1
-            }
-
-            let fileURL = stagingDir.appending(path: fileName)
-            try blob.data.write(to: fileURL, options: .atomic)
-            hashByImageIndex[blob.index] = SHA256.hash(data: blob.data).map { String(format: "%02x", $0) }.joined()
-
+        let works: [ExpandedCaptureWork] = staged.files.map { item in
             let override = ImportedAssetMetadataOverride(
-                title: preferredBase,
+                title: item.title,
                 tags: ["PureRef"],
                 rating: 0,
                 notes: nil,
@@ -771,7 +811,7 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
                 updatedAt: nil,
                 preRenderedBookmarkThumbnailURL: nil
             )
-            works.append(ExpandedCaptureWork(input: .fileURL(fileURL), folderID: sceneFolder.id, metadataOverride: override))
+            return ExpandedCaptureWork(input: .fileURL(item.fileURL), folderID: sceneFolder.id, metadataOverride: override)
         }
 
         let imported: [AssetRecord]
@@ -830,6 +870,45 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         )
     }
 
+    @concurrent
+    private static func decodeAndStagePureRefOffActor(
+        at url: URL,
+        sceneName: String,
+        stagingDir: URL
+    ) async throws -> (scene: PureRefScene, hashByImageIndex: [Int: String], files: [(fileURL: URL, title: String)]) {
+        let accessed = url.startAccessingSecurityScopedResource()
+        defer { if accessed { url.stopAccessingSecurityScopedResource() } }
+
+        let scene = try PureRefCodec.decode(contentsOf: url)
+        try FileManager.default.createDirectory(at: stagingDir, withIntermediateDirectories: true)
+
+        var hashByImageIndex: [Int: String] = [:]
+        var usedFileNames = Set<String>()
+        var files: [(fileURL: URL, title: String)] = []
+        files.reserveCapacity(scene.images.count)
+
+        for blob in scene.images {
+            let preferredBase = sanitizedPureRefAssetStem(
+                displayName: blob.displayName,
+                sourcePath: blob.sourcePath,
+                fallbackIndex: blob.index + 1,
+                sceneName: sceneName
+            )
+            var fileName = "\(preferredBase).\(blob.format.fileExtension)"
+            var suffix = 2
+            while !usedFileNames.insert(fileName.lowercased()).inserted {
+                fileName = "\(preferredBase)-\(suffix).\(blob.format.fileExtension)"
+                suffix += 1
+            }
+
+            let fileURL = stagingDir.appending(path: fileName)
+            try blob.data.write(to: fileURL, options: .atomic)
+            hashByImageIndex[blob.index] = SHA256.hash(data: blob.data).map { String(format: "%02x", $0) }.joined()
+            files.append((fileURL, preferredBase))
+        }
+        return (scene, hashByImageIndex, files)
+    }
+
     public func exportAssetsToPureRef(
         assetIDs: [UUID],
         title: String,
@@ -869,10 +948,7 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         }
 
         let scene = PureRefCodec.buildScene(fromAssets: inputs)
-        let encoded = try PureRefCodec.encode(scene)
-        let parentDir = destinationURL.deletingLastPathComponent()
-        try FileManager.default.createDirectory(at: parentDir, withIntermediateDirectories: true)
-        try encoded.write(to: destinationURL, options: .atomic)
+        let byteCount = try await Self.encodeAndWritePureRefOffActor(scene: scene, to: destinationURL)
 
         return PureRefExportReport(
             fileURL: destinationURL,
@@ -880,7 +956,7 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
             placementCount: scene.placements.count,
             noteCount: scene.notes.count,
             skippedCount: skippedCount,
-            byteCount: encoded.count
+            byteCount: byteCount
         )
     }
 
@@ -912,10 +988,7 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
             throw PureRefCodecError.encodingFailed("当前情绪板中没有可导出的图片或便签。")
         }
 
-        let encoded = try PureRefCodec.encode(built.scene)
-        let parentDir = destinationURL.deletingLastPathComponent()
-        try FileManager.default.createDirectory(at: parentDir, withIntermediateDirectories: true)
-        try encoded.write(to: destinationURL, options: .atomic)
+        let byteCount = try await Self.encodeAndWritePureRefOffActor(scene: built.scene, to: destinationURL)
 
         return PureRefExportReport(
             fileURL: destinationURL,
@@ -923,28 +996,46 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
             placementCount: built.scene.placements.count,
             noteCount: built.scene.notes.count,
             skippedCount: built.skippedCount,
-            byteCount: encoded.count
+            byteCount: byteCount
         )
     }
 
+    @concurrent
+    private static func encodeAndWritePureRefOffActor(scene: PureRefScene, to destinationURL: URL) async throws -> Int {
+        let encoded = try PureRefCodec.encode(scene)
+        let accessed = destinationURL.startAccessingSecurityScopedResource()
+        defer { if accessed { destinationURL.stopAccessingSecurityScopedResource() } }
+        let parentDir = destinationURL.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: parentDir, withIntermediateDirectories: true)
+        try encoded.write(to: destinationURL, options: .atomic)
+        return encoded.count
+    }
+
     private func resolvePureRefExportImageData(for asset: AssetRecord) async -> Data? {
-        // Prefer full-resolution original if directly image-decodable (PNG/JPEG/HEIC/WebP/GIF/TIFF/BMP)
-        if let original = try? await originalURL(for: asset.id),
-           let data = try? Data(contentsOf: original),
-           PureRefCodec.inspectImageDimensions(data) != nil {
-            if PureRefCodec.detectImageFormat(in: data) != nil {
-                return data
-            }
-            if let converted = PureRefCodec.convertToPNG(data) {
-                return converted
+        var candidates: [URL] = []
+        if let original = try? await originalURL(for: asset.id) {
+            candidates.append(original)
+        }
+        for tier in [ThumbnailTier.preview1400, ThumbnailTier.grid520] {
+            if let thumb = await thumbnailURL(for: asset.id, tier: tier) {
+                candidates.append(thumb)
             }
         }
-        // Fallback to high-res generated poster thumbnail (videos, PDFs, web bookmarks, design files)
-        for tier in [ThumbnailTier.preview1400, ThumbnailTier.grid520] {
-            if let thumb = await thumbnailURL(for: asset.id, tier: tier),
-               let data = try? Data(contentsOf: thumb),
+        guard !candidates.isEmpty else { return nil }
+        return await Self.readAndConvertPureRefImageOffActor(candidates: candidates)
+    }
+
+    @concurrent
+    private static func readAndConvertPureRefImageOffActor(candidates: [URL]) async -> Data? {
+        for candidate in candidates {
+            if let data = try? Data(contentsOf: candidate),
                PureRefCodec.inspectImageDimensions(data) != nil {
-                return PureRefCodec.detectImageFormat(in: data) != nil ? data : PureRefCodec.convertToPNG(data)
+                if PureRefCodec.detectImageFormat(in: data) != nil {
+                    return data
+                }
+                if let converted = PureRefCodec.convertToPNG(data) {
+                    return converted
+                }
             }
         }
         return nil
@@ -1575,12 +1666,14 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         folderID: UUID?
     ) async throws -> PreparedAsset {
         let bookmark = await WebBookmark.fetch(url, allowWebViewSnapshot: true)
-        let resolvedURL = bookmark.finalURL ?? url
-        let domain = WebURLParser.cleanDomain(for: resolvedURL) ?? resolvedURL.host() ?? "web.link"
+        let canonicalURL = bookmark.finalURL ?? url
+        // Preserve the user's original collected URL as `sourceURL` (login/paywall/locale redirects
+        // must never overwrite the original bookmark target; keep redirect target in `canonicalURL`).
+        let domain = WebURLParser.cleanDomain(for: url) ?? url.host() ?? WebURLParser.cleanDomain(for: canonicalURL) ?? "web.link"
         let cleanSuppliedTitle = suppliedTitle?.trimmingCharacters(in: .whitespacesAndNewlines)
         let resolvedTitle = (cleanSuppliedTitle?.isEmpty == false ? cleanSuppliedTitle! : nil)
             ?? bookmark.title
-            ?? WebBookmark.fallbackTitle(for: resolvedURL)
+            ?? WebBookmark.fallbackTitle(for: url)
         let cleanSuppliedNotes = suppliedNotes?.trimmingCharacters(in: .whitespacesAndNewlines)
         let pageSummary = bookmark.description?.trimmingCharacters(in: .whitespacesAndNewlines)
         let resolvedNotes: String = {
@@ -1599,17 +1692,17 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
             domain: domain,
             siteName: bookmark.siteName,
             description: resolvedNotes,
-            urlString: resolvedURL.absoluteString,
+            urlString: url.absoluteString,
             themeColorHex: bookmark.themeColorHex,
             favicon: bookmark.favicon
         ) else {
-            return try await prepare(.webURL(resolvedURL, title: resolvedTitle, notes: resolvedNotes), folderID: folderID)
+            return try await prepare(.webURL(url, title: resolvedTitle, notes: resolvedNotes), folderID: folderID)
         }
 
         let id = UUID()
         do {
             var source = try await media.ingestPreResolvedWebPage(
-                url: resolvedURL,
+                url: url,
                 title: resolvedTitle,
                 notes: resolvedNotes,
                 domain: domain,
@@ -1626,7 +1719,8 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
             if !bookmark.attachments.isEmpty
                 || !(pageSummary?.isEmpty ?? true)
                 || bookmark.isVideoPage
-                || !(bookmark.authorName?.isEmpty ?? true) {
+                || !(bookmark.authorName?.isEmpty ?? true)
+                || canonicalURL.absoluteString != url.absoluteString {
                 source.asset.richMetadata = AssetRichMetadata(
                     webPage: WebPageRichMetadata(
                         siteName: bookmark.siteName,
@@ -1636,7 +1730,7 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
                         attachments: bookmark.attachments,
                         hasVideo: bookmark.isVideoPage,
                         durationSeconds: bookmark.durationSeconds,
-                        canonicalURL: resolvedURL.absoluteString
+                        canonicalURL: canonicalURL.absoluteString
                     )
                 )
             }
@@ -2108,6 +2202,63 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         return result
     }
 
+    /// Applies multiple distinct `AssetBatchPatch`es in a single SQLite write transaction.
+    public func updateAssetsBatch(_ patches: [AssetBatchPatch]) async throws -> [AssetRecord] {
+        guard !patches.isEmpty else { return [] }
+        if patches.count == 1 {
+            return try await updateAssets(patches[0])
+        }
+        let result = try await database.transaction { store in
+            var changed: [AssetRecord] = []
+            changed.reserveCapacity(patches.count)
+            for patch in patches {
+                if case .folder(let id) = patch.folderAssignment, try store.folder(id: id) == nil {
+                    throw DriveTransportError.fileNotFound(id.uuidString)
+                }
+                var seen = Set<UUID>()
+                for id in patch.assetIDs where seen.insert(id).inserted {
+                    guard var asset = try store.asset(id: id) else { continue }
+                    if let title = patch.title { asset.title = title }
+                    if let notes = patch.notes { asset.notes = notes }
+                    if let sourceURL = patch.sourceURL {
+                        let trimmed = sourceURL.trimmingCharacters(in: .whitespacesAndNewlines)
+                        asset.sourceURL = trimmed.isEmpty ? nil : trimmed
+                        asset.sourceDomain = URL(string: trimmed).flatMap(WebURLParser.cleanDomain)
+                            ?? URL(string: trimmed)?.host()
+                    }
+                    if let rating = patch.rating { asset.rating = min(5, max(0, rating)) }
+                    var tags = tagMap(asset.tags + patch.addTags)
+                    let dismissed = Set(patch.dismissSuggestedTags.map(SearchText.normalize))
+                    asset.suggestedTags.removeAll { dismissed.contains(SearchText.normalize($0)) }
+                    if patch.acceptSuggestedTags {
+                        tags.merge(tagMap(asset.suggestedTags)) { first, _ in first }
+                        asset.suggestedTags.removeAll()
+                    }
+                    for tag in patch.removeTags { tags.removeValue(forKey: SearchText.normalize(tag)) }
+                    asset.tags = tags.values.sorted()
+                    switch patch.folderAssignment {
+                    case .unchanged: break
+                    case .inbox: asset.folderID = nil
+                    case .folder(let folder): asset.folderID = folder
+                    }
+                    if let pinned = patch.pinnedOffline { asset.pinnedOffline = pinned }
+                    if let trashed = patch.isTrashed { asset.isTrashed = trashed }
+                    changed.append(try store.saveAssetLocally(asset))
+                }
+            }
+            return changed
+        }
+        let pinnedIDs = result.filter(\.pinnedOffline).map(\.id)
+        if patches.contains(where: { $0.pinnedOffline == true }), !pinnedIDs.isEmpty {
+            await warmOfflinePins(pinnedIDs)
+            return try await database.transaction { store in try result.compactMap { try store.asset(id: $0.id) } }
+        }
+        if patches.contains(where: { $0.pinnedOffline == false }) {
+            _ = try await evict(keeping: [])
+        }
+        return result
+    }
+
     public func permanentlyDeleteAssets(ids: [UUID]) async throws {
         let config = await syncConfig()
         let rootSegments = config.rootFolderName
@@ -2117,15 +2268,15 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         let rootPrefix = (rootSegments.isEmpty ? ["Charkle"] : rootSegments).joined(separator: "/")
 
         let uniqueIDs = Array(Set(ids))
-        var precomputedMD5: [UUID: String] = [:]
-        for id in uniqueIDs {
-            if let asset = try? await database.asset(id: id),
-               let cached = media.cachedOriginal(for: asset),
-               let digest = try? MediaPipeline.digests(cached) {
-                precomputedMD5[id] = digest.md5
+        var cachedPairs: [(UUID, URL)] = []
+        cachedPairs.reserveCapacity(uniqueIDs.count)
+        let loadedAssets = (try? await database.assets(ids: uniqueIDs)) ?? []
+        for asset in loadedAssets {
+            if let cached = media.cachedOriginal(for: asset) {
+                cachedPairs.append((asset.id, cached))
             }
         }
-        let md5Lookup = precomputedMD5
+        let md5Lookup = await Self.computeMD5DigestsOffActor(cachedPairs)
 
         try await database.transaction { store in
             let folders = try store.fetchFolders()
@@ -2190,17 +2341,39 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
 
     private var dedupFingerprintCacheLoaded = false
     private var dedupFingerprintCache: [UUID: CachedDedupFingerprintEntry] = [:]
+    private var invalidatedDedupAssetIDs: Set<UUID> = []
 
     private var dedupFingerprintCacheURL: URL {
         media.directory.appending(path: "dedup-fingerprints-v1.json")
     }
 
-    private func loadDedupFingerprintCacheIfNeeded() {
+    private func invalidateDedupFingerprint(for id: UUID) {
+        invalidatedDedupAssetIDs.insert(id)
+        if dedupFingerprintCache.removeValue(forKey: id) != nil, dedupFingerprintCacheLoaded {
+            let snapshot = dedupFingerprintCache
+            let url = dedupFingerprintCacheURL
+            Task { await Self.persistDedupFingerprintCacheOffActor(snapshot, to: url) }
+        }
+    }
+
+    private func loadDedupFingerprintCacheIfNeeded() async {
+        guard !dedupFingerprintCacheLoaded else { return }
+        let loaded = await Self.loadDedupFingerprintCacheOffActor(from: dedupFingerprintCacheURL)
         guard !dedupFingerprintCacheLoaded else { return }
         dedupFingerprintCacheLoaded = true
-        guard let data = try? Data(contentsOf: dedupFingerprintCacheURL),
+        var merged = loaded
+        for invalidID in invalidatedDedupAssetIDs {
+            merged.removeValue(forKey: invalidID)
+        }
+        invalidatedDedupAssetIDs.removeAll()
+        dedupFingerprintCache = merged
+    }
+
+    @concurrent
+    private static func loadDedupFingerprintCacheOffActor(from url: URL) async -> [UUID: CachedDedupFingerprintEntry] {
+        guard let data = try? Data(contentsOf: url),
               let decoded = try? JSONDecoder().decode([String: CachedDedupFingerprintEntry].self, from: data) else {
-            return
+            return [:]
         }
         var mapped: [UUID: CachedDedupFingerprintEntry] = [:]
         mapped.reserveCapacity(decoded.count)
@@ -2209,17 +2382,55 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
                 mapped[uuid] = value
             }
         }
-        dedupFingerprintCache = mapped
+        return mapped
     }
 
-    private func persistDedupFingerprintCache() {
+    @concurrent
+    private static func persistDedupFingerprintCacheOffActor(_ cache: [UUID: CachedDedupFingerprintEntry], to url: URL) async {
         var encodedMap: [String: CachedDedupFingerprintEntry] = [:]
-        encodedMap.reserveCapacity(dedupFingerprintCache.count)
-        for (id, entry) in dedupFingerprintCache {
+        encodedMap.reserveCapacity(cache.count)
+        for (id, entry) in cache {
             encodedMap[id.uuidString] = entry
         }
         guard let data = try? JSONEncoder().encode(encodedMap) else { return }
-        try? data.write(to: dedupFingerprintCacheURL, options: .atomic)
+        try? data.write(to: url, options: .atomic)
+    }
+
+    @concurrent
+    private static func computeMD5DigestsOffActor(_ pairs: [(UUID, URL)]) async -> [UUID: String] {
+        var result: [UUID: String] = [:]
+        result.reserveCapacity(pairs.count)
+        for (id, url) in pairs {
+            if let digest = try? MediaPipeline.digests(url) {
+                result[id] = digest.md5
+            }
+        }
+        return result
+    }
+
+    @concurrent
+    private static func hashDocumentsOffActor(_ items: [(asset: AssetRecord, fileURL: URL?)]) async -> [UUID: String] {
+        var hashes: [UUID: String] = [:]
+        hashes.reserveCapacity(items.count)
+        for (asset, url) in items {
+            if let textHash = SmartDeduplicator.normalizedDocumentTextHash(for: asset, cachedFileURL: url) {
+                hashes[asset.id] = textHash
+            }
+        }
+        return hashes
+    }
+
+    @concurrent
+    private static func clusterDuplicatesOffActor(
+        items: [SmartDeduplicator.IndexedMediaAsset],
+        sensitivity: DeduplicationSensitivity,
+        boardReferencedAssetIDs: Set<UUID>
+    ) async -> [DuplicateGroup] {
+        SmartDeduplicator.clusterDuplicates(
+            items: items,
+            sensitivity: sensitivity,
+            boardReferencedAssetIDs: boardReferencedAssetIDs
+        )
     }
 
     public func scanDuplicateImages(
@@ -2229,7 +2440,7 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         onProgress: (@Sendable (DeduplicationScanProgress) async -> Void)? = nil
     ) async throws -> DeduplicationScanReport {
         let startedAt = Date()
-        loadDedupFingerprintCacheIfNeeded()
+        await loadDedupFingerprintCacheIfNeeded()
 
         var criteria = FilterCriteria(includeTrashed: false, sortBy: .newest)
         if let mediaKinds, !mediaKinds.isEmpty {
@@ -2356,17 +2567,14 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
                 if dedupFingerprintCache.count > max(5_000, activeIDs.count * 2) {
                     dedupFingerprintCache = dedupFingerprintCache.filter { activeIDs.contains($0.key) }
                 }
-                persistDedupFingerprintCache()
+                await Self.persistDedupFingerprintCacheOffActor(dedupFingerprintCache, to: dedupFingerprintCacheURL)
             }
         }
 
         if !toHashDocuments.isEmpty {
-            for (asset, url) in toHashDocuments {
-                completedWork += 1
-                if let textHash = SmartDeduplicator.normalizedDocumentTextHash(for: asset, cachedFileURL: url) {
-                    docTextHashes[asset.id] = textHash
-                }
-            }
+            let computedDocHashes = await Self.hashDocumentsOffActor(toHashDocuments)
+            docTextHashes.merge(computedDocHashes) { _, new in new }
+            completedWork += toHashDocuments.count
             await onProgress?(DeduplicationScanProgress(
                 completed: completedWork,
                 total: workTotal,
@@ -2389,7 +2597,7 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
             )
         }
 
-        let groups = SmartDeduplicator.clusterDuplicates(
+        let groups = await Self.clusterDuplicatesOffActor(
             items: indexed,
             sensitivity: sensitivity,
             boardReferencedAssetIDs: boardReferencedAssetIDs
@@ -2563,9 +2771,12 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         if disposal == .permanentlyDelete && !txOutcome.removedIDs.isEmpty {
             try await permanentlyDeleteAssets(ids: txOutcome.removedIDs)
             for rid in txOutcome.removedIDs {
+                invalidatedDedupAssetIDs.insert(rid)
                 dedupFingerprintCache.removeValue(forKey: rid)
             }
-            persistDedupFingerprintCache()
+            if dedupFingerprintCacheLoaded {
+                await Self.persistDedupFingerprintCacheOffActor(dedupFingerprintCache, to: dedupFingerprintCacheURL)
+            }
         }
 
         return DeduplicationCleanupResult(
@@ -2583,6 +2794,25 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
     public func similarAssets(to assetID: UUID, limit: Int) async throws -> [ScoredAsset] {
         try await curator.similarAssets(to: assetID, limit: limit)
     }
+
+    func fetchAssetSourceKeys(includeTrashed: Bool = false) async throws -> [(sourceURL: String?, socialOriginalURL: String?, mediaKind: MediaKind)] {
+        try await database.fetchAssetSourceKeys(includeTrashed: includeTrashed)
+    }
+
+    public func suggestFolders(for assetIDs: [UUID]) async throws -> [UUID: FolderSuggestion] {
+        let tsConfig = await typeSafeConfig()
+        if tsConfig.enabled, tsConfig.enableInboxSmartTriage, intelligence.storedTypeSafeAPIKey() != nil {
+            var out: [UUID: FolderSuggestion] = [:]
+            for id in assetIDs {
+                if let suggestion = try await suggestFolder(for: id) {
+                    out[id] = suggestion
+                }
+            }
+            return out
+        }
+        return try await curator.suggestFolders(for: assetIDs)
+    }
+
     public func suggestFolder(for assetID: UUID) async throws -> FolderSuggestion? {
         let tsConfig = await typeSafeConfig()
         if tsConfig.enabled, tsConfig.enableInboxSmartTriage,
@@ -2688,41 +2918,32 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
 
     private func canEvictCloudOriginals() async -> Bool {
         let config = await syncConfig()
-        let cloudBackends = config.enabledCloudBackends
-        if cloudBackends.isEmpty {
+        // `asset.driveFileID` belongs to the primary sync backend; only allow evicting local originals
+        // when the primary backend itself is an enabled, reachable cloud backend that can re-download them.
+        let primary = config.primaryBackend
+        guard primary.isEnabled, primary.mode != .localOnly else {
             return false
         }
         if injectedTransport != nil {
             return true
         }
-        for profile in cloudBackends {
-            switch profile.mode {
-            case .localOnly:
-                continue
-            case .iCloudDrive:
-                if await hasICloudBookmark(for: profile.id)
-                    || !profile.iCloudCustomFolderPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                    || ICloudDriveTransport.probeAvailability(containerIdentifier: profile.iCloudContainerIdentifier).hasAutomaticPath {
-                    return true
-                }
-            case .webDAV:
-                if !profile.webDAVServerURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    return true
-                }
-            case .gdirectMount:
-                if GDirectIntegration.isMountActive(at: profile.mountPath)
-                    || GDirectIntegration.activeLoopbackNFSMountPath() != nil {
-                    return true
-                }
-            case .directAPIWithGDirect:
-                if await oauth.hasStoredToken()
-                    || GDirectIntegration.isMountActive(at: profile.mountPath)
-                    || GDirectIntegration.activeLoopbackNFSMountPath() != nil {
-                    return true
-                }
-            }
+        switch primary.mode {
+        case .localOnly:
+            return false
+        case .iCloudDrive:
+            return await hasICloudBookmark(for: primary.id)
+                || !primary.iCloudCustomFolderPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                || ICloudDriveTransport.probeAvailability(containerIdentifier: primary.iCloudContainerIdentifier).hasAutomaticPath
+        case .webDAV:
+            return !primary.webDAVServerURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        case .gdirectMount:
+            return GDirectIntegration.isMountActive(at: primary.mountPath)
+                || GDirectIntegration.activeLoopbackNFSMountPath() != nil
+        case .directAPIWithGDirect:
+            return await oauth.hasStoredToken()
+                || GDirectIntegration.isMountActive(at: primary.mountPath)
+                || GDirectIntegration.activeLoopbackNFSMountPath() != nil
         }
-        return false
     }
 
     private func evict(keeping: Set<UUID>) async throws -> CacheStats {
@@ -2851,7 +3072,7 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
               let orig = media.cachedOriginal(for: before) else {
             return nil
         }
-        let extracted = ImageMetadataExtractor.extract(from: orig)
+        let extracted = await Self.extractImageMetadataOffActor(from: orig)
         guard extracted.photoExif != nil || extracted.aiGeneration != nil else {
             return nil
         }
@@ -2863,6 +3084,11 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
             current.richMetadata = rich
             return try store.saveAssetLocally(current)
         }
+    }
+
+    @concurrent
+    private static func extractImageMetadataOffActor(from url: URL) async -> ExtractedImageMetadata {
+        ImageMetadataExtractor.extract(from: url)
     }
 
     public func enrichAssetsWithCloudAI(ids: [UUID]) async throws -> [AssetRecord] {
@@ -3263,10 +3489,12 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         let expandedTerms = visualHints.expandedTerms
 
         if !trimmed.isEmpty {
+            try Task.checkCancellation()
             textRanks = try await database.searchRanks(trimmed)
             if queryTerms.count > 1 || (queryTerms.count == 1 && SearchText.normalize(queryTerms[0]) != SearchText.normalize(trimmed)) {
                 var perTermSum: [UUID: Double] = [:]
                 for term in queryTerms {
+                    try Task.checkCancellation()
                     let ranks = try await database.searchRanks(term)
                     for (id, rank) in ranks {
                         perTermSum[id, default: 0] += rank
@@ -3286,6 +3514,7 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
                 var expSum: [UUID: Double] = [:]
                 var expHits: [UUID: Int] = [:]
                 for term in expandedTerms {
+                    try Task.checkCancellation()
                     let ranks = try await database.searchRanks(term)
                     for (id, rank) in ranks {
                         expSum[id, default: 0] += rank
@@ -3345,29 +3574,33 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         }
 
         // 2b. Signal D: Local positive seed similarity & negative visual repulsion (Apple Vision FeaturePrint + CIELAB)
+        try Task.checkCancellation()
         var visualSeedScores: [UUID: Double] = [:]
         var unlikePenalties: [UUID: Double] = [:]
         var usedSeedVisual = false
         let unlikeSet = Set(unlikeAssetIDs)
         if !seedAssetIDs.isEmpty || !unlikeAssetIDs.isEmpty {
-            let vectors = try await database.vectors()
+            let featurePrints = try await database.featurePrints()
             let seedSet = Set(seedAssetIDs)
+            var obsCache: [UUID: VNFeaturePrintObservation] = [:]
+            func unarchivedPrint(for id: UUID) -> VNFeaturePrintObservation? {
+                if let cached = obsCache[id] { return cached }
+                guard let data = featurePrints[id],
+                      let obs = VisionAnalyzer.unarchiveFeaturePrint(data) else { return nil }
+                obsCache[id] = obs
+                return obs
+            }
             if !seedAssetIDs.isEmpty {
-                var seedAssets: [AssetRecord] = []
-                for sid in seedAssetIDs {
-                    if let a = try await database.asset(id: sid) {
-                        seedAssets.append(a)
-                    }
-                }
-                let seedPrints = seedAssetIDs.compactMap { vectors[$0]?.featurePrint }
+                let seedAssets = try await database.assets(ids: seedAssetIDs)
+                let seedObs = seedAssetIDs.compactMap(unarchivedPrint(for:))
                 let seedColors = seedAssets.flatMap { $0.dominantColors.prefix(3) }
-                if !seedPrints.isEmpty || !seedColors.isEmpty {
+                if !seedObs.isEmpty || !seedColors.isEmpty {
                     usedSeedVisual = true
                     for asset in scopedAssets where !seedSet.contains(asset.id) && !unlikeSet.contains(asset.id) {
                         var bestVis = 0.0
-                        if let fp = vectors[asset.id]?.featurePrint, !seedPrints.isEmpty {
-                            bestVis = seedPrints
-                                .compactMap { VisionAnalyzer.visualDistance(between: fp, and: $0) }
+                        if !seedObs.isEmpty, let candidateObs = unarchivedPrint(for: asset.id) {
+                            bestVis = seedObs
+                                .compactMap { VisionAnalyzer.visualDistance(between: candidateObs, and: $0) }
                                 .map { VisionAnalyzer.visualSimilarity(forDistance: $0) }
                                 .max() ?? 0.0
                         }
@@ -3380,7 +3613,7 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
                                 colorSim = max(0, 1.0 - de / 28.0)
                             }
                         }
-                        let combinedSeed = seedPrints.isEmpty ? colorSim : (bestVis * 0.78 + colorSim * 0.22)
+                        let combinedSeed = seedObs.isEmpty ? colorSim : (bestVis * 0.78 + colorSim * 0.22)
                         if combinedSeed > 0.15 {
                             visualSeedScores[asset.id] = min(1.0, combinedSeed)
                         }
@@ -3388,12 +3621,13 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
                 }
             }
             if !unlikeAssetIDs.isEmpty {
-                let unlikePrints = unlikeAssetIDs.compactMap { vectors[$0]?.featurePrint }
-                if !unlikePrints.isEmpty {
+                try Task.checkCancellation()
+                let unlikeObs = unlikeAssetIDs.compactMap(unarchivedPrint(for:))
+                if !unlikeObs.isEmpty {
                     for asset in scopedAssets where !unlikeSet.contains(asset.id) {
-                        if let fp = vectors[asset.id]?.featurePrint {
-                            let maxNegSim = unlikePrints
-                                .compactMap { VisionAnalyzer.visualDistance(between: fp, and: $0) }
+                        if let candidateObs = unarchivedPrint(for: asset.id) {
+                            let maxNegSim = unlikeObs
+                                .compactMap { VisionAnalyzer.visualDistance(between: candidateObs, and: $0) }
                                 .map { VisionAnalyzer.visualSimilarity(forDistance: $0) }
                                 .max() ?? 0.0
                             if maxNegSim >= 0.42 {
@@ -3406,12 +3640,14 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         }
 
         // 3. Signal B: Cloud AI Embedding cosine similarity (if active & indexed)
+        try Task.checkCancellation()
         var embeddingScores: [UUID: Double] = [:]
         var usedEmbedding = false
         let cloudCfg = await aiConfig()
         if !trimmed.isEmpty, let provider = try? intelligence.provider(for: cloudCfg) {
             let embeddings = try await database.embeddings(forModel: provider.embeddingIdentity)
             if !embeddings.isEmpty, let queryVec = try? await provider.embed(trimmed) {
+                try Task.checkCancellation()
                 usedEmbedding = true
                 for asset in scopedAssets {
                     if let emb = embeddings[asset.id],
@@ -3425,6 +3661,7 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         }
 
         // 4. Signal C: TypeSafe (Jev Score) direct visual semantic scoring on candidate images
+        try Task.checkCancellation()
         var jevScores: [UUID: VisualScoreResult] = [:]
         var usedJev = false
         var evaluatedVisualCount = 0
@@ -3456,6 +3693,7 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
             var visualInputs: [VisualCandidateInput] = []
             visualInputs.reserveCapacity(shortlist.count)
             for asset in shortlist {
+                try Task.checkCancellation()
                 let jpeg = try? await loadVisualGroundingPayload(for: asset.id, targetLongSide: 384).data
                 visualInputs.append(VisualCandidateInput(
                     assetID: asset.id,
@@ -3467,6 +3705,7 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
                 ))
             }
 
+            try Task.checkCancellation()
             evaluatedVisualCount = visualInputs.count
             if let scored = try? await intelligence.grounding.scoreCandidatesForQuery(
                 query: trimmed,
@@ -3772,6 +4011,20 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
             FileManager.default.fileExists(atPath: originalURL.path) ? originalURL : nil
         ].compactMap { $0 }
 
+        if let payload = await Self.loadVisualGroundingPayloadOffActor(
+            candidateURLs: candidateURLs,
+            targetLongSide: targetLongSide
+        ) {
+            return payload
+        }
+        throw LibraryDatabaseError("该素材缺少本地预览图，请先下载或生成缩略图后重试。")
+    }
+
+    @concurrent
+    private static func loadVisualGroundingPayloadOffActor(
+        candidateURLs: [URL],
+        targetLongSide: Int
+    ) async -> (data: Data, format: String, cgImage: CGImage?)? {
         for url in candidateURLs {
             if let cgImage = MediaPipeline.raster(url)?.poster,
                let normalizedJPEG = TypeSafeImagePreparer.prepareJPEG(from: cgImage, targetLongSide: targetLongSide) {
@@ -3784,7 +4037,7 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
                 return (rawData, format, nil)
             }
         }
-        throw LibraryDatabaseError("该素材缺少本地预览图，请先下载或生成缩略图后重试。")
+        return nil
     }
 
     private static let webDAVPasswordKey = "sync.webdav.password"
@@ -4250,14 +4503,19 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         return await hasWebDAVPassword()
     }
 
-    private func readBackendWebDAVPassword(for backendID: UUID) throws -> String {
-        let key = Self.webDAVPasswordKey(for: backendID)
-        if let data = try? intelligence.keychain.read(key),
-           let decoded = String(data: data, encoding: .utf8),
-           !decoded.isEmpty {
-            return decoded
+    func readBackendWebDAVPassword(for backendID: UUID) throws -> String {
+        if backendID == SyncBackendProfile.legacyPrimaryID {
+            return try readWebDAVPassword()
         }
-        return try readWebDAVPassword()
+        let key = Self.webDAVPasswordKey(for: backendID)
+        do {
+            let stored = try intelligence.keychain.read(key)
+                .flatMap { String(data: $0, encoding: .utf8) } ?? ""
+            return stored
+        } catch {
+            engineLogger.error("Keychain read failed for backend WebDAV password: \(error.localizedDescription, privacy: .public)")
+            throw DriveTransportError.authenticationRequired("无法从钥匙串读取该 WebDAV 后端密码（\(error.localizedDescription)），请检查钥匙串访问权限。")
+        }
     }
 
     public func saveICloudBookmark(_ bookmarkData: Data?, displayPath: String, for backendID: UUID) async throws {
@@ -4303,6 +4561,11 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         }
         if let syncTask { return try await syncTask.value }
         let config = await syncConfig()
+        // Re-check actor reentrancy invariants after awaiting syncConfig().
+        guard !isMigrating else {
+            throw DriveTransportError.notConfigured("正在执行素材库迁移，请等待迁移完成后再同步。")
+        }
+        if let syncTask { return try await syncTask.value }
         guard let profile = config.resolvedBackends.first(where: { $0.id == id }) else {
             throw DriveTransportError.notConfigured("未找到指定的同步后端。")
         }
@@ -4312,6 +4575,7 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
                 profile: profile,
                 baseConfig: config,
                 deferOpPruning: multiCount > 1,
+                deferProjectionClearing: multiCount > 1,
                 progressPrefix: "[\(profile.name)]"
             )
         }
@@ -4340,6 +4604,18 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
 
         let task = Task { () throws -> SyncReport in
             let isMulti = enabled.count > 1
+            // In multi-backend mode, snapshot dirty projection versions before syncing so primary backend
+            // does not clear shared projection markers before secondary backends upload the same changes.
+            let initialBoardsDirty: [String: String] = isMulti
+                ? ((try? await database.state("projection.boards")) ?? [:])
+                : [:]
+            let initialThumbsDirty: [String: String] = (isMulti && config.syncThumbnails)
+                ? ((try? await database.state("projection.thumbnails")) ?? [:])
+                : [:]
+            let initialEmbeddingsDirty: [String: String] = (isMulti && config.syncEmbeddings)
+                ? ((try? await database.state("projection.embeddings")) ?? [:])
+                : [:]
+
             var statuses = await self.mergedBackendStatuses(for: config)
             var aggregated = SyncReport()
             var discoveredIDSet = Set<UUID>()
@@ -4368,6 +4644,7 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
                         profile: profile,
                         baseConfig: config,
                         deferOpPruning: isMulti,
+                        deferProjectionClearing: isMulti,
                         progressPrefix: prefix
                     )
                     succeededCount += 1
@@ -4412,7 +4689,7 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
                 }
             }
 
-            // In multi-backend mode, prune `sync_ops` only through the minimum op cursor safely uploaded by ALL enabled backends.
+            // In multi-backend mode, prune `sync_ops` and clear shared dirty projections ONLY once ALL enabled backends succeed.
             if isMulti && succeededCount == enabled.count {
                 var cursors: [Int64] = []
                 for profile in enabled {
@@ -4421,6 +4698,19 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
                 }
                 if let safeMin = cursors.min(), safeMin > 0 {
                     try? await database.acknowledgeOps(through: safeMin)
+                }
+                if !initialBoardsDirty.isEmpty || !initialThumbsDirty.isEmpty || !initialEmbeddingsDirty.isEmpty {
+                    try? await database.transaction { store in
+                        for (id, version) in initialBoardsDirty {
+                            try store.clearProjection("boards", id: id, ifVersion: version)
+                        }
+                        for (id, version) in initialThumbsDirty {
+                            try store.clearProjection("thumbnails", id: id, ifVersion: version)
+                        }
+                        for (id, version) in initialEmbeddingsDirty {
+                            try store.clearProjection("embeddings", id: id, ifVersion: version)
+                        }
+                    }
                 }
             }
 
@@ -4458,8 +4748,14 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
                 let ai = await self.aiConfig()
                 if ai.autoAnalyzeOnImport, ai.provider != .disabled {
                     let discoveredIDs = aggregated.discoveredAssetIDs
-                    Task { [weak engine = self] in
-                        guard let engine else { return }
+                    let bgTaskID = UUID()
+                    let bgTask = Task { [weak engine = self] in
+                        defer {
+                            Task { [weak engine] in
+                                await engine?.finishBackgroundEnrichmentTask(bgTaskID)
+                            }
+                        }
+                        guard let engine, !Task.isCancelled else { return }
                         if let enriched = try? await engine.enrichAssetsWithCloudAI(ids: discoveredIDs), !enriched.isEmpty {
                             NotificationCenter.default.post(
                                 name: CharkleSyncNotifications.didCompleteSync,
@@ -4473,6 +4769,7 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
                             )
                         }
                     }
+                    backgroundEnrichmentTasks[bgTaskID] = bgTask
                 }
             }
             if aggregated.hasVisibleLibraryChanges {
@@ -4498,6 +4795,7 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         profile: SyncBackendProfile,
         baseConfig: DriveSyncConfig,
         deferOpPruning: Bool,
+        deferProjectionClearing: Bool = false,
         progressPrefix: String?
     ) async throws -> SyncReport {
         let singleConfig = profile.toSingleBackendConfig(inheriting: baseConfig)
@@ -4514,6 +4812,7 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
                 backendID: profile.id,
                 isPrimaryBackend: profile.isPrimary,
                 deferOpPruning: deferOpPruning,
+                deferProjectionClearing: deferProjectionClearing,
                 progressPrefix: progressPrefix
             )
         )

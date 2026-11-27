@@ -1194,6 +1194,7 @@ public nonisolated enum VideoPlatformResolver {
 
         // Try native InnerTube streams (preferring adaptive HLS `.m3u8` up to 1080p, then progressive muxed MP4)
         for profile in [YouTubeClientProfile.ios, .android, .tvEmbedded] {
+            if Task.isCancelled { break }
             guard let payload = await fetchYouTubePlayerResponse(videoID: videoID, client: profile),
                   let streamingData = payload["streamingData"] as? [String: Any] else {
                 continue
@@ -1344,6 +1345,7 @@ public nonisolated enum VideoPlatformResolver {
         let streamURLs = await fetchBilibiliProgressiveStreamURLs(bvid: resolvedBVID, cid: resolvedCID)
         let referer = "https://www.bilibili.com/video/\(resolvedBVID)"
         for streamURL in streamURLs {
+            try Task.checkCancellation()
             if let file = await downloadStreamFile(
                 from: streamURL,
                 to: directory,
@@ -1382,6 +1384,7 @@ public nonisolated enum VideoPlatformResolver {
         var seen = Set<String>()
 
         for params in baseParamsList {
+            if Task.isCancelled { break }
             let endpoint = wbiKeys != nil
                 ? "https://api.bilibili.com/x/player/wbi/playurl"
                 : "https://api.bilibili.com/x/player/playurl"
@@ -1447,6 +1450,7 @@ public nonisolated enum VideoPlatformResolver {
 
         // Try native InnerTube progressive muxed MP4 across mobile/TV client profiles (works on BOTH macOS & iOS!)
         for profile in [YouTubeClientProfile.ios, .android, .tvEmbedded] {
+            try Task.checkCancellation()
             guard let payload = await fetchYouTubePlayerResponse(videoID: videoID, client: profile),
                   let streamingData = payload["streamingData"] as? [String: Any],
                   let formats = streamingData["formats"] as? [[String: Any]] else {
@@ -1468,6 +1472,7 @@ public nonisolated enum VideoPlatformResolver {
             .sorted { $0.qualityRank > $1.qualityRank }
 
             for candidate in progressiveMP4s {
+                try Task.checkCancellation()
                 if let file = await downloadStreamFile(
                     from: candidate.url,
                     to: directory,
@@ -1516,12 +1521,14 @@ public nonisolated enum VideoPlatformResolver {
             req.setValue(referer, forHTTPHeaderField: "Referer")
         }
 
-        guard let (tempURL, resp) = try? await downloadSession.download(for: req),
-              let http = resp as? HTTPURLResponse,
-              (200..<300).contains(http.statusCode) else {
+        guard let (tempURL, resp) = try? await downloadSession.download(for: req) else {
             return nil
         }
         defer { try? FileManager.default.removeItem(at: tempURL) }
+        guard let http = resp as? HTTPURLResponse,
+              (200..<300).contains(http.statusCode) else {
+            return nil
+        }
 
         let size = Int64((try? tempURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
         // Reject tiny HTML error bodies or >600 MB oversized files
@@ -1549,8 +1556,135 @@ public nonisolated enum VideoPlatformResolver {
     }
 
     #if os(macOS)
+    private static func runYtDlpProcess(
+        binary: String,
+        arguments: [String],
+        captureStdout: Bool,
+        timeoutSeconds: Double
+    ) async -> (exitCode: Int32, stdout: Data)? {
+        guard !Task.isCancelled else { return nil }
+        final class ProcessState: @unchecked Sendable {
+            let lock = NSLock()
+            var process: Process?
+            var timeoutWork: DispatchWorkItem?
+            var cancelled = false
+            var resumed = false
+        }
+        let state = ProcessState()
+
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                let finishOnce: @Sendable ((exitCode: Int32, stdout: Data)?) -> Void = { result in
+                    state.lock.lock()
+                    let shouldResume = !state.resumed
+                    state.resumed = true
+                    state.lock.unlock()
+                    if shouldResume {
+                        continuation.resume(returning: result)
+                    }
+                }
+
+                let proc = Process()
+                proc.executableURL = URL(fileURLWithPath: binary)
+                proc.arguments = arguments
+                let outPipe: Pipe? = captureStdout ? Pipe() : nil
+                proc.standardOutput = outPipe ?? FileHandle.nullDevice
+                proc.standardError = FileHandle.nullDevice
+
+                let timeoutWork = DispatchWorkItem {
+                    state.lock.lock()
+                    let p = state.process
+                    state.timeoutWork = nil
+                    state.lock.unlock()
+                    if let p, p.isRunning {
+                        p.terminate()
+                    }
+                    finishOnce(nil)
+                }
+
+                state.lock.lock()
+                if state.cancelled {
+                    state.lock.unlock()
+                    finishOnce(nil)
+                    return
+                }
+                state.process = proc
+                state.timeoutWork = timeoutWork
+                state.lock.unlock()
+
+                let readGroup = DispatchGroup()
+                final class DataBox: @unchecked Sendable { var data = Data() }
+                let outBox = DataBox()
+
+                proc.terminationHandler = { terminated in
+                    state.lock.lock()
+                    let work = state.timeoutWork
+                    state.timeoutWork = nil
+                    state.lock.unlock()
+                    work?.cancel()
+
+                    readGroup.notify(queue: DispatchQueue.global(qos: .userInitiated)) {
+                        state.lock.lock()
+                        let wasCancelled = state.cancelled
+                        state.process = nil
+                        state.lock.unlock()
+                        if wasCancelled {
+                            finishOnce(nil)
+                        } else {
+                            finishOnce((terminated.terminationStatus, outBox.data))
+                        }
+                    }
+                }
+
+                // Enter stdout drain group BEFORE proc.run() so fast termination cannot beat readGroup.enter().
+                if outPipe != nil {
+                    readGroup.enter()
+                }
+                do {
+                    try proc.run()
+                    if let outPipe {
+                        DispatchQueue.global(qos: .userInitiated).async {
+                            outBox.data = outPipe.fileHandleForReading.readDataToEndOfFile()
+                            readGroup.leave()
+                        }
+                    }
+                    DispatchQueue.global(qos: .userInitiated).asyncAfter(
+                        deadline: .now() + timeoutSeconds,
+                        execute: timeoutWork
+                    )
+                } catch {
+                    if outPipe != nil {
+                        readGroup.leave()
+                    }
+                    state.lock.lock()
+                    let work = state.timeoutWork
+                    state.timeoutWork = nil
+                    state.process = nil
+                    state.lock.unlock()
+                    work?.cancel()
+                    finishOnce(nil)
+                }
+            }
+        } onCancel: {
+            state.lock.lock()
+            state.cancelled = true
+            let p = state.process
+            let work = state.timeoutWork
+            state.timeoutWork = nil
+            state.lock.unlock()
+            work?.cancel()
+            if let p, p.isRunning {
+                p.terminate()
+            }
+        }
+    }
+
     /// Optional macOS zero-download helper: resolves a direct streaming URL via `yt-dlp -g` for generic video sites.
     private static func resolveDirectStreamURLViaYtDlpIfAvailable(pageURL: String) async -> VideoStreamPlaybackPlan.DirectStream? {
+        guard let parsedPageURL = URL(string: pageURL),
+              WebBookmark.isSafeRemoteFetchURL(parsedPageURL) else {
+            return nil
+        }
         let candidates = [
             "/opt/homebrew/bin/yt-dlp",
             "/usr/local/bin/yt-dlp",
@@ -1560,58 +1694,39 @@ public nonisolated enum VideoPlatformResolver {
             return nil
         }
 
-        return await withCheckedContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                let proc = Process()
-                proc.executableURL = URL(fileURLWithPath: binary)
-                proc.arguments = [
-                    "--no-playlist",
-                    "--no-warnings",
-                    "-g",
-                    "-f", "best[ext=mp4]/best[protocol*=m3u8]/best",
-                    pageURL
-                ]
-                let outPipe = Pipe()
-                proc.standardOutput = outPipe
-                proc.standardError = Pipe()
-                do {
-                    try proc.run()
-                    let deadline = Date().addingTimeInterval(6.0)
-                    while proc.isRunning && Date() < deadline {
-                        Thread.sleep(forTimeInterval: 0.05)
-                    }
-                    if proc.isRunning {
-                        proc.terminate()
-                        continuation.resume(returning: nil)
-                        return
-                    }
-                    guard proc.terminationStatus == 0 else {
-                        continuation.resume(returning: nil)
-                        return
-                    }
-                    let data = outPipe.fileHandleForReading.readDataToEndOfFile()
-                    let firstLine = String(data: data, encoding: .utf8)?
-                        .split(whereSeparator: \.isNewline)
-                        .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
-                        .first(where: { $0.hasPrefix("https://") || $0.hasPrefix("http://") })
-                    guard let firstLine,
-                          let streamURL = URL(string: firstLine),
-                          WebBookmark.isSafeRemoteFetchURL(streamURL) else {
-                        continuation.resume(returning: nil)
-                        return
-                    }
-                    let isHLS = streamURL.pathExtension.lowercased() == "m3u8"
-                        || streamURL.absoluteString.lowercased().contains(".m3u8")
-                    continuation.resume(returning: .init(
-                        url: streamURL,
-                        httpHeaders: ["Referer": pageURL, "User-Agent": browserUA],
-                        isHLS: isHLS
-                    ))
-                } catch {
-                    continuation.resume(returning: nil)
-                }
-            }
+        let safePageURL = parsedPageURL.absoluteString
+        guard let result = await runYtDlpProcess(
+            binary: binary,
+            arguments: [
+                "--no-playlist",
+                "--no-warnings",
+                "-g",
+                "-f", "best[ext=mp4]/best[protocol*=m3u8]/best",
+                "--",
+                safePageURL
+            ],
+            captureStdout: true,
+            timeoutSeconds: 6.0
+        ), result.exitCode == 0 else {
+            return nil
         }
+
+        let firstLine = String(data: result.stdout, encoding: .utf8)?
+            .split(whereSeparator: \.isNewline)
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first(where: { $0.hasPrefix("https://") || $0.hasPrefix("http://") })
+        guard let firstLine,
+              let streamURL = URL(string: firstLine),
+              WebBookmark.isSafeRemoteFetchURL(streamURL) else {
+            return nil
+        }
+        let isHLS = streamURL.pathExtension.lowercased() == "m3u8"
+            || streamURL.absoluteString.lowercased().contains(".m3u8")
+        return .init(
+            url: streamURL,
+            httpHeaders: ["Referer": safePageURL, "User-Agent": browserUA],
+            isHLS: isHLS
+        )
     }
 
     /// Optional macOS fallback when a video platform enforces cipher/DASH-only streams and `yt-dlp` is installed locally.
@@ -1620,6 +1735,10 @@ public nonisolated enum VideoPlatformResolver {
         to directory: URL,
         baseName: String
     ) async -> URL? {
+        guard let parsedPageURL = URL(string: pageURL),
+              WebBookmark.isSafeRemoteFetchURL(parsedPageURL) else {
+            return nil
+        }
         let candidates = [
             "/opt/homebrew/bin/yt-dlp",
             "/usr/local/bin/yt-dlp",
@@ -1632,42 +1751,32 @@ public nonisolated enum VideoPlatformResolver {
         let safeBase = sanitizedFileName(baseName)
         let outputTemplate = directory.appending(path: "\(safeBase).%(ext)s").path
 
-        return await withCheckedContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                let proc = Process()
-                proc.executableURL = URL(fileURLWithPath: binary)
-                proc.arguments = [
-                    "--no-playlist",
-                    "--no-warnings",
-                    "-f", "best[ext=mp4]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best",
-                    "--merge-output-format", "mp4",
-                    "-o", outputTemplate,
-                    pageURL
-                ]
-                proc.standardOutput = Pipe()
-                proc.standardError = Pipe()
-                do {
-                    try proc.run()
-                    proc.waitUntilExit()
-                    guard proc.terminationStatus == 0 else {
-                        continuation.resume(returning: nil)
-                        return
-                    }
-                    let files = (try? FileManager.default.contentsOfDirectory(
-                        at: directory,
-                        includingPropertiesForKeys: [.fileSizeKey],
-                        options: [.skipsHiddenFiles]
-                    )) ?? []
-                    let videoFile = files.first { url in
-                        let ext = url.pathExtension.lowercased()
-                        return ["mp4", "mov", "m4v", "webm", "mkv"].contains(ext)
-                            && url.deletingPathExtension().lastPathComponent.hasPrefix(safeBase)
-                    }
-                    continuation.resume(returning: videoFile)
-                } catch {
-                    continuation.resume(returning: nil)
-                }
-            }
+        guard let result = await runYtDlpProcess(
+            binary: binary,
+            arguments: [
+                "--no-playlist",
+                "--no-warnings",
+                "-f", "best[ext=mp4]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best",
+                "--merge-output-format", "mp4",
+                "-o", outputTemplate,
+                "--",
+                parsedPageURL.absoluteString
+            ],
+            captureStdout: false,
+            timeoutSeconds: 180.0
+        ), result.exitCode == 0 else {
+            return nil
+        }
+
+        let files = (try? FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.fileSizeKey],
+            options: [.skipsHiddenFiles]
+        )) ?? []
+        return files.first { url in
+            let ext = url.pathExtension.lowercased()
+            return ["mp4", "mov", "m4v", "webm", "mkv"].contains(ext)
+                && url.deletingPathExtension().lastPathComponent.hasPrefix(safeBase)
         }
     }
     #endif
@@ -1831,22 +1940,22 @@ public nonisolated enum VideoFrameCapture {
 
         // Determine if the video track has a non-identity rotation transform (e.g. vertical iPhone video);
         // for rotated non-HLS tracks, AVAssetImageGenerator applies the exact preferredTrackTransform.
+        var preferredTransform: CGAffineTransform = .identity
         var hasTrackRotation = false
         if let tracks = try? await asset.loadTracks(withMediaType: .video),
            let firstTrack = tracks.first,
            let preferred = try? await firstTrack.load(.preferredTransform) {
+            preferredTransform = preferred
             hasTrackRotation = abs(preferred.b) > 0.01 || abs(preferred.c) > 0.01 || preferred.a < 0 || preferred.d < 0
         }
 
-        // 1. Instant zero-network CVPixelBuffer snapshot (works for HLS `.m3u8`, HTTP MP4, and local videos).
+        // 1. Instant zero-network CVPixelBuffer snapshot (works for HLS `.m3u8`, HTTP MP4, and local videos),
+        //    with CIContext rendering & JPEG encoding offloaded off MainActor.
         if !hasTrackRotation,
            let videoOutput,
            let pixelBuffer = videoOutput.copyPixelBuffer(forItemTime: currentTime, itemTimeForDisplay: nil) {
-            let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
-            let extent = ciImage.extent
-            if extent.width > 0, extent.height > 0,
-               let cgImage = sharedCIContext.createCGImage(ciImage, from: extent),
-               let jpeg = encodeJPEG(cgImage) {
+            let bufferBox = UncheckedPixelBufferBox(pixelBuffer)
+            if let jpeg = await encodePixelBufferJPEGOffMain(bufferBox, preferredTransform: .identity) {
                 return (jpeg, seconds)
             }
         }
@@ -1861,11 +1970,8 @@ public nonisolated enum VideoFrameCapture {
         // 3. Final pixel-buffer fallback (e.g. rotated HLS stream where AVAssetImageGenerator isn't supported).
         if let videoOutput,
            let pixelBuffer = videoOutput.copyPixelBuffer(forItemTime: currentTime, itemTimeForDisplay: nil) {
-            let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
-            let extent = ciImage.extent
-            if extent.width > 0, extent.height > 0,
-               let cgImage = sharedCIContext.createCGImage(ciImage, from: extent),
-               let jpeg = encodeJPEG(cgImage) {
+            let bufferBox = UncheckedPixelBufferBox(pixelBuffer)
+            if let jpeg = await encodePixelBufferJPEGOffMain(bufferBox, preferredTransform: preferredTransform) {
                 return (jpeg, seconds)
             }
         }
@@ -1876,6 +1982,42 @@ public nonisolated enum VideoFrameCapture {
     private nonisolated final class UncheckedAVAssetBox: @unchecked Sendable {
         let asset: AVAsset
         init(_ asset: AVAsset) { self.asset = asset }
+    }
+
+    private nonisolated final class UncheckedPixelBufferBox: @unchecked Sendable {
+        let pixelBuffer: CVPixelBuffer
+        init(_ pixelBuffer: CVPixelBuffer) { self.pixelBuffer = pixelBuffer }
+    }
+
+    private static func orientation(for transform: CGAffineTransform) -> CGImagePropertyOrientation {
+        if abs(transform.b - 1) < 0.01 && abs(transform.c + 1) < 0.01 {
+            return .right
+        }
+        if abs(transform.b + 1) < 0.01 && abs(transform.c - 1) < 0.01 {
+            return .left
+        }
+        if abs(transform.a + 1) < 0.01 && abs(transform.d + 1) < 0.01 {
+            return .down
+        }
+        return .up
+    }
+
+    @concurrent
+    private static func encodePixelBufferJPEGOffMain(
+        _ bufferBox: UncheckedPixelBufferBox,
+        preferredTransform: CGAffineTransform
+    ) async -> Data? {
+        var ciImage = CIImage(cvPixelBuffer: bufferBox.pixelBuffer)
+        let orient = orientation(for: preferredTransform)
+        if orient != .up {
+            ciImage = ciImage.oriented(orient)
+        }
+        let extent = ciImage.extent
+        guard extent.width > 0, extent.height > 0,
+              let cgImage = sharedCIContext.createCGImage(ciImage, from: extent) else {
+            return nil
+        }
+        return encodeJPEG(cgImage)
     }
 
     @concurrent

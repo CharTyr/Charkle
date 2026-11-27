@@ -165,6 +165,28 @@ public struct GitHubRepoMetadata: Codable, Hashable, Sendable {
         self.readmeMarkdown = readmeMarkdown
         self.fetchedAt = fetchedAt
     }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let owner = try c.decode(String.self, forKey: .owner)
+        let repo = try c.decode(String.self, forKey: .repo)
+        self.owner = owner
+        self.repo = repo
+        self.fullName = try c.decodeIfPresent(String.self, forKey: .fullName) ?? "\(owner)/\(repo)"
+        self.ownerAvatarURL = try c.decodeIfPresent(String.self, forKey: .ownerAvatarURL)
+        self.description = try c.decodeIfPresent(String.self, forKey: .description)
+        self.stars = try c.decodeIfPresent(Int.self, forKey: .stars) ?? 0
+        self.forks = try c.decodeIfPresent(Int.self, forKey: .forks) ?? 0
+        self.watchers = try c.decodeIfPresent(Int.self, forKey: .watchers)
+        self.language = try c.decodeIfPresent(String.self, forKey: .language)
+        self.licenseName = try c.decodeIfPresent(String.self, forKey: .licenseName)
+        self.topics = try c.decodeIfPresent([String].self, forKey: .topics) ?? []
+        self.defaultBranch = try c.decodeIfPresent(String.self, forKey: .defaultBranch) ?? "main"
+        self.homepageURL = try c.decodeIfPresent(String.self, forKey: .homepageURL)
+        self.openGraphImageURL = try c.decodeIfPresent(String.self, forKey: .openGraphImageURL)
+        self.readmeMarkdown = try c.decodeIfPresent(String.self, forKey: .readmeMarkdown)
+        self.fetchedAt = try c.decodeIfPresent(Date.self, forKey: .fetchedAt) ?? Date()
+    }
 }
 
 public struct SocialMediaAttachment: Codable, Hashable, Sendable, Identifiable {
@@ -1220,6 +1242,42 @@ public struct AssetRecord: Codable, Hashable, Identifiable, Sendable {
         self.lastOpenedAt = lastOpenedAt
         self.richMetadata = richMetadata
     }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try c.decode(UUID.self, forKey: .id)
+        self.title = try c.decodeIfPresent(String.self, forKey: .title) ?? ""
+        self.fileName = try c.decodeIfPresent(String.self, forKey: .fileName) ?? ""
+        self.folderID = try c.decodeIfPresent(UUID.self, forKey: .folderID)
+        self.driveFileID = try c.decodeIfPresent(String.self, forKey: .driveFileID)
+        self.contentHash = try c.decodeIfPresent(String.self, forKey: .contentHash) ?? ""
+        self.mediaKind = try c.decodeIfPresent(MediaKind.self, forKey: .mediaKind) ?? .image
+        self.mimeType = try c.decodeIfPresent(String.self, forKey: .mimeType) ?? "application/octet-stream"
+        self.fileSizeBytes = try c.decodeIfPresent(Int64.self, forKey: .fileSizeBytes) ?? 0
+        self.pixelWidth = try c.decodeIfPresent(Int.self, forKey: .pixelWidth) ?? 0
+        self.pixelHeight = try c.decodeIfPresent(Int.self, forKey: .pixelHeight) ?? 0
+        self.durationSeconds = try c.decodeIfPresent(Double.self, forKey: .durationSeconds)
+        self.waveformPeaks = try c.decodeIfPresent([Float].self, forKey: .waveformPeaks) ?? []
+        self.sourceURL = try c.decodeIfPresent(String.self, forKey: .sourceURL)
+        self.sourceDomain = try c.decodeIfPresent(String.self, forKey: .sourceDomain)
+        self.notes = try c.decodeIfPresent(String.self, forKey: .notes) ?? ""
+        self.tags = try c.decodeIfPresent([String].self, forKey: .tags) ?? []
+        self.suggestedTags = try c.decodeIfPresent([String].self, forKey: .suggestedTags) ?? []
+        self.aiDescription = try c.decodeIfPresent(String.self, forKey: .aiDescription)
+        self.ocrText = try c.decodeIfPresent(String.self, forKey: .ocrText)
+        self.dominantColors = try c.decodeIfPresent([LabColor].self, forKey: .dominantColors) ?? []
+        self.rating = try c.decodeIfPresent(Int.self, forKey: .rating) ?? 0
+        self.pinnedOffline = try c.decodeIfPresent(Bool.self, forKey: .pinnedOffline) ?? false
+        self.isLocalOriginalCached = try c.decodeIfPresent(Bool.self, forKey: .isLocalOriginalCached) ?? false
+        self.isTrashed = try c.decodeIfPresent(Bool.self, forKey: .isTrashed) ?? false
+        let now = Date()
+        let created = try c.decodeIfPresent(Date.self, forKey: .createdAt) ?? now
+        self.createdAt = created
+        self.updatedAt = try c.decodeIfPresent(Date.self, forKey: .updatedAt) ?? created
+        self.updatedHLC = try c.decodeIfPresent(Int64.self, forKey: .updatedHLC) ?? 0
+        self.lastOpenedAt = try c.decodeIfPresent(Date.self, forKey: .lastOpenedAt)
+        self.richMetadata = try c.decodeIfPresent(AssetRichMetadata.self, forKey: .richMetadata)
+    }
 }
 
 public struct FolderRecord: Codable, Hashable, Identifiable, Sendable {
@@ -1256,6 +1314,22 @@ public struct FolderRecord: Codable, Hashable, Identifiable, Sendable {
         self.assetCount = assetCount
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try c.decode(UUID.self, forKey: .id)
+        self.name = try c.decodeIfPresent(String.self, forKey: .name) ?? ""
+        self.parentID = try c.decodeIfPresent(UUID.self, forKey: .parentID)
+        self.driveFolderID = try c.decodeIfPresent(String.self, forKey: .driveFolderID)
+        self.colorHex = try c.decodeIfPresent(String.self, forKey: .colorHex)
+        self.customSymbol = try c.decodeIfPresent(String.self, forKey: .customSymbol)
+        self.sortOrder = try c.decodeIfPresent(Int.self, forKey: .sortOrder) ?? 0
+        self.assetCount = try c.decodeIfPresent(Int.self, forKey: .assetCount) ?? 0
+        let now = Date()
+        let created = try c.decodeIfPresent(Date.self, forKey: .createdAt) ?? now
+        self.createdAt = created
+        self.updatedAt = try c.decodeIfPresent(Date.self, forKey: .updatedAt) ?? created
     }
 }
 
@@ -1490,6 +1564,17 @@ public struct SmartFolderRule: Codable, Hashable, Sendable {
         self.minRating = minRating
     }
 
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.matchMode = try c.decodeIfPresent(MatchMode.self, forKey: .matchMode) ?? .all
+        self.tags = try c.decodeIfPresent([String].self, forKey: .tags) ?? []
+        self.descriptionQuery = try c.decodeIfPresent(String.self, forKey: .descriptionQuery) ?? ""
+        self.colorHexes = try c.decodeIfPresent([String].self, forKey: .colorHexes) ?? []
+        self.colorTolerance = try c.decodeIfPresent(Double.self, forKey: .colorTolerance) ?? 24.0
+        self.mediaKinds = try c.decodeIfPresent([MediaKind].self, forKey: .mediaKinds) ?? []
+        self.minRating = try c.decodeIfPresent(Int.self, forKey: .minRating) ?? 0
+    }
+
     public var hasAnyCondition: Bool {
         !tags.isEmpty
             || !descriptionQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -1683,6 +1768,19 @@ public struct SmartFolderRecord: Codable, Hashable, Identifiable, Sendable {
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try c.decode(UUID.self, forKey: .id)
+        self.name = try c.decodeIfPresent(String.self, forKey: .name) ?? ""
+        self.colorHex = try c.decodeIfPresent(String.self, forKey: .colorHex)
+        self.rule = try c.decodeIfPresent(SmartFolderRule.self, forKey: .rule) ?? SmartFolderRule()
+        self.sortOrder = try c.decodeIfPresent(Int.self, forKey: .sortOrder) ?? 0
+        let now = Date()
+        let created = try c.decodeIfPresent(Date.self, forKey: .createdAt) ?? now
+        self.createdAt = created
+        self.updatedAt = try c.decodeIfPresent(Date.self, forKey: .updatedAt) ?? created
+    }
 }
 
 public enum SortOrder: String, Codable, CaseIterable, Hashable, Sendable {
@@ -1787,6 +1885,26 @@ public struct FilterCriteria: Codable, Hashable, Sendable {
         self.includeTrashed = includeTrashed
         self.onlyTrashed = onlyTrashed
         self.sortBy = sortBy
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.searchQuery = try c.decodeIfPresent(String.self, forKey: .searchQuery) ?? ""
+        self.kinds = try c.decodeIfPresent(Set<MediaKind>.self, forKey: .kinds) ?? []
+        self.selectedColorHex = try c.decodeIfPresent(String.self, forKey: .selectedColorHex)
+        self.colorTolerance = try c.decodeIfPresent(Double.self, forKey: .colorTolerance) ?? 28.0
+        self.shape = try c.decodeIfPresent(AspectShape.self, forKey: .shape)
+        self.minRating = try c.decodeIfPresent(Int.self, forKey: .minRating) ?? 0
+        self.tags = try c.decodeIfPresent(Set<String>.self, forKey: .tags) ?? []
+        self.folderID = try c.decodeIfPresent(UUID.self, forKey: .folderID)
+        self.includeSubfolders = try c.decodeIfPresent(Bool.self, forKey: .includeSubfolders) ?? false
+        self.onlyInbox = try c.decodeIfPresent(Bool.self, forKey: .onlyInbox) ?? false
+        self.onlyUntagged = try c.decodeIfPresent(Bool.self, forKey: .onlyUntagged) ?? false
+        self.onlyRecentDays = try c.decodeIfPresent(Int.self, forKey: .onlyRecentDays)
+        self.onlyPinnedOffline = try c.decodeIfPresent(Bool.self, forKey: .onlyPinnedOffline) ?? false
+        self.includeTrashed = try c.decodeIfPresent(Bool.self, forKey: .includeTrashed) ?? false
+        self.onlyTrashed = try c.decodeIfPresent(Bool.self, forKey: .onlyTrashed) ?? false
+        self.sortBy = try c.decodeIfPresent(SortOrder.self, forKey: .sortBy) ?? .newest
     }
 
     public var hasActiveVisualFilters: Bool {

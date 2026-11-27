@@ -54,8 +54,14 @@ public nonisolated struct MoodboardCurator: Sendable {
     }
 
     public func extractBoardPalette(assetIDs: [UUID], count: Int) async throws -> [LabColor] {
+        let orderedIDs = unique(assetIDs)
+        guard !orderedIDs.isEmpty else { return [] }
+        let assets = try await database.assets(ids: orderedIDs)
         var colors: [LabColor] = []
-        for id in unique(assetIDs) { colors += try await database.asset(id: id)?.dominantColors ?? [] }
+        colors.reserveCapacity(assets.count * 5)
+        for asset in assets {
+            colors.append(contentsOf: asset.dominantColors)
+        }
         return Self.palette(colors, count: count)
     }
 
@@ -87,23 +93,67 @@ public nonisolated struct MoodboardCurator: Sendable {
     }
 
     public func suggestFolder(for assetID: UUID) async throws -> FolderSuggestion? {
-        guard let asset = try await database.asset(id: assetID) else { return nil }
+        try await suggestFolders(for: [assetID])[assetID]
+    }
+
+    public func suggestFolders(for assetIDs: [UUID]) async throws -> [UUID: FolderSuggestion] {
+        let requested = unique(assetIDs)
+        guard !requested.isEmpty else { return [:] }
+        let targetAssets = try await database.assets(ids: requested)
+        guard !targetAssets.isEmpty else { return [:] }
+
         let folders = try await database.fetchFolders()
+        guard !folders.isEmpty else { return [:] }
         let assets = try await database.fetchAssets(matching: FilterCriteria())
-        let evidence = Evidence(seeds: [asset], vectors: try await database.vectors())
-        let peers = assets.filter { $0.id != assetID && $0.folderID != nil }.map { evidence.score($0) }
-        return folders.compactMap { folder -> FolderSuggestion? in
-            guard folder.id != asset.folderID else { return nil }
+        let vectors = try await database.vectors()
+
+        // Pre-unarchive VNFeaturePrintObservation once across the entire batch instead of repeating
+        // NSKeyedUnarchiver inside every (targetAsset × peerAsset) comparison.
+        let relevantIDs = Set(targetAssets.map(\.id)).union(assets.lazy.filter { $0.folderID != nil }.map(\.id))
+        var predecodedPrints: [UUID: VNFeaturePrintObservation] = [:]
+        predecodedPrints.reserveCapacity(min(relevantIDs.count, vectors.count))
+        for id in relevantIDs {
+            if let data = vectors[id]?.featurePrint,
+               let obs = VisionAnalyzer.unarchiveFeaturePrint(data) {
+                predecodedPrints[id] = obs
+            }
+        }
+
+        let folderAssets = assets.filter { $0.folderID != nil }
+        var results: [UUID: FolderSuggestion] = [:]
+        results.reserveCapacity(targetAssets.count)
+
+        for asset in targetAssets {
+            let evidence = Evidence(
+                seeds: [asset],
+                vectors: vectors,
+                predecodedFeaturePrints: predecodedPrints
+            )
+            let peers = folderAssets.filter { $0.id != asset.id }.map { evidence.score($0) }
             let keywords = unique(asset.tags + asset.suggestedTags)
-            let nameMatch = keywords.contains { SearchText.fuzzyScore(query: $0, candidate: folder.name) != nil }
-            let scores = peers.filter { $0.asset.folderID == folder.id && !$0.matchReasons.isEmpty }
-                .map(\.score).sorted(by: >).prefix(3)
-            guard nameMatch || !scores.isEmpty else { return nil }
-            let affinity = scores.isEmpty ? 0 : scores.reduce(0, +) / Double(scores.count)
-            let confidence = min(0.99, affinity * 0.8 + (nameMatch ? 0.45 : 0))
-            return FolderSuggestion(folderID: folder.id, folderName: folder.name, confidence: confidence,
-                                    reason: nameMatch ? "目录名与标签吻合" : "目录内有相近素材")
-        }.sorted { ($0.confidence, $0.folderName) > ($1.confidence, $1.folderName) }.first
+            let normalizedKeywords = keywords.map(SearchText.normalize).filter { !$0.isEmpty }
+            let suggestion = folders.compactMap { folder -> FolderSuggestion? in
+                guard folder.id != asset.folderID else { return nil }
+                let nameMatch = normalizedKeywords.contains {
+                    SearchText.fuzzyScore(normalizedQuery: $0, candidate: folder.name) != nil
+                }
+                let scores = peers.filter { $0.asset.folderID == folder.id && !$0.matchReasons.isEmpty }
+                    .map(\.score).sorted(by: >).prefix(3)
+                guard nameMatch || !scores.isEmpty else { return nil }
+                let affinity = scores.isEmpty ? 0 : scores.reduce(0, +) / Double(scores.count)
+                let confidence = min(0.99, affinity * 0.8 + (nameMatch ? 0.45 : 0))
+                return FolderSuggestion(
+                    folderID: folder.id,
+                    folderName: folder.name,
+                    confidence: confidence,
+                    reason: nameMatch ? "目录名与标签吻合" : "目录内有相近素材"
+                )
+            }.sorted { ($0.confidence, $0.folderName) > ($1.confidence, $1.folderName) }.first
+            if let suggestion {
+                results[asset.id] = suggestion
+            }
+        }
+        return results
     }
 
     private func keywordRanks(_ prompt: String) async throws -> [UUID: Double] {
@@ -244,6 +294,7 @@ private nonisolated struct Evidence {
     let queryVector: [Float]?
     let embeddingIdentity: String?
     let vectors: [UUID: AssetVector]
+    private let predecodedFeaturePrints: [UUID: VNFeaturePrintObservation]?
     private let seedFeaturePrints: [VNFeaturePrintObservation]
     private let seedEmbeddings: [(model: String?, values: [Float])]
     private let seedTagSets: [Set<String>]
@@ -256,7 +307,8 @@ private nonisolated struct Evidence {
         ranks: [UUID: Double] = [:],
         queryVector: [Float]? = nil,
         embeddingIdentity: String? = nil,
-        vectors: [UUID: AssetVector]
+        vectors: [UUID: AssetVector],
+        predecodedFeaturePrints: [UUID: VNFeaturePrintObservation]? = nil
     ) {
         self.seeds = seeds
         self.colors = colors
@@ -265,8 +317,10 @@ private nonisolated struct Evidence {
         self.queryVector = queryVector
         self.embeddingIdentity = embeddingIdentity
         self.vectors = vectors
+        self.predecodedFeaturePrints = predecodedFeaturePrints
         self.seedFeaturePrints = seeds.compactMap { seed in
-            vectors[seed.id]?.featurePrint.flatMap(VisionAnalyzer.unarchiveFeaturePrint)
+            predecodedFeaturePrints?[seed.id]
+                ?? vectors[seed.id]?.featurePrint.flatMap(VisionAnalyzer.unarchiveFeaturePrint)
         }
         self.seedEmbeddings = seeds.compactMap { seed in
             guard let vec = vectors[seed.id], let values = vec.embedding else { return nil }
@@ -306,9 +360,17 @@ private nonisolated struct Evidence {
                 signals.append((best, 0.40, 0.45, Self.cloudReason))
             }
         }
-        if !seedFeaturePrints.isEmpty, let printData = vectors[asset.id]?.featurePrint {
+        if !seedFeaturePrints.isEmpty {
             let bestVisual: Double? = autoreleasepool {
-                guard let candidateObs = VisionAnalyzer.unarchiveFeaturePrint(printData) else { return nil }
+                let candidateObs: VNFeaturePrintObservation?
+                if let predecoded = predecodedFeaturePrints?[asset.id] {
+                    candidateObs = predecoded
+                } else if let printData = vectors[asset.id]?.featurePrint {
+                    candidateObs = VisionAnalyzer.unarchiveFeaturePrint(printData)
+                } else {
+                    candidateObs = nil
+                }
+                guard let candidateObs else { return nil }
                 var best: Double?
                 for seedObs in seedFeaturePrints {
                     if let dist = VisionAnalyzer.visualDistance(between: candidateObs, and: seedObs) {

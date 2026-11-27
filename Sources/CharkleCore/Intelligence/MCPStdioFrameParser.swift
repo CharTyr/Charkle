@@ -22,6 +22,8 @@ public nonisolated struct MCPStdioFrameParser: Sendable {
     public let maxFrameBytes: Int
     private var buffer = Data()
     private var discardingNDJSONLine = false
+    private var discardingContentLengthRemaining = 0
+    private var headerOnlyDiscardCandidate: Data?
 
     private static let crlfSeparator = Data("\r\n\r\n".utf8)
     private static let lfSeparator = Data("\n\n".utf8)
@@ -39,6 +41,24 @@ public nonisolated struct MCPStdioFrameParser: Sendable {
 
     public mutating func finishEOF() -> [Event] {
         var events = drainAvailable()
+        if discardingContentLengthRemaining > 0 {
+            let candidate = headerOnlyDiscardCandidate
+            buffer.removeAll(keepingCapacity: false)
+            discardingContentLengthRemaining = 0
+            headerOnlyDiscardCandidate = nil
+            // If an oversized Content-Length header arrived with zero body bytes and was followed
+            // only by a complete standalone JSON payload before EOF, recover it cleanly as NDJSON.
+            if let candidate {
+                let trimmed = Self.trimWhitespace(candidate)
+                if !trimmed.isEmpty,
+                   trimmed.count <= maxFrameBytes,
+                   (trimmed[trimmed.startIndex] == 0x7B || trimmed[trimmed.startIndex] == 0x5B),
+                   (try? JSONSerialization.jsonObject(with: trimmed)) != nil {
+                    events.append(.message(trimmed, framing: .ndjson))
+                }
+            }
+            return events
+        }
         if discardingNDJSONLine {
             buffer.removeAll(keepingCapacity: false)
             discardingNDJSONLine = false
@@ -83,6 +103,26 @@ public nonisolated struct MCPStdioFrameParser: Sendable {
         var events: [Event] = []
 
         while true {
+            if discardingContentLengthRemaining > 0 {
+                let toDrop = min(buffer.count, discardingContentLengthRemaining)
+                if toDrop > 0 {
+                    if var candidate = headerOnlyDiscardCandidate {
+                        if candidate.count + toDrop <= maxFrameBytes {
+                            candidate.append(buffer[buffer.startIndex..<(buffer.startIndex + toDrop)])
+                            headerOnlyDiscardCandidate = candidate
+                        } else {
+                            headerOnlyDiscardCandidate = nil
+                        }
+                    }
+                    buffer.removeSubrange(buffer.startIndex..<(buffer.startIndex + toDrop))
+                    discardingContentLengthRemaining -= toDrop
+                }
+                if discardingContentLengthRemaining > 0 {
+                    break
+                }
+                headerOnlyDiscardCandidate = nil
+            }
+
             if discardingNDJSONLine {
                 if let newlineIndex = buffer.firstIndex(of: 0x0A) {
                     buffer.removeSubrange(buffer.startIndex...newlineIndex)
@@ -169,8 +209,10 @@ public nonisolated struct MCPStdioFrameParser: Sendable {
                 guard contentLength <= maxFrameBytes else {
                     let bodyStart = headerRange.upperBound
                     let bufferedBodyBytes = buffer.endIndex - bodyStart
-                    let dropEnd = bodyStart + min(bufferedBodyBytes, contentLength)
-                    buffer.removeSubrange(buffer.startIndex..<dropEnd)
+                    let dropBodyBytes = min(bufferedBodyBytes, contentLength)
+                    buffer.removeSubrange(buffer.startIndex..<(bodyStart + dropBodyBytes))
+                    discardingContentLengthRemaining = contentLength - dropBodyBytes
+                    headerOnlyDiscardCandidate = (bufferedBodyBytes == 0 && discardingContentLengthRemaining > 0) ? Data() : nil
                     events.append(.invalidFrame("Content-Length \(contentLength) exceeds limit \(maxFrameBytes)", framing: .contentLength))
                     continue
                 }

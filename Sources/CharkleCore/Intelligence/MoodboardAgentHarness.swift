@@ -845,8 +845,59 @@ public nonisolated struct MoodboardAgentHarness: Sendable {
         return Task.isCancelled
     }
 
+    private static let thinkBlockRegex = try? NSRegularExpression(pattern: #"<think>[\s\S]*?</think>"#, options: [.caseInsensitive])
+
     static func extractJSONObject(from raw: String) throws -> [String: Any] {
-        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let withoutThink: String
+        if let regex = thinkBlockRegex {
+            let range = NSRange(raw.startIndex..<raw.endIndex, in: raw)
+            withoutThink = regex.stringByReplacingMatches(in: raw, range: range, withTemplate: "")
+        } else {
+            withoutThink = raw
+        }
+        let trimmed = withoutThink.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Scan balanced top-level JSON objects (preferring the last valid dictionary, matching reasoning-model outputs)
+        var candidates: [String] = []
+        var depth = 0
+        var startIndex: String.Index?
+        var inString = false
+        var escaped = false
+        var idx = trimmed.startIndex
+        while idx < trimmed.endIndex {
+            let ch = trimmed[idx]
+            if inString {
+                if escaped {
+                    escaped = false
+                } else if ch == "\\" {
+                    escaped = true
+                } else if ch == "\"" {
+                    inString = false
+                }
+            } else {
+                if ch == "\"" {
+                    inString = true
+                } else if ch == "{" {
+                    if depth == 0 { startIndex = idx }
+                    depth += 1
+                } else if ch == "}", depth > 0 {
+                    depth -= 1
+                    if depth == 0, let start = startIndex {
+                        candidates.append(String(trimmed[start...idx]))
+                        startIndex = nil
+                    }
+                }
+            }
+            idx = trimmed.index(after: idx)
+        }
+
+        for candidate in candidates.reversed() {
+            if let data = candidate.data(using: .utf8),
+               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                return obj
+            }
+        }
+
         guard let first = trimmed.firstIndex(of: "{"), let last = trimmed.lastIndex(of: "}"), first <= last else {
             throw LibraryDatabaseError("模型未返回合法的 JSON 策展方案。")
         }
