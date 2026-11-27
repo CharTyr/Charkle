@@ -47,6 +47,9 @@ public enum CharkleMotion {
     /// Fast micro-tactile hover & pointer-down feedback (never animate layout on hover!).
     public static let hoverPress = Animation.timingCurve(0.23, 1, 0.32, 1, duration: 0.12)
 
+    /// Critically-damped gliding spring for single-pill continuous nearest-row hover transitions.
+    public static let hoverGlide = Animation.spring(duration: 0.20, bounce: 0.0)
+
     /// Popover origin enter (`0.16s`) and exit (`0.11s`) — both ease-out so exits respond immediately.
     public static let popoverEnter = Animation.timingCurve(0.23, 1, 0.32, 1, duration: 0.16)
     public static let popoverExit = Animation.timingCurve(0.23, 1, 0.32, 1, duration: 0.11)

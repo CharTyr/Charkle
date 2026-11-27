@@ -36,6 +36,38 @@ public struct SidebarView: View {
     @Namespace private var expandedSelectionNamespace
     @Namespace private var collapsedSelectionNamespace
 
+    private static let expandedHoverScope = "charkle.sidebar.expanded.hover"
+    private static let collapsedHoverScope = "charkle.sidebar.collapsed.hover"
+    private static let tagsPopoverHoverScope = "charkle.sidebar.tagsPopover.hover"
+
+    @State private var expandedHoverController = CharkleContinuousHoverController(maxVerticalReach: 44)
+    @State private var collapsedHoverController = CharkleContinuousHoverController(maxVerticalReach: 32)
+    @State private var tagsPopoverHoverController = CharkleContinuousHoverController(maxVerticalReach: 28)
+
+    private var isSidebarDragTargetingActive: Bool {
+        dropTargetedFolderID != nil
+            || dropTargetedFolderRoot
+            || dropTargetedSlot != nil
+            || dropTargetedInbox
+            || dropTargetedBoardID != nil
+    }
+
+    private static func hoverTargetID(for destination: SidebarDestination) -> String {
+        switch destination {
+        case .allItems: "nav:allItems"
+        case .inbox: "nav:inbox"
+        case .untagged: "nav:untagged"
+        case .recent: "nav:recent"
+        case .trash: "nav:trash"
+        case .pinterest: "nav:pinterest"
+        case .moodboardsHome: "nav:moodboardsHome"
+        case .moodboard(let id): "nav:board:\(id.uuidString)"
+        case .smartFolder(let id): "nav:smartFolder:\(id.uuidString)"
+        case .folder(let id): "nav:folder:\(id.uuidString)"
+        case .tag(let name): "nav:tag:\(name)"
+        }
+    }
+
     private enum FolderCreationTarget: Equatable {
         case root
         case subfolder(UUID)
@@ -360,6 +392,11 @@ public struct SidebarView: View {
                                     }
                                 }
                                 .contentShape(shape)
+                                .charkleContinuousHoverTarget(
+                                    id: "rail-folder:\(folder.id.uuidString)",
+                                    in: Self.collapsedHoverScope,
+                                    controller: collapsedHoverController
+                                )
                             }
                             .buttonStyle(.plain)
                             .help("\(folder.name) (\(library.subtreeAssetCount(for: folder.id)))")
@@ -395,6 +432,11 @@ public struct SidebarView: View {
                                     in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous)
                                 )
                                 .contentShape(RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous))
+                                .charkleContinuousHoverTarget(
+                                    id: "rail-tags",
+                                    in: Self.collapsedHoverScope,
+                                    controller: collapsedHoverController
+                                )
                         }
                         .buttonStyle(.plain)
                         .help("查看全部标签 (\(library.tagCounts.count))")
@@ -410,6 +452,12 @@ public struct SidebarView: View {
                 .frame(maxWidth: .infinity)
                 .padding(.top, 6)
                 .padding(.bottom, 12)
+                .charkleContinuousHoverContainer(
+                    scope: Self.collapsedHoverScope,
+                    controller: collapsedHoverController,
+                    cornerRadius: CharkleTheme.Radius.chip,
+                    isSuspended: isDraggingDivider || isSidebarDragTargetingActive
+                )
                 .charkleCleanScrollbars(hidden: true)
             }
             .scrollIndicators(.hidden)
@@ -417,7 +465,7 @@ public struct SidebarView: View {
 
             CharkleHairlineDivider()
 
-            Button {
+            SidebarHoverPillButton(isSelected: coordinator.isSettingsPresented) {
                 withAnimation(CharkleMotion.accessible(CharkleMotion.enterMd, reduced: reduceMotion)) {
                     coordinator.openSettings()
                 }
@@ -427,15 +475,7 @@ public struct SidebarView: View {
                     .symbolVariant(coordinator.isSettingsPresented ? .fill : .none)
                     .foregroundStyle(coordinator.isSettingsPresented ? activeAccent : CharkleTheme.secondaryInk(for: colorScheme))
                     .frame(width: 38, height: 34)
-                    .background(
-                        coordinator.isSettingsPresented
-                            ? Color.primary.opacity(colorScheme == .dark ? 0.14 : 0.09)
-                            : Color.clear,
-                        in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous)
-                    )
-                    .contentShape(RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous))
             }
-            .buttonStyle(.plain)
             .help("设置 (⌘,)")
             .padding(.vertical, 8)
         }
@@ -488,6 +528,11 @@ public struct SidebarView: View {
                 }
             }
             .contentShape(shape)
+            .charkleContinuousHoverTarget(
+                id: Self.hoverTargetID(for: destination),
+                in: Self.collapsedHoverScope,
+                controller: collapsedHoverController
+            )
         }
         .buttonStyle(.plain)
         .help(tooltip)
@@ -938,6 +983,12 @@ public struct SidebarView: View {
                 }
                 .padding(.top, 10)
                 .padding(.bottom, 14)
+                .charkleContinuousHoverContainer(
+                    scope: Self.expandedHoverScope,
+                    controller: expandedHoverController,
+                    cornerRadius: CharkleTheme.Radius.chip,
+                    isSuspended: isDraggingDivider || isSidebarDragTargetingActive || creationTarget != nil || renamingFolderID != nil
+                )
                 .charkleCleanScrollbars(hidden: true)
             }
             .scrollIndicators(.hidden)
@@ -945,7 +996,7 @@ public struct SidebarView: View {
 
             CharkleHairlineDivider()
 
-            Button {
+            SidebarHoverPillButton(isSelected: coordinator.isSettingsPresented) {
                 withAnimation(CharkleMotion.accessible(CharkleMotion.enterMd, reduced: reduceMotion)) {
                     coordinator.openSettings()
                 }
@@ -966,15 +1017,7 @@ public struct SidebarView: View {
                 }
                 .padding(.horizontal, 10)
                 .padding(.vertical, 7)
-                .background(
-                    coordinator.isSettingsPresented
-                        ? Color.primary.opacity(colorScheme == .dark ? 0.12 : 0.08)
-                        : Color.clear,
-                    in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous)
-                )
-                .contentShape(RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous))
             }
-            .buttonStyle(.plain)
             .padding(.horizontal, 8)
             .padding(.vertical, 7)
             .help("打开 Charkle 设置 (⌘,)")
@@ -1205,11 +1248,21 @@ public struct SidebarView: View {
                                 in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous)
                             )
                             .contentShape(Rectangle())
+                            .charkleContinuousHoverTarget(
+                                id: "pop-tag:\(tag.name)",
+                                in: Self.tagsPopoverHoverScope,
+                                controller: tagsPopoverHoverController
+                            )
                         }
                         .buttonStyle(.plain)
                     }
                 }
                 .padding(8)
+                .charkleContinuousHoverContainer(
+                    scope: Self.tagsPopoverHoverScope,
+                    controller: tagsPopoverHoverController,
+                    cornerRadius: CharkleTheme.Radius.chip
+                )
             }
             .frame(maxHeight: 360)
         }
@@ -1393,6 +1446,11 @@ public struct SidebarView: View {
                 }
             }
             .contentShape(rowShape)
+            .charkleContinuousHoverTarget(
+                id: "folder:\(folder.id.uuidString)",
+                in: Self.expandedHoverScope,
+                controller: expandedHoverController
+            )
             .onDrag {
                 NSItemProvider(object: CharkleDragIdentifiers.encode(folderIDs: targetFolderIDs) as NSString)
             } preview: {
@@ -1761,6 +1819,55 @@ public struct SidebarView: View {
     }
 }
 
+/// Isolates hover state for pinned footer actions (e.g. Settings) so hovering them never
+/// invalidates `SidebarView.body` while matching the continuous hover pill's calibrated neutral wash.
+private struct SidebarHoverPillButton<Label: View>: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.charkleOverlayInteractionSuspended) private var isOverlayInteractionSuspended
+
+    let isSelected: Bool
+    let action: () -> Void
+    @ViewBuilder let label: () -> Label
+
+    @State private var isHovered: Bool = false
+
+    private var fillColor: Color {
+        if isSelected {
+            return Color.primary.opacity(colorScheme == .dark ? 0.12 : 0.08)
+        }
+        if isHovered && !isOverlayInteractionSuspended {
+            return colorScheme == .dark
+                ? Color.white.opacity(reduceTransparency ? 0.11 : 0.075)
+                : Color.black.opacity(reduceTransparency ? 0.075 : 0.05)
+        }
+        return .clear
+    }
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous)
+        Button(action: action) {
+            label()
+                .background(fillColor, in: shape)
+                .contentShape(shape)
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering in
+            let next = isOverlayInteractionSuspended ? false : hovering
+            guard isHovered != next else { return }
+            withAnimation(CharkleMotion.accessible(CharkleMotion.hoverPress, reduced: reduceMotion)) {
+                isHovered = next
+            }
+        }
+        .onChange(of: isOverlayInteractionSuspended) { _, suspended in
+            if suspended && isHovered {
+                isHovered = false
+            }
+        }
+    }
+}
+
 /// Isolates per-row hover state so hovering over folders in the sidebar only re-renders the
 /// entered/exited row instead of invalidating the entire `SidebarView` tree.
 private struct SidebarFolderRowHoverWrapper<Content: View>: View {
@@ -1978,6 +2085,11 @@ extension SidebarView {
                 }
             }
             .contentShape(rowShape)
+            .charkleContinuousHoverTarget(
+                id: Self.hoverTargetID(for: destination),
+                in: Self.expandedHoverScope,
+                controller: expandedHoverController
+            )
         }
         .buttonStyle(.plain)
         .padding(.horizontal, 8)

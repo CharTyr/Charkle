@@ -202,4 +202,61 @@ struct AuditFixShellTests {
         #expect(syncPane.contains("已开启同步轻量化预览图"))
         #expect(aiPane.contains("已开启导入时自动 AI 分析"))
     }
+
+    @Test("Sidebar continuous nearest-row hover eliminates inter-row dead zones and wires GPU gliding pill")
+    @MainActor
+    func sidebarContinuousNearestRowHoverContracts() throws {
+        // 1. Pure math: zero inter-row dead zones across gaps, edge padding, and 200-row lists
+        let rows: [ContinuousHoverTarget] = [
+            ContinuousHoverTarget(id: "all", frame: CGRect(x: 8, y: 30, width: 216, height: 30)),
+            ContinuousHoverTarget(id: "inbox", frame: CGRect(x: 8, y: 66, width: 216, height: 30)),      // 6pt gap
+            ContinuousHoverTarget(id: "pinterest", frame: CGRect(x: 8, y: 126, width: 216, height: 30))  // 30pt section gap
+        ]
+
+        // Inside top edge padding (30pt above first row) still locks onto first row
+        #expect(ContinuousHoverResolver.nearestTarget(to: 0, in: rows, maxVerticalReach: 44)?.id == "all")
+        #expect(ContinuousHoverResolver.nearestTarget(to: 15, in: rows, maxVerticalReach: 44)?.id == "all")
+
+        // Inside 6pt gap between "all" (midY=45) and "inbox" (midY=81): midpoint is 63
+        #expect(ContinuousHoverResolver.nearestTarget(to: 61, in: rows, maxVerticalReach: 44)?.id == "all")
+        #expect(ContinuousHoverResolver.nearestTarget(to: 63, in: rows, maxVerticalReach: 44)?.id == "all")
+        #expect(ContinuousHoverResolver.nearestTarget(to: 65, in: rows, maxVerticalReach: 44)?.id == "inbox")
+
+        // Across 30pt section divider gap between "inbox" (midY=81) and "pinterest" (midY=141): midpoint is 111
+        #expect(ContinuousHoverResolver.nearestTarget(to: 108, in: rows, maxVerticalReach: 44)?.id == "inbox")
+        #expect(ContinuousHoverResolver.nearestTarget(to: 114, in: rows, maxVerticalReach: 44)?.id == "pinterest")
+
+        // Bottom edge padding locks onto last item; far blank void releases hover cleanly
+        #expect(ContinuousHoverResolver.nearestTarget(to: 185, in: rows, maxVerticalReach: 44)?.id == "pinterest")
+        #expect(ContinuousHoverResolver.nearestTarget(to: 240, in: rows, maxVerticalReach: 44) == nil)
+        #expect(ContinuousHoverResolver.nearestTarget(to: .nan, in: rows, maxVerticalReach: 44) == nil)
+        #expect(ContinuousHoverResolver.nearestTarget(to: 50, in: [], maxVerticalReach: 44) == nil)
+
+        // 200-row scaling accuracy (single linear pass)
+        let manyRows = (0..<200).map { idx in
+            ContinuousHoverTarget(
+                id: "row-\(idx)",
+                frame: CGRect(x: 8, y: CGFloat(idx) * 36, width: 216, height: 30)
+            )
+        }
+        #expect(ContinuousHoverResolver.nearestTarget(to: 147 * 36 + 32, in: manyRows, maxVerticalReach: 44)?.id == "row-147")
+        #expect(ContinuousHoverResolver.nearestTarget(to: 147 * 36 + 34, in: manyRows, maxVerticalReach: 44)?.id == "row-148")
+
+        // 2. Source wiring contracts: single gliding pill, zero-layout-write offset, overlay/motion/drag safety
+        let hoverSource = try readSource("Sources/CharkleApp/DesignSystem/CharkleContinuousHover.swift")
+        let sidebarSource = try readSource("Sources/CharkleApp/Views/SidebarView.swift")
+        let motionSource = try readSource("Sources/CharkleApp/DesignSystem/CharkleMotion.swift")
+
+        #expect(motionSource.contains("public static let hoverGlide"))
+        #expect(hoverSource.contains("ContinuousHoverResolver.nearestTarget("))
+        #expect(hoverSource.contains(".onContinuousHover(coordinateSpace: .local)"))
+        #expect(hoverSource.contains(".onGeometryChange(for: CGRect.self)"))
+        #expect(hoverSource.contains("@Environment(\\.charkleOverlayInteractionSuspended)"))
+        #expect(hoverSource.contains("@Environment(\\.accessibilityReduceMotion)"))
+        #expect(hoverSource.contains("CharkleMotion.hoverGlide"))
+        #expect(sidebarSource.contains(".charkleContinuousHoverContainer("))
+        #expect(sidebarSource.contains(".charkleContinuousHoverTarget("))
+        #expect(sidebarSource.contains("SidebarHoverPillButton"))
+        #expect(sidebarSource.contains("isSidebarDragTargetingActive"))
+    }
 }
