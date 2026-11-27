@@ -116,6 +116,9 @@ impl MediaArtwork {
         cover: Option<&DynamicImage>,
         avatar: Option<&DynamicImage>,
     ) -> DynamicImage {
+        if meta.platform.is_video_platform() {
+            return Self::video_platform_card(meta, cover, avatar);
+        }
         if meta.platform == SocialPlatform::Xiaohongshu {
             return Self::xiaohongshu_post_card(meta, cover, avatar);
         }
@@ -145,6 +148,8 @@ impl MediaArtwork {
             SocialPlatform::Xiaohongshu => "#FF2442",
             SocialPlatform::Pixiv => "#0096FA",
             SocialPlatform::Instagram => "#D93B58",
+            SocialPlatform::Youtube => "#FF0000",
+            SocialPlatform::Bilibili => "#FB7299",
         };
 
         let mut handle_parts = Vec::new();
@@ -325,6 +330,156 @@ impl MediaArtwork {
                     image::imageops::overlay(&mut img, &overlay.to_rgba8(), 0, 0);
                 }
             }
+        }
+
+        DynamicImage::ImageRgba8(img)
+    }
+
+    /// Native 16:9 video bookmark card (`1280×720`) for YouTube & Bilibili:
+    /// full-bleed cover artwork with subtle dark scrim, platform pill (top-left),
+    /// duration badge (bottom-right), subtle centered play glyph, and bottom title/channel bar.
+    pub fn video_platform_card(
+        meta: &SocialPostMetadata,
+        cover: Option<&DynamicImage>,
+        avatar: Option<&DynamicImage>,
+    ) -> DynamicImage {
+        const W: u32 = 1_280;
+        const H: u32 = 720;
+
+        let (accent_hex, platform_label) = match meta.platform {
+            SocialPlatform::Youtube => ("#FF0033", "YouTube"),
+            SocialPlatform::Bilibili => ("#FB7299", "Bilibili"),
+            _ => ("#2563EB", meta.platform.display_name()),
+        };
+
+        let mut img = RgbaImage::from_pixel(W, H, Rgba([18, 22, 29, 255]));
+        if let Some(cover_img) = cover {
+            let fitted = cover_img
+                .resize_to_fill(W, H, image::imageops::FilterType::Triangle)
+                .to_rgba8();
+            image::imageops::overlay(&mut img, &fitted, 0, 0);
+        }
+
+        let title = meta
+            .article_title
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| meta.body_text.trim());
+        let display_title = if title.is_empty() {
+            format!("{platform_label} 视频书签")
+        } else {
+            title.to_string()
+        };
+        let title_lines = wrap_cjk_aware_ellipsis(&display_title, 44, 2);
+        let author = meta.display_author_name();
+        let initial = author
+            .chars()
+            .next()
+            .unwrap_or('V')
+            .to_uppercase()
+            .to_string();
+        let duration_label = meta.formatted_video_duration();
+        let has_summary = meta.has_video_summary_content();
+
+        let mut svg = String::with_capacity(4096);
+        svg.push_str(&format!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" viewBox="0 0 {W} {H}">
+  <defs>
+    <linearGradient id="vidScrim" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#0B0F17" stop-opacity="0.34"/>
+      <stop offset="46%" stop-color="#0B0F17" stop-opacity="0.08"/>
+      <stop offset="100%" stop-color="#0B0F17" stop-opacity="0.88"/>
+    </linearGradient>
+  </defs>
+  <rect x="0" y="0" width="{W}" height="{H}" fill="url(#vidScrim)"/>
+"##
+        ));
+
+        // Platform badge at top-left
+        let badge_w = 136u32;
+        svg.push_str(&format!(
+            r##"  <rect x="32" y="28" width="{badge_w}" height="42" rx="21" ry="21" fill="{accent_hex}" fill-opacity="0.94"/>
+  <text x="{}" y="55" text-anchor="middle" font-family="Microsoft YaHei UI, Segoe UI, sans-serif" font-size="20" font-weight="700" fill="#FFFFFF">{}</text>
+"##,
+            32 + badge_w / 2,
+            escape_svg_xml(platform_label)
+        ));
+
+        // Optional AI summary / chapter indicator pill next to platform badge
+        if has_summary {
+            svg.push_str(
+                r##"  <rect x="182" y="28" width="128" height="42" rx="21" ry="21" fill="#111827" fill-opacity="0.72"/>
+  <text x="246" y="55" text-anchor="middle" font-family="Microsoft YaHei UI, Segoe UI, sans-serif" font-size="18" font-weight="600" fill="#F8FAFC">含视频摘要</text>
+"##,
+            );
+        }
+
+        // Centered translucent play circle
+        svg.push_str(
+            r##"  <circle cx="640" cy="336" r="52" fill="#0B0F17" fill-opacity="0.58" stroke="#FFFFFF" stroke-opacity="0.28" stroke-width="2"/>
+  <polygon points="626,312 626,360 666,336" fill="#FFFFFF"/>
+"##,
+        );
+
+        // Duration pill at bottom-right above footer line
+        if let Some(ref dur) = duration_label {
+            let dur_w = ((dur.chars().count() as u32) * 14 + 34).clamp(84, 170);
+            let dur_x = W - 32 - dur_w;
+            svg.push_str(&format!(
+                r##"  <rect x="{dur_x}" y="636" width="{dur_w}" height="40" rx="10" ry="10" fill="#0B0F17" fill-opacity="0.82"/>
+  <text x="{}" y="663" text-anchor="middle" font-family="Consolas, Segoe UI, sans-serif" font-size="21" font-weight="700" fill="#FFFFFF">{}</text>
+"##,
+                dur_x + dur_w / 2,
+                escape_svg_xml(dur)
+            ));
+        }
+
+        // Bottom title lines
+        let mut title_y = if title_lines.len() > 1 {
+            566u32
+        } else {
+            600u32
+        };
+        for line in &title_lines {
+            svg.push_str(&format!(
+                r##"  <text x="36" y="{title_y}" font-family="Microsoft YaHei UI, Segoe UI, sans-serif" font-size="34" font-weight="700" fill="#FFFFFF">{}</text>
+"##,
+                escape_svg_xml(line)
+            ));
+            title_y += 42;
+        }
+
+        // Author monogram + channel name
+        if avatar.is_none() {
+            svg.push_str(&format!(
+                r##"  <circle cx="56" cy="656" r="20" fill="{accent_hex}"/>
+  <text x="56" y="663" text-anchor="middle" font-family="Microsoft YaHei UI, Segoe UI, sans-serif" font-size="18" font-weight="700" fill="#FFFFFF">{}</text>
+"##,
+                escape_svg_xml(&initial)
+            ));
+        }
+        let mut meta_line = author;
+        if let Some(views) = meta.view_count {
+            meta_line.push_str(&format!("  ·  {} 播放", format_metric_count(views)));
+        }
+        if let Some(ref date) = meta.published_at_text {
+            let d = date.trim();
+            if !d.is_empty() {
+                meta_line.push_str(&format!("  ·  {d}"));
+            }
+        }
+        svg.push_str(&format!(
+            r##"  <text x="90" y="664" font-family="Microsoft YaHei UI, Segoe UI, sans-serif" font-size="22" font-weight="500" fill="#E2E8F0">{}</text>
+</svg>"##,
+            escape_svg_xml(&truncate_chars(&meta_line, 56))
+        ));
+
+        if let Some(overlay) = Self::render_svg_with_fonts(svg.as_bytes(), W) {
+            image::imageops::overlay(&mut img, &overlay.to_rgba8(), 0, 0);
+        }
+        if let Some(av) = avatar {
+            composite_circular_avatar(&mut img, av, 36, 636, 40);
         }
 
         DynamicImage::ImageRgba8(img)
@@ -1380,6 +1535,11 @@ mod tests {
             original_url: "https://www.xiaohongshu.com/explore/67a1b2c3d4e5f60718293a4b"
                 .to_string(),
             media_fetch_failed: false,
+            video_duration_seconds: None,
+            video_summary: None,
+            video_outline: Vec::new(),
+            video_id: None,
+            video_cid: None,
         };
 
         // Cover-bearing card: exact 900×1440 with 3:4 cover top + white footer bottom
@@ -1431,6 +1591,11 @@ mod tests {
             view_count: Some(48_900),
             original_url: "https://x.com/studio_design/status/2032956200000000001".to_string(),
             media_fetch_failed: false,
+            video_duration_seconds: None,
+            video_summary: None,
+            video_outline: Vec::new(),
+            video_id: None,
+            video_cid: None,
         };
 
         let cover =

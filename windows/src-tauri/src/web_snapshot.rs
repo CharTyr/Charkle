@@ -60,9 +60,16 @@ impl Drop for EphemeralWindowGuard {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct DomMetaPayload {
     title: Option<String>,
     description: Option<String>,
+    site_name: Option<String>,
+    author_name: Option<String>,
+    #[serde(default)]
+    hero_images: Vec<String>,
+    #[serde(default)]
+    videos: Vec<String>,
 }
 
 /// Concrete `WebPageSnapshotProvider` backed by an ephemeral hidden offscreen WebView2 window.
@@ -192,10 +199,36 @@ async fn capture_webview2_preview(win: &tauri::WebviewWindow) -> Option<WebPageS
             }
         }
 
-        // Capture DOM title & meta description via ExecuteScript.
+        // Capture rich Layer 5 SPA DOM metadata (title, lead paragraph description, site/author,
+        // rendered hero images, and <video> streams) via ExecuteScript.
         let meta_slot_cb = Arc::clone(&meta_slot);
         let script = w!(
-            "JSON.stringify({title: document.title || '', description: (document.querySelector('meta[property=\"og:description\"]')?.content || document.querySelector('meta[name=\"description\"]')?.content || '')})"
+            "(() => { \
+              const pickMeta = (sels) => { for (const s of sels) { const el = document.querySelector(s); const v = el?.content?.trim(); if (v) return v; } return ''; }; \
+              const title = pickMeta(['meta[property=\"og:title\"]','meta[name=\"twitter:title\"]']) || (document.title || '').trim() || (document.querySelector('h1')?.innerText || '').trim(); \
+              let description = pickMeta(['meta[property=\"og:description\"]','meta[name=\"twitter:description\"]','meta[name=\"description\"]']); \
+              if (!description) { \
+                const ps = Array.from(document.querySelectorAll('article p, main p, p')).map(p => (p.innerText || '').replace(/\\s+/g, ' ').trim()).filter(t => t.length >= 28 && !/cookie|privacy|all rights reserved|enable javascript/i.test(t)); \
+                if (ps.length) description = ps.slice(0, 2).join('\\n\\n').slice(0, 460); \
+              } \
+              const siteName = pickMeta(['meta[property=\"og:site_name\"]','meta[name=\"application-name\"]']); \
+              const authorName = pickMeta(['meta[name=\"author\"]','meta[property=\"article:author\"]','meta[name=\"twitter:creator\"]']) || (document.querySelector('[rel=\"author\"]')?.innerText || '').trim(); \
+              const heroImages = []; const seenImg = new Set(); \
+              for (const img of Array.from(document.querySelectorAll('article img, main img, img'))) { \
+                const src = img.currentSrc || img.src || img.getAttribute('data-original') || img.getAttribute('data-src') || ''; \
+                if (!src || src.startsWith('data:') || !/^https?:/i.test(src) || seenImg.has(src)) continue; \
+                const w = img.naturalWidth || img.width || 0; const h = img.naturalHeight || img.height || 0; \
+                if ((w > 0 && w < 220) || (h > 0 && h < 140)) continue; \
+                seenImg.add(src); heroImages.push(src); if (heroImages.length >= 8) break; \
+              } \
+              const videos = []; const seenVid = new Set(); \
+              for (const v of Array.from(document.querySelectorAll('video, video source'))) { \
+                const src = v.currentSrc || v.src || v.getAttribute('src') || ''; \
+                if (!src || !/^https?:/i.test(src) || seenVid.has(src)) continue; \
+                seenVid.add(src); videos.push(src); if (videos.length >= 6) break; \
+              } \
+              return JSON.stringify({ title, description, siteName, authorName, heroImages, videos }); \
+            })()"
         );
         let script_handler = ExecuteScriptCompletedHandler::create(Box::new(move |hr, raw_json| {
             let parsed = if hr.is_ok() {
@@ -315,12 +348,33 @@ async fn capture_webview2_preview(win: &tauri::WebviewWindow) -> Option<WebPageS
         .and_then(|m| m.description.as_deref())
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .map(|s| s.chars().take(420).collect());
+        .map(|s| s.chars().take(460).collect());
+    let clean_site = meta
+        .as_ref()
+        .and_then(|m| m.site_name.as_deref())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.chars().take(120).collect());
+    let clean_author = meta
+        .as_ref()
+        .and_then(|m| m.author_name.as_deref())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.chars().take(120).collect());
+    let hero_image_urls = meta
+        .as_ref()
+        .map(|m| m.hero_images.clone())
+        .unwrap_or_default();
+    let video_urls = meta.as_ref().map(|m| m.videos.clone()).unwrap_or_default();
 
     Some(WebPageSnapshot {
         png_bytes,
         title: clean_title,
         description: clean_desc,
+        site_name: clean_site,
+        author_name: clean_author,
+        hero_image_urls,
+        video_urls,
         final_url,
     })
 }

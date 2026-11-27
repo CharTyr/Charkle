@@ -378,11 +378,18 @@ pub async fn copy_assets_to_clipboard(
     asset_ids: Vec<String>,
 ) -> IpcResult<usize> {
     let mut paths: Vec<PathBuf> = Vec::with_capacity(asset_ids.len());
+    let mut seen_ids = std::collections::HashSet::with_capacity(asset_ids.len());
+    let mut seen_paths = std::collections::HashSet::with_capacity(asset_ids.len());
     for raw in asset_ids {
         let id = parse_uuid(&raw)?;
+        if !seen_ids.insert(id) {
+            continue;
+        }
         if let Some(asset) = state.engine.fetch_asset(id)? {
             if let Some(local_path) = state.engine.cached_original_path(&asset) {
-                paths.push(local_path);
+                if seen_paths.insert(local_path.clone()) {
+                    paths.push(local_path);
+                }
             }
         }
     }

@@ -31,7 +31,7 @@ use crate::media::resolvers::{
 use crate::media::xiaohongshu::XiaohongshuURLParser;
 use crate::models::core::{
     AssetRecord, AssetRichMetadata, FolderRecord, LabColor, MediaKind, SocialMediaAttachmentKind,
-    SocialPlatform,
+    SocialPlatform, WebPageRichMetadata,
 };
 use crate::models::media::{CacheStats, CaptureInput, ThumbnailTier};
 use crate::models::moodboard::{
@@ -378,6 +378,7 @@ impl MediaPipeline {
         let mut pre_rich: Option<AssetRichMetadata> = None;
         let mut pre_poster: Option<DynamicImage> = None;
         let mut pre_ocr: Option<String> = None;
+        let mut pre_duration: Option<f64> = None;
 
         // Delegate `.url` / `.webloc` shortcut file drops through the full rich URL resolution pipeline
         // so GitHub repos, X/Threads/Bluesky posts, and universal websites get covers, metadata & FTS5 text.
@@ -491,8 +492,32 @@ impl MediaPipeline {
                         if preferred_title.is_none() {
                             preferred_title = Some(post.short_title());
                         }
-                        if notes.trim().is_empty() && !post.metadata.body_text.trim().is_empty() {
-                            notes = post.metadata.body_text.clone();
+                        if let Some(dur) = post.metadata.video_duration_seconds {
+                            if dur > 0.0 {
+                                pre_duration = Some(dur);
+                            }
+                        }
+                        let is_video_platform = post.metadata.platform.is_video_platform();
+                        if notes.trim().is_empty() {
+                            if is_video_platform {
+                                let mut note_blocks = Vec::new();
+                                if let Some(ref s) = post.metadata.video_summary {
+                                    let st = s.trim();
+                                    if !st.is_empty() {
+                                        note_blocks.push(st.to_string());
+                                    }
+                                }
+                                if !post.metadata.video_outline.is_empty() {
+                                    note_blocks.push(post.metadata.video_outline.join("\n"));
+                                }
+                                let body_t = post.metadata.body_text.trim();
+                                if !body_t.is_empty() && note_blocks.is_empty() {
+                                    note_blocks.push(body_t.to_string());
+                                }
+                                notes = note_blocks.join("\n\n");
+                            } else if !post.metadata.body_text.trim().is_empty() {
+                                notes = post.metadata.body_text.clone();
+                            }
                         }
                         let mut cover_img = None;
                         let mut downloaded_video: Option<(Vec<u8>, String)> = None;
@@ -504,8 +529,13 @@ impl MediaPipeline {
                                 kind,
                                 SocialMediaAttachmentKind::Video | SocialMediaAttachmentKind::Gif
                             ) {
-                                downloaded_video =
-                                    SocialPostResolver::download_media_bytes(dl_url, kind).await;
+                                // Zero-download default contract for YouTube / Bilibili bookmarks:
+                                // never download the full MP4 unless the user explicitly asks to extract it.
+                                if !is_video_platform {
+                                    downloaded_video =
+                                        SocialPostResolver::download_media_bytes(dl_url, kind)
+                                            .await;
+                                }
                             } else if let Some((bytes, _)) =
                                 SocialPostResolver::download_media_bytes(dl_url, kind).await
                             {
@@ -565,6 +595,20 @@ impl MediaPipeline {
                         if let Some(ref h) = post.metadata.article_title {
                             if !h.trim().is_empty() {
                                 ocr_parts.push(h.trim().to_string());
+                            }
+                        }
+                        if is_video_platform {
+                            let author = post.metadata.display_author_name();
+                            if !author.is_empty() {
+                                ocr_parts.push(author);
+                            }
+                            if let Some(ref s) = post.metadata.video_summary {
+                                if !s.trim().is_empty() {
+                                    ocr_parts.push(s.trim().to_string());
+                                }
+                            }
+                            if !post.metadata.video_outline.is_empty() {
+                                ocr_parts.push(post.metadata.video_outline.join("\n"));
                             }
                         }
                         if !post.metadata.body_text.trim().is_empty() {
@@ -673,6 +717,11 @@ impl MediaPipeline {
                             }
                         }
                     }
+                    if let Some(dur) = bm.duration_seconds {
+                        if dur > 0.0 {
+                            pre_duration = Some(dur);
+                        }
+                    }
                     let mut web_ocr_parts = vec![
                         preferred_title
                             .clone()
@@ -682,13 +731,35 @@ impl MediaPipeline {
                     if let Some(ref site) = bm.site_name {
                         web_ocr_parts.push(site.clone());
                     }
+                    if let Some(ref author) = bm.author_name {
+                        if !author.trim().is_empty() {
+                            web_ocr_parts.push(author.clone());
+                        }
+                    }
                     if let Some(ref desc) = bm.description {
                         web_ocr_parts.push(desc.clone());
                     }
                     pre_ocr = Some(web_ocr_parts.join("\n"));
-                    if let Some(ref desc) = bm.description {
+                    let has_rich_web = bm.author_name.is_some()
+                        || bm.published_at_text.is_some()
+                        || bm.description.is_some()
+                        || !bm.attachments.is_empty()
+                        || bm.is_video_page
+                        || bm.duration_seconds.is_some()
+                        || bm.site_name.is_some();
+                    if has_rich_web {
                         pre_rich = Some(AssetRichMetadata {
-                            text_excerpt: Some(desc.clone()),
+                            text_excerpt: bm.description.clone(),
+                            web_page: Some(WebPageRichMetadata {
+                                site_name: bm.site_name.clone(),
+                                author_name: bm.author_name.clone(),
+                                published_at_text: bm.published_at_text.clone(),
+                                summary: bm.description.clone(),
+                                attachments: bm.attachments.clone(),
+                                has_video: bm.is_video_page,
+                                duration_seconds: bm.duration_seconds,
+                                canonical_url: bm.final_url.clone(),
+                            }),
                             ..AssetRichMetadata::default()
                         });
                     }
@@ -733,6 +804,11 @@ impl MediaPipeline {
                         meta.effective_attachments().len() <= 1
                             && (body_trimmed.is_empty() || body_trimmed == title_trimmed)
                     }
+                    SocialPlatform::Youtube | SocialPlatform::Bilibili => {
+                        meta.video_summary.is_none()
+                            || meta.video_duration_seconds.is_none()
+                            || meta.effective_attachments().is_empty()
+                    }
                     SocialPlatform::Threads
                     | SocialPlatform::Bluesky
                     | SocialPlatform::Pixiv
@@ -745,13 +821,15 @@ impl MediaPipeline {
                     if let Ok(parsed_orig) = Url::parse(&meta.original_url) {
                         if let Some(social_ref) = SocialPostURLParser::parse(&parsed_orig) {
                             if let Some(live) = SocialPostResolver::resolve(&social_ref).await {
-                                if matches!(
-                                    live.primary_media_kind,
-                                    Some(
-                                        SocialMediaAttachmentKind::Video
-                                            | SocialMediaAttachmentKind::Gif
+                                if !live.metadata.platform.is_video_platform()
+                                    && matches!(
+                                        live.primary_media_kind,
+                                        Some(
+                                            SocialMediaAttachmentKind::Video
+                                                | SocialMediaAttachmentKind::Gif
+                                        )
                                     )
-                                ) {
+                                {
                                     resolved_video_url = live.primary_media_download_url.clone();
                                 }
                                 live_extracted_tags = live.extracted_tags;
@@ -760,6 +838,13 @@ impl MediaPipeline {
                         }
                     }
                 }
+
+                if let Some(dur) = meta.video_duration_seconds {
+                    if dur > 0.0 {
+                        pre_duration = Some(dur);
+                    }
+                }
+                let is_video_platform = meta.platform.is_video_platform();
 
                 extra_tags.push(meta.platform.display_name().to_string());
                 for tag in tags.into_iter().chain(live_extracted_tags).take(16) {
@@ -813,7 +898,7 @@ impl MediaPipeline {
 
                 let mut downloaded_video: Option<(Vec<u8>, String)> = None;
                 let video_candidate = resolved_video_url.or_else(|| meta.video_url.clone());
-                if meta.has_video {
+                if meta.has_video && !is_video_platform {
                     if let Some(ref v_url) = video_candidate {
                         downloaded_video = SocialPostResolver::download_media_bytes(
                             v_url,
@@ -848,7 +933,24 @@ impl MediaPipeline {
                 let md_doc = resolved.markdown_document();
 
                 preferred_title = Some(short_title.clone());
-                notes = meta.body_text.clone();
+                notes = if is_video_platform {
+                    let mut blocks = Vec::new();
+                    if let Some(ref s) = meta.video_summary {
+                        if !s.trim().is_empty() {
+                            blocks.push(s.trim().to_string());
+                        }
+                    }
+                    if !meta.video_outline.is_empty() {
+                        blocks.push(meta.video_outline.join("\n"));
+                    }
+                    if blocks.is_empty() {
+                        meta.body_text.clone()
+                    } else {
+                        blocks.join("\n\n")
+                    }
+                } else {
+                    meta.body_text.clone()
+                };
                 source_url = Url::parse(&meta.original_url).ok();
                 pre_poster = Some(MediaArtwork::social_post_card_with_avatar(
                     &meta,
@@ -860,6 +962,20 @@ impl MediaPipeline {
                 if let Some(ref h) = meta.article_title {
                     if !h.trim().is_empty() {
                         ocr_parts.push(h.trim().to_string());
+                    }
+                }
+                if is_video_platform {
+                    let author = meta.display_author_name();
+                    if !author.is_empty() {
+                        ocr_parts.push(author);
+                    }
+                    if let Some(ref s) = meta.video_summary {
+                        if !s.trim().is_empty() {
+                            ocr_parts.push(s.trim().to_string());
+                        }
+                    }
+                    if !meta.video_outline.is_empty() {
+                        ocr_parts.push(meta.video_outline.join("\n"));
                     }
                 }
                 if !meta.body_text.trim().is_empty() {
@@ -946,6 +1062,9 @@ impl MediaPipeline {
         asset.notes = notes;
         asset.is_local_original_cached = true;
         asset.rich_metadata = pre_rich;
+        if let Some(dur) = pre_duration {
+            asset.duration_seconds = Some(dur);
+        }
         if let Some(ocr) = pre_ocr {
             asset.ocr_text = Some(ocr);
         }

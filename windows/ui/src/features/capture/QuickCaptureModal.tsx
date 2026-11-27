@@ -144,6 +144,32 @@ export const QuickCaptureModal: React.FC = () => {
     }
   };
 
+  const handlePickPureRef = async () => {
+    setSubmitting(true);
+    setSubmitError(null);
+    try {
+      const paths = await getTransport().pickPureRefFilesDialog();
+      if (paths.length > 0) {
+        const results = await useLibraryStore
+          .getState()
+          .importPureRefScenes(paths, effectiveFolderId, true, destination);
+        const totalImages = results.reduce((sum, r) => sum + r.importedAssets.length, 0);
+        useCoordinatorStore.getState().pushToast({
+          message: `已导入 PureRef 场景（${totalImages} 张图）并创建情绪板`,
+          tone: 'success',
+          durationMs: 4200,
+        });
+        setOpen(false);
+      }
+    } catch (err) {
+      setSubmitError(
+        err instanceof Error && err.message ? err.message : '导入 PureRef 场景失败，请重试',
+      );
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
   const submitCurrentTab = async () => {
     if (!canSubmitForm || submitting) return;
     setSubmitting(true);
@@ -265,14 +291,24 @@ export const QuickCaptureModal: React.FC = () => {
           <div className="py-8 px-6 rounded-[var(--win-radius-card)] border border-dashed border-[var(--border-strong)] bg-[var(--bg-gallery)] flex flex-col items-center justify-center gap-3 text-center">
             <FolderArrowUp24Regular className="w-7 h-7 text-[var(--accent)]" />
             <div className="text-[13.5px] font-medium text-[var(--text-primary)]">
-              选择图片、视频、音频、PDF、文档或 3D 模型
+              选择图片、视频、音频、PDF、文档、3D 模型或 PureRef (.pur) 场景
             </div>
             <p className="text-[12px] text-[var(--text-secondary)]">
-              也可直接将文件拖入画廊，或按 Ctrl+V 粘贴剪贴板图片与链接。
+              也可直接将文件或 .pur 场景拖入画廊，或按 Ctrl+V 粘贴剪贴板图片与链接。
             </p>
-            <Button variant="accent" loading={submitting} onClick={() => void handlePickFiles()}>
-              选择文件…
-            </Button>
+            <div className="flex items-center gap-2 flex-wrap justify-center">
+              <Button variant="accent" loading={submitting} onClick={() => void handlePickFiles()}>
+                选择文件…
+              </Button>
+              <Button
+                variant="standard"
+                loading={submitting}
+                data-testid="capture-import-pureref"
+                onClick={() => void handlePickPureRef()}
+              >
+                导入 PureRef (.pur)…
+              </Button>
+            </div>
           </div>
         )}
 
@@ -281,7 +317,7 @@ export const QuickCaptureModal: React.FC = () => {
             <button type="submit" className="hidden" aria-hidden="true" />
             <div className="flex flex-col gap-1">
               <label className="text-[12px] font-medium text-[var(--text-secondary)]">
-                链接地址（支持网页、小红书分享文案、推文及 GitHub 仓库）
+                链接地址（支持任意网页、YouTube / B 站视频、小红书、推文及 GitHub 仓库）
               </label>
               <input
                 ref={urlInputRef}
@@ -293,7 +329,7 @@ export const QuickCaptureModal: React.FC = () => {
                   setUrl(e.target.value);
                   setSubmitError(null);
                 }}
-                placeholder="https://... 或直接粘贴小红书 / 推文 / GitHub 分享内容"
+                placeholder="https://... 或直接粘贴 YouTube / B 站 / 小红书 / 推文 / 网页链接"
                 className="win-input-elevation h-9 px-3 rounded-[var(--win-radius-control)] text-[13px] text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] outline-none"
               />
               {urlHasInput && extractedUrl && extractedUrl !== url.trim() && (

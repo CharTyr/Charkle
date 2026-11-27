@@ -20,6 +20,9 @@ use sha2::{Digest, Sha256};
 use url::Url;
 
 use crate::media::artwork::MediaArtwork;
+use crate::media::video_platform::{
+    VideoPlatformReference, VideoPlatformResolver, VideoPlatformURLParser,
+};
 use crate::media::xiaohongshu::{
     XhsProxyError, XhsProxyResponse, XiaohongshuNoteReference, XiaohongshuPostResolver,
     XiaohongshuURLParser, MAX_XHS_PROXY_BYTES, XIAOHONGSHU_REFERER,
@@ -32,7 +35,7 @@ use crate::traits::WebPageSnapshotProvider;
 
 const USER_AGENT: &str = "Charkle/1.0 (+https://charkle.app)";
 const BROWSER_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
-const MAX_HTML_BYTES: usize = 524_288;
+const MAX_HTML_BYTES: usize = 1_048_576;
 const MAX_DIRECT_IMAGE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_OG_IMAGE_BYTES: usize = 6 * 1024 * 1024;
 const MAX_FAVICON_BYTES: usize = 512 * 1024;
@@ -272,23 +275,35 @@ pub struct ResolvedWebBookmark {
     pub title: Option<String>,
     pub description: Option<String>,
     pub site_name: Option<String>,
+    pub author_name: Option<String>,
+    pub published_at_text: Option<String>,
     pub final_url: Option<String>,
     pub theme_color: Option<String>,
     pub poster_image: Option<DynamicImage>,
     pub poster_url: Option<String>,
     pub favicon_image: Option<DynamicImage>,
     pub favicon_url: Option<String>,
+    pub attachments: Vec<SocialMediaAttachment>,
+    pub is_video_page: bool,
+    pub duration_seconds: Option<f64>,
     pub network_unreachable: bool,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct ParsedWebHtml {
     pub title: Option<String>,
     pub description: Option<String>,
     pub site_name: Option<String>,
+    pub author_name: Option<String>,
+    pub published_at_text: Option<String>,
     pub theme_color: Option<String>,
     pub image_candidates: Vec<String>,
+    pub video_candidates: Vec<String>,
     pub favicon_candidates: Vec<String>,
+    pub oembed_url: Option<String>,
+    pub canonical_url: Option<String>,
+    pub is_video_page: bool,
+    pub duration_seconds: Option<f64>,
 }
 
 pub struct WebBookmarkResolver;
@@ -449,17 +464,19 @@ impl WebBookmarkResolver {
                 .next()
                 .map(|el| el.text().collect::<String>())
         });
-        let title = select_meta(&doc, "og:title")
+        let og_title = select_meta(&doc, "og:title")
             .or_else(|| select_meta(&doc, "twitter:title"))
-            .or(title_tag)
+            .map(|s| collapse_whitespace(&s, 220))
+            .filter(|s| !s.is_empty());
+        let fallback_title = title_tag
             .or(h1_tag)
             .map(|s| collapse_whitespace(&s, 220))
             .filter(|s| !s.is_empty());
 
-        let description = select_meta(&doc, "og:description")
+        let meta_description = select_meta(&doc, "og:description")
             .or_else(|| select_meta(&doc, "twitter:description"))
             .or_else(|| select_meta(&doc, "description"))
-            .map(|s| collapse_whitespace(&s, 420))
+            .map(|s| collapse_whitespace(&s, 460))
             .filter(|s| !s.is_empty());
 
         let site_name = select_meta(&doc, "og:site_name")
@@ -467,11 +484,39 @@ impl WebBookmarkResolver {
             .map(|s| collapse_whitespace(&s, 80))
             .filter(|s| !s.is_empty());
 
+        let mut author_name = select_meta(&doc, "article:author")
+            .or_else(|| select_meta(&doc, "author"))
+            .or_else(|| select_meta(&doc, "twitter:creator"))
+            .map(|s| collapse_whitespace(&s, 80))
+            .filter(|s| !s.is_empty());
+
+        let mut published_at_text = select_meta(&doc, "article:published_time")
+            .or_else(|| select_meta(&doc, "og:published_time"))
+            .or_else(|| select_meta(&doc, "date"))
+            .map(|s| collapse_whitespace(&s, 40))
+            .filter(|s| !s.is_empty());
+
         let theme_color =
             select_meta(&doc, "theme-color").and_then(|raw| normalize_hex_color(&raw));
 
+        let canonical_url = select_link_hrefs(&doc, &["canonical"])
+            .into_iter()
+            .find_map(|raw| resolve_web_href(&raw, base_url));
+
+        let oembed_url = extract_oembed_link_href(&doc, base_url);
+
         let mut image_candidates = Vec::new();
         let mut seen_images = HashSet::new();
+        let mut push_img = |raw: &str| {
+            if let Some(resolved) = resolve_web_href(raw, base_url) {
+                if !is_likely_tracking_or_icon_url(&resolved)
+                    && seen_images.insert(resolved.clone())
+                {
+                    image_candidates.push(resolved);
+                }
+            }
+        };
+
         for key in [
             "og:image:secure_url",
             "og:image",
@@ -480,25 +525,82 @@ impl WebBookmarkResolver {
             "twitter:image:src",
         ] {
             for raw in select_all_meta(&doc, key) {
-                if let Some(resolved) = resolve_web_href(&raw, base_url) {
-                    if seen_images.insert(resolved.clone()) {
-                        image_candidates.push(resolved);
-                    }
-                }
+                push_img(&raw);
             }
         }
         for raw in select_link_hrefs(&doc, &["image_src"]) {
-            if let Some(resolved) = resolve_web_href(&raw, base_url) {
-                if seen_images.insert(resolved.clone()) {
-                    image_candidates.push(resolved);
+            push_img(&raw);
+        }
+
+        let mut video_candidates = Vec::new();
+        let mut seen_videos = HashSet::new();
+        let mut push_vid = |raw: &str| {
+            if let Some(resolved) = resolve_web_href(raw, base_url) {
+                if seen_videos.insert(resolved.clone()) {
+                    video_candidates.push(resolved);
                 }
             }
+        };
+        for key in [
+            "og:video:secure_url",
+            "og:video:url",
+            "og:video",
+            "twitter:player:stream",
+        ] {
+            for raw in select_all_meta(&doc, key) {
+                push_vid(&raw);
+            }
         }
-        for raw in extract_json_ld_images(&doc) {
-            if let Some(resolved) = resolve_web_href(&raw, base_url) {
-                if seen_images.insert(resolved.clone()) {
-                    image_candidates.push(resolved);
-                }
+
+        // Layer 2: Full JSON-LD Schema.org extraction (@graph + Article/VideoObject/WebPage)
+        let ld = extract_json_ld_rich(&doc);
+        for raw in &ld.images {
+            push_img(raw);
+        }
+        for raw in &ld.videos {
+            push_vid(raw);
+        }
+        let final_title = og_title.or(ld.title).or(fallback_title);
+        let mut description = meta_description.or(ld.description);
+        let final_site = site_name.or(ld.site_name);
+        if author_name.is_none() {
+            author_name = ld.author_name;
+        }
+        if published_at_text.is_none() {
+            published_at_text = ld.published_at_text;
+        }
+        // Layer 4: DOM <video>, lazy hero <img>, and readable lead paragraphs
+        let (dom_videos, dom_posters, dom_hero_imgs) = extract_dom_media(&doc);
+        let mut is_video_page = ld.is_video_page;
+        for raw in &dom_videos {
+            push_vid(raw);
+            is_video_page = true;
+        }
+        for raw in &dom_posters {
+            push_img(raw);
+        }
+        for raw in &dom_hero_imgs {
+            push_img(raw);
+        }
+        drop(push_vid);
+        drop(push_img);
+        if !video_candidates.is_empty() {
+            is_video_page = true;
+        }
+        if let Some(og_type) = select_meta(&doc, "og:type") {
+            if og_type.to_ascii_lowercase().contains("video") {
+                is_video_page = true;
+            }
+        }
+        let duration_seconds = ld.duration_seconds;
+
+        if description
+            .as_deref()
+            .map(|s| s.chars().count() < 24)
+            .unwrap_or(true)
+        {
+            if let Some(lead) = extract_readable_lead_paragraphs(&doc) {
+                description = Some(lead);
             }
         }
 
@@ -529,12 +631,19 @@ impl WebBookmarkResolver {
         }
 
         ParsedWebHtml {
-            title,
+            title: final_title,
             description,
-            site_name,
+            site_name: final_site,
+            author_name,
+            published_at_text,
             theme_color,
             image_candidates,
+            video_candidates,
             favicon_candidates,
+            oembed_url,
+            canonical_url,
+            is_video_page,
+            duration_seconds,
         }
     }
 
@@ -556,12 +665,11 @@ impl WebBookmarkResolver {
         Self::fetch_with_snapshot(url, None).await
     }
 
-    /// Full 3-tier webpage resolver:
-    /// - Tier 1: Direct image URL (<= 8 MiB) or HTML OG/Twitter/`image_src`/JSON-LD with CJK
-    ///   charset decoding, `Referer`, `>= 160×100` & anti-tracking-pixel aspect guards.
-    /// - Tier 2: Optional offscreen browser snapshot (`1280×800`, skipped on `network_unreachable`,
-    ///   validated with `is_visually_blank`).
-    /// - Tier 3 enrichment: Favicon fetch (`>= 16×16`) for editorial bookmark card fallback.
+    /// Full 5-layer universal webpage resolver:
+    /// - Layer 1–2 & 4: Direct image URL (<= 8 MiB) or HTML Meta + JSON-LD + DOM `<video>`/hero `<img>`/lead text.
+    /// - Layer 3: Universal oEmbed auto-discovery (`application/json+oembed`, SSRF-checked).
+    /// - Layer 5: Offscreen WebView2 SPA fallback extracting rendered title, description, hero images, and `<video>`s.
+    /// - Editorial fallback enrichment: Favicon fetch (`>= 16×16`).
     pub async fn fetch_with_snapshot(
         url: &Url,
         snapshot_provider: Option<&dyn WebPageSnapshotProvider>,
@@ -569,18 +677,25 @@ impl WebBookmarkResolver {
         if !Self::is_web_url(url) {
             return ResolvedWebBookmark::default();
         }
-        let client = browser_http_client(8);
+        let client = browser_http_client(10);
         let mut title: Option<String> = None;
         let mut description: Option<String> = None;
         let mut site_name: Option<String> = None;
+        let mut author_name: Option<String> = None;
+        let mut published_at_text: Option<String> = None;
         let mut theme_color: Option<String> = None;
         let mut final_url = url.clone();
+        let mut canonical_url: Option<String> = None;
         let mut poster_image: Option<DynamicImage> = None;
         let mut poster_url: Option<String> = None;
         let mut favicon_image: Option<DynamicImage> = None;
         let mut favicon_url: Option<String> = None;
         let mut icon_candidates: Vec<String> = Vec::new();
-        let mut fallback_poster_url: Option<String> = None;
+        let mut discovered_images: Vec<String> = Vec::new();
+        let mut discovered_videos: Vec<String> = Vec::new();
+        let mut is_video_page = false;
+        let mut duration_seconds: Option<f64> = None;
+        let mut oembed_url: Option<String> = None;
         let mut network_unreachable = false;
 
         match client
@@ -626,16 +741,26 @@ impl WebBookmarkResolver {
                                 } else {
                                     filename.chars().take(220).collect()
                                 };
+                                let direct_att = SocialMediaAttachment::new(
+                                    SocialMediaAttachmentKind::Photo,
+                                    final_url.as_str(),
+                                    Some(final_url.to_string()),
+                                );
                                 return ResolvedWebBookmark {
                                     title: Some(display_title),
                                     description: None,
                                     site_name: clean_domain,
+                                    author_name: None,
+                                    published_at_text: None,
                                     final_url: Some(final_url.to_string()),
                                     theme_color: None,
                                     poster_image: Some(img),
                                     poster_url: Some(final_url.to_string()),
                                     favicon_image: None,
                                     favicon_url: None,
+                                    attachments: vec![direct_att],
+                                    is_video_page: false,
+                                    duration_seconds: None,
                                     network_unreachable: false,
                                 };
                             }
@@ -649,42 +774,21 @@ impl WebBookmarkResolver {
                         title = parsed.title;
                         description = parsed.description;
                         site_name = parsed.site_name;
+                        author_name = parsed.author_name;
+                        published_at_text = parsed.published_at_text;
                         theme_color = parsed.theme_color;
                         icon_candidates = parsed.favicon_candidates;
-                        fallback_poster_url = parsed.image_candidates.first().cloned();
-
-                        for candidate in parsed.image_candidates.iter().take(4) {
-                            if let Some(img) = Self::fetch_web_image(
-                                &client,
-                                candidate,
-                                &final_url,
-                                MAX_OG_IMAGE_BYTES,
-                                1200,
-                            )
-                            .await
-                            {
-                                let ratio = f64::from(img.width()) / f64::from(img.height().max(1));
-                                if img.width() >= 160
-                                    && img.height() >= 100
-                                    && (0.15..=6.5).contains(&ratio)
-                                {
-                                    poster_image = Some(img);
-                                    poster_url = Some(candidate.clone());
-                                    break;
-                                } else if img.width() >= 16
-                                    && img.height() >= 16
-                                    && favicon_image.is_none()
-                                {
-                                    favicon_image = Some(img);
-                                    favicon_url = Some(candidate.clone());
-                                }
-                            }
-                        }
+                        discovered_images = parsed.image_candidates;
+                        discovered_videos = parsed.video_candidates;
+                        oembed_url = parsed.oembed_url;
+                        canonical_url = parsed.canonical_url;
+                        is_video_page = parsed.is_video_page;
+                        duration_seconds = parsed.duration_seconds;
                     }
                 }
             }
             Ok(_non_2xx) => {
-                // Site reached (e.g. 403/503 to raw reqwest); allow Tier 2 browser snapshot below.
+                // Site reached (e.g. 403/503 to raw reqwest); allow Layer 5 WebView2 snapshot below.
             }
             Err(err) => {
                 if err.is_connect() || err.is_builder() {
@@ -693,33 +797,107 @@ impl WebBookmarkResolver {
             }
         }
 
-        // Tier 2: Offscreen ephemeral browser snapshot when Tier 1 got no cover & network is reachable
-        if poster_image.is_none() && !network_unreachable {
+        // Layer 3: Universal oEmbed auto-discovery (SSRF-checked)
+        if let Some(ref oe_str) = oembed_url {
+            if !network_unreachable {
+                if let Some(oe) = fetch_oembed_json(&client, oe_str).await {
+                    if title.as_deref().map(str::trim).unwrap_or("").is_empty() {
+                        title = oe.title;
+                    }
+                    if author_name.is_none() {
+                        author_name = oe.author_name;
+                    }
+                    if site_name.is_none() {
+                        site_name = oe.provider_name;
+                    }
+                    if oe.is_video {
+                        is_video_page = true;
+                    }
+                    if let Some(thumb) = oe.thumbnail_url {
+                        if !discovered_images.contains(&thumb) {
+                            discovered_images.insert(0, thumb);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Fetch best cover poster from discovered images
+        for candidate in discovered_images.iter().take(6) {
+            if let Some(img) =
+                Self::fetch_web_image(&client, candidate, &final_url, MAX_OG_IMAGE_BYTES, 1200)
+                    .await
+            {
+                let ratio = f64::from(img.width()) / f64::from(img.height().max(1));
+                if img.width() >= 160 && img.height() >= 100 && (0.15..=6.5).contains(&ratio) {
+                    poster_image = Some(img);
+                    poster_url = Some(candidate.clone());
+                    break;
+                } else if img.width() >= 16 && img.height() >= 16 && favicon_image.is_none() {
+                    favicon_image = Some(img);
+                    favicon_url = Some(candidate.clone());
+                }
+            }
+        }
+
+        // Layer 5: Headless WebView2 SPA fallback when static HTML lacked poster OR meaningful title/summary/media
+        let needs_spa_probe = !network_unreachable
+            && (poster_image.is_none()
+                || (title.as_deref().map(str::trim).unwrap_or("").is_empty()
+                    && description
+                        .as_deref()
+                        .map(str::trim)
+                        .unwrap_or("")
+                        .is_empty()));
+        if needs_spa_probe {
             if let Some(provider) = snapshot_provider {
                 if let Some(snap) = provider.capture_snapshot(final_url.as_str()).await {
-                    if let Ok(img) = image::load_from_memory(&snap.png_bytes) {
-                        if img.width() >= 160
-                            && img.height() >= 100
-                            && !Self::is_visually_blank(&img)
-                        {
-                            poster_image = Some(img);
-                            if title.as_deref().map(str::trim).unwrap_or("").is_empty() {
-                                title = snap.title;
-                            }
-                            if description
-                                .as_deref()
-                                .map(str::trim)
-                                .unwrap_or("")
-                                .is_empty()
+                    if poster_image.is_none() {
+                        if let Ok(img) = image::load_from_memory(&snap.png_bytes) {
+                            if img.width() >= 160
+                                && img.height() >= 100
+                                && !Self::is_visually_blank(&img)
                             {
-                                description = snap.description;
+                                poster_image = Some(img);
                             }
-                            if let Some(ref resolved) = snap.final_url {
-                                if let Ok(parsed) = Url::parse(resolved) {
-                                    if Self::is_web_url(&parsed) {
-                                        final_url = parsed;
-                                    }
-                                }
+                        }
+                    }
+                    if title.as_deref().map(str::trim).unwrap_or("").is_empty() {
+                        title = snap.title;
+                    }
+                    if description
+                        .as_deref()
+                        .map(str::trim)
+                        .unwrap_or("")
+                        .chars()
+                        .count()
+                        < 24
+                    {
+                        if let Some(d) = snap.description.filter(|s| !s.trim().is_empty()) {
+                            description = Some(d);
+                        }
+                    }
+                    if site_name.is_none() {
+                        site_name = snap.site_name;
+                    }
+                    if author_name.is_none() {
+                        author_name = snap.author_name;
+                    }
+                    for img_u in snap.hero_image_urls {
+                        if !discovered_images.contains(&img_u) {
+                            discovered_images.push(img_u);
+                        }
+                    }
+                    for vid_u in snap.video_urls {
+                        if !discovered_videos.contains(&vid_u) {
+                            discovered_videos.push(vid_u);
+                            is_video_page = true;
+                        }
+                    }
+                    if let Some(ref resolved) = snap.final_url {
+                        if let Ok(parsed) = Url::parse(resolved) {
+                            if Self::is_web_url(&parsed) {
+                                final_url = parsed;
                             }
                         }
                     }
@@ -727,7 +905,32 @@ impl WebBookmarkResolver {
             }
         }
 
-        // Tier 3 enrichment: fetch site favicon when falling back to editorial card
+        // Build unified extractable webpage attachments (videos first, then hero images up to 8)
+        let mut attachments: Vec<SocialMediaAttachment> = Vec::new();
+        let mut seen_att = HashSet::new();
+        let fallback_thumb = poster_url
+            .clone()
+            .or_else(|| discovered_images.first().cloned());
+        for vid in discovered_videos.iter().take(4) {
+            if seen_att.insert(vid.clone()) {
+                attachments.push(SocialMediaAttachment::new(
+                    SocialMediaAttachmentKind::Video,
+                    vid.clone(),
+                    fallback_thumb.clone(),
+                ));
+            }
+        }
+        for img_u in discovered_images.iter().take(8) {
+            if seen_att.insert(img_u.clone()) {
+                attachments.push(SocialMediaAttachment::new(
+                    SocialMediaAttachmentKind::Photo,
+                    img_u.clone(),
+                    Some(img_u.clone()),
+                ));
+            }
+        }
+
+        // Editorial card fallback favicon enrichment
         if poster_image.is_none() && favicon_image.is_none() && !network_unreachable {
             if icon_candidates.is_empty() {
                 if let Ok(root_icon) = final_url.join("/favicon.ico") {
@@ -750,16 +953,22 @@ impl WebBookmarkResolver {
             }
         }
 
+        let effective_final = canonical_url.unwrap_or_else(|| final_url.to_string());
         ResolvedWebBookmark {
             title: Self::usable_page_title(title.as_deref(), Some(url)),
             description,
             site_name: site_name.or_else(|| WebURLParser::clean_domain(&final_url)),
-            final_url: Some(final_url.to_string()),
+            author_name,
+            published_at_text,
+            final_url: Some(effective_final),
             theme_color,
             poster_image,
-            poster_url: poster_url.or(fallback_poster_url),
+            poster_url: poster_url.or(fallback_thumb),
             favicon_image,
             favicon_url,
+            attachments,
+            is_video_page,
+            duration_seconds,
             network_unreachable,
         }
     }
@@ -866,63 +1075,445 @@ fn normalize_hex_color(raw: &str) -> Option<String> {
     }
 }
 
-fn extract_json_ld_images(doc: &Html) -> Vec<String> {
+#[derive(Default)]
+struct JsonLdExtracted {
+    title: Option<String>,
+    description: Option<String>,
+    site_name: Option<String>,
+    author_name: Option<String>,
+    published_at_text: Option<String>,
+    images: Vec<String>,
+    videos: Vec<String>,
+    is_video_page: bool,
+    duration_seconds: Option<f64>,
+}
+
+fn extract_json_ld_rich(doc: &Html) -> JsonLdExtracted {
+    let mut out = JsonLdExtracted::default();
     let Ok(sel) = Selector::parse(r#"script[type="application/ld+json"]"#) else {
-        return Vec::new();
+        return out;
     };
-    let mut out = Vec::new();
-    for el in doc.select(&sel).take(4) {
+    for el in doc.select(&sel).take(8) {
         let raw = el.text().collect::<String>();
         let Ok(val) = serde_json::from_str::<serde_json::Value>(raw.trim()) else {
             continue;
         };
-        collect_json_ld_images(&val, &mut out);
-        if out.len() >= 4 {
-            break;
-        }
+        walk_json_ld(&val, &mut out, 0);
     }
     out
 }
 
-fn collect_json_ld_images(val: &serde_json::Value, out: &mut Vec<String>) {
-    if out.len() >= 4 {
+fn walk_json_ld(val: &Value, out: &mut JsonLdExtracted, depth: usize) {
+    if depth > 8 {
         return;
     }
     match val {
-        serde_json::Value::Object(map) => {
-            if let Some(img) = map.get("image") {
-                match img {
-                    serde_json::Value::String(s) => out.push(s.clone()),
-                    serde_json::Value::Object(obj) => {
-                        if let Some(u) = obj.get("url").and_then(|v| v.as_str()) {
-                            out.push(u.to_string());
-                        }
-                    }
-                    serde_json::Value::Array(arr) => {
-                        for elem in arr.iter().take(2) {
-                            if let Some(s) = elem.as_str() {
-                                out.push(s.to_string());
-                            } else if let Some(u) = elem.get("url").and_then(|v| v.as_str()) {
-                                out.push(u.to_string());
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            if let Some(graph) = map.get("@graph").and_then(|v| v.as_array()) {
-                for node in graph {
-                    collect_json_ld_images(node, out);
-                }
+        Value::Array(arr) => {
+            for item in arr {
+                walk_json_ld(item, out, depth + 1);
             }
         }
-        serde_json::Value::Array(arr) => {
-            for elem in arr {
-                collect_json_ld_images(elem, out);
+        Value::Object(map) => {
+            if let Some(graph) = map.get("@graph") {
+                walk_json_ld(graph, out, depth + 1);
+            }
+            let type_str = match map.get("@type") {
+                Some(Value::String(s)) => s.to_ascii_lowercase(),
+                Some(Value::Array(arr)) => arr
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    .to_ascii_lowercase(),
+                _ => String::new(),
+            };
+            let is_video = type_str.contains("video");
+            let is_content = is_video
+                || type_str.contains("article")
+                || type_str.contains("posting")
+                || type_str.contains("creativework")
+                || type_str.contains("webpage")
+                || type_str.contains("recipe")
+                || type_str.contains("product");
+
+            if is_video {
+                out.is_video_page = true;
+            }
+            if is_content || depth == 0 {
+                if out.title.is_none() {
+                    out.title = map
+                        .get("headline")
+                        .or_else(|| map.get("name"))
+                        .and_then(Value::as_str)
+                        .map(|s| collapse_whitespace(s, 220))
+                        .filter(|s| !s.is_empty());
+                }
+                if out.description.is_none() {
+                    out.description = map
+                        .get("description")
+                        .and_then(Value::as_str)
+                        .map(|s| collapse_whitespace(s, 460))
+                        .filter(|s| !s.is_empty());
+                }
+                if out.published_at_text.is_none() {
+                    out.published_at_text = map
+                        .get("datePublished")
+                        .or_else(|| map.get("uploadDate"))
+                        .and_then(Value::as_str)
+                        .map(|s| collapse_whitespace(s, 32))
+                        .filter(|s| !s.is_empty());
+                }
+                if out.author_name.is_none() {
+                    out.author_name = extract_json_ld_author(map.get("author"))
+                        .or_else(|| extract_json_ld_author(map.get("creator")));
+                }
+                if out.site_name.is_none() {
+                    out.site_name = map
+                        .get("publisher")
+                        .and_then(|p| p.get("name"))
+                        .and_then(Value::as_str)
+                        .map(|s| collapse_whitespace(s, 80))
+                        .filter(|s| !s.is_empty());
+                }
+                if out.duration_seconds.is_none() {
+                    if let Some(dur_str) = map.get("duration").and_then(Value::as_str) {
+                        out.duration_seconds = parse_iso8601_duration(dur_str);
+                    }
+                }
+            }
+
+            for img_key in ["thumbnailUrl", "image"] {
+                if let Some(img_val) = map.get(img_key) {
+                    collect_json_ld_media_urls(img_val, &mut out.images, 8);
+                }
+            }
+            for vid_key in ["contentUrl", "embedUrl"] {
+                if let Some(Value::String(u)) = map.get(vid_key) {
+                    let lower = u.to_ascii_lowercase();
+                    if (is_video
+                        || lower.contains(".mp4")
+                        || lower.contains(".webm")
+                        || lower.contains(".mov"))
+                        && out.videos.len() < 4
+                        && !out.videos.contains(u)
+                    {
+                        out.videos.push(u.clone());
+                    }
+                }
+            }
+
+            if let Some(main_entity) = map
+                .get("mainEntity")
+                .or_else(|| map.get("mainEntityOfPage"))
+            {
+                if main_entity.is_object() || main_entity.is_array() {
+                    walk_json_ld(main_entity, out, depth + 1);
+                }
+            }
+            if let Some(video) = map.get("video") {
+                walk_json_ld(video, out, depth + 1);
             }
         }
         _ => {}
     }
+}
+
+fn extract_json_ld_author(val: Option<&Value>) -> Option<String> {
+    match val? {
+        Value::String(s) => {
+            let c = collapse_whitespace(s, 80);
+            (!c.is_empty()).then_some(c)
+        }
+        Value::Object(obj) => obj
+            .get("name")
+            .and_then(Value::as_str)
+            .map(|s| collapse_whitespace(s, 80))
+            .filter(|s| !s.is_empty()),
+        Value::Array(arr) => arr
+            .iter()
+            .find_map(|item| extract_json_ld_author(Some(item))),
+        _ => None,
+    }
+}
+
+fn collect_json_ld_media_urls(val: &Value, out: &mut Vec<String>, limit: usize) {
+    if out.len() >= limit {
+        return;
+    }
+    match val {
+        Value::String(s) => {
+            if !s.trim().is_empty() && !out.contains(s) {
+                out.push(s.clone());
+            }
+        }
+        Value::Object(obj) => {
+            if let Some(u) = obj
+                .get("url")
+                .or_else(|| obj.get("contentUrl"))
+                .and_then(Value::as_str)
+            {
+                if !u.trim().is_empty() && !out.iter().any(|x| x == u) {
+                    out.push(u.to_string());
+                }
+            }
+        }
+        Value::Array(arr) => {
+            for item in arr {
+                collect_json_ld_media_urls(item, out, limit);
+                if out.len() >= limit {
+                    break;
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Parses ISO-8601 duration strings such as `PT1H2M15S`, `PT10M12S`, `PT45S` into seconds.
+pub fn parse_iso8601_duration(raw: &str) -> Option<f64> {
+    let trimmed = raw.trim().to_ascii_uppercase();
+    let rest = trimmed.strip_prefix("PT")?;
+    let mut total = 0.0_f64;
+    let mut num_buf = String::new();
+    let mut matched = false;
+    for ch in rest.chars() {
+        if ch.is_ascii_digit() || ch == '.' {
+            num_buf.push(ch);
+        } else {
+            let val = num_buf.parse::<f64>().ok()?;
+            num_buf.clear();
+            match ch {
+                'H' => {
+                    total += val * 3600.0;
+                    matched = true;
+                }
+                'M' => {
+                    total += val * 60.0;
+                    matched = true;
+                }
+                'S' => {
+                    total += val;
+                    matched = true;
+                }
+                _ => return None,
+            }
+        }
+    }
+    (matched && total > 0.0).then_some(total)
+}
+
+fn extract_oembed_link_href(doc: &Html, base_url: Option<&Url>) -> Option<String> {
+    let sel = Selector::parse(r#"link[rel="alternate"][href]"#).ok()?;
+    for el in doc.select(&sel) {
+        let typ = el
+            .value()
+            .attr("type")
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
+        if typ == "application/json+oembed" || typ == "text/json+oembed" {
+            if let Some(href) = el.value().attr("href") {
+                if let Some(resolved) = resolve_web_href(href, base_url) {
+                    return Some(resolved);
+                }
+            }
+        }
+    }
+    None
+}
+
+struct OEmbedPayload {
+    title: Option<String>,
+    author_name: Option<String>,
+    provider_name: Option<String>,
+    thumbnail_url: Option<String>,
+    is_video: bool,
+}
+
+async fn fetch_oembed_json(client: &Client, raw_url: &str) -> Option<OEmbedPayload> {
+    let parsed = Url::parse(raw_url.trim()).ok()?;
+    if !SocialPostResolver::is_safe_public_media_url(&parsed) {
+        return None;
+    }
+    let resp = client
+        .get(parsed)
+        .header("Accept", "application/json")
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() || !SocialPostResolver::is_safe_public_media_url(resp.url()) {
+        return None;
+    }
+    let bytes = resp.bytes().await.ok()?;
+    if bytes.is_empty() || bytes.len() > 256 * 1024 {
+        return None;
+    }
+    let val: Value = serde_json::from_slice(&bytes).ok()?;
+    let obj = val.as_object()?;
+    let clean = |k: &str, max: usize| {
+        obj.get(k)
+            .and_then(Value::as_str)
+            .map(|s| collapse_whitespace(s, max))
+            .filter(|s| !s.is_empty())
+    };
+    let is_video = obj
+        .get("type")
+        .and_then(Value::as_str)
+        .is_some_and(|t| t.eq_ignore_ascii_case("video"));
+    Some(OEmbedPayload {
+        title: clean("title", 220),
+        author_name: clean("author_name", 80),
+        provider_name: clean("provider_name", 80),
+        thumbnail_url: obj
+            .get("thumbnail_url")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| s.starts_with("http://") || s.starts_with("https://"))
+            .map(str::to_string),
+        is_video,
+    })
+}
+
+fn is_likely_tracking_or_icon_url(url: &str) -> bool {
+    let lower = url.to_ascii_lowercase();
+    lower.contains("favicon")
+        || lower.contains("1x1")
+        || lower.contains("pixel.")
+        || lower.contains("/pixel")
+        || lower.contains("beacon")
+        || lower.contains("spacer.gif")
+        || lower.contains("sprite")
+        || lower.contains("emoji")
+        || lower.contains("gravatar")
+        || lower.ends_with(".ico")
+}
+
+fn pick_largest_srcset_url(srcset: &str) -> Option<String> {
+    let mut best: Option<(f64, String)> = None;
+    for entry in srcset.split(',') {
+        let parts: Vec<&str> = entry.split_whitespace().collect();
+        let Some(&url) = parts.first() else {
+            continue;
+        };
+        if url.is_empty() {
+            continue;
+        }
+        let weight = parts
+            .get(1)
+            .and_then(|desc| {
+                if let Some(w) = desc.strip_suffix('w') {
+                    w.parse::<f64>().ok()
+                } else if let Some(x) = desc.strip_suffix('x') {
+                    x.parse::<f64>().ok().map(|v| v * 1000.0)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(1.0);
+        if best.as_ref().is_none_or(|(bw, _)| weight > *bw) {
+            best = Some((weight, url.to_string()));
+        }
+    }
+    best.map(|(_, u)| u)
+}
+
+fn extract_dom_media(doc: &Html) -> (Vec<String>, Vec<String>, Vec<String>) {
+    let mut videos = Vec::new();
+    let mut posters = Vec::new();
+    let mut hero_imgs = Vec::new();
+
+    if let Ok(vid_sel) = Selector::parse("video") {
+        for v in doc.select(&vid_sel).take(6) {
+            if let Some(src) = v
+                .value()
+                .attr("src")
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                videos.push(src.to_string());
+            }
+            if let Some(poster) = v
+                .value()
+                .attr("poster")
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                posters.push(poster.to_string());
+            }
+        }
+    }
+    if let Ok(src_sel) = Selector::parse("video source[src]") {
+        for s in doc.select(&src_sel).take(6) {
+            if let Some(src) = s
+                .value()
+                .attr("src")
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                videos.push(src.to_string());
+            }
+        }
+    }
+
+    if let Ok(img_sel) = Selector::parse("article img, main img, img") {
+        for img in doc.select(&img_sel).take(24) {
+            let val = img.value();
+            let w_attr = val.attr("width").and_then(|s| s.parse::<u32>().ok());
+            let h_attr = val.attr("height").and_then(|s| s.parse::<u32>().ok());
+            if w_attr.is_some_and(|w| w < 120) || h_attr.is_some_and(|h| h < 80) {
+                continue;
+            }
+            let cand = val
+                .attr("data-original")
+                .or_else(|| val.attr("data-src"))
+                .or_else(|| val.attr("data-lazy-src"))
+                .map(str::to_string)
+                .or_else(|| val.attr("srcset").and_then(pick_largest_srcset_url))
+                .or_else(|| val.attr("src").map(str::to_string));
+            if let Some(raw) = cand.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
+                if !raw.starts_with("data:") && !is_likely_tracking_or_icon_url(&raw) {
+                    hero_imgs.push(raw);
+                    if hero_imgs.len() >= 8 {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    (videos, posters, hero_imgs)
+}
+
+fn extract_readable_lead_paragraphs(doc: &Html) -> Option<String> {
+    let sel = Selector::parse("article p, main p, p").ok()?;
+    let mut paragraphs: Vec<String> = Vec::new();
+    let mut total_chars = 0usize;
+    for p in doc.select(&sel).take(30) {
+        let raw = p.text().collect::<String>();
+        let clean = collapse_whitespace(&raw, 360);
+        if clean.chars().count() < 24 {
+            continue;
+        }
+        let lower = clean.to_ascii_lowercase();
+        if (lower.contains("cookie") && lower.contains("privacy"))
+            || lower.contains("enable javascript")
+            || lower.contains("all rights reserved")
+        {
+            continue;
+        }
+        if paragraphs.contains(&clean) {
+            continue;
+        }
+        total_chars += clean.chars().count();
+        paragraphs.push(clean);
+        if paragraphs.len() >= 2 || total_chars >= 280 {
+            break;
+        }
+    }
+    if paragraphs.is_empty() {
+        return None;
+    }
+    let joined = paragraphs.join("\n\n");
+    Some(joined.chars().take(460).collect())
 }
 
 fn collapse_whitespace(raw: &str, max_chars: usize) -> String {
@@ -1551,6 +2142,23 @@ impl XPostURLParser {
         h == "pinimg.com" || h.ends_with(".pinimg.com")
     }
 
+    pub fn is_video_platform_media_host(host: Option<&str>) -> bool {
+        let Some(raw) = host else {
+            return false;
+        };
+        let h = raw.trim().to_ascii_lowercase();
+        h == "hdslb.com"
+            || h.ends_with(".hdslb.com")
+            || h == "ytimg.com"
+            || h.ends_with(".ytimg.com")
+            || h == "ggpht.com"
+            || h.ends_with(".ggpht.com")
+            || h == "bilivideo.com"
+            || h.ends_with(".bilivideo.com")
+            || h == "bilivideo.cn"
+            || h.ends_with(".bilivideo.cn")
+    }
+
     /// Strict HTTPS CDN host allowlist for the local `/proxy-social` image cache proxy.
     pub fn is_allowed_social_proxy_host(host: Option<&str>) -> bool {
         if XiaohongshuURLParser::is_xiaohongshu_media_host(host)
@@ -1558,6 +2166,7 @@ impl XPostURLParser {
             || Self::is_pixiv_media_host(host)
             || Self::is_instagram_media_host(host)
             || Self::is_pinterest_media_host(host)
+            || Self::is_video_platform_media_host(host)
         {
             return true;
         }
@@ -1689,6 +2298,7 @@ pub enum SocialPostReference {
         shortcode: String,
         canonical_url: String,
     },
+    Video(VideoPlatformReference),
 }
 
 impl SocialPostReference {
@@ -1700,6 +2310,7 @@ impl SocialPostReference {
             Self::Xiaohongshu(_) => SocialPlatform::Xiaohongshu,
             Self::Pixiv { .. } => SocialPlatform::Pixiv,
             Self::Instagram { .. } => SocialPlatform::Instagram,
+            Self::Video(v) => v.platform(),
         }
     }
 
@@ -1711,6 +2322,7 @@ impl SocialPostReference {
             Self::Xiaohongshu(r) => r.canonical_url(),
             Self::Pixiv { canonical_url, .. } => canonical_url.clone(),
             Self::Instagram { canonical_url, .. } => canonical_url.clone(),
+            Self::Video(v) => v.canonical_url().to_string(),
         }
     }
 
@@ -1725,6 +2337,7 @@ impl SocialPostReference {
             Self::Xiaohongshu(r) => r.dedup_key(),
             Self::Pixiv { illust_id, .. } => format!("pixiv:{illust_id}"),
             Self::Instagram { shortcode, .. } => format!("ig:{shortcode}"),
+            Self::Video(v) => v.dedup_key(),
         }
     }
 }
@@ -1752,6 +2365,9 @@ impl SocialPostURLParser {
         }
         if let Some(xhs_ref) = XiaohongshuURLParser::parse(url) {
             return Some(SocialPostReference::Xiaohongshu(xhs_ref));
+        }
+        if let Some(vid_ref) = VideoPlatformURLParser::parse(url) {
+            return Some(SocialPostReference::Video(vid_ref));
         }
         if !matches!(url.scheme(), "http" | "https") {
             return None;
@@ -1876,10 +2492,15 @@ impl SocialPostURLParser {
         None
     }
 
-    /// Extracts the first X/Threads/Bluesky/Xiaohongshu post URL embedded in plain text or share copy.
+    /// Extracts the first X/Threads/Bluesky/Xiaohongshu/YouTube/Bilibili URL embedded in plain text or share copy.
     pub fn extract_post_url(raw: &str) -> Option<Url> {
         if let Some(xhs_url) = XiaohongshuURLParser::extract_note_url(raw) {
             return Some(xhs_url);
+        }
+        if let Some(web_url) = WebURLParser::extract_web_url(raw, true) {
+            if VideoPlatformURLParser::parse(&web_url).is_some() {
+                return Some(web_url);
+            }
         }
         for token in raw.split_whitespace() {
             let cleaned = token
@@ -1924,6 +2545,16 @@ impl ResolvedSocialPost {
                     Some(t.to_string())
                 }
             });
+        if self.metadata.platform.is_video_platform() {
+            if let Some(headline) = candidate {
+                return headline.chars().take(72).collect();
+            }
+            let author = self.metadata.display_author_name();
+            if !author.is_empty() {
+                return format!("{author} · {}", self.metadata.platform.display_name());
+            }
+            return self.metadata.platform.display_name().to_string();
+        }
         let author_prefix = if self.metadata.platform == SocialPlatform::Xiaohongshu {
             self.metadata.display_author_name()
         } else {
@@ -1962,6 +2593,9 @@ impl ResolvedSocialPost {
         };
         lines.push(format!("# {display}"));
         let mut sub = vec![self.metadata.platform.display_name().to_string()];
+        if let Some(dur) = self.metadata.formatted_video_duration() {
+            sub.push(dur);
+        }
         if let Some(ref date) = self.metadata.published_at_text {
             if !date.is_empty() {
                 sub.push(date.clone());
@@ -1972,6 +2606,21 @@ impl ResolvedSocialPost {
             if !article_title.is_empty() {
                 lines.push(String::new());
                 lines.push(format!("## {article_title}"));
+            }
+        }
+        if let Some(ref summary) = self.metadata.video_summary {
+            let st = summary.trim();
+            if !st.is_empty() {
+                lines.push(String::new());
+                lines.push("### 视频摘要".to_string());
+                lines.push(st.to_string());
+            }
+        }
+        if !self.metadata.video_outline.is_empty() {
+            lines.push(String::new());
+            lines.push("### 章节大纲".to_string());
+            for item in &self.metadata.video_outline {
+                lines.push(format!("- {item}"));
             }
         }
         let body = self.metadata.body_text.trim();
@@ -2083,6 +2732,12 @@ impl SocialPostResolver {
             pick_str(&live.original_url, &fallback.original_url)
         };
 
+        let video_outline = if !live.video_outline.is_empty() {
+            live.video_outline
+        } else {
+            fallback.video_outline
+        };
+
         SocialPostMetadata {
             platform: live.platform,
             author_name,
@@ -2104,6 +2759,13 @@ impl SocialPostResolver {
             view_count: live.view_count.or(fallback.view_count),
             original_url,
             media_fetch_failed: live.media_fetch_failed && fallback.media_fetch_failed,
+            video_duration_seconds: live
+                .video_duration_seconds
+                .or(fallback.video_duration_seconds),
+            video_summary: pick_opt(live.video_summary, fallback.video_summary),
+            video_outline,
+            video_id: pick_opt(live.video_id, fallback.video_id),
+            video_cid: live.video_cid.or(fallback.video_cid),
         }
     }
 
@@ -2138,6 +2800,9 @@ impl SocialPostResolver {
                 Self::resolve_og_fallback(SocialPlatform::Instagram, shortcode, canonical_url)
                     .await,
             ),
+            SocialPostReference::Video(video_ref) => {
+                VideoPlatformResolver::resolve(video_ref).await
+            }
         }
     }
 
@@ -2149,8 +2814,8 @@ impl SocialPostResolver {
     }
 
     /// Resolves host-aware anti-hotlink `Referer` headers for social media CDN downloads
-    /// (Pixiv `*.pximg.net`, Xiaohongshu `*.xhscdn.com`, Instagram/Threads `*.cdninstagram.com` /
-    /// `*.fbcdn.net`, or explicit web referer fallback).
+    /// (Pixiv `*.pximg.net`, Xiaohongshu `*.xhscdn.com`, Bilibili `*.hdslb.com`/`*.bilivideo.*`,
+    /// Instagram/Threads `*.cdninstagram.com`/`*.fbcdn.net`, or explicit web referer fallback).
     pub fn resolve_cdn_referer<'a>(
         url: &Url,
         explicit_referer: Option<&'a str>,
@@ -2164,6 +2829,17 @@ impl SocialPostResolver {
         }
         if XiaohongshuURLParser::is_xiaohongshu_media_host(host) {
             return Some(XIAOHONGSHU_REFERER);
+        }
+        if let Some(h) = host.map(|s| s.trim().to_ascii_lowercase()) {
+            if h == "hdslb.com"
+                || h.ends_with(".hdslb.com")
+                || h == "bilivideo.com"
+                || h.ends_with(".bilivideo.com")
+                || h == "bilivideo.cn"
+                || h.ends_with(".bilivideo.cn")
+            {
+                return Some("https://www.bilibili.com/");
+            }
         }
         if XPostURLParser::is_instagram_media_host(host) {
             return explicit_referer
@@ -2480,6 +3156,11 @@ impl SocialPostResolver {
             view_count: None,
             original_url: format!("https://x.com/{handle}/status/{}", x_ref.tweet_id),
             media_fetch_failed: false,
+            video_duration_seconds: None,
+            video_summary: None,
+            video_outline: Vec::new(),
+            video_id: None,
+            video_cid: None,
         };
         Some(ResolvedSocialPost {
             metadata,
@@ -2674,6 +3355,11 @@ impl SocialPostResolver {
             view_count: tweet.views,
             original_url: canonical,
             media_fetch_failed: false,
+            video_duration_seconds: None,
+            video_summary: None,
+            video_outline: Vec::new(),
+            video_id: None,
+            video_cid: None,
         };
 
         Some(ResolvedSocialPost {
@@ -2807,6 +3493,11 @@ impl SocialPostResolver {
             view_count: None,
             original_url: format!("https://x.com/{handle}/status/{}", x_ref.tweet_id),
             media_fetch_failed: false,
+            video_duration_seconds: None,
+            video_summary: None,
+            video_outline: Vec::new(),
+            video_id: None,
+            video_cid: None,
         };
 
         Some(ResolvedSocialPost {
@@ -2983,6 +3674,11 @@ impl SocialPostResolver {
             view_count: None,
             original_url: format!("https://x.com/{handle}/status/{}", x_ref.tweet_id),
             media_fetch_failed: false,
+            video_duration_seconds: None,
+            video_summary: None,
+            video_outline: Vec::new(),
+            video_id: None,
+            video_cid: None,
         };
 
         Some(ResolvedSocialPost {
@@ -3136,6 +3832,11 @@ impl SocialPostResolver {
             view_count: None,
             original_url: canonical_url.to_string(),
             media_fetch_failed: false,
+            video_duration_seconds: None,
+            video_summary: None,
+            video_outline: Vec::new(),
+            video_id: None,
+            video_cid: None,
         };
 
         Some(ResolvedSocialPost {
@@ -3212,6 +3913,11 @@ impl SocialPostResolver {
             view_count: None,
             original_url: canonical_url.to_string(),
             media_fetch_failed: false,
+            video_duration_seconds: None,
+            video_summary: None,
+            video_outline: Vec::new(),
+            video_id: None,
+            video_cid: None,
         };
 
         ResolvedSocialPost {

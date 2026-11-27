@@ -139,6 +139,7 @@ export const MoodboardsHome: React.FC = () => {
 
   const [createOpen, setCreateOpen] = useState(false);
   const [creating, setCreating] = useState(false);
+  const [importingPureRef, setImportingPureRef] = useState(false);
   const [generatorOpen, setGeneratorOpen] = useState(false);
   const [titleDraft, setTitleDraft] = useState('');
   const [subtitleDraft, setSubtitleDraft] = useState('');
@@ -271,6 +272,50 @@ export const MoodboardsHome: React.FC = () => {
             </div>
 
             <div className="flex items-center gap-2 shrink-0">
+              <Button
+                variant="standard"
+                size="sm"
+                loading={importingPureRef}
+                data-testid="moodboards-import-pureref"
+                onClick={() => {
+                  if (importingPureRef) return;
+                  setImportingPureRef(true);
+                  void (async () => {
+                    try {
+                      const paths = await getTransport().pickPureRefFilesDialog();
+                      if (paths.length === 0) return;
+                      const results = await useLibraryStore
+                        .getState()
+                        .importPureRefScenes(paths, null, true, { type: 'moodboardsHome' });
+                      await fetchBoards();
+                      const first = results[0];
+                      const totalImages = results.reduce(
+                        (sum, r) => sum + r.importedAssets.length,
+                        0,
+                      );
+                      pushToast({
+                        message: `已导入 PureRef 场景（${totalImages} 张图），并生成自由情绪板`,
+                        tone: 'success',
+                        durationMs: 4200,
+                      });
+                      if (first?.createdBoardID) {
+                        await openBoard(first.createdBoardID);
+                        setDestination({ type: 'moodboard', id: first.createdBoardID });
+                      }
+                    } catch (err) {
+                      pushToast({
+                        message: `导入 PureRef (.pur) 失败：${err instanceof Error ? err.message : String(err)}`,
+                        tone: 'error',
+                      });
+                    } finally {
+                      setImportingPureRef(false);
+                    }
+                  })();
+                }}
+              >
+                <ArrowCircleDown16Regular className="w-3.5 h-3.5" />
+                导入 PureRef (.pur)
+              </Button>
               <Button variant="standard" size="sm" onClick={() => setCreateOpen(true)}>
                 <Add16Regular className="w-3.5 h-3.5" />
                 新建空白板

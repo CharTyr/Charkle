@@ -136,6 +136,7 @@ const CandidateTileMedia: React.FC<{ asset: AssetRecord; compact?: boolean }> = 
 export interface CandidatePoolPanelProps {
   onAddAsset?: (asset: AssetRecord) => void;
   onExportFigmaBundle?: () => void;
+  onExportPureRef?: () => void;
   onCopyBoardImage?: () => void;
   onSaveBoardImage?: (format: BoardImageFormat) => void;
   onCopyHex?: (hex: string) => void;
@@ -175,6 +176,7 @@ const SectionCard: React.FC<{
 export const CandidatePoolPanel: React.FC<CandidatePoolPanelProps> = ({
   onAddAsset,
   onExportFigmaBundle,
+  onExportPureRef,
   onCopyBoardImage,
   onSaveBoardImage,
   onCopyHex,
@@ -420,6 +422,39 @@ export const CandidatePoolPanel: React.FC<CandidatePoolPanelProps> = ({
     } catch (err) {
       pushToast({
         message: `导出失败：${err instanceof Error ? err.message : String(err)}`,
+        tone: 'error',
+      });
+    } finally {
+      setLocalExporting(false);
+    }
+  };
+
+  const triggerExportPureRef = async () => {
+    if (isExporting) return;
+    if (onExportPureRef) {
+      onExportPureRef();
+      return;
+    }
+    if (!hasExportableContent) {
+      pushToast({ message: '当前画布暂无可导出的素材或便签', tone: 'info', durationMs: 2400 });
+      return;
+    }
+    setLocalExporting(true);
+    try {
+      const stem = sanitizeExportFileName(activeBoard.title);
+      const dest = await transport.saveFileDialog(`${stem}.pur`, [
+        { name: 'PureRef 场景 (.pur)', extensions: ['pur'] },
+      ]);
+      if (!dest) return;
+      const report = await transport.exportMoodboardToPureRef(activeBoard, dest);
+      pushToast({
+        message: `已导出 PureRef 场景（${report.imageCount} 张图 / ${report.noteCount} 条便签）`,
+        tone: 'success',
+        durationMs: 4200,
+      });
+    } catch (err) {
+      pushToast({
+        message: `导出 PureRef (.pur) 失败：${err instanceof Error ? err.message : String(err)}`,
         tone: 'error',
       });
     } finally {
@@ -960,6 +995,18 @@ export const CandidatePoolPanel: React.FC<CandidatePoolPanelProps> = ({
             >
               <LayerDiagonal16Regular className="w-3.5 h-3.5 shrink-0" />
               <span className="truncate">导出到 Figma / FigJam（可编辑图层）</span>
+            </button>
+
+            <button
+              type="button"
+              disabled={isExporting}
+              data-testid="studio-export-pureref-rail"
+              onClick={() => void triggerExportPureRef()}
+              title="导出为 PureRef (.pur) 场景，完整保留位置、缩放、旋转、裁切与便签"
+              className="charkle-pressable w-full px-2.5 py-1.5 rounded-[var(--win-radius-control)] bg-[var(--accent-soft)] hover:bg-[var(--accent)]/18 text-[var(--accent)] text-[11.5px] font-medium inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+            >
+              <ArrowCircleDown16Regular className="w-3.5 h-3.5 shrink-0" />
+              <span className="truncate">导出 PureRef (.pur) 场景</span>
             </button>
 
             <button

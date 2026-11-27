@@ -53,14 +53,18 @@ function readStoredTagFreq(): Record<string, number> {
 }
 
 export function isPlainWebBookmark(asset: AssetRecord | null | undefined): boolean {
-  return Boolean(
-    asset &&
-      asset.mediaKind === 'webBookmark' &&
-      !asset.richMetadata?.githubRepo &&
-      !asset.richMetadata?.socialPost &&
-      asset.sourceURL &&
-      asset.sourceURL.trim().length > 0,
-  );
+  if (!asset || asset.mediaKind !== 'webBookmark') return false;
+  if (asset.richMetadata?.githubRepo || asset.richMetadata?.socialPost) return false;
+  const web = asset.richMetadata?.webPage;
+  if (
+    web &&
+    ((web.attachments && web.attachments.length > 0) ||
+      Boolean(web.summary?.trim()) ||
+      Boolean(web.hasVideo))
+  ) {
+    return false;
+  }
+  return Boolean(asset.sourceURL && asset.sourceURL.trim().length > 0);
 }
 
 export function buildCriteriaForDestination(
@@ -422,6 +426,26 @@ export interface LibraryState {
     postAsset: AssetRecord,
     destination: SidebarDestination,
   ) => Promise<AssetRecord[]>;
+  extractWebAttachment: (
+    webAsset: AssetRecord,
+    attachment: SocialMediaAttachment,
+    index: number,
+    destination: SidebarDestination,
+  ) => Promise<AssetRecord | null>;
+  batchExtractLinkMedia: (
+    assetIds: string[],
+    destination: SidebarDestination,
+  ) => Promise<import('../types/domain').BatchLinkMediaExtractionReport>;
+  importPureRefScenes: (
+    paths: string[],
+    targetFolderId?: string | null,
+    createMoodboard?: boolean,
+    destination?: SidebarDestination,
+  ) => Promise<import('../types/domain').PureRefImportResult[]>;
+  exportAssetsToPureRef: (
+    assetIds: string[],
+    destinationPath: string,
+  ) => Promise<import('../types/domain').PureRefExportReport>;
   refreshRichAsset: (id: string) => Promise<AssetRecord>;
   hydrateImageMetadata: (id: string) => Promise<AssetRecord | null>;
   markAssetOpened: (id: string) => Promise<void>;
@@ -1022,39 +1046,55 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     const post = postAsset.richMetadata?.socialPost;
     if (!post || !attachment.url) return null;
     const isXiaohongshu = post.platform === 'xiaohongshu';
+    const isVideoPlatform = post.platform === 'youtube' || post.platform === 'bilibili';
     const platformLabel = isXiaohongshu
       ? '小红书'
-      : post.platform === 'x'
-        ? 'X'
-        : post.platform === 'threads'
-          ? 'Threads'
-          : 'Bluesky';
-    const postNoun = isXiaohongshu ? '笔记' : '推文';
+      : post.platform === 'youtube'
+        ? 'YouTube'
+        : post.platform === 'bilibili'
+          ? 'Bilibili'
+          : post.platform === 'pixiv'
+            ? 'Pixiv'
+            : post.platform === 'instagram'
+              ? 'Instagram'
+              : post.platform === 'x'
+                ? 'X'
+                : post.platform === 'threads'
+                  ? 'Threads'
+                  : 'Bluesky';
+    const postNoun = isXiaohongshu
+      ? '笔记'
+      : isVideoPlatform
+        ? '视频'
+        : post.platform === 'pixiv'
+          ? '作品'
+          : '推文';
     const kindLabel =
       attachment.kind === 'video' ? '视频' : attachment.kind === 'gif' ? '动图' : '图片';
     const displayHandle = formatSocialDisplayHandle(post);
     const authorLabel = displayHandle ?? (post.authorName?.trim() || platformLabel);
-    const extractedTitle = `${authorLabel} ${kindLabel} #${index + 1}`;
+    const extractedTitle = isVideoPlatform
+      ? (post.articleTitle?.trim() || postAsset.title || `${authorLabel} 视频`)
+      : `${authorLabel} ${kindLabel} #${index + 1}`;
     const authorLine = displayHandle
       ? `${post.authorName} (${displayHandle})`
       : post.authorName?.trim() || platformLabel;
     const attributionNotes = [
       `来源${postNoun}：${authorLine} · ${platformLabel}`,
-      post.bodyText.trim(),
+      isVideoPlatform ? post.videoSummary?.trim() || post.bodyText.trim() : post.bodyText.trim(),
       `原${postNoun}链接：${post.originalURL}`,
     ]
       .filter(Boolean)
       .join('\n\n');
 
+    const attachments = getEffectiveSocialAttachments(post);
     try {
-      const created = await getTransport().ingestUrl(
+      const standalone = await getTransport().extractLinkMediaAttachment(
+        postAsset.id,
         attachment.url,
-        extractedTitle,
-        attributionNotes,
-        postAsset.folderID ?? null,
-        null,
+        attachment.kind,
+        attachments.length > 1 ? index : null,
       );
-      const standalone = created[0];
       if (!standalone) return null;
       await getTransport().updateAssets({
         assetIDs: [standalone.id],
@@ -1063,7 +1103,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
         addTags: [platformLabel],
       });
       await get().refreshAll(destination);
-      return standalone;
+      return { ...standalone, title: extractedTitle, notes: attributionNotes };
     } catch (err) {
       useCoordinatorStore.getState().pushToast({
         message: `提取${postNoun}媒体失败：${err instanceof Error ? err.message : String(err)}`,
@@ -1074,18 +1114,51 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
   },
 
   async extractAllSocialAttachments(postAsset, destination) {
-    const attachments = getEffectiveSocialAttachments(postAsset.richMetadata?.socialPost);
-    const extracted: AssetRecord[] = [];
-    for (let i = 0; i < attachments.length; i += 1) {
-      const created = await get().extractSocialAttachment(
-        postAsset,
-        attachments[i],
-        i,
-        destination,
+    const report = await get().batchExtractLinkMedia([postAsset.id], destination);
+    return report.extractedAssets;
+  },
+
+  async extractWebAttachment(webAsset, attachment, index, destination) {
+    if (!attachment.url) return null;
+    const total = webAsset.richMetadata?.webPage?.attachments?.length ?? 1;
+    try {
+      const standalone = await getTransport().extractLinkMediaAttachment(
+        webAsset.id,
+        attachment.url,
+        attachment.kind,
+        total > 1 ? index : null,
       );
-      if (created) extracted.push(created);
+      await get().refreshAll(destination);
+      return standalone;
+    } catch (err) {
+      useCoordinatorStore.getState().pushToast({
+        message: `提取网页媒体失败：${err instanceof Error ? err.message : String(err)}`,
+        tone: 'error',
+      });
+      return null;
     }
-    return extracted;
+  },
+
+  async batchExtractLinkMedia(assetIds, destination) {
+    const report = await getTransport().batchExtractLinkMedia(assetIds);
+    await get().refreshAll(destination);
+    return report;
+  },
+
+  async importPureRefScenes(paths, targetFolderId = null, createMoodboard = true, destination) {
+    if (paths.length === 0) return [];
+    const results = await getTransport().importPureRefScenes(
+      paths,
+      targetFolderId,
+      createMoodboard,
+    );
+    const dest = destination ?? useCoordinatorStore.getState().destination;
+    await get().refreshAll(dest);
+    return results;
+  },
+
+  async exportAssetsToPureRef(assetIds, destinationPath) {
+    return getTransport().exportAssetsToPureRef(assetIds, destinationPath);
   },
 
   async refreshRichAsset(id) {

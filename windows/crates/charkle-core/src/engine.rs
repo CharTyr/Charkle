@@ -31,13 +31,14 @@ use crate::media::{
     CachedDedupFingerprintEntry, DeduplicationCleanupResult, DeduplicationResolutionPlan,
     DeduplicationScanReport, DeduplicationScanScope, DeduplicationSensitivity,
     DuplicateDisposalMode, EaglePackImporter, IndexedMediaAsset, LocalVisualDescriptor,
-    MaterialPackageImportResult, MediaPipeline, ParsedEagleFolder, SampleLibrarySeeder,
-    SmartDeduplicator, StagingDirGuard,
+    MaterialPackageImportResult, MediaPipeline, ParsedEagleFolder, PureRefAssetInput, PureRefCodec,
+    PureRefExportReport, PureRefImportResult, SampleLibrarySeeder, SmartDeduplicator,
+    StagingDirGuard, VideoPlatformResolver, VideoPlatformURLParser,
 };
 use crate::models::core::{
     AssetBatchPatch, AssetRecord, FilterCriteria, FolderRecord, FolderSuggestion, LabColor,
     MediaKind, QuickJumpMatch, ScoredAsset, SmartFolderRecord, SocialMediaAttachmentKind,
-    SocialPlatform, TagCount,
+    SocialPlatform, TagCount, WebPageRichMetadata,
 };
 use crate::models::media::{
     cosine_similarity, AssetVector, CacheStats, CaptureInput, ThumbnailTier,
@@ -64,6 +65,16 @@ use crate::traits::{
 use crate::wire::swift_codec::{format_swift_uuid, upper_uuid, upper_uuid_vec};
 
 const WEBDAV_PASSWORD_VAULT_KEY: &str = "sync.webdav.password";
+
+/// Summary returned by [`LiveCharkleEngine::batch_extract_link_media`].
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchLinkMediaExtractionReport {
+    pub source_asset_count: usize,
+    pub extracted_assets: Vec<AssetRecord>,
+    pub failed_count: usize,
+    pub skipped_count: usize,
+}
 
 /// Single ranked hit returned by [`LiveCharkleEngine::semantic_search_local`].
 #[derive(Debug, Clone)]
@@ -208,7 +219,21 @@ impl LiveCharkleEngine {
     // =========================================================================
 
     pub fn fetch_assets(&self, criteria: &FilterCriteria) -> CoreResult<Vec<AssetRecord>> {
-        self.db.fetch_assets(criteria, None)
+        let mut primary = self.db.fetch_assets(criteria, None)?;
+        let trimmed = criteria.search_query.trim();
+        if !trimmed.is_empty() && !criteria.only_trashed {
+            // Seamlessly fuse bilingual EN<->ZH / visual-tone / synonym / vector semantic recall
+            // right behind exact literal/FTS5/OCR/Pinyin hits (single unified search bar, zero mode switch).
+            if let Ok(sem) = self.semantic_search_local(trimmed, criteria, 60, &[], &[]) {
+                let mut seen: HashSet<Uuid> = primary.iter().map(|a| a.id).collect();
+                for hit in sem.hits {
+                    if hit.score >= 0.36 && seen.insert(hit.asset.id) {
+                        primary.push(hit.asset);
+                    }
+                }
+            }
+        }
+        Ok(primary)
     }
 
     pub fn fetch_asset(&self, id: Uuid) -> CoreResult<Option<AssetRecord>> {
@@ -1145,16 +1170,42 @@ impl LiveCharkleEngine {
         }
 
         let mut package_paths: Vec<PathBuf> = Vec::new();
+        let mut pureref_paths: Vec<PathBuf> = Vec::new();
         let mut normal_paths: Vec<PathBuf> = Vec::with_capacity(raw_paths.len());
         for raw in raw_paths {
             if EaglePackImporter::is_recognized_material_package(&raw, false) {
                 package_paths.push(raw);
+            } else if PureRefCodec::is_pure_ref_path(&raw) && raw.is_file() {
+                pureref_paths.push(raw);
             } else {
                 normal_paths.push(raw);
             }
         }
 
         let mut report = IngestPathsReport::default();
+        for pur_path in pureref_paths {
+            let pur = self
+                .import_pure_ref_scene(&pur_path, target_folder_id, target_board_id.is_none())
+                .await?;
+            if let Some(bid) = target_board_id {
+                if let Some(mut board) = self.db.board(bid)? {
+                    for asset in &pur.imported_assets {
+                        if !board.candidate_asset_ids.contains(&asset.id) {
+                            board.candidate_asset_ids.push(asset.id);
+                        }
+                    }
+                    let _ = self.save_board(&board);
+                }
+            }
+            report.assets.extend(pur.imported_assets);
+            report.skipped_files += pur.skipped_missing_link_count;
+            if let Some(root_fid) = pur.root_folder_id {
+                if let Ok(Some(folder)) = self.db.folder(root_fid) {
+                    report.matched_folder_names.push(folder.name.clone());
+                    report.created_folders.push(folder);
+                }
+            }
+        }
         for pkg_path in package_paths {
             let pkg = self
                 .import_material_package_internal(
@@ -2312,8 +2363,30 @@ impl LiveCharkleEngine {
                 };
                 current.title = title_helper.short_title();
                 current.media_kind = MediaKind::WebBookmark;
+                if let Some(dur) = merged_meta.video_duration_seconds {
+                    if dur > 0.0 {
+                        current.duration_seconds = Some(dur);
+                    }
+                }
+                let mut ocr_parts = Vec::new();
+                if let Some(ref h) = merged_meta.article_title {
+                    if !h.trim().is_empty() {
+                        ocr_parts.push(h.trim().to_string());
+                    }
+                }
+                if let Some(ref s) = merged_meta.video_summary {
+                    if !s.trim().is_empty() {
+                        ocr_parts.push(s.trim().to_string());
+                    }
+                }
+                if !merged_meta.video_outline.is_empty() {
+                    ocr_parts.push(merged_meta.video_outline.join("\n"));
+                }
                 if !merged_meta.body_text.trim().is_empty() {
-                    current.ocr_text = Some(merged_meta.body_text.clone());
+                    ocr_parts.push(merged_meta.body_text.trim().to_string());
+                }
+                if !ocr_parts.is_empty() {
+                    current.ocr_text = Some(ocr_parts.join("\n"));
                 }
                 for tag in resolved.extracted_tags {
                     let clean = tag.trim();
@@ -2354,19 +2427,50 @@ impl LiveCharkleEngine {
                     current.title = title.clone();
                 }
             }
-            if let Some(ref desc) = bm.description {
-                if !desc.trim().is_empty() {
-                    if current.notes.trim().is_empty() {
-                        current.notes = desc.clone();
-                    }
-                    let mut rich = current.rich_metadata.clone().unwrap_or_default();
-                    rich.text_excerpt = Some(desc.clone());
-                    current.rich_metadata = Some(rich);
+            if let Some(dur) = bm.duration_seconds {
+                if dur > 0.0 {
+                    current.duration_seconds = Some(dur);
                 }
+            }
+            if let Some(ref desc) = bm.description {
+                if !desc.trim().is_empty() && current.notes.trim().is_empty() {
+                    current.notes = desc.clone();
+                }
+            }
+            let has_rich_web = bm.author_name.is_some()
+                || bm.published_at_text.is_some()
+                || bm.description.is_some()
+                || !bm.attachments.is_empty()
+                || bm.is_video_page
+                || bm.duration_seconds.is_some()
+                || bm.site_name.is_some();
+            if has_rich_web {
+                let mut rich = current.rich_metadata.clone().unwrap_or_default();
+                if let Some(ref desc) = bm.description {
+                    if !desc.trim().is_empty() {
+                        rich.text_excerpt = Some(desc.clone());
+                    }
+                }
+                rich.web_page = Some(WebPageRichMetadata {
+                    site_name: bm.site_name.clone(),
+                    author_name: bm.author_name.clone(),
+                    published_at_text: bm.published_at_text.clone(),
+                    summary: bm.description.clone(),
+                    attachments: bm.attachments.clone(),
+                    has_video: bm.is_video_page,
+                    duration_seconds: bm.duration_seconds,
+                    canonical_url: bm.final_url.clone(),
+                });
+                current.rich_metadata = Some(rich);
             }
             let mut ocr_parts = vec![current.title.clone(), clean_domain.clone()];
             if let Some(ref site) = bm.site_name {
                 ocr_parts.push(site.clone());
+            }
+            if let Some(ref author) = bm.author_name {
+                if !author.trim().is_empty() {
+                    ocr_parts.push(author.clone());
+                }
             }
             if let Some(ref desc) = bm.description {
                 ocr_parts.push(desc.clone());
@@ -3489,6 +3593,530 @@ impl LiveCharkleEngine {
         )
     }
 
+    // =========================================================================
+    // Bidirectional PureRef (.pur) Import & Export
+    // =========================================================================
+
+    /// Imports a PureRef (`.pur`) scene into a Charkle library folder and optionally builds
+    /// a Freeform Moodboard faithfully preserving image geometry, flips, rotations, crops, and notes.
+    pub async fn import_pure_ref_scene(
+        &self,
+        path: &Path,
+        target_folder_id: Option<Uuid>,
+        create_moodboard: bool,
+    ) -> CoreResult<PureRefImportResult> {
+        if let Some(fid) = target_folder_id {
+            if self.db.folder(fid)?.is_none() {
+                return Err(CoreError::NotFound(format_swift_uuid(&fid)));
+            }
+        }
+        let path_owned = path.to_path_buf();
+        let scene_name = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("PureRef 场景")
+            .to_string();
+
+        let scene = tokio::task::spawn_blocking(move || PureRefCodec::decode_path(&path_owned))
+            .await
+            .map_err(|e| CoreError::Media(format!("PureRef 解码任务异常：{e}")))??;
+
+        let mut folders_snapshot = self.db.fetch_folders()?;
+        let mut created_folders = Vec::new();
+        let root_folder = ensure_or_create_import_folder(
+            self,
+            &scene_name,
+            target_folder_id,
+            &mut folders_snapshot,
+            &mut created_folders,
+        )?;
+
+        let mut imported_assets: Vec<AssetRecord> = Vec::with_capacity(scene.images.len());
+        let mut asset_by_image_index: HashMap<usize, AssetRecord> =
+            HashMap::with_capacity(scene.images.len());
+
+        for blob in &scene.images {
+            let ext = blob.format.file_extension();
+            let raw_name = blob
+                .display_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .unwrap_or_else(|| format!("{scene_name}_{:03}", blob.index + 1));
+            let suggested_name = if Path::new(&raw_name).extension().is_some() {
+                raw_name
+            } else {
+                format!("{raw_name}.{ext}")
+            };
+
+            let created = self
+                .ingest(
+                    vec![CaptureInput::ImageData {
+                        data: blob.data.clone(),
+                        suggested_name,
+                        source_url: None,
+                    }],
+                    Some(root_folder.id),
+                    None,
+                )
+                .await?;
+            if let Some(asset) = created.into_iter().next() {
+                asset_by_image_index.insert(blob.index, asset.clone());
+                imported_assets.push(asset);
+            }
+        }
+
+        let mut palette: Vec<LabColor> = Vec::new();
+        let mut seen_hex = HashSet::new();
+        for asset in &imported_assets {
+            for color in &asset.dominant_colors {
+                if seen_hex.insert(color.hex.clone()) {
+                    palette.push(color.clone());
+                    if palette.len() >= 6 {
+                        break;
+                    }
+                }
+            }
+            if palette.len() >= 6 {
+                break;
+            }
+        }
+
+        let (created_board_id, created_board_title, imported_note_count) = if create_moodboard {
+            let (board_doc, note_count) = PureRefCodec::build_moodboard_document(
+                &scene_name,
+                &scene,
+                &asset_by_image_index,
+                palette,
+            );
+            let saved_board = self.save_board(&board_doc)?;
+            (Some(saved_board.id), Some(saved_board.title), note_count)
+        } else {
+            (None, None, 0)
+        };
+
+        self.emit(EngineEvent::LibraryChanged);
+
+        Ok(PureRefImportResult {
+            scene_name,
+            format_version: scene.format_version,
+            used_fallback_extraction: scene.used_fallback_extraction,
+            imported_assets,
+            root_folder_id: Some(root_folder.id),
+            created_board_id,
+            created_board_title,
+            imported_note_count,
+            skipped_missing_link_count: scene.skipped_missing_link_count,
+        })
+    }
+
+    /// Exports selected library assets as a valid v1.10 PureRef (`.pur`) scene with justified auto-layout.
+    pub fn export_assets_to_pure_ref(
+        &self,
+        asset_ids: &[Uuid],
+        destination_path: &Path,
+    ) -> CoreResult<PureRefExportReport> {
+        let mut inputs = Vec::with_capacity(asset_ids.len());
+        let mut skipped_count = 0usize;
+        let mut seen = HashSet::new();
+        for &id in asset_ids {
+            if !seen.insert(id) {
+                continue;
+            }
+            let Some(asset) = self.db.asset(id)? else {
+                skipped_count += 1;
+                continue;
+            };
+            if let Some(input) = self.load_pure_ref_asset_input(&asset) {
+                inputs.push(input);
+            } else {
+                skipped_count += 1;
+            }
+        }
+        if inputs.is_empty() {
+            return Err(CoreError::Media(
+                "所选素材中没有可导出为 PureRef 场景的图像文件。".to_string(),
+            ));
+        }
+
+        let scene = PureRefCodec::build_scene_from_assets(&inputs);
+        let bytes = PureRefCodec::encode(&scene)?;
+        if let Some(parent) = destination_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(destination_path, &bytes)?;
+
+        Ok(PureRefExportReport {
+            file_path: destination_path.to_string_lossy().to_string(),
+            image_count: scene.images.len(),
+            placement_count: scene.placements.len(),
+            note_count: scene.notes.len(),
+            skipped_count,
+            byte_count: bytes.len(),
+        })
+    }
+
+    /// Exports a Charkle Moodboard as a valid v1.10 PureRef (`.pur`) scene preserving spatial
+    /// coordinates, sizes, rotations, flips, crops, z-order, notes, and group titles.
+    pub fn export_moodboard_to_pure_ref(
+        &self,
+        document: &MoodboardDocument,
+        destination_path: &Path,
+    ) -> CoreResult<PureRefExportReport> {
+        let board_assets = self.load_board_asset_map(document)?;
+        let mut inputs_by_id: HashMap<Uuid, PureRefAssetInput> =
+            HashMap::with_capacity(board_assets.len());
+        for (id, asset) in &board_assets {
+            if let Some(input) = self.load_pure_ref_asset_input(asset) {
+                inputs_by_id.insert(*id, input);
+            }
+        }
+        let (scene, skipped_count) = PureRefCodec::build_scene_from_board(document, &inputs_by_id);
+        let bytes = PureRefCodec::encode(&scene)?;
+        if let Some(parent) = destination_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(destination_path, &bytes)?;
+
+        Ok(PureRefExportReport {
+            file_path: destination_path.to_string_lossy().to_string(),
+            image_count: scene.images.len(),
+            placement_count: scene.placements.len(),
+            note_count: scene.notes.len(),
+            skipped_count,
+            byte_count: bytes.len(),
+        })
+    }
+
+    fn load_pure_ref_asset_input(&self, asset: &AssetRecord) -> Option<PureRefAssetInput> {
+        let candidate_paths = [
+            self.media.cached_original(asset),
+            self.media
+                .thumbnail_url(asset.id, ThumbnailTier::Preview1400),
+            self.media.thumbnail_url(asset.id, ThumbnailTier::Grid520),
+        ];
+        for path in candidate_paths.into_iter().flatten() {
+            if let Ok(data) = std::fs::read(&path) {
+                if PureRefCodec::detect_image_format(&data).is_some()
+                    && PureRefCodec::inspect_image_dimensions(&data).is_some()
+                {
+                    return Some(PureRefAssetInput {
+                        id: asset.id,
+                        title: asset.title.clone(),
+                        file_name: asset.file_name.clone(),
+                        pixel_width: asset.pixel_width.max(1) as u32,
+                        pixel_height: asset.pixel_height.max(1) as u32,
+                        image_data: data,
+                    });
+                }
+            }
+        }
+        None
+    }
+
+    // =========================================================================
+    // On-Demand Link Media & Video Extraction (Single & Multi-Select Batch)
+    // =========================================================================
+
+    /// Extracts a single photo/GIF/video attachment from a social post, YouTube/Bilibili video
+    /// bookmark, or rich webpage bookmark into an independent first-class library asset.
+    pub async fn extract_link_media_attachment(
+        &self,
+        asset_id: Uuid,
+        attachment_url: String,
+        attachment_kind: SocialMediaAttachmentKind,
+        attachment_index: Option<usize>,
+    ) -> CoreResult<AssetRecord> {
+        let Some(parent) = self.db.asset(asset_id)? else {
+            return Err(CoreError::NotFound(format_swift_uuid(&asset_id)));
+        };
+        let trimmed_url = attachment_url.trim().to_string();
+        if trimmed_url.is_empty() {
+            return Err(CoreError::Media("附件链接为空，无法提取素材。".to_string()));
+        }
+
+        let social_platform = parent
+            .rich_metadata
+            .as_ref()
+            .and_then(|r| r.social_post.as_ref())
+            .map(|p| p.platform);
+        let parsed_att_url = Url::parse(&trimmed_url).ok();
+        let parsed_parent_url = parent
+            .source_url
+            .as_deref()
+            .and_then(|s| Url::parse(s).ok())
+            .or_else(|| {
+                parent
+                    .rich_metadata
+                    .as_ref()
+                    .and_then(|r| r.social_post.as_ref())
+                    .and_then(|p| Url::parse(&p.original_url).ok())
+            });
+
+        let video_ref = parsed_att_url
+            .as_ref()
+            .and_then(VideoPlatformURLParser::parse)
+            .or_else(|| {
+                if social_platform.is_some_and(SocialPlatform::is_video_platform) {
+                    parsed_parent_url
+                        .as_ref()
+                        .and_then(VideoPlatformURLParser::parse)
+                } else {
+                    None
+                }
+            });
+
+        let base_title = {
+            let clean = parent.title.trim();
+            let stem = if clean.is_empty() {
+                "提取素材"
+            } else {
+                clean
+            };
+            match attachment_index {
+                Some(idx) => format!("{stem} ({})", idx + 1),
+                None => stem.to_string(),
+            }
+        };
+
+        let mut created_asset =
+            if let (SocialMediaAttachmentKind::Video, Some(vref)) = (attachment_kind, video_ref) {
+                let video_meta = parent
+                    .rich_metadata
+                    .as_ref()
+                    .and_then(|r| r.social_post.clone())
+                    .filter(|p| p.platform.is_video_platform())
+                    .unwrap_or_else(|| crate::models::core::SocialPostMetadata {
+                        platform: vref.platform(),
+                        author_name: parent.title.clone(),
+                        author_handle: String::new(),
+                        author_avatar_url: None,
+                        published_at_text: None,
+                        body_text: String::new(),
+                        quoted_author: None,
+                        quoted_text: None,
+                        article_title: Some(parent.title.clone()),
+                        media_urls: Vec::new(),
+                        media_thumbnail_urls: Vec::new(),
+                        attachments: Vec::new(),
+                        has_video: true,
+                        video_url: None,
+                        reply_count: None,
+                        repost_count: None,
+                        like_count: None,
+                        view_count: None,
+                        original_url: vref.canonical_url().to_string(),
+                        media_fetch_failed: false,
+                        video_duration_seconds: parent.duration_seconds,
+                        video_summary: None,
+                        video_outline: Vec::new(),
+                        video_id: None,
+                        video_cid: None,
+                    });
+                let dl_path = VideoPlatformResolver::download_video(
+                    &video_meta,
+                    &self.media.staging,
+                    &base_title,
+                )
+                .await?;
+                let ingest_res = self
+                    .ingest(
+                        vec![CaptureInput::FilePath(dl_path.clone())],
+                        parent.folder_id,
+                        None,
+                    )
+                    .await;
+                let _ = std::fs::remove_file(&dl_path);
+                let mut created = ingest_res?
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| CoreError::Media("视频入库失败。".to_string()))?;
+                if let Some(dur) = parent.duration_seconds {
+                    if created.duration_seconds.is_none() {
+                        created.duration_seconds = Some(dur);
+                    }
+                }
+                created
+            } else if matches!(
+                attachment_kind,
+                SocialMediaAttachmentKind::Video | SocialMediaAttachmentKind::Gif
+            ) {
+                if let Some((bytes, ext)) = SocialPostResolver::download_media_bytes_with_referer(
+                    &trimmed_url,
+                    attachment_kind,
+                    parent.source_url.as_deref(),
+                )
+                .await
+                {
+                    let tmp = self.media.staging.join(format!(
+                        "extract-{}.{}",
+                        Uuid::new_v4().simple(),
+                        if ext.is_empty() { "mp4" } else { ext.as_str() }
+                    ));
+                    std::fs::write(&tmp, &bytes)?;
+                    let ingest_res = self
+                        .ingest(
+                            vec![CaptureInput::FilePath(tmp.clone())],
+                            parent.folder_id,
+                            None,
+                        )
+                        .await;
+                    let _ = std::fs::remove_file(&tmp);
+                    ingest_res?
+                        .into_iter()
+                        .next()
+                        .ok_or_else(|| CoreError::Media("媒体文件入库失败。".to_string()))?
+                } else if attachment_kind == SocialMediaAttachmentKind::Video {
+                    let page_url = parent.source_url.as_deref().unwrap_or(&trimmed_url);
+                    let dl_path = VideoPlatformResolver::download_generic_web_video(
+                        page_url,
+                        parsed_att_url.as_ref(),
+                        &self.media.staging,
+                        &base_title,
+                    )
+                    .await?;
+                    let ingest_res = self
+                        .ingest(
+                            vec![CaptureInput::FilePath(dl_path.clone())],
+                            parent.folder_id,
+                            None,
+                        )
+                        .await;
+                    let _ = std::fs::remove_file(&dl_path);
+                    ingest_res?
+                        .into_iter()
+                        .next()
+                        .ok_or_else(|| CoreError::Media("网页视频入库失败。".to_string()))?
+                } else {
+                    return Err(CoreError::Media(
+                        "无法下载该动图附件，请检查网络或防盗链限制。".to_string(),
+                    ));
+                }
+            } else {
+                let (bytes, ext) = SocialPostResolver::download_media_bytes_with_referer(
+                    &trimmed_url,
+                    SocialMediaAttachmentKind::Photo,
+                    parent.source_url.as_deref(),
+                )
+                .await
+                .ok_or_else(|| {
+                    CoreError::Media("无法下载该图片附件，请检查网络连接后重试。".to_string())
+                })?;
+                let safe_ext = if ext.is_empty() { "jpg" } else { ext.as_str() };
+                let suggested = format!(
+                    "{}.{}",
+                    base_title
+                        .chars()
+                        .map(
+                            |c| if c.is_alphanumeric() || c == '-' || c == '_' || c == ' ' {
+                                c
+                            } else {
+                                '_'
+                            }
+                        )
+                        .take(64)
+                        .collect::<String>()
+                        .trim(),
+                    safe_ext
+                );
+                self.ingest(
+                    vec![CaptureInput::ImageData {
+                        data: bytes,
+                        suggested_name: if suggested.starts_with('.') {
+                            format!("extracted.{safe_ext}")
+                        } else {
+                            suggested
+                        },
+                        source_url: parent.source_url.clone().or(Some(trimmed_url.clone())),
+                    }],
+                    parent.folder_id,
+                    None,
+                )
+                .await?
+                .into_iter()
+                .next()
+                .ok_or_else(|| CoreError::Media("图片素材入库失败。".to_string()))?
+            };
+
+        created_asset.title = base_title;
+        if created_asset.source_url.is_none() {
+            created_asset.source_url = parent.source_url.clone().or(Some(trimmed_url));
+        }
+        if created_asset.source_domain.is_none() {
+            created_asset.source_domain = parent.source_domain.clone();
+        }
+        if created_asset.notes.trim().is_empty() {
+            if let Some(ref src) = parent.source_url {
+                created_asset.notes = format!("提取自：{src}");
+            }
+        }
+        for tag in &parent.tags {
+            if !created_asset
+                .tags
+                .iter()
+                .any(|t| t.eq_ignore_ascii_case(tag))
+            {
+                created_asset.tags.push(tag.clone());
+            }
+        }
+        let saved = self.db.save_asset_locally(&created_asset, true)?;
+        self.emit(EngineEvent::LibraryChanged);
+        Ok(saved)
+    }
+
+    /// Batch-extracts all photos & videos from a multi-selected set of social, video, or webpage
+    /// bookmarks without aborting when an individual link fails.
+    pub async fn batch_extract_link_media(
+        &self,
+        asset_ids: &[Uuid],
+    ) -> CoreResult<BatchLinkMediaExtractionReport> {
+        let mut report = BatchLinkMediaExtractionReport::default();
+        let mut seen = HashSet::new();
+
+        for &asset_id in asset_ids {
+            if !seen.insert(asset_id) {
+                continue;
+            }
+            let Some(asset) = self.db.asset(asset_id)? else {
+                report.skipped_count += 1;
+                continue;
+            };
+            let attachments = asset.extractable_link_attachments();
+            if attachments.is_empty() {
+                report.skipped_count += 1;
+                continue;
+            }
+            report.source_asset_count += 1;
+            let multi = attachments.len() > 1;
+            for (idx, att) in attachments.into_iter().enumerate() {
+                match self
+                    .extract_link_media_attachment(
+                        asset_id,
+                        att.url,
+                        att.kind,
+                        multi.then_some(idx),
+                    )
+                    .await
+                {
+                    Ok(extracted) => report.extracted_assets.push(extracted),
+                    Err(err) => {
+                        tracing::warn!(
+                            asset_id = %asset_id,
+                            error = %err,
+                            "Batch link media extraction skipped failing attachment"
+                        );
+                        report.failed_count += 1;
+                    }
+                }
+            }
+        }
+
+        Ok(report)
+    }
+
     fn load_board_asset_map(
         &self,
         document: &MoodboardDocument,
@@ -4273,6 +4901,11 @@ mod tests {
                 original_url: "https://www.xiaohongshu.com/explore/67a1b2c3d4e5f60718293a4b"
                     .to_string(),
                 media_fetch_failed: false,
+                video_duration_seconds: None,
+                video_summary: None,
+                video_outline: Vec::new(),
+                video_id: None,
+                video_cid: None,
             }),
             ..AssetRichMetadata::default()
         });
@@ -4311,6 +4944,11 @@ mod tests {
                 view_count: None,
                 original_url: "http://127.0.0.1:1/unreachable-note".to_string(),
                 media_fetch_failed: false,
+                video_duration_seconds: None,
+                video_summary: None,
+                video_outline: Vec::new(),
+                video_id: None,
+                video_cid: None,
             }),
             ..AssetRichMetadata::default()
         });

@@ -87,7 +87,7 @@ export interface AppUpdateStoreState {
 
 const INITIAL_STATE = {
   state: { status: 'idle' } as AppUpdateState,
-  currentVersion: '1.4.1',
+  currentVersion: '1.5.0',
   autoCheckUpdates: true,
   lastUpdateCheckAtMs: null as number | null,
   skippedVersion: null as string | null,
@@ -98,7 +98,7 @@ const INITIAL_STATE = {
 
 function applyPreferences(prefs: UpdatePreferencesDto) {
   return {
-    currentVersion: prefs.currentVersion || '1.4.1',
+    currentVersion: prefs.currentVersion || '1.5.0',
     autoCheckUpdates: prefs.autoCheckUpdates,
     lastUpdateCheckAtMs: prefs.lastUpdateCheckAtMs ?? null,
     skippedVersion: prefs.skippedVersion ?? null,

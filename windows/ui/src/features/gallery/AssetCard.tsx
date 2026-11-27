@@ -211,11 +211,18 @@ export const AssetCard: React.FC<AssetCardProps> = React.memo(({
 
   const gh = asset.richMetadata?.githubRepo;
   const social = asset.richMetadata?.socialPost;
+  const webPage = asset.richMetadata?.webPage;
   const isXiaohongshu = social?.platform === 'xiaohongshu';
   const isSwatch = asset.fileName.toLowerCase().endsWith('.swatch');
   const isAudio = asset.mediaKind === 'audio';
   const isMarkdownDoc = asset.mediaKind === 'document' && Boolean(asset.richMetadata?.textExcerpt);
-  const isPlainWebBookmark = asset.mediaKind === 'webBookmark' && !gh && !social;
+  const isRichWebPage = Boolean(
+    webPage &&
+      ((webPage.attachments && webPage.attachments.length > 0) ||
+        webPage.summary?.trim() ||
+        webPage.hasVideo),
+  );
+  const isPlainWebBookmark = asset.mediaKind === 'webBookmark' && !gh && !social && !isRichWebPage;
 
   const supportsHoverPlayback =
     !gh &&

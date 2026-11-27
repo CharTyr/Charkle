@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 use charkle_core::export::{BoardImageFormat, FigmaBridgeExportReport, MoodboardExportOptions};
 use charkle_core::layout::EditorialLayoutResult;
+use charkle_core::media::PureRefExportReport;
 use charkle_core::models::moodboard::{
     MoodboardCurationRequest, MoodboardDocument, MoodboardProposal,
 };
@@ -111,5 +112,23 @@ pub async fn export_board_figma_bridge(
         code: "FIGMA_EXPORT_FAILED",
         message: format!("Figma bridge export worker failed: {e}"),
     })??;
+    Ok(report)
+}
+
+#[tauri::command]
+pub async fn export_moodboard_to_pureref(
+    state: State<'_, AppState>,
+    document: MoodboardDocument,
+    destination_path: String,
+) -> IpcResult<PureRefExportReport> {
+    let engine = state.engine.clone();
+    let path = PathBuf::from(destination_path);
+    let report =
+        tokio::task::spawn_blocking(move || engine.export_moodboard_to_pure_ref(&document, &path))
+            .await
+            .map_err(|e| IpcError {
+                code: "PUREREF_EXPORT_FAILED",
+                message: format!("PureRef board export worker failed: {e}"),
+            })??;
     Ok(report)
 }

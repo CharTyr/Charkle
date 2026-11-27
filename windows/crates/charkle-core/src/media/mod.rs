@@ -8,7 +8,9 @@ pub mod dedup;
 pub mod eaglepack;
 pub mod metadata;
 pub mod pipeline;
+pub mod pureref;
 pub mod resolvers;
+pub mod video_platform;
 pub mod visual_fingerprint;
 pub mod xiaohongshu;
 
@@ -30,6 +32,10 @@ pub use pipeline::{
     FileDigests, MediaImportResult, MediaPipeline, OriginalEntry, SampleLibrarySeeder,
     MAX_CACHE_BUDGET_BYTES, MIN_CACHE_BUDGET_BYTES,
 };
+pub use pureref::{
+    PureRefAssetInput, PureRefCodec, PureRefColor, PureRefExportReport, PureRefImageBlob,
+    PureRefImageFormat, PureRefImagePlacement, PureRefImportResult, PureRefScene, PureRefTextNote,
+};
 pub use resolvers::{
     canonical_dedup_key, fetch_or_cache_social_media, social_proxy_cache_key,
     validate_social_proxy_url, GitHubRepoReference, GitHubRepoResolver, GitHubRepoURLParser,
@@ -37,6 +43,7 @@ pub use resolvers::{
     SocialPostResolver, SocialPostURLParser, WebBookmarkResolver, WebURLParser, XPostReference,
     XPostURLParser,
 };
+pub use video_platform::{VideoPlatformReference, VideoPlatformResolver, VideoPlatformURLParser};
 pub use visual_fingerprint::LocalVisualDescriptor;
 pub use xiaohongshu::{
     fetch_or_cache_xhs_media, validate_xhs_proxy_url, XhsProxyError, XhsProxyResponse,

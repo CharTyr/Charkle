@@ -12,7 +12,7 @@ use crate::models::moodboard::NormalizedCropRect;
 use crate::wire::swift_codec::{base64_data_opt, cocoa_date_opt, upper_uuid, upper_uuid_opt};
 
 /// All supported asset ingestion forms matching `CaptureInput` in Swift.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum CaptureInput {
     FilePath(PathBuf),
     ImageData {

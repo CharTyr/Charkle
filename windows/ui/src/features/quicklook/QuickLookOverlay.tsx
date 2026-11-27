@@ -645,14 +645,19 @@ export const QuickLookOverlay: React.FC = () => {
   const renderWebBookmarkCard = (active: AssetRecord) => {
     const dotHex = active.dominantColors[0]?.hex ?? '#5C6B73';
     const domain = formatQuickLookBookmarkDomain(active);
+    const web = active.richMetadata?.webPage;
+    const webAttachments = web?.attachments ?? [];
     const previewUrl = withQuickLookThumbCacheBust(
       transport.thumbnailUrl(active.id, 'preview1400'),
       active.updatedAt,
     );
+    const summaryText = web?.summary?.trim() || active.notes.trim();
+
     return (
       <div
+        data-testid="quicklook-web-bookmark-card"
         onClick={(e) => e.stopPropagation()}
-        className="w-full max-w-[680px] p-5 rounded-[var(--win-radius-dialog)] bg-[var(--bg-elevated)] border border-[var(--win-stroke-flyout)] shadow-[0_24px_60px_rgba(0,0,0,0.42)] flex flex-col gap-3.5"
+        className="w-full max-w-[680px] max-h-[82vh] overflow-y-auto charkle-scroll p-5 rounded-[var(--win-radius-dialog)] bg-[var(--bg-elevated)] border border-[var(--win-stroke-flyout)] shadow-[0_24px_60px_rgba(0,0,0,0.42)] flex flex-col gap-3.5"
       >
         <div className="flex items-center justify-between gap-3">
           <div className="flex items-center gap-2.5 min-w-0">
@@ -661,8 +666,18 @@ export const QuickLookOverlay: React.FC = () => {
               style={{ backgroundColor: dotHex }}
             />
             <span className="text-[13px] font-semibold charkle-mono text-[var(--text-secondary)] truncate">
-              {active.sourceDomain ?? domain}
+              {web?.siteName?.trim() || active.sourceDomain || domain}
             </span>
+            {web?.authorName?.trim() && (
+              <span className="text-[12px] text-[var(--text-tertiary)] truncate">
+                · {web.authorName.trim()}
+              </span>
+            )}
+            {web?.publishedAtText?.trim() && (
+              <span className="text-[11.5px] text-[var(--text-tertiary)] shrink-0">
+                · {web.publishedAtText.trim()}
+              </span>
+            )}
           </div>
           {active.sourceURL && (
             <Button
@@ -688,12 +703,12 @@ export const QuickLookOverlay: React.FC = () => {
           )}
         </div>
 
-        <div className="w-full max-h-[380px] rounded-[var(--win-radius-card)] overflow-hidden border border-[var(--win-stroke-card)] bg-[var(--bg-subtle)]/40 flex items-center justify-center">
+        <div className="w-full max-h-[340px] rounded-[var(--win-radius-card)] overflow-hidden border border-[var(--win-stroke-card)] bg-[var(--bg-subtle)]/40 flex items-center justify-center">
           <img
             src={previewUrl}
             alt={active.title}
             draggable={false}
-            className="w-full max-h-[380px] object-contain"
+            className="w-full max-h-[340px] object-contain"
           />
         </div>
 
@@ -707,13 +722,79 @@ export const QuickLookOverlay: React.FC = () => {
           </p>
         )}
 
-        {active.notes && (
+        {summaryText && (
           <>
             <div className="h-px bg-[var(--win-stroke-divider)]" />
             <p className="text-[13px] leading-relaxed text-[var(--text-primary)] whitespace-pre-wrap select-text">
-              {active.notes}
+              {summaryText}
             </p>
           </>
+        )}
+
+        {webAttachments.length > 0 && (
+          <div className="flex flex-col gap-2 pt-1 border-t border-[var(--win-stroke-divider)]">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[12px] font-semibold text-[var(--text-secondary)]">
+                网页内发现 {webAttachments.length} 个可提取媒体
+              </span>
+              {webAttachments.length > 1 && (
+                <Button
+                  variant="subtle"
+                  size="xs"
+                  onClick={() =>
+                    void useLibraryStore
+                      .getState()
+                      .batchExtractLinkMedia([active.id], useCoordinatorStore.getState().destination)
+                      .then((report) => {
+                        pushToast({
+                          message: `已提取 ${report.extractedAssets.length} 项网页媒体为独立素材`,
+                          tone: 'success',
+                        });
+                      })
+                  }
+                >
+                  全部提取为独立素材
+                </Button>
+              )}
+            </div>
+            <div className="flex flex-col gap-1.5">
+              {webAttachments.map((att, idx) => (
+                <div
+                  key={`${att.id}-${idx}`}
+                  className="flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-[var(--win-radius-control)] bg-[var(--bg-subtle)]/70 border border-[var(--win-stroke-card)]"
+                >
+                  <span className="text-[12px] text-[var(--text-primary)] truncate">
+                    {att.kind === 'video' ? '视频' : att.kind === 'gif' ? '动图' : '图片'} #{idx + 1} · {att.url}
+                  </span>
+                  <Button
+                    variant="subtle"
+                    size="xs"
+                    data-testid={`web-extract-att-${idx}`}
+                    onClick={() =>
+                      void useLibraryStore
+                        .getState()
+                        .extractWebAttachment(
+                          active,
+                          att,
+                          idx,
+                          useCoordinatorStore.getState().destination,
+                        )
+                        .then((created) => {
+                          if (created) {
+                            pushToast({
+                              message: `已提取「${created.title}」为独立素材`,
+                              tone: 'success',
+                            });
+                          }
+                        })
+                    }
+                  >
+                    提取为独立素材
+                  </Button>
+                </div>
+              ))}
+            </div>
+          </div>
         )}
       </div>
     );

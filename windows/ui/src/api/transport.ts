@@ -18,6 +18,7 @@ import {
   type AssetBatchPatch,
   type AssetRecord,
   type BackendTestResultDto,
+  type BatchLinkMediaExtractionReport,
   type CacheStats,
   type CaptureSessionInfo,
   type ChatGPTAccountSession,
@@ -69,6 +70,8 @@ import {
   type PinterestPin,
   type PinterestPinDetailResult,
   type PinterestTrayImportProgress,
+  type PureRefExportReport,
+  type PureRefImportResult,
   type QuickJumpMatch,
   type RebuildIndexResultDto,
   type ScoredAsset,
@@ -76,6 +79,7 @@ import {
   type ShelfSettings,
   type ShelfTargetMode,
   type SmartFolderRecord,
+  type SocialMediaAttachmentKind,
   type StorageMigrationReport,
   type SyncAuthStateDto,
   type SyncBackendProfile,
@@ -171,6 +175,27 @@ export interface CharkleTransport {
     targetFolderId?: string | null,
     targetBoardId?: string | null,
   ): Promise<MaterialPackageImportResult[]>;
+  importPureRefScenes(
+    paths: string[],
+    targetFolderId?: string | null,
+    createMoodboard?: boolean,
+  ): Promise<PureRefImportResult[]>;
+  exportAssetsToPureRef(
+    assetIds: string[],
+    destinationPath: string,
+  ): Promise<PureRefExportReport>;
+  exportMoodboardToPureRef(
+    document: MoodboardDocument,
+    destinationPath: string,
+  ): Promise<PureRefExportReport>;
+  extractLinkMediaAttachment(
+    assetId: string,
+    attachmentUrl: string,
+    attachmentKind: SocialMediaAttachmentKind,
+    attachmentIndex?: number | null,
+  ): Promise<AssetRecord>;
+  batchExtractLinkMedia(assetIds: string[]): Promise<BatchLinkMediaExtractionReport>;
+  pickPureRefFilesDialog(): Promise<string[]>;
   scanDuplicates(
     scope: DeduplicationScanScope,
     sensitivity: DeduplicationSensitivity,
@@ -477,6 +502,67 @@ export class TauriTransport implements CharkleTransport {
       targetFolderId: targetFolderId ?? null,
       targetBoardId: targetBoardId ?? null,
     });
+  }
+
+  importPureRefScenes(
+    paths: string[],
+    targetFolderId?: string | null,
+    createMoodboard = true,
+  ): Promise<PureRefImportResult[]> {
+    return invoke('import_pureref_scenes', {
+      paths,
+      targetFolderId: targetFolderId ?? null,
+      createMoodboard,
+    });
+  }
+
+  exportAssetsToPureRef(
+    assetIds: string[],
+    destinationPath: string,
+  ): Promise<PureRefExportReport> {
+    return invoke('export_assets_to_pureref', {
+      assetIds,
+      destinationPath,
+    });
+  }
+
+  exportMoodboardToPureRef(
+    document: MoodboardDocument,
+    destinationPath: string,
+  ): Promise<PureRefExportReport> {
+    return invoke('export_moodboard_to_pureref', {
+      document,
+      destinationPath,
+    });
+  }
+
+  extractLinkMediaAttachment(
+    assetId: string,
+    attachmentUrl: string,
+    attachmentKind: SocialMediaAttachmentKind,
+    attachmentIndex?: number | null,
+  ): Promise<AssetRecord> {
+    return invoke('extract_link_media_attachment', {
+      assetId,
+      attachmentUrl,
+      attachmentKind,
+      attachmentIndex: attachmentIndex ?? null,
+    });
+  }
+
+  batchExtractLinkMedia(assetIds: string[]): Promise<BatchLinkMediaExtractionReport> {
+    return invoke('batch_extract_link_media', { assetIds });
+  }
+
+  async pickPureRefFilesDialog(): Promise<string[]> {
+    const selected = await openDialog({
+      multiple: true,
+      directory: false,
+      title: '选择 PureRef 场景文件 (.pur)',
+      filters: [{ name: 'PureRef 场景 (.pur)', extensions: ['pur'] }],
+    });
+    if (!selected) return [];
+    return Array.isArray(selected) ? selected : [selected];
   }
 
   scanDuplicates(
@@ -3110,7 +3196,7 @@ export class InMemoryMockTransport implements CharkleTransport {
 
   async getSystemDiagnostics(): Promise<SystemDiagnosticsDto> {
     return {
-      appVersion: '1.4.1',
+      appVersion: '1.5.0',
       schemaVersion: 2,
       dataDir: '%LOCALAPPDATA%\\Charkle',
       databasePath: '%LOCALAPPDATA%\\Charkle\\Library.sqlite3',
@@ -3231,7 +3317,7 @@ export class InMemoryMockTransport implements CharkleTransport {
 
   // Native GitHub Releases Updater mock state
   private mockUpdatePrefs: UpdatePreferencesDto = {
-    currentVersion: '1.4.1',
+    currentVersion: '1.5.0',
     autoCheckUpdates: true,
     lastUpdateCheckAtMs: null,
     skippedVersion: null,
@@ -3432,9 +3518,224 @@ export class InMemoryMockTransport implements CharkleTransport {
     mergeMetadata: boolean;
   }> = [];
   public mockImportedPackagePaths: string[] = [];
+  public mockPureRefPaths: string[] = [];
+  public mockImportedPureRefPaths: string[] = [];
+  public mockExportedPureRefPaths: string[] = [];
+  public mockExtractedAttachments: Array<{
+    assetId: string;
+    attachmentUrl: string;
+    attachmentKind: SocialMediaAttachmentKind;
+    attachmentIndex: number | null;
+  }> = [];
+  public mockBatchExtractedAssetIds: string[][] = [];
 
   async pickMaterialPackageFilesDialog(): Promise<string[]> {
     return [...this.mockMaterialPackagePaths];
+  }
+
+  async pickPureRefFilesDialog(): Promise<string[]> {
+    return [...this.mockPureRefPaths];
+  }
+
+  async importPureRefScenes(
+    paths: string[],
+    targetFolderId?: string | null,
+    createMoodboard = true,
+  ): Promise<PureRefImportResult[]> {
+    this.mockImportedPureRefPaths.push(...paths);
+    const results: PureRefImportResult[] = [];
+    for (const p of paths) {
+      const base = p.split(/[\\/]/).pop() ?? 'PureRef.pur';
+      const sceneName = base.replace(/\.pur$/i, '') || 'PureRef 场景';
+      const folder = await this.createFolder(sceneName, targetFolderId ?? null);
+      const created = await this.ingestText(
+        `${sceneName} 参考图`,
+        `Imported from ${base}`,
+        null,
+        folder.id,
+      );
+      let createdBoardID: string | null = null;
+      let createdBoardTitle: string | null = null;
+      if (createMoodboard) {
+        const now = msToCocoaSeconds(Date.now());
+        const boardId = `PURE-${Math.random().toString(16).slice(2, 10).toUpperCase()}`;
+        const saved = await this.saveBoard({
+          id: boardId,
+          title: sceneName,
+          subtitle: 'PureRef 导入场景',
+          mode: { freeform: {} },
+          nodes: created.map((asset, idx) => ({
+            id: `NODE-${idx}-${boardId}`,
+            kind: { assetRef: { assetID: asset.id, weight: 1, autoplayLoop: false } },
+            frame: { x: 80 + idx * 320, y: 80, width: 280, height: 220 },
+            zIndex: idx,
+            rotationDegrees: 0,
+            flipHorizontal: false,
+            flipVertical: false,
+            isLocked: false,
+            editorialOrder: idx,
+            updatedAt: now,
+          })),
+          connectors: [],
+          inkStrokes: [],
+          extractedPalette: [],
+          candidateAssetIDs: [],
+          pinnedOffline: false,
+          viewportCenter: { x: 0, y: 0 },
+          viewportZoom: 1,
+          createdAt: now,
+          updatedAt: now,
+          updatedHLC: Date.now(),
+        });
+        createdBoardID = saved.id;
+        createdBoardTitle = saved.title;
+      }
+      results.push({
+        sceneName,
+        formatVersion: '1.10',
+        usedFallbackExtraction: false,
+        importedAssets: created,
+        rootFolderID: folder.id,
+        createdBoardID,
+        createdBoardTitle,
+        importedNoteCount: 1,
+        skippedMissingLinkCount: 0,
+      });
+    }
+    return results;
+  }
+
+  async exportAssetsToPureRef(
+    assetIds: string[],
+    destinationPath: string,
+  ): Promise<PureRefExportReport> {
+    this.lastExportedPath = destinationPath;
+    this.mockExportedPureRefPaths.push(destinationPath);
+    return {
+      filePath: destinationPath,
+      imageCount: assetIds.length,
+      placementCount: assetIds.length,
+      noteCount: 0,
+      skippedCount: 0,
+      byteCount: Math.max(1024, assetIds.length * 4096),
+    };
+  }
+
+  async exportMoodboardToPureRef(
+    document: MoodboardDocument,
+    destinationPath: string,
+  ): Promise<PureRefExportReport> {
+    this.lastExportedPath = destinationPath;
+    this.mockExportedPureRefPaths.push(destinationPath);
+    const imageCount = document.nodes.filter((n) => 'assetRef' in n.kind).length;
+    const noteCount = document.nodes.filter((n) => 'note' in n.kind).length;
+    return {
+      filePath: destinationPath,
+      imageCount,
+      placementCount: imageCount,
+      noteCount,
+      skippedCount: 0,
+      byteCount: Math.max(1024, imageCount * 4096 + noteCount * 256),
+    };
+  }
+
+  async extractLinkMediaAttachment(
+    assetId: string,
+    attachmentUrl: string,
+    attachmentKind: SocialMediaAttachmentKind,
+    attachmentIndex?: number | null,
+  ): Promise<AssetRecord> {
+    this.mockExtractedAttachments.push({
+      assetId,
+      attachmentUrl,
+      attachmentKind,
+      attachmentIndex: attachmentIndex ?? null,
+    });
+    const parent = this.assets.find((a) => a.id === assetId);
+    const suffix = attachmentIndex != null ? ` (${attachmentIndex + 1})` : '';
+    const title = `${parent?.title ?? '提取素材'}${suffix}`;
+    const ext = attachmentKind === 'video' ? 'mp4' : attachmentKind === 'gif' ? 'gif' : 'jpg';
+    const mediaKind: MediaKind =
+      attachmentKind === 'video' ? 'video' : attachmentKind === 'gif' ? 'animatedImage' : 'image';
+    const now = msToCocoaSeconds(Date.now());
+    const id = `EXT-${Math.random().toString(16).slice(2, 10).toUpperCase()}`;
+    const record: AssetRecord = {
+      id,
+      contentHash: `hash-${id}`,
+      folderID: parent?.folderID ?? null,
+      mediaKind,
+      mimeType:
+        attachmentKind === 'video'
+          ? 'video/mp4'
+          : attachmentKind === 'gif'
+            ? 'image/gif'
+            : 'image/jpeg',
+      title,
+      fileName: `${title}.${ext}`,
+      notes: parent?.sourceURL ? `提取自：${parent.sourceURL}` : '',
+      tags: parent ? [...parent.tags] : [],
+      suggestedTags: [],
+      rating: 0,
+      pixelWidth: 1280,
+      pixelHeight: 720,
+      durationSeconds: attachmentKind === 'video' ? (parent?.durationSeconds ?? 120) : null,
+      fileSizeBytes: 65_536,
+      dominantColors: parent?.dominantColors ?? [],
+      waveformPeaks: [],
+      sourceURL: parent?.sourceURL ?? attachmentUrl,
+      sourceDomain: parent?.sourceDomain ?? null,
+      ocrText: null,
+      aiDescription: null,
+      richMetadata: null,
+      pinnedOffline: false,
+      isLocalOriginalCached: true,
+      isTrashed: false,
+      createdAt: now,
+      updatedAt: now,
+      lastOpenedAt: null,
+      updatedHLC: Date.now(),
+    };
+    this.assets.unshift(record);
+    return record;
+  }
+
+  async batchExtractLinkMedia(assetIds: string[]): Promise<BatchLinkMediaExtractionReport> {
+    this.mockBatchExtractedAssetIds.push([...assetIds]);
+    const extractedAssets: AssetRecord[] = [];
+    let sourceAssetCount = 0;
+    let skippedCount = 0;
+    for (const id of assetIds) {
+      const parent = this.assets.find((a) => a.id === id);
+      const post = parent?.richMetadata?.socialPost;
+      const web = parent?.richMetadata?.webPage;
+      const atts = post?.attachments?.length
+        ? post.attachments
+        : web?.attachments?.length
+          ? web.attachments
+          : post && (post.platform === 'youtube' || post.platform === 'bilibili')
+            ? [{ id: 'vid-0', kind: 'video' as const, url: post.originalURL, thumbnailURL: null }]
+            : [];
+      if (!parent || atts.length === 0) {
+        skippedCount += 1;
+        continue;
+      }
+      sourceAssetCount += 1;
+      for (let i = 0; i < atts.length; i += 1) {
+        const created = await this.extractLinkMediaAttachment(
+          id,
+          atts[i].url,
+          atts[i].kind,
+          atts.length > 1 ? i : null,
+        );
+        extractedAssets.push(created);
+      }
+    }
+    return {
+      sourceAssetCount,
+      extractedAssets,
+      failedCount: 0,
+      skippedCount,
+    };
   }
 
   async importMaterialPackages(

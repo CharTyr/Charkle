@@ -457,6 +457,11 @@ impl XiaohongshuPostResolver {
             view_count: None,
             original_url: final_ref.canonical_url(),
             media_fetch_failed: false,
+            video_duration_seconds: None,
+            video_summary: None,
+            video_outline: Vec::new(),
+            video_id: None,
+            video_cid: None,
         };
 
         Some(ResolvedSocialPost {
@@ -562,6 +567,11 @@ impl XiaohongshuPostResolver {
             view_count: None,
             original_url: reference.canonical_url(),
             media_fetch_failed: false,
+            video_duration_seconds: None,
+            video_summary: None,
+            video_outline: Vec::new(),
+            video_id: None,
+            video_cid: None,
         };
 
         Some(ResolvedSocialPost {

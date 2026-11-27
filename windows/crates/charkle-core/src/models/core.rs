@@ -118,9 +118,15 @@ pub enum SocialPlatform {
     Xiaohongshu,
     Pixiv,
     Instagram,
+    Youtube,
+    Bilibili,
 }
 
 impl SocialPlatform {
+    pub fn is_video_platform(self) -> bool {
+        matches!(self, Self::Youtube | Self::Bilibili)
+    }
+
     pub fn raw_value(self) -> &'static str {
         match self {
             Self::X => "x",
@@ -129,6 +135,8 @@ impl SocialPlatform {
             Self::Xiaohongshu => "xiaohongshu",
             Self::Pixiv => "pixiv",
             Self::Instagram => "instagram",
+            Self::Youtube => "youtube",
+            Self::Bilibili => "bilibili",
         }
     }
 
@@ -140,6 +148,8 @@ impl SocialPlatform {
             "xiaohongshu" | "xhs" | "rednote" => Some(Self::Xiaohongshu),
             "pixiv" => Some(Self::Pixiv),
             "instagram" | "ig" => Some(Self::Instagram),
+            "youtube" | "yt" | "youtu.be" => Some(Self::Youtube),
+            "bilibili" | "bili" | "b23" => Some(Self::Bilibili),
             _ => None,
         }
     }
@@ -152,6 +162,8 @@ impl SocialPlatform {
             Self::Xiaohongshu => "小红书",
             Self::Pixiv => "Pixiv",
             Self::Instagram => "Instagram",
+            Self::Youtube => "YouTube",
+            Self::Bilibili => "B站",
         }
     }
 
@@ -160,6 +172,7 @@ impl SocialPlatform {
             Self::X => "推文",
             Self::Xiaohongshu => "笔记",
             Self::Pixiv => "作品",
+            Self::Youtube | Self::Bilibili => "视频",
             Self::Threads | Self::Bluesky | Self::Instagram => "贴文",
         }
     }
@@ -172,6 +185,8 @@ impl SocialPlatform {
             Self::Xiaohongshu => "小红书 笔记",
             Self::Pixiv => "Pixiv 作品",
             Self::Instagram => "Instagram 贴文",
+            Self::Youtube => "YouTube 视频",
+            Self::Bilibili => "B站 视频",
         }
     }
 
@@ -183,6 +198,8 @@ impl SocialPlatform {
             Self::Xiaohongshu => "在小红书打开",
             Self::Pixiv => "在 Pixiv 打开",
             Self::Instagram => "在 Instagram 打开",
+            Self::Youtube => "在 YouTube 打开",
+            Self::Bilibili => "在 B 站打开",
         }
     }
 }
@@ -321,7 +338,7 @@ impl SocialMediaAttachment {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SocialPostMetadata {
     pub platform: SocialPlatform,
@@ -364,10 +381,40 @@ pub struct SocialPostMetadata {
     pub original_url: String,
     #[serde(default)]
     pub media_fetch_failed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_duration_seconds: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub video_outline: Vec<String>,
+    #[serde(rename = "videoID", default, skip_serializing_if = "Option::is_none")]
+    pub video_id: Option<String>,
+    #[serde(rename = "videoCID", default, skip_serializing_if = "Option::is_none")]
+    pub video_cid: Option<i64>,
 }
 
 impl SocialPostMetadata {
-    /// Displayable handle subtitle (omits internal 24-hex Xiaohongshu user IDs for cleaner typography).
+    pub fn has_video_summary_content(&self) -> bool {
+        self.video_summary
+            .as_deref()
+            .is_some_and(|s| !s.trim().is_empty())
+            || !self.video_outline.is_empty()
+    }
+
+    pub fn formatted_video_duration(&self) -> Option<String> {
+        let secs = self.video_duration_seconds.filter(|&d| d > 0.0)?;
+        let total = secs.round() as i64;
+        let h = total / 3600;
+        let m = (total % 3600) / 60;
+        let s = total % 60;
+        if h > 0 {
+            Some(format!("{h}:{m:02}:{s:02}"))
+        } else {
+            Some(format!("{m:02}:{s:02}"))
+        }
+    }
+
+    /// Displayable handle subtitle (omits internal 24-hex Xiaohongshu user IDs and redundant video IDs).
     pub fn display_handle_line(&self) -> Option<String> {
         let trimmed = self.author_handle.trim();
         if trimmed.is_empty() {
@@ -383,6 +430,21 @@ impl SocialPostMetadata {
                 return None;
             }
             return Some(format!("小红书号 {trimmed}"));
+        }
+        if self.platform == SocialPlatform::Bilibili {
+            if trimmed.eq_ignore_ascii_case("bilibili") || trimmed == self.author_name.trim() {
+                return None;
+            }
+            return Some(trimmed.to_string());
+        }
+        if self.platform == SocialPlatform::Youtube {
+            if trimmed.starts_with("UC") && trimmed.len() >= 20 {
+                return None;
+            }
+            if trimmed == self.author_name.trim() {
+                return None;
+            }
+            return Some(trimmed.to_string());
         }
         Some(format!("@{trimmed}"))
     }
@@ -659,11 +721,38 @@ impl AIGenerationMetadata {
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct WebPageRichMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub site_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub published_at_text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub attachments: Vec<SocialMediaAttachment>,
+    #[serde(default)]
+    pub has_video: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_seconds: Option<f64>,
+    #[serde(
+        rename = "canonicalURL",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub canonical_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AssetRichMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub github_repo: Option<GitHubRepoMetadata>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub social_post: Option<SocialPostMetadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_page: Option<WebPageRichMetadata>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub photo_exif: Option<PhotoExifMetadata>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -974,6 +1063,43 @@ fn default_pixel_height() -> i32 {
 }
 
 impl AssetRecord {
+    /// Unified extractable link media across social posts, YouTube/Bilibili video bookmarks,
+    /// and rich webpages (`rich_metadata.web_page.attachments`).
+    pub fn extractable_link_attachments(&self) -> Vec<SocialMediaAttachment> {
+        if let Some(ref rich) = self.rich_metadata {
+            if let Some(ref post) = rich.social_post {
+                let effective = post.effective_attachments();
+                if !effective.is_empty() {
+                    return effective;
+                }
+                if post.platform.is_video_platform() && !post.original_url.trim().is_empty() {
+                    return vec![SocialMediaAttachment::new(
+                        SocialMediaAttachmentKind::Video,
+                        post.original_url.clone(),
+                        post.media_thumbnail_urls.first().cloned(),
+                    )];
+                }
+            }
+            if let Some(ref wp) = rich.web_page {
+                if !wp.attachments.is_empty() {
+                    return wp.attachments.clone();
+                }
+                if wp.has_video {
+                    if let Some(url) = wp.canonical_url.as_ref().or(self.source_url.as_ref()) {
+                        if !url.trim().is_empty() {
+                            return vec![SocialMediaAttachment::new(
+                                SocialMediaAttachmentKind::Video,
+                                url.clone(),
+                                None,
+                            )];
+                        }
+                    }
+                }
+            }
+        }
+        Vec::new()
+    }
+
     pub fn new(title: impl Into<String>, file_name: impl Into<String>) -> Self {
         let now = Utc::now();
         Self {

@@ -55,8 +55,32 @@ export type GalleryLayoutMode =
   | 'galleryFilmstrip'
   | 'ringGallery';
 
-export type SocialPlatform = 'x' | 'threads' | 'bluesky' | 'xiaohongshu' | 'pixiv' | 'instagram';
+export type SocialPlatform =
+  | 'x'
+  | 'threads'
+  | 'bluesky'
+  | 'xiaohongshu'
+  | 'pixiv'
+  | 'instagram'
+  | 'youtube'
+  | 'bilibili';
 export type SocialMediaAttachmentKind = 'photo' | 'video' | 'gif';
+
+export function isVideoSocialPlatform(platform: SocialPlatform | string | null | undefined): boolean {
+  return platform === 'youtube' || platform === 'bilibili';
+}
+
+export function formatVideoDurationText(seconds: number | null | undefined): string | null {
+  if (seconds == null || !Number.isFinite(seconds) || seconds <= 0) return null;
+  const total = Math.round(seconds);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  if (h > 0) {
+    return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+  }
+  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+}
 export type SmartFolderMatchMode = 'all' | 'any';
 export type NoteStyle = 'paper' | 'ink' | 'warm' | 'sage' | 'slate';
 export type GroupTint = 'neutral' | 'sand' | 'sage' | 'slate' | 'terracotta' | 'ocean';
@@ -120,6 +144,50 @@ export interface SocialPostMetadata {
   viewCount?: number | null;
   originalURL: string;
   mediaFetchFailed?: boolean;
+  videoDurationSeconds?: number | null;
+  videoSummary?: string | null;
+  videoOutline?: string[];
+  videoID?: string | null;
+  videoCID?: number | null;
+}
+
+export interface WebPageRichMetadata {
+  siteName?: string | null;
+  authorName?: string | null;
+  publishedAtText?: string | null;
+  summary?: string | null;
+  attachments: SocialMediaAttachment[];
+  hasVideo?: boolean;
+  durationSeconds?: number | null;
+  canonicalURL?: string | null;
+}
+
+export interface PureRefImportResult {
+  sceneName: string;
+  formatVersion: string;
+  usedFallbackExtraction: boolean;
+  importedAssets: AssetRecord[];
+  rootFolderID?: string | null;
+  createdBoardID?: string | null;
+  createdBoardTitle?: string | null;
+  importedNoteCount: number;
+  skippedMissingLinkCount: number;
+}
+
+export interface PureRefExportReport {
+  filePath: string;
+  imageCount: number;
+  placementCount: number;
+  noteCount: number;
+  skippedCount: number;
+  byteCount: number;
+}
+
+export interface BatchLinkMediaExtractionReport {
+  sourceAssetCount: number;
+  extractedAssets: AssetRecord[];
+  failedCount: number;
+  skippedCount: number;
 }
 
 /**
@@ -140,13 +208,24 @@ export function formatSocialDisplayHandle(
       return null;
     }
   }
+  if (post.platform === 'bilibili') {
+    if (clean === (post.authorName ?? '').trim() || clean.toLowerCase() === 'bilibili') {
+      return null;
+    }
+    return clean.startsWith('UP ') ? clean : `@${clean}`;
+  }
+  if (post.platform === 'youtube') {
+    if (clean === (post.authorName ?? '').trim() || clean.toLowerCase() === 'youtube') {
+      return null;
+    }
+  }
   return `@${clean}`;
 }
 
 /**
  * Routes Xiaohongshu CDN URLs through `/proxy-xhs` (Referer injection) and X/Twitter, Bluesky,
- * and Threads CDN URLs through `/proxy-social` (Rust retry + Twitter size fallback + on-disk cache)
- * so WebView2 renders social post images & avatars reliably even after TLS glitches or offline.
+ * Threads, YouTube, and Bilibili CDN URLs through `/proxy-social` (Rust retry + on-disk cache)
+ * so WebView2 renders social & video bookmark covers/avatars reliably even offline or with hotlink rules.
  */
 export function resolveSocialMediaUrl(
   rawUrl: string | null | undefined,
@@ -181,7 +260,17 @@ export function resolveSocialMediaUrl(
       host === 'pximg.net' ||
       host.endsWith('.pximg.net') ||
       host === 'pinimg.com' ||
-      host.endsWith('.pinimg.com')
+      host.endsWith('.pinimg.com') ||
+      host === 'hdslb.com' ||
+      host.endsWith('.hdslb.com') ||
+      host === 'ytimg.com' ||
+      host.endsWith('.ytimg.com') ||
+      host === 'ggpht.com' ||
+      host.endsWith('.ggpht.com') ||
+      host === 'bilivideo.com' ||
+      host.endsWith('.bilivideo.com') ||
+      host === 'bilivideo.cn' ||
+      host.endsWith('.bilivideo.cn')
     ) {
       return `http://charkle-media.localhost/proxy-social?url=${encodeURIComponent(trimmed)}`;
     }
@@ -189,6 +278,66 @@ export function resolveSocialMediaUrl(
     // Preserve raw URL if not parseable as absolute URL
   }
   return trimmed;
+}
+
+/**
+ * Returns every extractable photo/GIF/video attachment across social posts, YouTube/Bilibili video
+ * bookmarks, and rich webpages (`richMetadata.webPage.attachments`).
+ */
+export function extractableLinkAttachments(
+  asset: AssetRecord | null | undefined,
+): SocialMediaAttachment[] {
+  if (!asset) return [];
+  const post = asset.richMetadata?.socialPost;
+  if (post) {
+    if (post.attachments && post.attachments.length > 0) {
+      return post.attachments;
+    }
+    const items: SocialMediaAttachment[] = [];
+    const seen = new Set<string>();
+    if (post.videoURL && post.videoURL.trim()) {
+      const url = post.videoURL.trim();
+      seen.add(url);
+      items.push({
+        id: 'video-0',
+        kind: 'video',
+        url,
+        thumbnailURL: post.mediaThumbnailURLs?.[0] ?? null,
+      });
+    }
+    for (let i = 0; i < (post.mediaURLs ?? []).length; i += 1) {
+      const url = post.mediaURLs[i]?.trim();
+      if (!url || seen.has(url)) continue;
+      seen.add(url);
+      const lower = url.toLowerCase();
+      const isVid =
+        lower.includes('.mp4') ||
+        lower.includes('.m3u8') ||
+        lower.includes('/ext_tw_video/') ||
+        lower.includes('/amplify_video/') ||
+        lower.includes('video.twimg.com');
+      items.push({
+        id: `media-${i}`,
+        kind: isVid ? 'video' : 'photo',
+        url,
+        thumbnailURL: post.mediaThumbnailURLs?.[i] ?? null,
+      });
+    }
+    if (items.length === 0 && isVideoSocialPlatform(post.platform) && post.originalURL?.trim()) {
+      items.push({
+        id: 'video-bookmark-0',
+        kind: 'video',
+        url: post.originalURL.trim(),
+        thumbnailURL: post.mediaThumbnailURLs?.[0] ?? post.mediaURLs?.[0] ?? null,
+      });
+    }
+    return items;
+  }
+  const web = asset.richMetadata?.webPage;
+  if (web && Array.isArray(web.attachments) && web.attachments.length > 0) {
+    return web.attachments;
+  }
+  return [];
 }
 
 export interface PhotoExifMetadata {
@@ -238,6 +387,7 @@ export interface AIGenerationMetadata {
 export interface AssetRichMetadata {
   githubRepo?: GitHubRepoMetadata | null;
   socialPost?: SocialPostMetadata | null;
+  webPage?: WebPageRichMetadata | null;
   photoExif?: PhotoExifMetadata | null;
   aiGeneration?: AIGenerationMetadata | null;
   textExcerpt?: string | null;

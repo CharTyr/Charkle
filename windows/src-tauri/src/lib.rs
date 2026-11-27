@@ -528,6 +528,12 @@ pub fn run() {
             commands::moodboard::export_board_image_file,
             commands::moodboard::copy_board_image_to_clipboard,
             commands::moodboard::export_board_figma_bridge,
+            commands::moodboard::export_moodboard_to_pureref,
+            // v1.5.0 PureRef Bidirectional Scenes & Link Media / Video Extraction
+            commands::assets::import_pureref_scenes,
+            commands::assets::export_assets_to_pureref,
+            commands::assets::extract_link_media_attachment,
+            commands::assets::batch_extract_link_media,
             // M5 Hybrid Cloud AI, TypeSafe Jev, External Agent, Migration & Diagnostics
             commands::settings::get_ai_provider_state,
             commands::settings::save_ai_provider_config,

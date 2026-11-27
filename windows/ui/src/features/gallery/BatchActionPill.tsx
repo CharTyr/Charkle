@@ -1,22 +1,26 @@
 import React, { useMemo, useRef, useState } from 'react';
 import {
   ArrowDownload16Regular,
+  ArrowExportUp16Regular,
   ArrowUndo16Regular,
   Board16Regular,
   Cloud16Regular,
   Delete16Regular,
   Dismiss16Regular,
   FolderArrowRight16Regular,
+  ImageMultiple16Regular,
   Sparkle16Regular,
   Star16Regular,
   Tag16Regular,
 } from '@fluentui/react-icons';
+import { getTransport } from '../../api/transport';
 import { Button, ModalShell, Popover, Tooltip } from '../../design-system';
 import {
   useCoordinatorStore,
   useLibraryStore,
   useMoodboardStore,
 } from '../../stores';
+import { extractableLinkAttachments } from '../../types/domain';
 import { FolderMoveMenu } from '../sidebar/FolderMoveMenu';
 
 /**
@@ -44,6 +48,8 @@ export const BatchActionPill: React.FC = () => {
   const tagCounts = useLibraryStore((s) => s.tagCounts);
   const updateAssets = useLibraryStore((s) => s.updateAssets);
   const permanentlyDeleteAssets = useLibraryStore((s) => s.permanentlyDeleteAssets);
+  const batchExtractLinkMedia = useLibraryStore((s) => s.batchExtractLinkMedia);
+  const exportAssetsToPureRef = useLibraryStore((s) => s.exportAssetsToPureRef);
 
   const boards = useMoodboardStore((s) => s.boards);
   const addAssetsToBoard = useMoodboardStore((s) => s.addAssetsToBoard);
@@ -54,6 +60,8 @@ export const BatchActionPill: React.FC = () => {
   const [boardOpen, setBoardOpen] = useState(false);
   const [tagDraft, setTagDraft] = useState('');
   const [permDeleteIds, setPermDeleteIds] = useState<string[] | null>(null);
+  const [extractingBatch, setExtractingBatch] = useState(false);
+  const [exportingPureRef, setExportingPureRef] = useState(false);
 
   const moveBtnRef = useRef<HTMLButtonElement | null>(null);
   const tagBtnRef = useRef<HTMLButtonElement | null>(null);
@@ -66,6 +74,11 @@ export const BatchActionPill: React.FC = () => {
     return assets.filter((a) => set.has(a.id));
   }, [assets, selectedAssetIds]);
 
+  const extractableLinkAssets = useMemo(
+    () => selectedAssets.filter((a) => extractableLinkAttachments(a).length > 0),
+    [selectedAssets],
+  );
+
   const showPill = selectedAssetIds.length >= 2 && !isModalOverlayActive;
   if (!showPill && permDeleteIds === null) return null;
 
@@ -74,6 +87,61 @@ export const BatchActionPill: React.FC = () => {
     (selectedAssets.length > 0 && selectedAssets.every((a) => a.isTrashed));
   const allKeptLocally =
     selectedAssets.length > 0 && selectedAssets.every((a) => a.pinnedOffline);
+
+  const handleBatchExtractMedia = async () => {
+    if (extractingBatch || extractableLinkAssets.length === 0) return;
+    setExtractingBatch(true);
+    try {
+      const ids = extractableLinkAssets.map((a) => a.id);
+      const report = await batchExtractLinkMedia(ids, destination);
+      if (report.extractedAssets.length > 0) {
+        pushToast({
+          message:
+            report.failedCount > 0
+              ? `已从 ${report.sourceAssetCount} 条链接提取 ${report.extractedAssets.length} 项独立素材（${report.failedCount} 项失败）`
+              : `已从 ${report.sourceAssetCount} 条链接提取 ${report.extractedAssets.length} 项独立素材`,
+          tone: 'success',
+          durationMs: 4200,
+        });
+      } else {
+        pushToast({
+          message: '未能提取所选链接中的媒体，请检查网络连接或重试',
+          tone: 'info',
+        });
+      }
+    } catch (err) {
+      pushToast({
+        message: `批量提取媒体失败：${err instanceof Error ? err.message : String(err)}`,
+        tone: 'error',
+      });
+    } finally {
+      setExtractingBatch(false);
+    }
+  };
+
+  const handleBatchExportPureRef = async () => {
+    if (exportingPureRef || selectedAssetIds.length === 0) return;
+    setExportingPureRef(true);
+    try {
+      const dest = await getTransport().saveFileDialog('Charkle参考图集.pur', [
+        { name: 'PureRef 场景 (.pur)', extensions: ['pur'] },
+      ]);
+      if (!dest) return;
+      const report = await exportAssetsToPureRef([...selectedAssetIds], dest);
+      pushToast({
+        message: `已导出 PureRef 场景（${report.imageCount} 张图）`,
+        tone: 'success',
+        durationMs: 4200,
+      });
+    } catch (err) {
+      pushToast({
+        message: `导出 PureRef 失败：${err instanceof Error ? err.message : String(err)}`,
+        tone: 'error',
+      });
+    } finally {
+      setExportingPureRef(false);
+    }
+  };
 
   const applyBatchTag = async (tag: string) => {
     const clean = tag.trim();
@@ -137,6 +205,36 @@ export const BatchActionPill: React.FC = () => {
                 >
                   <Sparkle16Regular className="w-3.5 h-3.5" />
                   <span>生成情绪板</span>
+                </Button>
+
+                {extractableLinkAssets.length > 0 && (
+                  <Button
+                    variant="subtle"
+                    size="xs"
+                    loading={extractingBatch}
+                    data-testid="batch-extract-link-media"
+                    onClick={() => void handleBatchExtractMedia()}
+                    className="text-[var(--accent)] font-semibold"
+                  >
+                    <ImageMultiple16Regular className="w-3.5 h-3.5" />
+                    <span>
+                      {extractingBatch
+                        ? '提取中…'
+                        : `提取媒体 (${extractableLinkAssets.length})`}
+                    </span>
+                  </Button>
+                )}
+
+                <Button
+                  variant="subtle"
+                  size="xs"
+                  loading={exportingPureRef}
+                  data-testid="batch-export-pureref"
+                  onClick={() => void handleBatchExportPureRef()}
+                  className="text-[var(--text-primary)]"
+                >
+                  <ArrowExportUp16Regular className="w-3.5 h-3.5" />
+                  <span>导出 PureRef</span>
                 </Button>
 
                 {boards.length > 0 && (

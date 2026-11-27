@@ -37,12 +37,16 @@ pub trait VolumeMountInspector: Send + Sync {
     fn is_mount_available(&self, path: &Path) -> bool;
 }
 
-/// Captured offscreen webpage screenshot + DOM metadata (Tier 2 web bookmark fallback).
-#[derive(Debug, Clone)]
+/// Captured offscreen webpage screenshot + DOM metadata (Tier 2 / Layer 5 SPA web bookmark fallback).
+#[derive(Debug, Clone, Default)]
 pub struct WebPageSnapshot {
     pub png_bytes: Vec<u8>,
     pub title: Option<String>,
     pub description: Option<String>,
+    pub site_name: Option<String>,
+    pub author_name: Option<String>,
+    pub hero_image_urls: Vec<String>,
+    pub video_urls: Vec<String>,
     pub final_url: Option<String>,
 }
 

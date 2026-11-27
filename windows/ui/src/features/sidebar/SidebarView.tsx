@@ -18,7 +18,6 @@ import {
   Pin12Regular,
   Search16Regular,
   Search20Regular,
-  Sparkle16Filled,
   Sparkle16Regular,
 } from '@fluentui/react-icons';
 import { getTransport } from '../../api/transport';
@@ -242,8 +241,6 @@ export const SidebarView: React.FC = () => {
   const inboxCount = useLibraryStore((s) => s.inboxCount);
   const cutAssetIds = useLibraryStore((s) => s.cutAssetIds);
   const criteria = useLibraryStore((s) => s.criteria);
-  const semanticSearch = useLibraryStore((s) => s.semanticSearch);
-  const setSemanticSearch = useLibraryStore((s) => s.setSemanticSearch);
   const setCriteria = useLibraryStore((s) => s.setCriteria);
   const recentlyTouchedTags = useLibraryStore((s) => s.recentlyTouchedTags);
   const tagUsageFrequency = useLibraryStore((s) => s.tagUsageFrequency);
@@ -317,12 +314,12 @@ export const SidebarView: React.FC = () => {
     setSearchDraft(criteria.searchQuery);
   }, [criteria.searchQuery]);
 
-  // 120ms debounced real-time library search (non-semantic mode)
+  // 120ms debounced unified instant + hybrid search (single search bar, zero mode switching)
   useEffect(() => {
     if (searchDraft === criteria.searchQuery) return;
-    if (semanticSearch && searchDraft.trim().length > 0) return;
     const timer = window.setTimeout(() => {
-      if (isMoodboardView && searchDraft.trim().length > 0) {
+      const trimmed = searchDraft.trim();
+      if (isMoodboardView && trimmed.length > 0) {
         setDestination({ type: 'allItems' });
       }
       void setCriteria({ searchQuery: searchDraft }, effectiveSearchDestination);
@@ -331,7 +328,6 @@ export const SidebarView: React.FC = () => {
   }, [
     searchDraft,
     criteria.searchQuery,
-    semanticSearch,
     isMoodboardView,
     effectiveSearchDestination,
     setCriteria,
@@ -355,47 +351,12 @@ export const SidebarView: React.FC = () => {
     return () => window.cancelAnimationFrame(raf);
   }, [sidebarSearchFocusNonce, sidebarCollapsed]);
 
-  const commitSemanticQuery = () => {
+  const commitSearchImmediately = () => {
     const trimmed = searchDraft.trim();
-    if (!trimmed) return;
-    if (isMoodboardView) {
+    if (isMoodboardView && trimmed.length > 0) {
       setDestination({ type: 'allItems' });
     }
-    void setCriteria({ searchQuery: trimmed, sortBy: 'relevance' }, effectiveSearchDestination);
-  };
-
-  const handleToggleSemantic = () => {
-    const trimmed = searchDraft.trim();
-    if (semanticSearch && !trimmed) {
-      setSemanticSearch(false);
-      if (criteria.sortBy === 'relevance') {
-        void setCriteria({ sortBy: 'newest' }, effectiveSearchDestination);
-      }
-      return;
-    }
-    const next = !semanticSearch;
-    setSemanticSearch(next);
-    if (next) {
-      if (trimmed) {
-        if (isMoodboardView) {
-          setDestination({ type: 'allItems' });
-        }
-        void setCriteria({ searchQuery: trimmed, sortBy: 'relevance' }, effectiveSearchDestination);
-      } else {
-        pushToast({
-          message: '已开启语义搜图模式：输入描述后按回车检索',
-          tone: 'info',
-        });
-      }
-    } else {
-      void setCriteria(
-        {
-          searchQuery: searchDraft,
-          sortBy: criteria.sortBy === 'relevance' ? 'newest' : criteria.sortBy,
-        },
-        effectiveSearchDestination,
-      );
-    }
+    void setCriteria({ searchQuery: searchDraft }, effectiveSearchDestination);
   };
 
   const totalNonTrashedCount = useMemo(
@@ -1126,15 +1087,10 @@ export const SidebarView: React.FC = () => {
           </div>
         </div>
 
-        {/* THE ONLY Global Search Input (AutoSuggestBox, Ctrl+F) */}
+        {/* THE ONLY Unified Global Search Input (Instant Literal + Hybrid Semantic, Ctrl+F) */}
         <div className="px-3 pb-2 shrink-0">
           <div className="win-input-elevation h-8 px-2 flex items-center gap-1.5 rounded-[var(--win-radius-control)]">
-            <Search16Regular
-              className={[
-                'w-3.5 h-3.5 shrink-0',
-                semanticSearch ? 'text-[var(--accent)]' : 'text-[var(--text-tertiary)]',
-              ].join(' ')}
-            />
+            <Search16Regular className="w-3.5 h-3.5 shrink-0 text-[var(--text-tertiary)]" />
             <input
               ref={searchInputRef}
               type="text"
@@ -1142,9 +1098,9 @@ export const SidebarView: React.FC = () => {
               onChange={(e) => setSearchDraft(e.target.value)}
               onKeyDown={(e) => {
                 if (e.nativeEvent.isComposing || e.keyCode === 229) return;
-                if (e.key === 'Enter' && semanticSearch) {
+                if (e.key === 'Enter') {
                   e.preventDefault();
-                  commitSemanticQuery();
+                  commitSearchImmediately();
                 } else if (e.key === 'Escape') {
                   e.preventDefault();
                   if (searchDraft) {
@@ -1155,7 +1111,7 @@ export const SidebarView: React.FC = () => {
                   }
                 }
               }}
-              placeholder={semanticSearch ? '语义搜图，回车检索…' : '搜索素材…'}
+              placeholder="搜索素材、摘要或画面内容…"
               aria-label="搜索素材"
               className="flex-1 min-w-0 bg-transparent text-[13px] leading-[18px] text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] outline-none"
             />
@@ -1173,35 +1129,6 @@ export const SidebarView: React.FC = () => {
                 <Dismiss12Regular className="w-3 h-3" />
               </button>
             )}
-            <Tooltip
-              content={
-                semanticSearch
-                  ? '关闭语义搜图'
-                  : '开启语义搜图（结合画面内容与文字语义检索）'
-              }
-              side="bottom"
-            >
-              <button
-                type="button"
-                aria-pressed={semanticSearch}
-                aria-label="语义搜图"
-                onClick={handleToggleSemantic}
-                className={[
-                  'charkle-pressable h-[22px] px-1.5 inline-flex items-center justify-center gap-1 rounded-[var(--win-radius-control)] text-[11px] font-medium cursor-pointer shrink-0 whitespace-nowrap',
-                  'focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-[var(--accent)]',
-                  semanticSearch
-                    ? 'bg-[var(--accent)] text-[var(--accent-text)]'
-                    : 'bg-[var(--accent-soft)] text-[var(--accent)] hover:brightness-95',
-                ].join(' ')}
-              >
-                {semanticSearch ? (
-                  <Sparkle16Filled className="w-3 h-3 shrink-0" />
-                ) : (
-                  <Sparkle16Regular className="w-3 h-3 shrink-0" />
-                )}
-                <span>语义</span>
-              </button>
-            </Tooltip>
           </div>
         </div>
 

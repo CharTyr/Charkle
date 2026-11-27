@@ -2,13 +2,15 @@ use std::path::PathBuf;
 
 use base64::engine::general_purpose::STANDARD as BASE64_STD;
 use base64::Engine;
+use charkle_core::engine::BatchLinkMediaExtractionReport;
 use charkle_core::media::{
     DeduplicationCleanupResult, DeduplicationResolutionPlan, DeduplicationScanReport,
     DeduplicationScanScope, DeduplicationSensitivity, DuplicateDisposalMode,
-    MaterialPackageImportResult,
+    MaterialPackageImportResult, PureRefExportReport, PureRefImportResult,
 };
 use charkle_core::models::core::{
     AssetBatchPatch, AssetRecord, FilterCriteria, FolderSuggestion, MediaKind, ScoredAsset,
+    SocialMediaAttachmentKind,
 };
 use charkle_core::models::media::CaptureInput;
 use tauri::State;
@@ -268,5 +270,84 @@ pub fn resolve_duplicate_groups(
     state
         .engine
         .resolve_duplicate_groups(&plans, disposal, merge_metadata)
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn import_pureref_scenes(
+    state: State<'_, AppState>,
+    paths: Vec<String>,
+    target_folder_id: Option<String>,
+    create_moodboard: Option<bool>,
+) -> IpcResult<Vec<PureRefImportResult>> {
+    let folder = parse_optional_uuid(target_folder_id)?;
+    let make_board = create_moodboard.unwrap_or(true);
+    let mut results = Vec::with_capacity(paths.len());
+    for raw in paths {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let path = PathBuf::from(trimmed);
+        let res = state
+            .engine
+            .import_pure_ref_scene(&path, folder, make_board)
+            .await?;
+        results.push(res);
+    }
+    Ok(results)
+}
+
+#[tauri::command]
+pub async fn export_assets_to_pureref(
+    state: State<'_, AppState>,
+    asset_ids: Vec<String>,
+    destination_path: String,
+) -> IpcResult<PureRefExportReport> {
+    let uuids: Vec<_> = asset_ids
+        .iter()
+        .map(|s| parse_uuid(s))
+        .collect::<IpcResult<Vec<_>>>()?;
+    let engine = state.engine.clone();
+    let dest = PathBuf::from(destination_path);
+    let report =
+        tokio::task::spawn_blocking(move || engine.export_assets_to_pure_ref(&uuids, &dest))
+            .await
+            .map_err(|e| IpcError {
+                code: "PUREREF_EXPORT_FAILED",
+                message: format!("PureRef export worker failed: {e}"),
+            })??;
+    Ok(report)
+}
+
+#[tauri::command]
+pub async fn extract_link_media_attachment(
+    state: State<'_, AppState>,
+    asset_id: String,
+    attachment_url: String,
+    attachment_kind: SocialMediaAttachmentKind,
+    attachment_index: Option<usize>,
+) -> IpcResult<AssetRecord> {
+    let uuid = parse_uuid(&asset_id)?;
+    state
+        .engine
+        .extract_link_media_attachment(uuid, attachment_url, attachment_kind, attachment_index)
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn batch_extract_link_media(
+    state: State<'_, AppState>,
+    asset_ids: Vec<String>,
+) -> IpcResult<BatchLinkMediaExtractionReport> {
+    let uuids: Vec<_> = asset_ids
+        .iter()
+        .map(|s| parse_uuid(s))
+        .collect::<IpcResult<Vec<_>>>()?;
+    state
+        .engine
+        .batch_extract_link_media(&uuids)
+        .await
         .map_err(Into::into)
 }

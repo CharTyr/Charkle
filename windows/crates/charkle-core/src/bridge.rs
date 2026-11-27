@@ -1186,6 +1186,7 @@ fn parse_social_media_job(item: &serde_json::Map<String, Value>) -> Option<Socia
                 }
                 SocialPostReference::Pixiv { illust_id, .. } => illust_id.clone(),
                 SocialPostReference::Instagram { shortcode, .. } => shortcode.clone(),
+                SocialPostReference::Video(v) => v.dedup_key(),
             })
         })
         .unwrap_or_else(|| Uuid::new_v4().simple().to_string()[..8].to_string());
@@ -1719,6 +1720,7 @@ async fn ingest_social_media_jobs(
             SocialPlatform::X => "原推文：",
             SocialPlatform::Pixiv => "原作品：",
             SocialPlatform::Xiaohongshu => "原笔记：",
+            SocialPlatform::Youtube | SocialPlatform::Bilibili => "原视频：",
             SocialPlatform::Bluesky | SocialPlatform::Threads | SocialPlatform::Instagram => {
                 "原贴文："
             }
@@ -2559,6 +2561,11 @@ fn parse_social_bookmark_payload(
             .and_then(XiaohongshuPostResolver::parse_chinese_metric_count),
         original_url: raw_url.to_string(),
         media_fetch_failed: false,
+        video_duration_seconds: None,
+        video_summary: None,
+        video_outline: Vec::new(),
+        video_id: None,
+        video_cid: None,
     };
 
     let cover_data = item

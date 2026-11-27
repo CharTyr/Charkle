@@ -16,6 +16,8 @@ import {
 } from '../../stores';
 import {
   formatSocialDisplayHandle,
+  formatVideoDurationText,
+  isVideoSocialPlatform,
   resolveSocialMediaUrl,
   type AssetRecord,
   type SocialMediaAttachment,
@@ -69,6 +71,8 @@ const PLATFORM_META: Record<
   xiaohongshu: { name: '小红书', openLabel: '在小红书中打开', badgeBg: '#FF2442', noun: '笔记' },
   pixiv: { name: 'Pixiv', openLabel: '在 Pixiv 打开', badgeBg: '#0096FA', noun: '作品' },
   instagram: { name: 'Instagram', openLabel: '在 Instagram 打开', badgeBg: '#D93B58', noun: '贴文' },
+  youtube: { name: 'YouTube', openLabel: '在 YouTube 打开', badgeBg: '#FF0033', noun: '视频' },
+  bilibili: { name: 'Bilibili', openLabel: '在 B 站打开', badgeBg: '#FB7299', noun: '视频' },
 };
 
 export const SocialPostViewer: React.FC<SocialPostViewerProps> = ({ asset }) => {
@@ -107,7 +111,22 @@ export const SocialPostViewer: React.FC<SocialPostViewerProps> = ({ asset }) => 
     noun: '推文',
   };
   const isXiaohongshu = post.platform === 'xiaohongshu';
+  const isVideoPlatform = isVideoSocialPlatform(post.platform);
   const displayHandle = formatSocialDisplayHandle(post);
+  const videoDurationText = formatVideoDurationText(
+    post.videoDurationSeconds ?? asset.durationSeconds,
+  );
+  const videoSummaryText = post.videoSummary?.trim() || '';
+  const videoOutlineItems = Array.isArray(post.videoOutline)
+    ? post.videoOutline.filter((line) => line.trim().length > 0)
+    : [];
+  const videoCoverSrc =
+    resolveSocialMediaUrl(
+      attachments[0]?.thumbnailURL ||
+        post.mediaThumbnailURLs?.[0] ||
+        post.mediaURLs?.[0],
+      inTauri,
+    ) || getTransport().thumbnailUrl(asset.id, 'preview1400');
   const avatarSrc = resolveSocialMediaUrl(post.authorAvatarURL, inTauri);
   const useSingleColumn =
     attachments.length === 1 ||
@@ -235,11 +254,104 @@ export const SocialPostViewer: React.FC<SocialPostViewerProps> = ({ asset }) => 
           </span>
         </div>
 
-        {/* Article / Note Headline */}
+        {/* Article / Note / Video Headline */}
         {post.articleTitle && (
           <h3 className="text-[17px] font-bold text-[var(--text-primary)] select-text charkle-heading">
             {post.articleTitle}
           </h3>
+        )}
+
+        {/* YouTube / Bilibili Video Bookmark Cover & Explicit On-Demand Save */}
+        {isVideoPlatform && (
+          <div
+            data-testid="video-bookmark-stage"
+            className="flex flex-col gap-3"
+          >
+            <div className="relative aspect-video w-full rounded-[var(--win-radius-card)] overflow-hidden bg-black/90 border border-[var(--win-stroke-card)]">
+              <img
+                src={videoCoverSrc}
+                alt={post.articleTitle ?? asset.title}
+                referrerPolicy="no-referrer"
+                className="w-full h-full object-cover"
+              />
+              {videoDurationText && (
+                <span className="absolute bottom-2.5 right-2.5 px-2 py-0.5 rounded-[var(--win-radius-control)] bg-black/80 text-white text-[11.5px] font-semibold charkle-mono">
+                  {videoDurationText}
+                </span>
+              )}
+            </div>
+
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+              <span className="text-[11.5px] text-[var(--text-secondary)]">
+                默认仅保存轻量视频书签与摘要，按需提取 MP4 到本地库
+              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  data-testid="video-bookmark-save-asset"
+                  disabled={extractingKey !== null}
+                  onClick={() =>
+                    void handleExtractOne(
+                      {
+                        id: 'video-bookmark-0',
+                        kind: 'video',
+                        url: post.originalURL,
+                        thumbnailURL:
+                          post.mediaThumbnailURLs?.[0] ?? post.mediaURLs?.[0] ?? null,
+                      },
+                      0,
+                    )
+                  }
+                  className="charkle-pressable inline-flex items-center gap-1.5 px-3 py-1.5 rounded-[var(--win-radius-control)] bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-[var(--accent-text)] text-[12px] font-semibold disabled:opacity-50 cursor-pointer"
+                >
+                  <VideoClip16Regular className="w-3.5 h-3.5" />
+                  <span>
+                    {extractingKey === 'video-bookmark-0-0'
+                      ? '正在保存视频…'
+                      : '保存视频为独立素材'}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  onClick={openOriginalPost}
+                  className="charkle-pressable inline-flex items-center gap-1 px-2.5 py-1.5 rounded-[var(--win-radius-control)] bg-[var(--bg-subtle)] hover:bg-[var(--win-subtle-hover)] text-[var(--text-primary)] text-[12px] font-medium cursor-pointer"
+                >
+                  <Open16Regular className="w-3.5 h-3.5" />
+                  <span>{platform.openLabel}</span>
+                </button>
+              </div>
+            </div>
+
+            {(videoSummaryText || videoOutlineItems.length > 0) && (
+              <div
+                data-testid="video-bookmark-summary-card"
+                className="p-3.5 rounded-[var(--win-radius-card)] bg-[var(--bg-subtle)]/75 border border-[var(--win-stroke-card)] flex flex-col gap-2"
+              >
+                <div className="text-[12px] font-bold text-[var(--text-primary)]">
+                  视频摘要
+                </div>
+                {videoSummaryText && (
+                  <p className="text-[13px] leading-[1.6] text-[var(--text-primary)]/90 whitespace-pre-wrap select-text">
+                    {videoSummaryText}
+                  </p>
+                )}
+                {videoOutlineItems.length > 0 && (
+                  <div className="flex flex-col gap-1 pt-1 border-t border-[var(--win-stroke-divider)]">
+                    <div className="text-[11px] font-semibold text-[var(--text-secondary)]">
+                      章节大纲
+                    </div>
+                    <ul className="flex flex-col gap-1 text-[12.5px] text-[var(--text-primary)]/85 select-text">
+                      {videoOutlineItems.map((line, i) => (
+                        <li key={i} className="leading-snug">
+                          {line}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
         )}
 
         {/* Body Text */}
@@ -263,8 +375,8 @@ export const SocialPostViewer: React.FC<SocialPostViewerProps> = ({ asset }) => 
           </div>
         )}
 
-        {/* Embedded Attachments with Independent Extraction */}
-        {attachments.length > 0 && (
+        {/* Embedded Attachments with Independent Extraction (non-video-platform social posts) */}
+        {!isVideoPlatform && attachments.length > 0 && (
           <div className="flex flex-col gap-2.5">
             {attachments.length > 1 && (
               <div className="flex items-center justify-between gap-2">

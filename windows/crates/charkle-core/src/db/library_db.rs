@@ -398,11 +398,14 @@ impl LibraryDatabase {
 
             if let Some(ref post) = rich.social_post {
                 let handle = format!("@{}", post.author_handle);
+                let outline_joined = post.video_outline.join("\n");
                 let lines: Vec<&str> = [
                     post.platform.display_name(),
                     post.author_name.as_str(),
                     handle.as_str(),
                     post.article_title.as_deref().unwrap_or(""),
+                    post.video_summary.as_deref().unwrap_or(""),
+                    outline_joined.as_str(),
                     post.body_text.as_str(),
                     post.quoted_text.as_deref().unwrap_or(""),
                 ]
@@ -410,6 +413,20 @@ impl LibraryDatabase {
                 .filter(|s| !s.is_empty())
                 .collect();
                 append_block(&mut extra_ocr, lines.join("\n"));
+            }
+
+            if let Some(ref web) = rich.web_page {
+                let lines: Vec<&str> = [
+                    web.site_name.as_deref().unwrap_or(""),
+                    web.author_name.as_deref().unwrap_or(""),
+                    web.summary.as_deref().unwrap_or(""),
+                ]
+                .into_iter()
+                .filter(|s| !s.is_empty())
+                .collect();
+                if !lines.is_empty() {
+                    append_block(&mut extra_ocr, lines.join("\n"));
+                }
             }
 
             if let Some(ref exif) = rich.photo_exif {

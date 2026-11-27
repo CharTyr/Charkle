@@ -2094,6 +2094,38 @@ export const MoodboardStudioView: React.FC = () => {
     }
   };
 
+  const handleExportPureRef = async () => {
+    if (exporting) return;
+    if (!hasExportableContent) {
+      pushToast({ message: '当前画布暂无可导出的素材或便签', tone: 'info', durationMs: 2400 });
+      return;
+    }
+    const stem = sanitizeExportFileName(activeBoard.title);
+    setExporting(true);
+    try {
+      await useMoodboardStore.getState().flushPendingSaves();
+      const dest = await transport.saveFileDialog(`${stem}.pur`, [
+        { name: 'PureRef 场景 (.pur)', extensions: ['pur'] },
+      ]);
+      if (!dest) return;
+      const latestBoard = useMoodboardStore.getState().activeBoard ?? activeBoard;
+      const report = await transport.exportMoodboardToPureRef(latestBoard, dest);
+      setExportOpen(false);
+      pushToast({
+        message: `已导出 PureRef 场景（${report.imageCount} 张图 / ${report.noteCount} 条便签）`,
+        tone: 'success',
+        durationMs: 4800,
+      });
+    } catch (err) {
+      pushToast({
+        message: `导出 PureRef (.pur) 失败：${err instanceof Error ? err.message : String(err)}`,
+        tone: 'error',
+      });
+    } finally {
+      setExporting(false);
+    }
+  };
+
   const handleCopyColorHex = (hex: string) => {
     const upper = hex.toUpperCase();
     void navigator.clipboard?.writeText(upper).catch(() => {});
@@ -4458,6 +4490,7 @@ export const MoodboardStudioView: React.FC = () => {
                 addAssetNodeAt(asset.id, getSpawnWorldCenter(), asset, assetsById)
               }
               onExportFigmaBundle={() => void handleExportFigmaBridge()}
+              onExportPureRef={() => void handleExportPureRef()}
               onCopyBoardImage={() => void handleCopyClipboard()}
               onSaveBoardImage={(fmt) => void handleExportImage(fmt)}
               onCopyHex={handleCopyColorHex}
@@ -5256,6 +5289,17 @@ export const MoodboardStudioView: React.FC = () => {
             >
               <ArrowDownload16Regular className="w-3.5 h-3.5" />
               导出 .charkleboard（Figma / FigJam）
+            </Button>
+            <Button
+              variant="standard"
+              size="sm"
+              loading={exporting}
+              data-testid="studio-export-pureref-popover"
+              onClick={() => void handleExportPureRef()}
+              className="w-full justify-center"
+            >
+              <ArrowDownload16Regular className="w-3.5 h-3.5" />
+              导出 PureRef (.pur)
             </Button>
           </div>
         </div>

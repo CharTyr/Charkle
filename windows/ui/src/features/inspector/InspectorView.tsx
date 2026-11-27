@@ -120,7 +120,10 @@ function displayTypeLabel(asset: AssetRecord): string {
     if (p === 'xiaohongshu') return '小红书笔记';
     if (p === 'pixiv') return 'Pixiv 作品';
     if (p === 'instagram') return 'Instagram 贴文';
+    if (p === 'youtube') return 'YouTube 视频';
+    if (p === 'bilibili') return 'Bilibili 视频';
   }
+  if (asset.richMetadata?.webPage?.hasVideo) return '视频网页';
   const lower = asset.fileName.toLowerCase();
   if (lower.endsWith('.swatch')) return '灵感色卡';
   if (asset.mediaKind === 'document') {
@@ -1991,45 +1994,156 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
 
     if (section === 'socialMediaExtract') {
       const post = targetAsset.richMetadata?.socialPost;
+      const webPage = !post ? targetAsset.richMetadata?.webPage : null;
+
+      if (!post && webPage && (webPage.attachments?.length > 0 || webPage.summary?.trim())) {
+        const webAttachments = webPage.attachments ?? [];
+        const handleExtractWebOne = async (att: SocialMediaAttachment, idx: number) => {
+          const key = `web-${att.id}-${idx}`;
+          setExtractingKey(key);
+          try {
+            const created = await useLibraryStore
+              .getState()
+              .extractWebAttachment(targetAsset, att, idx, destination);
+            if (created) {
+              pushToast({
+                message: `已单独提取「${created.title}」并保留网页来源`,
+                tone: 'success',
+              });
+            }
+          } catch (err) {
+            pushToast({
+              message: `提取网页媒体失败：${err instanceof Error ? err.message : String(err)}`,
+              tone: 'error',
+            });
+          } finally {
+            setExtractingKey(null);
+          }
+        };
+
+        return (
+          <InspectorSectionCard
+            key="socialMediaExtract"
+            cardId="socialMediaExtract"
+            title="网页摘要与媒体提取"
+            icon={<ImageMultiple16Regular className="w-3.5 h-3.5" />}
+            trailing={
+              webAttachments.length > 0 ? (
+                <span className="text-[10px] font-medium text-[var(--text-tertiary)] charkle-tabular">
+                  {webAttachments.length} 项
+                </span>
+              ) : undefined
+            }
+            isDraggingSelf={isDraggingSelf}
+            onStartHeaderDrag={handleStartHeaderDrag}
+            onHeaderContextMenu={handleHeaderContextMenu}
+          >
+            <div className="flex flex-col gap-2">
+              {(webPage.siteName || webPage.authorName || webPage.publishedAtText) && (
+                <div className="text-[11px] text-[var(--text-secondary)] truncate">
+                  {[webPage.siteName, webPage.authorName, webPage.publishedAtText]
+                    .filter((v): v is string => Boolean(v?.trim()))
+                    .join(' · ')}
+                </div>
+              )}
+              {webPage.summary?.trim() && (
+                <p className="text-[11.5px] leading-relaxed text-[var(--text-primary)]/90 whitespace-pre-wrap select-text">
+                  {webPage.summary.trim()}
+                </p>
+              )}
+              {webAttachments.map((att, idx) => {
+                const kindText =
+                  att.kind === 'video' ? '视频' : att.kind === 'gif' ? '动图' : '图片';
+                const key = `web-${att.id}-${idx}`;
+                return (
+                  <button
+                    key={key}
+                    type="button"
+                    disabled={extractingKey !== null}
+                    onClick={() => void handleExtractWebOne(att, idx)}
+                    className="charkle-pressable w-full px-2 py-1.5 rounded-[var(--win-radius-control)] bg-[var(--accent-soft)] hover:bg-[var(--accent)]/20 text-[var(--accent)] text-[11.5px] font-medium inline-flex items-center gap-2 disabled:opacity-60 cursor-pointer"
+                  >
+                    {att.kind === 'video' ? (
+                      <Filmstrip16Regular className="w-3.5 h-3.5 shrink-0" />
+                    ) : (
+                      <Image16Regular className="w-3.5 h-3.5 shrink-0" />
+                    )}
+                    <span className="truncate">
+                      {extractingKey === key
+                        ? `正在提取第 ${idx + 1} 个${kindText}…`
+                        : `提取第 ${idx + 1} 个${kindText}为独立素材`}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </InspectorSectionCard>
+        );
+      }
+
       const attachments = getEffectiveSocialAttachments(post);
-      if (!post || attachments.length === 0) return null;
+      const isVideoPlatform = Boolean(
+        post && (post.platform === 'youtube' || post.platform === 'bilibili'),
+      );
+      if (!post || (!isVideoPlatform && attachments.length === 0)) return null;
 
       const inTauri = isTauriRuntime();
       const isXhs = post.platform === 'xiaohongshu';
       const postNoun =
         post.platform === 'xiaohongshu'
           ? '笔记'
-          : post.platform === 'pixiv'
-            ? '作品'
-            : post.platform === 'x'
-              ? '推文'
-              : '贴文';
+          : isVideoPlatform
+            ? '视频'
+            : post.platform === 'pixiv'
+              ? '作品'
+              : post.platform === 'x'
+                ? '推文'
+                : '贴文';
       const platformLabel =
         post.platform === 'xiaohongshu'
           ? '小红书'
-          : post.platform === 'pixiv'
-            ? 'Pixiv'
-            : post.platform === 'instagram'
-              ? 'Instagram'
-              : post.platform === 'threads'
-                ? 'Threads'
-                : post.platform === 'bluesky'
-                  ? 'Bluesky'
-                  : 'X';
+          : post.platform === 'youtube'
+            ? 'YouTube'
+            : post.platform === 'bilibili'
+              ? 'Bilibili'
+              : post.platform === 'pixiv'
+                ? 'Pixiv'
+                : post.platform === 'instagram'
+                  ? 'Instagram'
+                  : post.platform === 'threads'
+                    ? 'Threads'
+                    : post.platform === 'bluesky'
+                      ? 'Bluesky'
+                      : 'X';
       const platformBg =
         post.platform === 'xiaohongshu'
           ? '#FF2442'
-          : post.platform === 'pixiv'
-            ? '#0096FA'
-            : post.platform === 'instagram'
-              ? '#D93B58'
-              : post.platform === 'bluesky'
-                ? '#0284C7'
-                : post.platform === 'threads'
-                  ? '#27272A'
-                  : '#18181B';
+          : post.platform === 'youtube'
+            ? '#FF0033'
+            : post.platform === 'bilibili'
+              ? '#FB7299'
+              : post.platform === 'pixiv'
+                ? '#0096FA'
+                : post.platform === 'instagram'
+                  ? '#D93B58'
+                  : post.platform === 'bluesky'
+                    ? '#0284C7'
+                    : post.platform === 'threads'
+                      ? '#27272A'
+                      : '#18181B';
       const avatarSrc = resolveSocialMediaUrl(post.authorAvatarURL, inTauri);
       const displayHandle = formatSocialDisplayHandle(post);
+      const effectiveExtractItems: SocialMediaAttachment[] =
+        isVideoPlatform && attachments.length === 0
+          ? [
+              {
+                id: 'video-bookmark-0',
+                kind: 'video',
+                url: post.originalURL,
+                thumbnailURL: post.mediaThumbnailURLs?.[0] ?? post.mediaURLs?.[0] ?? null,
+              },
+            ]
+          : attachments;
 
       const handleExtractOne = async (att: SocialMediaAttachment, idx: number) => {
         const key = `${att.id}-${idx}`;
@@ -2076,7 +2190,7 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
         <InspectorSectionCard
           key="socialMediaExtract"
           cardId="socialMediaExtract"
-          title={isXhs ? '笔记媒体提取' : '推文媒体提取'}
+          title={isVideoPlatform ? '视频书签与摘要' : isXhs ? '笔记媒体提取' : '推文媒体提取'}
           icon={<ImageMultiple16Regular className="w-3.5 h-3.5" />}
           trailing={
             <div className="inline-flex items-center gap-1.5">
@@ -2086,9 +2200,11 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
               >
                 {platformLabel}
               </span>
-              <span className="text-[10px] font-medium text-[var(--text-tertiary)] charkle-tabular">
-                {attachments.length} 项
-              </span>
+              {!isVideoPlatform && (
+                <span className="text-[10px] font-medium text-[var(--text-tertiary)] charkle-tabular">
+                  {effectiveExtractItems.length} 项
+                </span>
+              )}
             </div>
           }
           isDraggingSelf={isDraggingSelf}
@@ -2123,11 +2239,29 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
               )}
             </div>
 
+            {isVideoPlatform && post.videoSummary?.trim() && (
+              <div className="p-2 rounded-[var(--win-radius-control)] bg-[var(--bg-subtle)]/75 text-[11px] leading-relaxed text-[var(--text-primary)]/90 whitespace-pre-wrap select-text">
+                {post.videoSummary.trim()}
+              </div>
+            )}
+
+            {isVideoPlatform && post.videoOutline && post.videoOutline.length > 0 && (
+              <ul className="flex flex-col gap-0.5 pl-1 text-[11px] text-[var(--text-secondary)] select-text">
+                {post.videoOutline.slice(0, 8).map((line, i) => (
+                  <li key={i} className="truncate">
+                    {line}
+                  </li>
+                ))}
+              </ul>
+            )}
+
             <p className="text-[11px] leading-relaxed text-[var(--text-secondary)]">
-              可将{postNoun}里的图片或视频单独存为素材，并自动保留原{postNoun}作者、正文与链接。
+              {isVideoPlatform
+                ? '默认仅保存封面、元信息与视频摘要；可按需下载 MP4 保存为本地独立视频素材。'
+                : `可将${postNoun}里的图片或视频单独存为素材，并自动保留原${postNoun}作者、正文与链接。`}
             </p>
 
-            {attachments.length > 1 && (
+            {!isVideoPlatform && effectiveExtractItems.length > 1 && (
               <button
                 type="button"
                 disabled={extractingKey !== null}
@@ -2138,12 +2272,12 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
                 <span>
                   {extractingKey === '__all__'
                     ? '正在提取全部媒体…'
-                    : `全部提取为独立素材（${attachments.length} 项）`}
+                    : `全部提取为独立素材（${effectiveExtractItems.length} 项）`}
                 </span>
               </button>
             )}
 
-            {attachments.map((att, idx) => {
+            {effectiveExtractItems.map((att, idx) => {
               const isVideoLike = att.kind === 'video' || att.kind === 'gif';
               const kindText =
                 att.kind === 'video' ? '视频' : att.kind === 'gif' ? '动图' : '图片';
@@ -2173,9 +2307,13 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
                     <Image16Regular className="w-3.5 h-3.5 shrink-0" />
                   )}
                   <span className="truncate">
-                    {extractingKey === key
-                      ? `正在提取第 ${idx + 1} 个${kindText}…`
-                      : `提取第 ${idx + 1} 个${kindText}为独立素材`}
+                    {isVideoPlatform
+                      ? extractingKey === key
+                        ? '正在保存视频…'
+                        : '保存视频为独立素材'
+                      : extractingKey === key
+                        ? `正在提取第 ${idx + 1} 个${kindText}…`
+                        : `提取第 ${idx + 1} 个${kindText}为独立素材`}
                   </span>
                 </button>
               );

@@ -68,6 +68,11 @@ fn schema_version_is_v2_and_fts5_searches_chinese_pinyin_initials_and_rich_metad
             view_count: None,
             original_url: "https://bsky.app/profile/elena.bsky.social/post/3k2abc".to_string(),
             media_fetch_failed: false,
+            video_duration_seconds: None,
+            video_summary: None,
+            video_outline: Vec::new(),
+            video_id: None,
+            video_cid: None,
         }),
         photo_exif: Some(PhotoExifMetadata {
             camera_make: Some("Fujifilm".to_string()),
@@ -575,6 +580,11 @@ fn fts5_handles_fullwidth_ime_and_special_punctuation_and_quick_jump_uses_rich_s
             original_url: "https://www.xiaohongshu.com/explore/67a1b2c3d4e5f60718293a4b"
                 .to_string(),
             media_fetch_failed: false,
+            video_duration_seconds: None,
+            video_summary: None,
+            video_outline: Vec::new(),
+            video_id: None,
+            video_cid: None,
         }),
         ..AssetRichMetadata::default()
     });

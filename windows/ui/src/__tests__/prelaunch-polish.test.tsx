@@ -173,7 +173,7 @@ describe('Pre-Launch Comprehensive Bug Hunt & Polish Regressions (#148-#154)', (
   describe('libraryStore', () => {
     it('extractSocialAttachment for xiaohongshu labels 小红书 / 笔记 (never Bluesky) and hides 24-hex userId', async () => {
       const transport = new InMemoryMockTransport();
-      const ingestSpy = vi.spyOn(transport, 'ingestUrl');
+      const extractSpy = vi.spyOn(transport, 'extractLinkMediaAttachment');
       const updateSpy = vi.spyOn(transport, 'updateAssets');
       setTransport(transport);
 
@@ -211,15 +211,16 @@ describe('Pre-Launch Comprehensive Bug Hunt & Polish Regressions (#148-#154)', (
       );
 
       expect(created).not.toBeNull();
-      expect(ingestSpy).toHaveBeenCalledTimes(1);
-      const [, titleArg, notesArg] = ingestSpy.mock.calls[0];
-      expect(titleArg).toBe('空间造物 图片 #1');
-      expect(titleArg).not.toContain(hexUserId);
-      expect(notesArg).toContain('来源笔记：空间造物 · 小红书');
-      expect(notesArg).toContain('原笔记链接：https://www.xiaohongshu.com/explore/');
-      expect(notesArg).not.toContain('Bluesky');
-      expect(notesArg).not.toContain('推文');
-      expect(notesArg).not.toContain(hexUserId);
+      expect(extractSpy).toHaveBeenCalledTimes(1);
+      expect(updateSpy).toHaveBeenCalledTimes(1);
+      const patchArg = updateSpy.mock.calls[0][0];
+      expect(patchArg.title).toBe('空间造物 图片 #1');
+      expect(patchArg.title).not.toContain(hexUserId);
+      expect(patchArg.notes).toContain('来源笔记：空间造物 · 小红书');
+      expect(patchArg.notes).toContain('原笔记链接：https://www.xiaohongshu.com/explore/');
+      expect(patchArg.notes).not.toContain('Bluesky');
+      expect(patchArg.notes).not.toContain('推文');
+      expect(patchArg.notes).not.toContain(hexUserId);
 
       expect(updateSpy).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -547,9 +548,7 @@ describe('Pre-Launch Comprehensive Bug Hunt & Polish Regressions (#148-#154)', (
 
       // Switch to URL tab and paste full Xiaohongshu share-copy text
       fireEvent.click(screen.getByRole('radio', { name: '网页链接' }));
-      const urlInput = screen.getByPlaceholderText(
-        'https://... 或直接粘贴小红书 / 推文 / GitHub 分享内容',
-      );
+      const urlInput = screen.getByPlaceholderText(/https:\/\/\.\.\. 或直接粘贴/);
       fireEvent.change(urlInput, {
         target: {
           value:
