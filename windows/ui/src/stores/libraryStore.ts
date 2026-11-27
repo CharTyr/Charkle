@@ -4,6 +4,8 @@ import {
   createDefaultFilterCriteria,
   formatSocialDisplayHandle,
   formatVideoTimestamp,
+  isVideoSocialPlatform,
+  isZeroDownloadVideoBookmark,
   matchesSmartFolderRule,
   type AssetBatchPatch,
   type AssetRecord,
@@ -1052,35 +1054,48 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     const post = postAsset.richMetadata?.socialPost;
     if (!post || !attachment.url) return null;
     const isXiaohongshu = post.platform === 'xiaohongshu';
-    const isVideoPlatform = post.platform === 'youtube' || post.platform === 'bilibili';
+    const isDouyin = post.platform === 'douyin';
+    const isVideoPlatform = isVideoSocialPlatform(post.platform);
+    const isStreamingVideo = isZeroDownloadVideoBookmark(post);
     const platformLabel = isXiaohongshu
       ? '小红书'
-      : post.platform === 'youtube'
-        ? 'YouTube'
-        : post.platform === 'bilibili'
-          ? 'Bilibili'
-          : post.platform === 'pixiv'
-            ? 'Pixiv'
-            : post.platform === 'instagram'
-              ? 'Instagram'
-              : post.platform === 'x'
-                ? 'X'
-                : post.platform === 'threads'
-                  ? 'Threads'
-                  : 'Bluesky';
+      : isDouyin
+        ? '抖音'
+        : post.platform === 'youtube'
+          ? 'YouTube'
+          : post.platform === 'bilibili'
+            ? 'Bilibili'
+            : post.platform === 'pixiv'
+              ? 'Pixiv'
+              : post.platform === 'instagram'
+                ? 'Instagram'
+                : post.platform === 'x'
+                  ? 'X'
+                  : post.platform === 'threads'
+                    ? 'Threads'
+                    : post.platform === 'bluesky'
+                      ? 'Bluesky'
+                      : typeof post.platform === 'string' && post.platform.trim()
+                        ? post.platform.trim()
+                        : '社交动态';
     const postNoun = isXiaohongshu
       ? '笔记'
       : isVideoPlatform
         ? '视频'
-        : post.platform === 'pixiv'
+        : isDouyin || post.platform === 'pixiv'
           ? '作品'
-          : '推文';
+          : post.platform === 'x' ||
+              post.platform === 'threads' ||
+              post.platform === 'bluesky' ||
+              post.platform === 'instagram'
+            ? '推文'
+            : '动态';
     const kindLabel =
       attachment.kind === 'video' ? '视频' : attachment.kind === 'gif' ? '动图' : '图片';
     const displayHandle = formatSocialDisplayHandle(post);
     const authorLabel = displayHandle ?? (post.authorName?.trim() || platformLabel);
-    const extractedTitle = isVideoPlatform
-      ? (post.articleTitle?.trim() || postAsset.title || `${authorLabel} 视频`)
+    const extractedTitle = isStreamingVideo
+      ? post.articleTitle?.trim() || postAsset.title || `${authorLabel} 视频`
       : `${authorLabel} ${kindLabel} #${index + 1}`;
     const authorLine = displayHandle
       ? `${post.authorName} (${displayHandle})`

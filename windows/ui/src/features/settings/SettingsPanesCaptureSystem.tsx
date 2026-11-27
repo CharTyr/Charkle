@@ -746,7 +746,7 @@ export const ExtensionsSettingsPane: React.FC = () => {
               <span className="flex flex-col gap-0.5">
                 <span>
                   {bridgeRunning
-                    ? `监听本机 http://127.0.0.1:${bridgePort} · 仅限本机回环访问，开启后浏览器扩展可一键收藏网页、小红书笔记、X 推文与图片`
+                    ? `监听本机 http://127.0.0.1:${bridgePort} · 仅限本机回环访问，开启后浏览器扩展可一键收藏网页、小红书、抖音、X 推文与图片`
                     : '开启后浏览器扩展即可自动连接 Charkle 桌面端'}
                 </span>
                 {bridge?.lastError && (
@@ -788,7 +788,7 @@ export const ExtensionsSettingsPane: React.FC = () => {
               bundledExtDir ? (
                 <span className="flex flex-col gap-0.5">
                   <span>
-                    已内置扩展程序目录 · 加载后自动连接本机素材库，支持网页抓图与 X / 小红书批量导入
+                    已内置扩展程序目录 · 加载后自动连接本机素材库，支持网页抓图与 X / 小红书 / 抖音批量导入
                   </span>
                   <span className="font-mono text-[11px] text-[var(--text-tertiary)] break-all">
                     {bundledExtDir}

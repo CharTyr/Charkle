@@ -856,6 +856,42 @@ mod tests {
             "image/jpeg"
         );
         assert_eq!(ok_res.body(), jpg_payload);
+
+        // Valid Douyin image CDN URL served from cache; spoofed Douyin host rejected with 403
+        let dy_bad = "https://douyinpic.com.evil.com/img/cover.jpeg";
+        let dy_bad_enc =
+            url::form_urlencoded::byte_serialize(dy_bad.as_bytes()).collect::<String>();
+        let dy_bad_req = Request::builder()
+            .uri(format!(
+                "http://charkle-media.localhost/proxy-social?url={dy_bad_enc}"
+            ))
+            .body(Vec::new())
+            .unwrap();
+        assert_eq!(
+            handle_social_proxy_request(tmp.path(), &dy_bad_req)
+                .await
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+
+        let dy_target = "https://p3-pc.douyinpic.com/img/sample-cover.webp";
+        let dy_key = charkle_core::media::resolvers::social_proxy_cache_key(dy_target);
+        let webp_payload = b"RIFF\x24\x00\x00\x00WEBPVP8 DOUYIN_COVER";
+        std::fs::write(cache_dir.join(format!("{dy_key}.bin")), webp_payload).unwrap();
+        let dy_enc = url::form_urlencoded::byte_serialize(dy_target.as_bytes()).collect::<String>();
+        let dy_req = Request::builder()
+            .uri(format!(
+                "http://charkle-media.localhost/proxy-social?url={dy_enc}"
+            ))
+            .body(Vec::new())
+            .unwrap();
+        let dy_res = handle_social_proxy_request(tmp.path(), &dy_req).await;
+        assert_eq!(dy_res.status(), StatusCode::OK);
+        assert_eq!(
+            dy_res.headers().get(header::CONTENT_TYPE).unwrap(),
+            "image/webp"
+        );
+        assert_eq!(dy_res.body(), webp_payload);
     }
 
     #[tokio::test]

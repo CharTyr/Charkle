@@ -1,0 +1,8 @@
+{"file": ".trellis/spec/cross-platform/index.md", "reason": "Cross-platform /.charkle/ sync wire contract, dedup keys, local extension bridge, and purity rules"}
+{"file": ".trellis/spec/windows/index.md", "reason": "Windows Rust core, Tauri zero-Base64 media protocol, credential vault, and verification gates"}
+{"file": ".trellis/spec/windows/fluent2-design-system.md", "reason": "Windows 11 Fluent 2 design tokens, component primitives, and motion/accessibility constraints"}
+{"file": "windows/AGENTS.md", "reason": "Windows Win32/OLE, WebView2 UI thread, and React gallery/anchor engineering guardrails"}
+{"file": "DESIGN.md", "reason": "Canonical cross-platform visual, color, typography, motion, and copy guidelines"}
+{"file": "AGENTS.md", "reason": "Monorepo platform scope isolation, repository purity, and explicit git push rules"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Cross-layer contract alignment across BrowserExtension, Rust core, Tauri IPC, and React UI"}
+{"file": ".trellis/tasks/11-27-windows-douyin-favorites-sync/research/codebase-and-compatibility-audit.md", "reason": "Verified source anchors, passive bridge contract, Xiaohongshu 1:1 mapping, baseline blockers, and cross-platform wire audit"}

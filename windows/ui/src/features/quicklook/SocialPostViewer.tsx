@@ -18,7 +18,9 @@ import {
 import {
   formatSocialDisplayHandle,
   formatVideoDurationText,
+  isVerticalSocialFeedPlatform,
   isVideoSocialPlatform,
+  isZeroDownloadVideoBookmark,
   resolveSocialMediaUrl,
   type AssetRecord,
   type SocialMediaAttachment,
@@ -84,6 +86,7 @@ const PLATFORM_META: Record<
   instagram: { name: 'Instagram', openLabel: '在 Instagram 打开', badgeBg: '#D93B58', noun: '贴文' },
   youtube: { name: 'YouTube', openLabel: '在 YouTube 打开', badgeBg: '#FF0033', noun: '视频' },
   bilibili: { name: 'Bilibili', openLabel: '在 B 站打开', badgeBg: '#FB7299', noun: '视频' },
+  douyin: { name: '抖音', openLabel: '在抖音中打开', badgeBg: '#161823', noun: '作品' },
 };
 
 export const SocialPostViewer: React.FC<SocialPostViewerProps> = ({ asset }) => {
@@ -120,14 +123,17 @@ export const SocialPostViewer: React.FC<SocialPostViewerProps> = ({ asset }) => 
   if (!post) return null;
 
   const inTauri = isTauriRuntime();
+  const fallbackPlatformName =
+    typeof post.platform === 'string' && post.platform.trim() ? post.platform.trim() : '社交动态';
   const platform = PLATFORM_META[post.platform] ?? {
-    name: post.platform,
+    name: fallbackPlatformName,
     openLabel: '查看原帖',
-    badgeBg: '#18181B',
-    noun: '推文',
+    badgeBg: '#52525B',
+    noun: '动态',
   };
-  const isXiaohongshu = post.platform === 'xiaohongshu';
+  const isVerticalFeed = isVerticalSocialFeedPlatform(post.platform);
   const isVideoPlatform = isVideoSocialPlatform(post.platform);
+  const useStreamingVideoViewer = isZeroDownloadVideoBookmark(post);
   const displayHandle = formatSocialDisplayHandle(post);
   const videoDurationText = formatVideoDurationText(
     post.videoDurationSeconds ?? asset.durationSeconds,
@@ -147,7 +153,24 @@ export const SocialPostViewer: React.FC<SocialPostViewerProps> = ({ asset }) => 
   const useSingleColumn =
     attachments.length === 1 ||
     attachments.some((a) => a.kind === 'video' || a.kind === 'gif');
-  const isXiaohongshuMultiGrid = isXiaohongshu && !useSingleColumn && attachments.length > 1;
+  const isVerticalMultiGrid =
+    isVerticalFeed && !useStreamingVideoViewer && !useSingleColumn && attachments.length > 1;
+  const primaryStreamingVideoAttachment: SocialMediaAttachment = (() => {
+    const firstVideoAtt = attachments.find((a) => a.kind === 'video');
+    const targetUrl = isVideoPlatform
+      ? post.originalURL
+      : firstVideoAtt?.url?.trim() || post.videoURL?.trim() || post.originalURL;
+    return {
+      id: 'video-bookmark-0',
+      kind: 'video',
+      url: targetUrl,
+      thumbnailURL:
+        firstVideoAtt?.thumbnailURL ??
+        post.mediaThumbnailURLs?.[0] ??
+        post.mediaURLs?.[0] ??
+        null,
+    };
+  })();
 
   const openOriginalPost = () => {
     void getTransport()
@@ -241,7 +264,7 @@ export const SocialPostViewer: React.FC<SocialPostViewerProps> = ({ asset }) => 
       onClick={(e) => e.stopPropagation()}
       className={[
         'w-full max-h-[82vh] mx-auto rounded-[var(--win-radius-dialog)] bg-[var(--bg-elevated)] border border-[var(--win-stroke-flyout)] shadow-[0_24px_60px_rgba(0,0,0,0.42)] flex flex-col overflow-hidden',
-        isVideoPlatform ? 'max-w-[760px]' : 'max-w-[680px]',
+        useStreamingVideoViewer ? 'max-w-[760px]' : 'max-w-[680px]',
       ].join(' ')}
     >
       <div className="flex-1 min-h-0 overflow-y-auto charkle-scroll p-6 flex flex-col gap-4">
@@ -277,16 +300,19 @@ export const SocialPostViewer: React.FC<SocialPostViewerProps> = ({ asset }) => 
                 </span>
               )}
             </div>
-            {post.publishedAtText && (
-              <div className="text-[11.5px] text-[var(--text-tertiary)] truncate">
-                {post.publishedAtText}
+            {(post.publishedAtText || (videoDurationText && !useStreamingVideoViewer)) && (
+              <div className="flex items-center gap-2 text-[11.5px] text-[var(--text-tertiary)] truncate">
+                {post.publishedAtText && <span className="truncate">{post.publishedAtText}</span>}
+                {videoDurationText && !useStreamingVideoViewer && (
+                  <span className="shrink-0 charkle-mono charkle-tabular">{videoDurationText}</span>
+                )}
               </div>
             )}
           </div>
 
           <span
             style={{ backgroundColor: platform.badgeBg }}
-            className="px-2.5 py-1 rounded-full text-[11px] font-bold text-white shrink-0"
+            className="px-2.5 py-1 rounded-full text-[11px] font-bold text-white border border-white/15 shrink-0"
           >
             {platform.name}
           </span>
@@ -299,8 +325,8 @@ export const SocialPostViewer: React.FC<SocialPostViewerProps> = ({ asset }) => 
           </h3>
         )}
 
-        {/* YouTube / Bilibili Zero-Download Inline Streaming Player & Explicit On-Demand Save */}
-        {isVideoPlatform && (
+        {/* Zero-Download Inline Streaming Player & Explicit On-Demand Save (YouTube / Bilibili / Douyin Video) */}
+        {useStreamingVideoViewer && (
           <div
             data-testid="video-bookmark-stage"
             className="flex flex-col gap-3"
@@ -326,18 +352,7 @@ export const SocialPostViewer: React.FC<SocialPostViewerProps> = ({ asset }) => 
                   type="button"
                   data-testid="video-bookmark-save-asset"
                   disabled={extractingKey !== null}
-                  onClick={() =>
-                    void handleExtractOne(
-                      {
-                        id: 'video-bookmark-0',
-                        kind: 'video',
-                        url: post.originalURL,
-                        thumbnailURL:
-                          post.mediaThumbnailURLs?.[0] ?? post.mediaURLs?.[0] ?? null,
-                      },
-                      0,
-                    )
-                  }
+                  onClick={() => void handleExtractOne(primaryStreamingVideoAttachment, 0)}
                   className="charkle-pressable inline-flex items-center gap-1.5 px-3 py-1.5 rounded-[var(--win-radius-control)] bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-[var(--accent-text)] text-[12px] font-semibold disabled:opacity-50 cursor-pointer"
                 >
                   <VideoClip16Regular className="w-3.5 h-3.5" />
@@ -411,8 +426,8 @@ export const SocialPostViewer: React.FC<SocialPostViewerProps> = ({ asset }) => 
           </div>
         )}
 
-        {/* Embedded Attachments with Independent Extraction (non-video-platform social posts) */}
-        {!isVideoPlatform && attachments.length > 0 && (
+        {/* Embedded Attachments with Independent Extraction (non-streaming social posts & Douyin photo notes) */}
+        {!useStreamingVideoViewer && attachments.length > 0 && (
           <div className="flex flex-col gap-2.5">
             {attachments.length > 1 && (
               <div className="flex items-center justify-between gap-2">
@@ -550,7 +565,7 @@ export const SocialPostViewer: React.FC<SocialPostViewerProps> = ({ asset }) => 
                     key={key}
                     className={[
                       'relative rounded-[var(--win-radius-card)] overflow-hidden bg-[var(--bg-subtle)]/70 border border-[var(--win-stroke-card)]',
-                      isXiaohongshuMultiGrid ? 'aspect-[3/4]' : '',
+                      isVerticalMultiGrid ? 'aspect-[3/4]' : '',
                     ].join(' ')}
                   >
                     {mediaFailed || !photoSrc ? (
@@ -582,12 +597,12 @@ export const SocialPostViewer: React.FC<SocialPostViewerProps> = ({ asset }) => 
                           }
                         }}
                         className={
-                          isXiaohongshuMultiGrid
+                          isVerticalMultiGrid
                             ? 'w-full h-full object-cover'
                             : [
                                 'w-full object-contain',
                                 attachments.length === 1
-                                  ? isXiaohongshu
+                                  ? isVerticalFeed
                                     ? 'max-h-[520px]'
                                     : 'max-h-[420px]'
                                   : 'max-h-[240px]',

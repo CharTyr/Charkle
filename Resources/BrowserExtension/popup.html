@@ -272,7 +272,7 @@
         </div>
       </section>
 
-      <!-- Panel 2: Context-First 6-Platform Batch Collector -->
+      <!-- Panel 2: Context-First 7-Platform Batch Collector -->
       <section id="panel-bookmarks" class="tab-panel surface-card" role="tabpanel" aria-labelledby="tab-bookmarks" hidden>
         <div id="bm-supported-block" class="stack-sm" hidden>
           <!-- Hero Detected Context -->
@@ -286,13 +286,26 @@
             </button>
           </div>
 
-          <!-- Xiaohongshu Author Profile: Media vs Bookmarks switcher (only visible on XHS profiles) -->
-          <div id="bm-xhs-mode-wrap" class="segmented-control cols-2" role="radiogroup" aria-label="小红书主页采集方式" hidden>
-            <button type="button" class="seg-btn pressable" role="radio" data-xhs-mode="media" aria-checked="true">
+          <!-- Xiaohongshu / Douyin Author Profile: Media vs Bookmarks switcher -->
+          <div id="bm-xhs-mode-wrap" class="segmented-control cols-2" role="radiogroup" aria-label="主页采集方式" hidden>
+            <button id="btn-profile-mode-media" type="button" class="seg-btn pressable" role="radio" data-xhs-mode="media" aria-checked="true">
               作者作品原图
             </button>
-            <button type="button" class="seg-btn pressable" role="radio" data-xhs-mode="bookmarks" aria-checked="false">
+            <button id="btn-profile-mode-bookmarks" type="button" class="seg-btn pressable" role="radio" data-xhs-mode="bookmarks" aria-checked="false">
               收藏与点赞卡片
+            </button>
+          </div>
+
+          <!-- Douyin Content-Type Quick Filter (always visible on Douyin pages, no drawer required) -->
+          <div id="bm-douyin-filter-wrap" class="segmented-control" role="radiogroup" aria-label="抖音内容类型筛选" hidden>
+            <button id="btn-dy-filter-all" type="button" class="seg-btn pressable" role="radio" data-dy-filter="all" aria-checked="true">
+              全部
+            </button>
+            <button id="btn-dy-filter-video" type="button" class="seg-btn pressable" role="radio" data-dy-filter="video" aria-checked="false">
+              仅视频
+            </button>
+            <button id="btn-dy-filter-image" type="button" class="seg-btn pressable" role="radio" data-dy-filter="image" aria-checked="false">
+              仅图文
             </button>
           </div>
 
@@ -334,6 +347,11 @@
                 <span>自动提取小红书完整多图与正文</span>
               </label>
 
+              <label id="bm-opt-dy-classify-row" class="checkbox-row" hidden>
+                <input id="bm-opt-dy-classify" type="checkbox" checked />
+                <span>按视频 / 图文自动分目录</span>
+              </label>
+
               <label class="checkbox-row">
                 <input id="bm-opt-skip-dups" type="checkbox" checked />
                 <span>跳过已导入条目（增量去重）</span>
@@ -367,16 +385,45 @@
             </div>
           </div>
 
-          <button id="btn-bm-start" type="button" class="btn-primary pressable">
-            开始批量采集
-          </button>
+          <!-- Douyin Multi-Select Picker Panel (built into Batch tab) -->
+          <div id="bm-douyin-picker" class="dy-picker-panel stack-sm" hidden>
+            <div class="dy-picker-toolbar">
+              <span id="bm-picker-summary" class="images-summary">正在读取当前页作品…</span>
+              <div class="dy-picker-actions">
+                <button id="btn-picker-select-new" type="button" class="ghost-mini-btn pressable">全选未导入</button>
+                <button id="btn-picker-clear" type="button" class="ghost-mini-btn pressable">清空</button>
+                <button id="btn-picker-more" type="button" class="ghost-mini-btn pressable">加载更多</button>
+                <button id="btn-picker-refresh" type="button" class="ghost-mini-btn pressable">刷新</button>
+                <button id="btn-picker-close" type="button" class="ghost-mini-btn pressable">返回</button>
+              </div>
+            </div>
+
+            <div id="bm-picker-empty" class="empty-state dy-picker-empty" hidden>
+              <p id="bm-picker-empty-text">当前页尚未加载出匹配作品，可点击「加载更多」向下滚动读取</p>
+            </div>
+
+            <div id="bm-picker-list" class="dy-picker-list charkle-scroll" role="list"></div>
+
+            <button id="btn-picker-import" type="button" class="btn-primary pressable" disabled>
+              导入所选 (0)
+            </button>
+          </div>
+
+          <div id="bm-primary-actions" class="action-row">
+            <button id="btn-bm-start" type="button" class="btn-primary pressable">
+              开始批量采集
+            </button>
+            <button id="btn-bm-open-picker" type="button" class="btn-secondary pressable" hidden>
+              挑选导入
+            </button>
+          </div>
         </div>
 
-        <!-- Clean 6-Platform Directory when NOT on a supported creator/collection page -->
+        <!-- Clean 7-Platform Directory when NOT on a supported creator/collection page -->
         <div id="bm-guide-block" class="stack-sm">
           <div class="guide-head">
-            <strong>支持 6 大社媒批量采集</strong>
-            <p>打开任意画师主页或收藏页，按作品原画质自动分目录入库。</p>
+            <strong>支持 7 大社媒批量采集</strong>
+            <p>打开任意创作者主页或收藏页，按作品自动分目录入库。</p>
           </div>
           <div class="platform-grid">
             <button type="button" class="platform-tile pressable" data-open-url="https://x.com/i/bookmarks">
@@ -421,12 +468,23 @@
                 <span class="platform-tile-sub">作者原图 · 收藏</span>
               </span>
             </button>
+            <button type="button" class="platform-tile pressable" data-open-url="https://www.douyin.com/user/self?showTab=favorite_collection">
+              <span class="platform-dot" data-kind="douyin" aria-hidden="true"></span>
+              <span class="platform-tile-copy">
+                <span class="platform-tile-name">抖音</span>
+                <span class="platform-tile-sub">收藏夹 · 喜欢 · 作品</span>
+              </span>
+            </button>
           </div>
         </div>
       </section>
 
       <!-- Panel 3: Batch Image Grabber -->
       <section id="panel-images" class="tab-panel surface-card" role="tabpanel" aria-labelledby="tab-images" hidden>
+        <div id="images-social-hint" class="social-hint-strip" hidden>
+          <span class="social-hint-text">当前页抓图仅保存卡片封面图；若要收藏完整视频与多图图文，请前往「批量」挑选或批量导入</span>
+          <button id="btn-images-goto-picker" type="button" class="ghost-mini-btn pressable">去挑选导入</button>
+        </div>
         <div class="images-toolbar">
           <span id="images-summary" class="images-summary">正在扫描页面图片…</span>
           <div class="images-toolbar-actions">

@@ -1,9 +1,9 @@
 /**
  * Charkle Extension — Passive Main-World Multi-Platform Media Feed Observer (read-only)
  *
- * Passively reads JSON responses that X, Bluesky, Threads, and Instagram web apps already fetch
+ * Passively reads JSON responses that X, Bluesky, Threads, Instagram, and Douyin web apps already fetch
  * so multi-image posts, carousels, and MP4 videos are captured losslessly at full resolution
- * without issuing extra private API calls or depending on rotating GraphQL query hashes.
+ * without issuing extra private API calls or depending on rotating query signatures.
  */
 (() => {
   if (window.__charkleSocialPageBridgeInstalled) return;
@@ -30,7 +30,9 @@
           ? 'threads'
           : HOST === 'instagram.com' || HOST === 'www.instagram.com' || HOST === 'm.instagram.com'
             ? 'instagram'
-            : null;
+            : HOST === 'douyin.com' || HOST === 'www.douyin.com' || HOST === 'm.douyin.com'
+              ? 'douyin'
+              : null;
 
   if (!PLATFORM) return;
 
@@ -60,6 +62,11 @@
         rawUrl.includes('/api/v1/clips/user/') ||
         rawUrl.includes('/api/v1/feed/saved/') ||
         rawUrl.includes('/api/v1/users/web_profile_info')
+      );
+    }
+    if (PLATFORM === 'douyin') {
+      return /\/aweme\/v[12]\/web\/(?:aweme\/(?:listcollection|favorite|post|detail)|collects\/(?:list|video\/list))\b/.test(
+        rawUrl,
       );
     }
     return false;
@@ -471,6 +478,304 @@
     return Array.from(byCode.values());
   }
 
+  // MARK: - Douyin Passive Web API Extractor
+
+  function isHeicDouyinUrl(rawUrl) {
+    const lower = String(rawUrl || '').toLowerCase();
+    return (
+      lower.includes('.heic') ||
+      lower.includes('.heif') ||
+      (lower.includes('~tplv-') && lower.includes('heic')) ||
+      lower.includes('format=heic') ||
+      lower.includes('format=heif')
+    );
+  }
+
+  function pickBestDouyinImg(urlList) {
+    if (!Array.isArray(urlList) || urlList.length === 0) return '';
+    const cleaned = [];
+    const seen = new Set();
+    for (const raw of urlList) {
+      const href = upgradeHttps(raw);
+      if (!href || seen.has(href)) continue;
+      seen.add(href);
+      cleaned.push(href);
+    }
+    if (cleaned.length === 0) return '';
+    return cleaned.find((u) => !isHeicDouyinUrl(u)) || cleaned[0];
+  }
+
+  function pickCleanDouyinVideoFromList(urlList) {
+    if (!Array.isArray(urlList) || urlList.length === 0) return '';
+    const valid = [];
+    const seen = new Set();
+    for (const raw of urlList) {
+      const href = upgradeHttps(raw);
+      if (!href || seen.has(href)) continue;
+      seen.add(href);
+      valid.push(href);
+    }
+    if (valid.length === 0) return '';
+    const clean = valid.find((u) => {
+      const low = u.toLowerCase();
+      return !low.includes('/playwm/') && !low.includes('watermark=1') && !/\/aweme\/v1\/playwm/i.test(u);
+    });
+    return clean || valid[0].replace(/\/playwm\//gi, '/play/');
+  }
+
+  function pickBestDouyinVideo(videoObj) {
+    if (!videoObj || typeof videoObj !== 'object') return null;
+    const bitRates = Array.isArray(videoObj.bit_rate) ? videoObj.bit_rate : [];
+    const ranked = [];
+    for (const br of bitRates) {
+      if (!br || typeof br !== 'object') continue;
+      const url = pickCleanDouyinVideoFromList(br.play_addr?.url_list);
+      if (!url) continue;
+      const isH265 = Number(br.is_h265 || 0) === 1 || /265|hevc/i.test(String(br.gear_name || ''));
+      const bitrateNum = Number(br.bit_rate || br.play_addr?.data_size || 0) || 0;
+      const width = Number(br.play_addr?.width || 0) || 0;
+      const height = Number(br.play_addr?.height || 0) || 0;
+      ranked.push({ url, isH265, bitrateNum, width, height });
+    }
+    if (ranked.length > 0) {
+      ranked.sort((a, b) => {
+        if (a.isH265 !== b.isH265) return a.isH265 ? 1 : -1;
+        const areaDiff = b.width * b.height - a.width * a.height;
+        if (areaDiff !== 0) return areaDiff;
+        return b.bitrateNum - a.bitrateNum;
+      });
+      return ranked[0].url;
+    }
+    return (
+      pickCleanDouyinVideoFromList(videoObj.play_addr_h264?.url_list) ||
+      pickCleanDouyinVideoFromList(videoObj.play_addr?.url_list) ||
+      pickCleanDouyinVideoFromList(videoObj.play_addr_lowbr?.url_list) ||
+      null
+    );
+  }
+
+  function parseDouyinMetric(raw) {
+    if (typeof raw === 'number' && Number.isFinite(raw)) {
+      return raw >= 0 ? Math.round(raw) : null;
+    }
+    const text = String(raw ?? '').trim().replace(/[,+]/g, '');
+    if (!text) return null;
+    const yi = /^(\d+(?:\.\d+)?)\s*亿$/i.exec(text);
+    if (yi) return Math.round(Number.parseFloat(yi[1]) * 100_000_000);
+    const wan = /^(\d+(?:\.\d+)?)\s*[万w]$/i.exec(text);
+    if (wan) return Math.round(Number.parseFloat(wan[1]) * 10_000);
+    const qian = /^(\d+(?:\.\d+)?)\s*[千k]$/i.exec(text);
+    if (qian) return Math.round(Number.parseFloat(qian[1]) * 1_000);
+    if (/^\d+$/.test(text)) return Number.parseInt(text, 10);
+    return null;
+  }
+
+  function parseDouyinEndpointMeta(rawUrl) {
+    const out = { sourceEndpoint: '', collectionId: null };
+    if (typeof rawUrl !== 'string' || !rawUrl) return out;
+    if (/\/aweme\/v[12]\/web\/aweme\/listcollection\b/.test(rawUrl)) out.sourceEndpoint = 'listcollection';
+    else if (/\/aweme\/v[12]\/web\/collects\/video\/list\b/.test(rawUrl)) out.sourceEndpoint = 'collects_video_list';
+    else if (/\/aweme\/v[12]\/web\/collects\/list\b/.test(rawUrl)) out.sourceEndpoint = 'collects_list';
+    else if (/\/aweme\/v[12]\/web\/aweme\/favorite\b/.test(rawUrl)) out.sourceEndpoint = 'favorite';
+    else if (/\/aweme\/v[12]\/web\/aweme\/post\b/.test(rawUrl)) out.sourceEndpoint = 'post';
+    else if (/\/aweme\/v[12]\/web\/aweme\/detail\b/.test(rawUrl)) out.sourceEndpoint = 'detail';
+    try {
+      const u = new URL(rawUrl, ORIGIN);
+      const cid = (u.searchParams.get('collects_id') || u.searchParams.get('collection_id') || '').trim();
+      if (cid) out.collectionId = cid;
+    } catch {
+      // ignore invalid URL
+    }
+    return out;
+  }
+
+  function extractDouyinCollections(payload) {
+    if (!payload || typeof payload !== 'object') return [];
+    const rawList = Array.isArray(payload.collects_list)
+      ? payload.collects_list
+      : Array.isArray(payload.data?.collects_list)
+        ? payload.data.collects_list
+        : Array.isArray(payload.favorite_folder_list)
+          ? payload.favorite_folder_list
+          : [];
+    const byId = new Map();
+    for (const item of rawList) {
+      if (!item || typeof item !== 'object') continue;
+      const id = String(item.collects_id_str || item.collects_id || item.id_str || item.id || '').trim();
+      const name = String(item.collects_name || item.name || item.title || '').trim();
+      if (!id || !name) continue;
+      const totalCount = parseDouyinMetric(item.total_number ?? item.item_count ?? item.count);
+      byId.set(id, { id, name, totalCount });
+    }
+    return Array.from(byId.values());
+  }
+
+  function extractDouyinPosts(payload, endpointMeta) {
+    if (!payload || typeof payload !== 'object') return [];
+    const candidates = [];
+    const pushArr = (arr) => {
+      if (!Array.isArray(arr)) return;
+      for (const entry of arr) {
+        if (!entry || typeof entry !== 'object') continue;
+        if (entry.aweme_id || entry.awemeId) candidates.push(entry);
+        else if (entry.aweme && typeof entry.aweme === 'object') candidates.push(entry.aweme);
+        else if (entry.aweme_info && typeof entry.aweme_info === 'object') candidates.push(entry.aweme_info);
+      }
+    };
+    pushArr(payload.aweme_list);
+    pushArr(payload.aweme_details);
+    pushArr(payload.item_list);
+    pushArr(payload.cards);
+    if (payload.aweme_detail && typeof payload.aweme_detail === 'object') candidates.push(payload.aweme_detail);
+    if (payload.data && typeof payload.data === 'object') {
+      pushArr(payload.data.aweme_list);
+      pushArr(payload.data.aweme_details);
+      pushArr(payload.data.item_list);
+      if (payload.data.aweme_detail && typeof payload.data.aweme_detail === 'object') {
+        candidates.push(payload.data.aweme_detail);
+      }
+    }
+
+    const byId = new Map();
+    for (const aweme of candidates) {
+      const awemeId = String(aweme.aweme_id || aweme.awemeId || '').trim();
+      if (!/^\d{15,22}$/.test(awemeId)) continue;
+
+      const imagesArr = Array.isArray(aweme.images) ? aweme.images : [];
+      const isPhotoNote = imagesArr.length > 0 || Number(aweme.aweme_type) === 68;
+      const author = aweme.author && typeof aweme.author === 'object' ? aweme.author : {};
+      const authorName = String(author.nickname || '抖音用户').trim() || '抖音用户';
+      const rawUnique = String(author.unique_id || '').trim();
+      const rawShort = String(author.short_id || '').trim();
+      const authorHandle =
+        rawUnique && rawUnique !== '0' && !rawUnique.startsWith('MS4wLjAB')
+          ? rawUnique
+          : rawShort && rawShort !== '0' && !rawShort.startsWith('MS4wLjAB')
+            ? rawShort
+            : '';
+      const authorAvatarURL =
+        pickBestDouyinImg(
+          author.avatar_medium?.url_list ||
+            author.avatar_thumb?.url_list ||
+            author.avatar_larger?.url_list ||
+            [],
+        ) || null;
+
+      const desc = String(aweme.desc || '').trim();
+      const explicitTitle = String(aweme.item_title || aweme.preview_title || '').trim();
+      const title = explicitTitle
+        ? explicitTitle.slice(0, 120)
+        : desc.replace(/#[^\s#]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 80) || desc.slice(0, 80);
+
+      const dates = formatDate(aweme.create_time);
+      const stats = aweme.statistics && typeof aweme.statistics === 'object' ? aweme.statistics : {};
+      const tags = [];
+      const seenTags = new Set();
+      const pushTag = (t) => {
+        const clean = String(t || '').trim().replace(/^#/, '');
+        if (!clean || clean.length > 32) return;
+        const low = clean.toLowerCase();
+        if (seenTags.has(low)) return;
+        seenTags.add(low);
+        tags.push(clean);
+      };
+      if (Array.isArray(aweme.text_extra)) {
+        for (const te of aweme.text_extra) {
+          if (te?.hashtag_name) pushTag(te.hashtag_name);
+        }
+      }
+      for (const m of desc.matchAll(/#([^\s#@]{1,30})/g)) {
+        if (m[1]) pushTag(m[1]);
+      }
+
+      const media = [];
+      const seenUrls = new Set();
+      let hasVideo = false;
+      let videoURL = null;
+      let durationSeconds = null;
+
+      if (isPhotoNote && imagesArr.length > 0) {
+        for (const imgObj of imagesArr) {
+          if (!imgObj || typeof imgObj !== 'object') continue;
+          const url =
+            pickBestDouyinImg(imgObj.url_list) || pickBestDouyinImg(imgObj.download_url_list);
+          if (!url || seenUrls.has(url)) continue;
+          seenUrls.add(url);
+          media.push({
+            kind: 'photo',
+            url,
+            thumbnailURL: url,
+            width: Number(imgObj.width || 0) || 0,
+            height: Number(imgObj.height || 0) || 0,
+          });
+        }
+      } else {
+        const videoObj = aweme.video && typeof aweme.video === 'object' ? aweme.video : {};
+        const coverUrl =
+          pickBestDouyinImg(videoObj.origin_cover?.url_list) ||
+          pickBestDouyinImg(videoObj.cover?.url_list) ||
+          pickBestDouyinImg(videoObj.dynamic_cover?.url_list) ||
+          '';
+        videoURL = pickBestDouyinVideo(videoObj);
+        const rawDur = Number(videoObj.duration ?? aweme.duration);
+        if (Number.isFinite(rawDur) && rawDur > 0) {
+          durationSeconds = Math.round((rawDur >= 1000 ? rawDur / 1000 : rawDur) * 10) / 10;
+        }
+        const width = Number(videoObj.width || videoObj.play_addr?.width || 0) || 0;
+        const height = Number(videoObj.height || videoObj.play_addr?.height || 0) || 0;
+        hasVideo = true;
+        if (videoURL) {
+          seenUrls.add(videoURL);
+          media.push({ kind: 'video', url: videoURL, thumbnailURL: coverUrl || null, width, height });
+        } else if (coverUrl) {
+          seenUrls.add(coverUrl);
+          media.push({ kind: 'photo', url: coverUrl, thumbnailURL: coverUrl, width, height });
+        }
+      }
+
+      const originalURL = isPhotoNote
+        ? `https://www.douyin.com/note/${awemeId}`
+        : `https://www.douyin.com/video/${awemeId}`;
+
+      const rec = {
+        platform: 'douyin',
+        postID: awemeId,
+        tweetID: awemeId,
+        videoID: awemeId,
+        originalURL,
+        dedupKey: `douyin:${awemeId}`,
+        authorName,
+        authorHandle,
+        authorAvatarURL,
+        publishedAtText: dates.publishedAtText,
+        publishedDateKey: dates.publishedDateKey,
+        title,
+        articleTitle: title || null,
+        bodyText: desc || title || originalURL,
+        isRetweet: false,
+        likeCount: parseDouyinMetric(stats.digg_count),
+        replyCount: parseDouyinMetric(stats.comment_count),
+        repostCount: parseDouyinMetric(stats.share_count),
+        viewCount: parseDouyinMetric(stats.play_count),
+        durationSeconds,
+        videoDurationSeconds: durationSeconds,
+        media,
+        hasVideo,
+        videoURL,
+        needsEnrich: false,
+        referer: 'https://www.douyin.com/',
+        tags: tags.slice(0, 12),
+        sourceEndpoint: endpointMeta?.sourceEndpoint || '',
+        collectionId: endpointMeta?.collectionId || null,
+      };
+      const prev = byId.get(awemeId);
+      const prevScore = prev ? (prev.media?.length || 0) * 10 + (prev.videoURL ? 2 : 0) : -1;
+      const nextScore = (rec.media?.length || 0) * 10 + (rec.videoURL ? 2 : 0);
+      if (!prev || nextScore >= prevScore) byId.set(awemeId, rec);
+    }
+    return Array.from(byId.values());
+  }
+
   function parseJsonOrNdjson(text) {
     if (!text || typeof text !== 'string') return [];
     const trimmed = text.trim();
@@ -494,16 +799,33 @@
     }
   }
 
-  function emitFromPayloads(payloads) {
+  function emitFromPayloads(payloads, rawUrl = '') {
     try {
       const allPosts = [];
+      const allCollections = [];
+      const endpointMeta = PLATFORM === 'douyin' ? parseDouyinEndpointMeta(rawUrl) : null;
       for (const json of payloads) {
         if (!json || typeof json !== 'object') continue;
         if (PLATFORM === 'x') allPosts.push(...extractXTweets(json));
         else if (PLATFORM === 'bluesky') allPosts.push(...extractBlueskyPosts(json));
         else if (PLATFORM === 'threads' || PLATFORM === 'instagram') {
           allPosts.push(...extractThreadsOrInstagramPosts(json, PLATFORM));
+        } else if (PLATFORM === 'douyin') {
+          allCollections.push(...extractDouyinCollections(json));
+          allPosts.push(...extractDouyinPosts(json, endpointMeta));
         }
+      }
+      if (PLATFORM === 'douyin' && allCollections.length > 0) {
+        window.postMessage(
+          {
+            __charkleSocialBridge: true,
+            __charkleXBridge: false,
+            platform: 'douyin',
+            type: 'DOUYIN_COLLECTIONS',
+            collections: allCollections,
+          },
+          ORIGIN,
+        );
       }
       if (allPosts.length > 0) {
         window.postMessage(
@@ -514,6 +836,8 @@
             type: 'GRAPHQL_POSTS',
             posts: allPosts,
             tweets: PLATFORM === 'x' ? allPosts : undefined,
+            sourceEndpoint: endpointMeta?.sourceEndpoint || undefined,
+            collectionId: endpointMeta?.collectionId || undefined,
           },
           ORIGIN,
         );
@@ -536,13 +860,28 @@
             res
               .clone()
               .text()
-              .then((text) => emitFromPayloads(parseJsonOrNdjson(text)))
+              .then((text) => emitFromPayloads(parseJsonOrNdjson(text), url))
               .catch(() => {});
           })
           .catch(() => {});
       }
       return promise;
     };
+  }
+
+  function parseDouyinBodyCollectionId(body) {
+    try {
+      if (!body) return null;
+      if (typeof body === 'string') {
+        const m = /(?:^|[&?])(?:collects_id|collection_id)=([^&]+)/i.exec(body);
+        if (m && m[1]) return decodeURIComponent(m[1]).trim() || null;
+      } else if (typeof URLSearchParams === 'function' && body instanceof URLSearchParams) {
+        return (body.get('collects_id') || body.get('collection_id') || '').trim() || null;
+      }
+    } catch {
+      // ignore unreadable body
+    }
+    return null;
   }
 
   // Passive XMLHttpRequest observer
@@ -555,17 +894,40 @@
       return origOpen.apply(this, arguments);
     };
 
-    XMLHttpRequest.prototype.send = function charkleWrappedSend() {
+    XMLHttpRequest.prototype.send = function charkleWrappedSend(body) {
       if (isTargetEndpoint(this.__charkleUrl)) {
+        let reqUrl = this.__charkleUrl;
+        if (PLATFORM === 'douyin' && !/[?&](?:collects_id|collection_id)=/i.test(reqUrl)) {
+          const bodyCid = parseDouyinBodyCollectionId(body);
+          if (bodyCid) {
+            reqUrl += `${reqUrl.includes('?') ? '&' : '?'}collects_id=${encodeURIComponent(bodyCid)}`;
+          }
+        }
         this.addEventListener(
           'load',
           () => {
             try {
               if (this.status < 200 || this.status >= 300) return;
               if (this.responseType === 'json' && this.response) {
-                emitFromPayloads([this.response]);
+                emitFromPayloads([this.response], reqUrl);
               } else if ((!this.responseType || this.responseType === 'text') && this.responseText) {
-                emitFromPayloads(parseJsonOrNdjson(this.responseText));
+                emitFromPayloads(parseJsonOrNdjson(this.responseText), reqUrl);
+              } else if (
+                this.responseType === 'arraybuffer' &&
+                this.response &&
+                typeof TextDecoder === 'function'
+              ) {
+                const decoded = new TextDecoder('utf-8').decode(this.response);
+                if (decoded) emitFromPayloads(parseJsonOrNdjson(decoded), reqUrl);
+              } else if (
+                this.responseType === 'blob' &&
+                this.response &&
+                typeof this.response.text === 'function'
+              ) {
+                this.response
+                  .text()
+                  .then((text) => emitFromPayloads(parseJsonOrNdjson(text), reqUrl))
+                  .catch(() => {});
               }
             } catch {
               // ignore non-JSON payloads

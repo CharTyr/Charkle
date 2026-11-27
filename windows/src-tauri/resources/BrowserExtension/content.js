@@ -76,9 +76,11 @@
     startedAt: 0,
   };
 
-  // Passively captured media posts from `page-bridge.js` across X, Bluesky, Threads & Instagram
+  // Passively captured media posts from `page-bridge.js` across X, Bluesky, Threads, Instagram & Douyin
   const capturedXTweetsById = new Map();
   const capturedSocialPostsByKey = new Map();
+  const douyinCollectionsById = new Map();
+  let lastActiveDouyinCollectionId = null;
   const MAX_CAPTURED_SOCIAL_POSTS = 5000;
 
   function trimCapturedMap(map, limit) {
@@ -94,13 +96,38 @@
 
   function initXGraphQLBridgeListener() {
     const host = window.location.hostname.toLowerCase();
-    if (!isXHost(host) && !isBlueskyHost(host) && !isThreadsHost(host) && !isInstagramHost(host)) {
+    if (
+      !isXHost(host) &&
+      !isBlueskyHost(host) &&
+      !isThreadsHost(host) &&
+      !isInstagramHost(host) &&
+      !isDouyinHost(host)
+    ) {
       return;
     }
     window.addEventListener('message', (event) => {
       if (event.source !== window || event.origin !== window.location.origin) return;
       const data = event.data;
       if (!data || (data.__charkleSocialBridge !== true && data.__charkleXBridge !== true)) return;
+
+      if (data.platform === 'douyin' && data.type === 'DOUYIN_COLLECTIONS' && Array.isArray(data.collections)) {
+        for (const col of data.collections) {
+          if (!col || !col.id || !col.name) continue;
+          douyinCollectionsById.set(String(col.id), {
+            id: String(col.id),
+            name: String(col.name).trim(),
+            totalCount: col.totalCount ?? null,
+          });
+        }
+        updateFloatingLauncherVisibility();
+        return;
+      }
+
+      if (data.platform === 'douyin' && data.collectionId) {
+        lastActiveDouyinCollectionId = String(data.collectionId);
+        updateFloatingLauncherVisibility();
+      }
+
       const incoming = Array.isArray(data.posts)
         ? data.posts
         : Array.isArray(data.tweets)
@@ -113,8 +140,42 @@
         const platform = post.platform || data.platform || 'x';
         const dedupKey = post.dedupKey || `${platform}:${postID}`;
         const prev = capturedSocialPostsByKey.get(dedupKey);
-        if (!prev || (Array.isArray(post.media) && post.media.length >= (prev.media?.length || 0))) {
-          capturedSocialPostsByKey.set(dedupKey, { ...post, platform, postID, dedupKey });
+        const mergedCollectionIds = Array.from(
+          new Set([
+            ...(Array.isArray(prev?.collectionIds) ? prev.collectionIds : []),
+            ...(prev?.collectionId ? [String(prev.collectionId)] : []),
+            ...(post.collectionId ? [String(post.collectionId)] : []),
+            ...(data.collectionId ? [String(data.collectionId)] : []),
+          ]),
+        );
+        const mergedEndpoints = Array.from(
+          new Set([
+            ...(Array.isArray(prev?.sourceEndpoints) ? prev.sourceEndpoints : []),
+            ...(prev?.sourceEndpoint ? [prev.sourceEndpoint] : []),
+            ...(post.sourceEndpoint ? [post.sourceEndpoint] : []),
+            ...(data.sourceEndpoint ? [data.sourceEndpoint] : []),
+          ]),
+        );
+        const prevScore = prev ? (prev.media?.length || 0) * 10 + (prev.videoURL ? 2 : 0) : -1;
+        const nextScore = (Array.isArray(post.media) ? post.media.length : 0) * 10 + (post.videoURL ? 2 : 0);
+        if (!prev || nextScore >= prevScore) {
+          capturedSocialPostsByKey.set(dedupKey, {
+            ...prev,
+            ...post,
+            platform,
+            postID,
+            dedupKey,
+            collectionId: post.collectionId || data.collectionId || prev?.collectionId || null,
+            collectionIds: mergedCollectionIds,
+            sourceEndpoint: post.sourceEndpoint || data.sourceEndpoint || prev?.sourceEndpoint || '',
+            sourceEndpoints: mergedEndpoints,
+          });
+        } else if (prev && (mergedCollectionIds.length > (prev.collectionIds?.length || 0) || mergedEndpoints.length > (prev.sourceEndpoints?.length || 0))) {
+          capturedSocialPostsByKey.set(dedupKey, {
+            ...prev,
+            collectionIds: mergedCollectionIds,
+            sourceEndpoints: mergedEndpoints,
+          });
         }
         if (platform === 'x') {
           const prevX = capturedXTweetsById.get(postID);
@@ -206,6 +267,20 @@
     return typeof candidate === 'string' && /^[a-zA-Z0-9]{16,40}$/.test(candidate);
   }
 
+  function isValidDouyinAwemeId(candidate) {
+    return typeof candidate === 'string' && /^\d{15,22}$/.test(candidate.trim());
+  }
+
+  function isDouyinHost(host) {
+    return (
+      host === 'douyin.com' ||
+      host === 'www.douyin.com' ||
+      host === 'm.douyin.com' ||
+      host === 'iesdouyin.com' ||
+      host === 'www.iesdouyin.com'
+    );
+  }
+
   function isXHost(host) {
     return (
       host === 'x.com' ||
@@ -261,6 +336,7 @@
     threads: '贴文',
     instagram: '贴文',
     xiaohongshu: '笔记',
+    douyin: '作品',
   };
 
   const SOCIAL_PLATFORM_DISPLAY = {
@@ -270,6 +346,7 @@
     threads: 'Threads',
     instagram: 'Instagram',
     xiaohongshu: '小红书',
+    douyin: '抖音',
   };
 
   function readCreatorDisplayName(platform, fallbackHandle = '') {
@@ -306,6 +383,26 @@
         const t = (nameEl?.textContent || '').trim();
         if (t) return t;
       }
+      if (platform === 'douyin') {
+        const selectors = [
+          '[data-e2e="user-info"] h1',
+          '[data-e2e="user-nickname"]',
+          'h1[class*="nickname"]',
+          'h1',
+        ];
+        for (const sel of selectors) {
+          const el = document.querySelector(sel);
+          const t = (el?.textContent || '').trim();
+          if (t && t.length <= 48 && !/^(抖音|推荐|发现|关注|朋友|我的|收藏|喜欢|作品)$/.test(t)) {
+            return t;
+          }
+        }
+        const fromTitle = String(document.title || '')
+          .replace(/的主页\s*[-–—|]\s*抖音.*$/i, '')
+          .replace(/\s*[-–—|]\s*抖音.*$/i, '')
+          .trim();
+        if (fromTitle && fromTitle !== '抖音') return fromTitle;
+      }
     } catch {
       // ignore DOM read errors
     }
@@ -316,12 +413,14 @@
     const cleanHandle = String(authorHandle ?? '').trim().replace(/^@/, '');
     const cleanName = sanitizeXFolderSegment(authorName, 36);
     const label = SOCIAL_PLATFORM_DISPLAY[platform] || '社交';
-    if (platform === 'pixiv' || platform === 'xiaohongshu') {
-      if (cleanName && cleanHandle && /^\d+$/.test(cleanHandle)) {
+    if (platform === 'pixiv' || platform === 'xiaohongshu' || platform === 'douyin') {
+      if (cleanName && cleanHandle && /^\d+$/.test(cleanHandle) && platform === 'pixiv') {
         return `${cleanName} (${label})`.slice(0, 64);
       }
       if (cleanName) return cleanName.slice(0, 64);
-      if (cleanHandle) return `${label} #${cleanHandle}`.slice(0, 64);
+      if (cleanHandle && !cleanHandle.startsWith('MS4wLjAB')) {
+        return `${label} #${cleanHandle}`.slice(0, 64);
+      }
       return fallback || `${label} 作品`;
     }
     if (!cleanHandle) return cleanName || fallback || `${label} 作者媒体`;
@@ -408,6 +507,214 @@
       // ignore DOM errors
     }
     return '';
+  }
+
+  function getActiveDouyinPrimaryTabText() {
+    try {
+      const selectors = [
+        '[data-e2e="user-tab-list"] [role="tab"][aria-selected="true"]',
+        '[data-e2e="user-tab-list"] [class*="active"]',
+        '[role="tab"][aria-selected="true"]',
+        '[class*="tab"][class*="active"]',
+        '[class*="Tab"][class*="Active"]',
+      ];
+      for (const sel of selectors) {
+        const nodes = document.querySelectorAll(sel);
+        for (const el of nodes) {
+          const text = (el.textContent || '').trim().replace(/\s+/g, ' ');
+          // Strictly match primary profile tabs; exclude secondary collection sub-tabs (`收藏夹`, `收藏视频`, `视频`, `合集`, `音乐`, `短剧`)
+          if (
+            /^(作品|喜欢|收藏|推荐|私密|赞过)(?:\s+\d+|\d*)$/.test(text) &&
+            !/^(收藏夹|收藏视频)/.test(text)
+          ) {
+            return text;
+          }
+        }
+      }
+    } catch {
+      // ignore DOM errors
+    }
+    return '';
+  }
+
+  function getActiveDouyinSubTabText() {
+    try {
+      const nodes = document.querySelectorAll('[role="tab"][aria-selected="true"], [class*="semi-tabs-tab-active"]');
+      for (const el of nodes) {
+        const text = (el.textContent || '').trim().replace(/\s+/g, ' ');
+        if (/^(收藏夹|收藏视频|视频|音乐|合集|短剧)(?:\s+\d+|\d*)$/.test(text)) {
+          return text;
+        }
+      }
+    } catch {
+      // ignore DOM errors
+    }
+    return '';
+  }
+
+  function getActiveDouyinTabText() {
+    const primary = getActiveDouyinPrimaryTabText();
+    const sub = getActiveDouyinSubTabText();
+    return sub ? `${primary}|${sub}` : primary;
+  }
+
+  function readActiveDouyinCollectionInfo(u) {
+    let collectionId = (
+      u?.searchParams?.get('collects_id') ||
+      u?.searchParams?.get('collection_id') ||
+      ''
+    ).trim();
+    const showSubTab = (u?.searchParams?.get('showSubTab') || '').trim().toLowerCase();
+    const parts = u ? u.pathname.split('/').filter(Boolean) : [];
+    if (!collectionId && parts.length >= 2 && /^(collection|collects)$/i.test(parts[0])) {
+      collectionId = parts[1];
+    }
+
+    // When explicitly viewing the `showSubTab=video` (or music/mix/playlet) all-favorites sub-tab
+    // without an explicit `collects_id`, do not carry over a previously viewed sub-collection folder.
+    if (!collectionId && showSubTab && ['video', 'music', 'mix', 'playlet', 'all'].includes(showSubTab)) {
+      return { isSubCollection: false, collectionId: null, collectionName: '' };
+    }
+
+    let collectionName = '';
+    if (collectionId && douyinCollectionsById.has(collectionId)) {
+      collectionName = douyinCollectionsById.get(collectionId).name || '';
+    }
+
+    // Check if a sub-collection drawer/view is currently open in DOM on the favorites tab
+    try {
+      const subHeadingSelectors = [
+        '[data-e2e="collection-detail-title"]',
+        '[class*="collects-detail"] h1',
+        '[class*="collects-detail"] h2',
+        '[class*="collection-title"]',
+        '[class*="folder-title"]',
+      ];
+      for (const sel of subHeadingSelectors) {
+        const el = document.querySelector(sel);
+        const text = (el?.textContent || '').trim();
+        if (text && text.length <= 48 && !/^(收藏|收藏夹|收藏视频|全部收藏|我的收藏|视频|合集)$/.test(text)) {
+          collectionName = text;
+          break;
+        }
+      }
+    } catch {
+      // ignore DOM errors
+    }
+
+    if (!collectionId && collectionName) {
+      for (const col of douyinCollectionsById.values()) {
+        if (col.name === collectionName) {
+          collectionId = col.id;
+          break;
+        }
+      }
+    }
+
+    if (!collectionId && lastActiveDouyinCollectionId) {
+      const col = douyinCollectionsById.get(lastActiveDouyinCollectionId);
+      if (col && document.body && String(document.body.innerText || '').includes(col.name)) {
+        const activePrimary = getActiveDouyinPrimaryTabText();
+        const showTab = (u?.searchParams?.get('showTab') || '').toLowerCase();
+        if (/^收藏/.test(activePrimary) || showTab === 'favorite_collection') {
+          const backBtn = document.querySelector(
+            '[class*="collects"] [class*="back"], [class*="collection"] [class*="back"], button[aria-label*="返回"]',
+          );
+          if (backBtn) {
+            collectionId = col.id;
+            collectionName = collectionName || col.name;
+          }
+        }
+      }
+    }
+
+    return {
+      isSubCollection: Boolean(collectionId || collectionName),
+      collectionId: collectionId || null,
+      collectionName: sanitizeXFolderSegment(collectionName, 48),
+    };
+  }
+
+  function normalizeDouyinHref(rawHref) {
+    if (!rawHref) return null;
+    try {
+      const u = new URL(String(rawHref).trim(), window.location.origin);
+      if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+      const host = u.hostname.toLowerCase();
+      if (!isDouyinHost(host)) return null;
+      const parts = u.pathname.split('/').filter(Boolean);
+      let awemeId = null;
+      let kind = 'video';
+      if (
+        parts.length >= 2 &&
+        (parts[0].toLowerCase() === 'video' || parts[0].toLowerCase() === 'note') &&
+        isValidDouyinAwemeId(parts[1])
+      ) {
+        kind = parts[0].toLowerCase();
+        awemeId = parts[1];
+      } else if (
+        parts.length >= 3 &&
+        parts[0].toLowerCase() === 'share' &&
+        (parts[1].toLowerCase() === 'video' || parts[1].toLowerCase() === 'note') &&
+        isValidDouyinAwemeId(parts[2])
+      ) {
+        kind = parts[1].toLowerCase();
+        awemeId = parts[2];
+      } else {
+        const modalId = (u.searchParams.get('modal_id') || '').trim();
+        if (isValidDouyinAwemeId(modalId)) {
+          awemeId = modalId;
+          kind = 'video';
+        }
+      }
+      if (!awemeId) return null;
+      return {
+        awemeId,
+        kind,
+        url: `https://www.douyin.com/${kind}/${awemeId}`,
+        dedupKey: `douyin:${awemeId}`,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  function hasDouyinAuthOrVerifyBlocker() {
+    try {
+      const selectors = [
+        '#login-pannel',
+        '.login-mask-enter-done',
+        '.captcha_verify_container',
+        '#captcha-verify-image',
+        '[class*="verify-bar"]',
+        'iframe[src*="verify"]',
+        'iframe[src*="captcha"]',
+      ];
+      for (const sel of selectors) {
+        const nodes = document.querySelectorAll(sel);
+        for (const el of nodes) {
+          if (!el) continue;
+          // Real logged-in Douyin pages keep a hidden 0x0 `<iframe id="nocaptcha-container">` mounted;
+          // require visible layout dimensions and non-hidden computed style before treating as a blocker.
+          const style = typeof window.getComputedStyle === 'function' ? window.getComputedStyle(el) : null;
+          if (
+            style &&
+            (style.display === 'none' ||
+              style.visibility === 'hidden' ||
+              Number.parseFloat(style.opacity || '1') < 0.05)
+          ) {
+            continue;
+          }
+          const rect = el.getBoundingClientRect();
+          if (rect.width >= 120 && rect.height >= 80) {
+            return true;
+          }
+        }
+      }
+    } catch {
+      // ignore DOM errors
+    }
+    return false;
   }
 
   const X_RESERVED_PROFILE_SEGMENTS = new Set([
@@ -769,6 +1076,111 @@
           label: '当前小红书笔记列表',
           suggestedFolderName: '小红书收藏',
         };
+      }
+    }
+
+    if (isDouyinHost(host)) {
+      const isSingleDouyinPost =
+        (parts.length >= 2 && (p0 === 'video' || p0 === 'note') && isValidDouyinAwemeId(parts[1])) ||
+        (parts.length >= 3 && p0 === 'share' && (p1 === 'video' || p1 === 'note') && isValidDouyinAwemeId(parts[2]));
+
+      if (!isSingleDouyinPost) {
+        const showTab = (u.searchParams.get('showTab') || u.searchParams.get('tab') || '').toLowerCase();
+        const showSubTab = (u.searchParams.get('showSubTab') || '').toLowerCase();
+        const activeDyPrimaryTab = getActiveDouyinPrimaryTabText();
+        const activeDySubTab = getActiveDouyinSubTabText();
+        const colInfo = readActiveDouyinCollectionInfo(u);
+        const isCollectTab =
+          showTab === 'favorite_collection' ||
+          showTab === 'collect' ||
+          showTab === 'collection' ||
+          showTab === 'favorites' ||
+          /^收藏/.test(activeDyPrimaryTab);
+        const isLikeTab = showTab === 'like' || showTab === 'likes' || /^喜欢/.test(activeDyPrimaryTab);
+
+        if (parts.length >= 2 && p0 === 'user') {
+          const userSeg = parts[1];
+          const dyAuthor = readCreatorDisplayName('douyin', '');
+          if (colInfo.isSubCollection && (isCollectTab || Boolean(u.searchParams.get('collects_id')))) {
+            const folderName = colInfo.collectionName || '抖音收藏';
+            return {
+              supported: true,
+              isCollectionRoute: true,
+              platform: 'douyin',
+              pageKind: 'board',
+              authorHandle: userSeg === 'self' ? '' : userSeg,
+              authorName: dyAuthor,
+              collectionId: colInfo.collectionId,
+              collectionName: colInfo.collectionName,
+              subTab: showSubTab || activeDySubTab || null,
+              label: colInfo.collectionName ? `抖音收藏夹 · ${colInfo.collectionName}` : '抖音收藏夹',
+              suggestedFolderName: folderName,
+            };
+          }
+          if (isCollectTab) {
+            const isVideoSub = showSubTab === 'video' || /^视频\b|^收藏视频/.test(activeDySubTab);
+            return {
+              supported: true,
+              isCollectionRoute: true,
+              platform: 'douyin',
+              pageKind: 'collect',
+              authorHandle: userSeg === 'self' ? '' : userSeg,
+              authorName: dyAuthor,
+              subTab: showSubTab || activeDySubTab || null,
+              label: isVideoSub ? '抖音收藏 · 视频与图文' : '抖音收藏页',
+              suggestedFolderName: '抖音收藏',
+            };
+          }
+          if (isLikeTab) {
+            return {
+              supported: true,
+              isCollectionRoute: true,
+              platform: 'douyin',
+              pageKind: 'likes',
+              authorHandle: userSeg === 'self' ? '' : userSeg,
+              authorName: dyAuthor,
+              label: '抖音喜欢页',
+              suggestedFolderName: '抖音喜欢',
+            };
+          }
+          return {
+            supported: true,
+            isCollectionRoute: true,
+            platform: 'douyin',
+            pageKind: 'profile',
+            authorHandle: userSeg === 'self' ? '' : userSeg,
+            authorName: dyAuthor,
+            label: dyAuthor ? `抖音作者 · ${dyAuthor}` : userSeg === 'self' ? '抖音个人主页' : '抖音作者主页',
+            suggestedFolderName: dyAuthor
+              ? buildCreatorRootFolderName('douyin', '', dyAuthor)
+              : '抖音收藏',
+          };
+        }
+
+        if (parts.length >= 1 && (p0 === 'collection' || p0 === 'collects' || p0 === 'favorites')) {
+          const folderName = colInfo.collectionName || '抖音收藏';
+          return {
+            supported: true,
+            isCollectionRoute: true,
+            platform: 'douyin',
+            pageKind: 'board',
+            collectionId: colInfo.collectionId,
+            collectionName: colInfo.collectionName,
+            label: colInfo.collectionName ? `抖音收藏夹 · ${colInfo.collectionName}` : '抖音收藏夹',
+            suggestedFolderName: folderName,
+          };
+        }
+
+        if (document.querySelector('a[href*="/video/"], a[href*="/note/"], [data-e2e="scroll-list"] li')) {
+          return {
+            supported: true,
+            isCollectionRoute: false,
+            platform: 'douyin',
+            pageKind: 'feed',
+            label: '当前抖音作品列表',
+            suggestedFolderName: '抖音收藏',
+          };
+        }
       }
     }
 
@@ -1513,6 +1925,9 @@
         includeVideos: cfg.authorMediaIncludeVideos !== false,
         skipRetweets: cfg.authorMediaSkipRetweets !== false,
         xhsCollectMode: cfg.xhsProfileCollectMode || 'media',
+        douyinCollectMode: cfg.douyinProfileCollectMode || 'media',
+        douyinContentFilter: cfg.douyinContentFilter || 'all',
+        douyinAutoClassify: cfg.douyinAutoClassify !== false,
         targetLabel: runtimeState.targetLabel,
       });
     });
@@ -1701,6 +2116,19 @@
           return '采集小红书作者作品';
         }
         return '一键导入小红书收藏';
+      }
+      if (info.platform === 'douyin') {
+        if (info.pageKind === 'likes') return '一键导入抖音喜欢';
+        if (info.pageKind === 'board' && info.collectionName) {
+          return `一键导入「${info.collectionName}」`;
+        }
+        if (
+          info.pageKind === 'profile' &&
+          (runtimeState.config?.douyinProfileCollectMode || 'media') === 'media'
+        ) {
+          return '采集抖音作者作品';
+        }
+        return '一键导入抖音收藏';
       }
       return info.pageKind === 'author_media'
         ? `采集 @${info.authorHandle || '作者'} 全部媒体`
@@ -2421,6 +2849,458 @@
     return items;
   }
 
+  function ensureDouyinTypeTagList(tags, hasVideo) {
+    const typeTag = hasVideo ? '抖音视频' : '抖音图文';
+    return Array.from(
+      new Set([...(Array.isArray(tags) ? tags : []), typeTag].filter(Boolean)),
+    ).slice(0, 16);
+  }
+
+  function matchesDouyinContentFilter(item, filter = 'all') {
+    if (filter === 'video') return Boolean(item?.hasVideo);
+    if (filter === 'image') return !item?.hasVideo;
+    return true;
+  }
+
+  function convertCapturedDouyinPostToBookmark(post, pageInfo = {}) {
+    const primaryTag =
+      pageInfo?.pageKind === 'likes'
+        ? '抖音喜欢'
+        : pageInfo?.pageKind === 'board' && pageInfo?.collectionName
+          ? pageInfo.collectionName
+          : '抖音收藏';
+    const rawMedia = Array.isArray(post?.media) ? post.media : [];
+    const attachments = rawMedia
+      .filter((m) => m && m.url)
+      .map((m) => ({
+        kind: m.kind || 'photo',
+        url: m.url,
+        thumbnailURL: m.thumbnailURL || (m.kind === 'photo' ? m.url : null),
+      }));
+    const coverUrl =
+      attachments.find((a) => a.kind === 'photo')?.url ||
+      attachments.find((a) => a.thumbnailURL)?.thumbnailURL ||
+      post.coverUrl ||
+      null;
+    const mediaURLs = attachments.filter((a) => a.kind === 'photo').map((a) => a.url);
+    const mediaThumbnailURLs = attachments
+      .map((a) => a.thumbnailURL || (a.kind === 'photo' ? a.url : ''))
+      .filter(Boolean);
+    if (mediaURLs.length === 0 && coverUrl) {
+      mediaURLs.push(coverUrl);
+    }
+    const hasVideo = Boolean(post.hasVideo);
+    const mergedTags = ensureDouyinTypeTagList(
+      ['抖音', primaryTag, ...(Array.isArray(post.tags) ? post.tags : [])],
+      hasVideo,
+    );
+
+    return {
+      type: 'socialBookmark',
+      platform: 'douyin',
+      postID: post.postID,
+      videoID: post.videoID || post.postID,
+      originalURL: post.originalURL,
+      dedupKey: post.dedupKey || `douyin:${post.postID}`,
+      authorName: post.authorName || pageInfo?.authorName || '抖音用户',
+      authorHandle: post.authorHandle || '',
+      authorAvatarURL: post.authorAvatarURL || null,
+      publishedAtText: post.publishedAtText || null,
+      articleTitle: post.articleTitle || post.title || null,
+      title: post.title || post.articleTitle || null,
+      bodyText: post.bodyText || post.title || post.originalURL,
+      coverUrl,
+      mediaURLs,
+      mediaThumbnailURLs,
+      attachments,
+      hasVideo: Boolean(post.hasVideo),
+      videoURL: post.videoURL || null,
+      durationSeconds: post.durationSeconds ?? null,
+      videoDurationSeconds: post.videoDurationSeconds ?? post.durationSeconds ?? null,
+      likeCount: post.likeCount ?? null,
+      replyCount: post.replyCount ?? null,
+      repostCount: post.repostCount ?? null,
+      viewCount: post.viewCount ?? null,
+      referer: 'https://www.douyin.com/',
+      tags: mergedTags,
+    };
+  }
+
+  function collectVisibleDouyinDomIds() {
+    const ids = new Set();
+    for (const a of document.querySelectorAll('a[href*="/video/"], a[href*="/note/"], a[href*="modal_id="]')) {
+      const norm = normalizeDouyinHref(a.getAttribute('href') || '');
+      if (norm) ids.add(norm.awemeId);
+    }
+    return ids;
+  }
+
+  function matchesDouyinPageScope(post, pageInfo, visibleDomIds) {
+    if (!post || post.platform !== 'douyin') return false;
+    const endpoints = Array.isArray(post.sourceEndpoints)
+      ? post.sourceEndpoints
+      : post.sourceEndpoint
+        ? [post.sourceEndpoint]
+        : [];
+    const colIds = Array.isArray(post.collectionIds)
+      ? post.collectionIds
+      : post.collectionId
+        ? [String(post.collectionId)]
+        : [];
+    const inDom = visibleDomIds.has(post.postID);
+
+    if (pageInfo?.pageKind === 'board' && pageInfo.collectionId) {
+      return colIds.includes(String(pageInfo.collectionId)) || inDom;
+    }
+    if (pageInfo?.pageKind === 'collect') {
+      return (
+        endpoints.includes('listcollection') ||
+        endpoints.includes('collects_video_list') ||
+        endpoints.length === 0 ||
+        inDom
+      );
+    }
+    if (pageInfo?.pageKind === 'likes') {
+      return endpoints.includes('favorite') || endpoints.length === 0 || inDom;
+    }
+    if (pageInfo?.pageKind === 'profile') {
+      return endpoints.includes('post') || endpoints.length === 0 || inDom;
+    }
+    return inDom || endpoints.length > 0;
+  }
+
+  function harvestVisibleDouyinItems(pageInfo, runOptions = {}, isMediaMode = false) {
+    const includeVideos = runOptions?.includeVideos !== false;
+    const visibleDomIds = collectVisibleDouyinDomIds();
+    const mergedByKey = new Map();
+
+    // 1. Primary source: passively intercepted Douyin Web API items from `page-bridge.js`
+    for (const post of capturedSocialPostsByKey.values()) {
+      if (!matchesDouyinPageScope(post, pageInfo, visibleDomIds)) continue;
+      const dedupKey = post.dedupKey || `douyin:${post.postID}`;
+      if (isMediaMode) {
+        const filteredMedia = includeVideos
+          ? post.media || []
+          : (post.media || []).filter((m) => m && m.kind === 'photo');
+        if (filteredMedia.length === 0) continue;
+        mergedByKey.set(dedupKey, {
+          ...post,
+          platform: 'douyin',
+          dedupKey,
+          media: filteredMedia,
+          hasVideo: filteredMedia.some((m) => m.kind === 'video' || m.kind === 'gif'),
+          needsEnrich: false,
+          referer: 'https://www.douyin.com/',
+          tags: ensureDouyinTypeTagList(post.tags, filteredMedia.some((m) => m.kind === 'video' || m.kind === 'gif')),
+        });
+      } else {
+        mergedByKey.set(dedupKey, convertCapturedDouyinPostToBookmark(post, pageInfo));
+      }
+    }
+
+    // 2. DOM fallback: covers first-screen SSR or pre-bridge cards via visible `/video/`, `/note/`, or `modal_id=` anchors
+    const primaryTag =
+      pageInfo?.pageKind === 'likes'
+        ? '抖音喜欢'
+        : pageInfo?.pageKind === 'board' && pageInfo?.collectionName
+          ? pageInfo.collectionName
+          : '抖音收藏';
+    for (const anchor of document.querySelectorAll('a[href*="/video/"], a[href*="/note/"], a[href*="modal_id="]')) {
+      const norm = normalizeDouyinHref(anchor.getAttribute('href') || '');
+      if (!norm || mergedByKey.has(norm.dedupKey)) continue;
+
+      const cached = capturedSocialPostsByKey.get(norm.dedupKey);
+      if (cached) {
+        if (isMediaMode) {
+          const filteredMedia = includeVideos
+            ? cached.media || []
+            : (cached.media || []).filter((m) => m && m.kind === 'photo');
+          if (filteredMedia.length === 0) continue;
+          mergedByKey.set(norm.dedupKey, {
+            ...cached,
+            platform: 'douyin',
+            dedupKey: norm.dedupKey,
+            media: filteredMedia,
+            hasVideo: filteredMedia.some((m) => m.kind === 'video' || m.kind === 'gif'),
+            needsEnrich: false,
+            referer: 'https://www.douyin.com/',
+            tags: ensureDouyinTypeTagList(
+              cached.tags,
+              filteredMedia.some((m) => m.kind === 'video' || m.kind === 'gif'),
+            ),
+          });
+        } else {
+          mergedByKey.set(norm.dedupKey, convertCapturedDouyinPostToBookmark(cached, pageInfo));
+        }
+        continue;
+      }
+
+      const card = anchor.closest('li, article, section') || anchor.parentElement || anchor;
+      const img = card.querySelector('img');
+      const coverUrl = upgradeHttps(
+        img?.currentSrc || img?.getAttribute('data-src') || img?.src || '',
+      );
+      const title = (
+        card.querySelector('p, [class*="title"], [class*="desc"]')?.textContent ||
+        img?.getAttribute('alt') ||
+        ''
+      )
+        .trim()
+        .slice(0, 120);
+      const isPhotoNote = norm.kind === 'note';
+      const hasVideo = !isPhotoNote;
+
+      if (isMediaMode) {
+        if (hasVideo && !includeVideos) continue;
+        if (!coverUrl || hasVideo) continue; // Wait for API stream URL for raw video downloads
+        mergedByKey.set(norm.dedupKey, {
+          platform: 'douyin',
+          postID: norm.awemeId,
+          tweetID: norm.awemeId,
+          originalURL: norm.url,
+          dedupKey: norm.dedupKey,
+          authorName: pageInfo?.authorName || '抖音用户',
+          authorHandle: '',
+          publishedAtText: null,
+          publishedDateKey: '',
+          title,
+          bodyText: title,
+          isRetweet: false,
+          media: [{ kind: 'photo', url: coverUrl, thumbnailURL: coverUrl }],
+          hasVideo: false,
+          needsEnrich: false,
+          referer: 'https://www.douyin.com/',
+          tags: ['抖音', '抖音图文'],
+        });
+      } else {
+        const attachments = coverUrl ? [{ kind: 'photo', url: coverUrl, thumbnailURL: coverUrl }] : [];
+        mergedByKey.set(norm.dedupKey, {
+          type: 'socialBookmark',
+          platform: 'douyin',
+          postID: norm.awemeId,
+          videoID: norm.awemeId,
+          originalURL: norm.url,
+          dedupKey: norm.dedupKey,
+          authorName: pageInfo?.authorName || '抖音用户',
+          authorHandle: '',
+          authorAvatarURL: null,
+          articleTitle: title || null,
+          title: title || null,
+          bodyText: title || norm.url,
+          coverUrl: coverUrl || null,
+          mediaURLs: attachments.map((a) => a.url),
+          mediaThumbnailURLs: attachments.map((a) => a.thumbnailURL || a.url),
+          attachments,
+          hasVideo,
+          videoURL: null,
+          durationSeconds: null,
+          videoDurationSeconds: null,
+          referer: 'https://www.douyin.com/',
+          tags: ensureDouyinTypeTagList(['抖音', primaryTag], hasVideo),
+        });
+      }
+    }
+
+    return Array.from(mergedByKey.values());
+  }
+
+  function extractCurrentSingleDouyinPost() {
+    const host = window.location.hostname.toLowerCase();
+    if (!isDouyinHost(host)) return null;
+    const norm = normalizeDouyinHref(window.location.href);
+    if (!norm) return null;
+
+    const cached = capturedSocialPostsByKey.get(norm.dedupKey);
+    if (cached) {
+      return convertCapturedDouyinPostToBookmark(cached, { pageKind: 'collect' });
+    }
+
+    // Best-effort DOM fallback when page-bridge has not yet seen a `/detail/` payload
+    const titleText = (
+      document.querySelector('[data-e2e="detail-video-info"] h1, h1')?.textContent ||
+      document.querySelector('meta[property="og:title"]')?.getAttribute('content') ||
+      document.title ||
+      ''
+    )
+      .replace(/\s*[-–—|]\s*抖音.*$/i, '')
+      .trim();
+    const descText = (
+      document.querySelector('meta[property="og:description"]')?.getAttribute('content') ||
+      document.querySelector('meta[name="description"]')?.getAttribute('content') ||
+      titleText
+    ).trim();
+    const authorName =
+      (
+        document.querySelector('[data-e2e="detail-video-info"] [class*="author"], [data-e2e="user-info"] h1')
+          ?.textContent || ''
+      ).trim() || '抖音用户';
+    const videoEl = document.querySelector('video');
+    const posterUrl = upgradeHttps(
+      videoEl?.getAttribute('poster') ||
+        document.querySelector('meta[property="og:image"]')?.getAttribute('content') ||
+        '',
+    );
+    const rawVideoSrc = upgradeHttps(videoEl?.currentSrc || videoEl?.src || '');
+    const isPhotoNote = norm.kind === 'note';
+    const hasVideo = !isPhotoNote;
+    const attachments = [];
+    if (hasVideo && rawVideoSrc && !rawVideoSrc.startsWith('blob:')) {
+      attachments.push({ kind: 'video', url: rawVideoSrc, thumbnailURL: posterUrl || null });
+    } else if (posterUrl) {
+      attachments.push({ kind: 'photo', url: posterUrl, thumbnailURL: posterUrl });
+    }
+
+    return {
+      type: 'socialBookmark',
+      platform: 'douyin',
+      postID: norm.awemeId,
+      videoID: norm.awemeId,
+      originalURL: norm.url,
+      dedupKey: norm.dedupKey,
+      authorName,
+      authorHandle: '',
+      authorAvatarURL: null,
+      articleTitle: titleText || null,
+      title: titleText || null,
+      bodyText: descText || titleText || norm.url,
+      coverUrl: posterUrl || null,
+      mediaURLs: posterUrl ? [posterUrl] : [],
+      mediaThumbnailURLs: posterUrl ? [posterUrl] : [],
+      attachments,
+      hasVideo,
+      videoURL: hasVideo && rawVideoSrc && !rawVideoSrc.startsWith('blob:') ? rawVideoSrc : null,
+      durationSeconds:
+        videoEl && Number.isFinite(videoEl.duration) && videoEl.duration > 0
+          ? Math.round(videoEl.duration * 10) / 10
+          : null,
+      videoDurationSeconds:
+        videoEl && Number.isFinite(videoEl.duration) && videoEl.duration > 0
+          ? Math.round(videoEl.duration * 10) / 10
+          : null,
+      referer: 'https://www.douyin.com/',
+      tags: ensureDouyinTypeTagList(['抖音'], hasVideo),
+    };
+  }
+
+  async function scanDouyinPickerItems(options = {}) {
+    const pageInfo = resolveImportPageInfo(options);
+    if (!pageInfo?.supported || pageInfo.platform !== 'douyin') {
+      return { ok: false, error: '当前页面不是抖音作品或收藏列表页。', items: [], canScrollMore: false };
+    }
+
+    if (options.scrollMore) {
+      const target = findActiveScrollTarget('douyin');
+      const before = readScrollMetrics(target);
+      const stepPx = Math.max(460, Math.round(before.clientHeight * 0.85));
+      await advanceScrollStep(target, stepPx);
+      await sleep(900);
+      let waited = 0;
+      while (hasActivePageLoadingSpinner('douyin') && waited < 1600) {
+        await sleep(320);
+        waited += 320;
+      }
+    }
+
+    const bookmarks = harvestVisibleDouyinItems(pageInfo, { includeVideos: true, skipRetweets: false }, false);
+    const items = bookmarks.map((bm) => {
+      const cached = bm.dedupKey ? capturedSocialPostsByKey.get(bm.dedupKey) : null;
+      const media = Array.isArray(cached?.media) && cached.media.length > 0
+        ? cached.media
+        : Array.isArray(bm.attachments)
+          ? bm.attachments
+          : [];
+      const photoCount = bm.hasVideo
+        ? 0
+        : Math.max(
+            media.filter((m) => m && m.kind === 'photo').length,
+            Array.isArray(bm.mediaURLs) ? bm.mediaURLs.length : 0,
+            bm.coverUrl ? 1 : 0,
+          );
+      return {
+        dedupKey: bm.dedupKey,
+        postID: bm.postID,
+        originalURL: bm.originalURL,
+        title: bm.articleTitle || bm.title || bm.bodyText || '无标题抖音作品',
+        authorName: bm.authorName || '抖音用户',
+        coverUrl: bm.coverUrl || media[0]?.thumbnailURL || media[0]?.url || null,
+        hasVideo: Boolean(bm.hasVideo),
+        durationSeconds: bm.durationSeconds ?? bm.videoDurationSeconds ?? null,
+        imageCount: photoCount,
+        likeCount: bm.likeCount ?? null,
+        publishedAtText: bm.publishedAtText || null,
+        bookmark: bm,
+        mediaPost: {
+          platform: 'douyin',
+          postID: bm.postID,
+          tweetID: bm.postID,
+          originalURL: bm.originalURL,
+          dedupKey: bm.dedupKey,
+          authorName: bm.authorName || '抖音用户',
+          authorHandle: bm.authorHandle || '',
+          publishedAtText: bm.publishedAtText || null,
+          publishedDateKey: cached?.publishedDateKey || (bm.publishedAtText ? bm.publishedAtText.slice(0, 10) : ''),
+          title: bm.articleTitle || bm.title || '',
+          bodyText: bm.bodyText || '',
+          isRetweet: false,
+          media,
+          hasVideo: Boolean(bm.hasVideo),
+          needsEnrich: false,
+          referer: 'https://www.douyin.com/',
+          tags: ensureDouyinTypeTagList(bm.tags, Boolean(bm.hasVideo)),
+        },
+      };
+    });
+
+    const scrollTarget = findActiveScrollTarget('douyin');
+    const metrics = readScrollMetrics(scrollTarget);
+    const canScrollMore = metrics.scrollTop + metrics.clientHeight < metrics.scrollHeight - 40;
+    return {
+      ok: true,
+      items,
+      pageInfo,
+      canScrollMore,
+    };
+  }
+
+  async function ensureDouyinCollectTabActive(pageInfo) {
+    if (!pageInfo || pageInfo.platform !== 'douyin' || pageInfo.pageKind !== 'profile') return;
+    // Prefer the primary profile tablist (the one containing `作品` or `喜欢`) so secondary `semi-tabs`
+    // (`收藏夹`, `视频`, `音乐`, `合集`, `短剧`) are never mistaken for the primary `收藏` tab.
+    const tabLists = Array.from(document.querySelectorAll('[data-e2e="user-tab-list"], [role="tablist"]'));
+    const primaryTabList =
+      tabLists.find((list) => {
+        const t = String(list.textContent || '');
+        return t.includes('作品') || t.includes('喜欢');
+      }) || document;
+    const tabs = Array.from(
+      primaryTabList.querySelectorAll('[role="tab"], [class*="semi-tabs-tab"], [class*="tab-item"], :scope > div'),
+    );
+    const collectTab = tabs.find((el) => {
+      const text = (el.textContent || '').trim().replace(/\s+/g, ' ');
+      return (text === '收藏' || /^收藏\s*\d*$/.test(text)) && !/^收藏夹|^收藏视频/.test(text);
+    });
+    if (!collectTab) return;
+
+    const alreadyActive =
+      collectTab.getAttribute('aria-selected') === 'true' ||
+      /active/i.test(String(collectTab.className || ''));
+    if (!alreadyActive) {
+      batchJob.phase = '正在自动切换至抖音「收藏」标签页…';
+      syncHudAndPush();
+      collectTab.click();
+      const beforeSize = capturedSocialPostsByKey.size;
+      for (let waited = 0; waited < 2500 && !batchJob.stopRequested; waited += 250) {
+        await sleep(250);
+        if (
+          capturedSocialPostsByKey.size > beforeSize ||
+          window.location.search.includes('favorite_collection')
+        ) {
+          break;
+        }
+      }
+    }
+  }
+
   async function ensureXAuthorMediaTabActive(pageInfo) {
     if (!pageInfo || pageInfo.platform !== 'x' || pageInfo.pageKind !== 'author_media') return;
     const handle = String(pageInfo.authorHandle || '').trim();
@@ -2830,6 +3710,8 @@
     platform,
     authorHandle,
     authorName,
+    autoClassify,
+    suggestedFolderName,
   }) {
     if (!posts || posts.length === 0) return;
     const platformTag = SOCIAL_PLATFORM_DISPLAY[platform] || '社交';
@@ -2837,13 +3719,19 @@
       new Set(
         [
           platformTag,
-          platform !== 'pixiv' && platform !== 'xiaohongshu' && authorHandle ? `@${authorHandle}` : '',
+          platform !== 'pixiv' && platform !== 'xiaohongshu' && platform !== 'douyin' && authorHandle
+            ? `@${authorHandle}`
+            : '',
           authorName || '',
         ].filter(Boolean),
       ),
     );
     const preparedPosts = posts.map((post) => {
-      const mergedTags = Array.from(new Set([...(post.tags || []), ...baseTags]));
+      const mergedTagsRaw = Array.from(new Set([...(post.tags || []), ...baseTags]));
+      const mergedTags =
+        (post.platform || platform) === 'douyin'
+          ? ensureDouyinTypeTagList(mergedTagsRaw, Boolean(post.hasVideo))
+          : mergedTagsRaw;
       return {
         ...post,
         platform: post.platform || platform,
@@ -2868,6 +3756,8 @@
       targetLabel: batchJob.targetLabel,
       badgeText: String(Math.min(999, batchJob.mediaImported + preparedPosts.length)),
     };
+    if (typeof autoClassify === 'boolean') msgPayload.autoClassify = autoClassify;
+    if (suggestedFolderName) msgPayload.suggestedFolderName = suggestedFolderName;
 
     try {
       const res = await ext.runtime.sendMessage(msgPayload);
@@ -3385,21 +4275,55 @@
         suggestedFolderName: pageKind === 'likes' ? '小红书点赞' : '小红书收藏',
       };
     }
+    if (isDouyinHost(host)) {
+      const pageKind = options.preferredPageKind || 'collect';
+      return {
+        supported: true,
+        isCollectionRoute: true,
+        platform: 'douyin',
+        pageKind,
+        label: options.preferredLabel || (pageKind === 'likes' ? '抖音喜欢页' : '抖音收藏页'),
+        suggestedFolderName: pageKind === 'likes' ? '抖音喜欢' : '抖音收藏',
+      };
+    }
     return detected;
   }
 
   function findActiveScrollTarget(platform) {
+    const isScrollableOverflow = (overflowY) =>
+      overflowY === 'auto' || overflowY === 'scroll' || overflowY === 'overlay';
+
+    if (platform === 'douyin') {
+      // Real Douyin Web keeps documentElement/body locked to viewport height; the primary scrollable
+      // container is `div.parent-route-container.route-scroll-container` (or an open collection drawer).
+      const explicitCandidates = Array.from(
+        document.querySelectorAll(
+          '[class*="collects-detail"], [class*="collection-modal"], .route-scroll-container, .parent-route-container',
+        ),
+      );
+      for (const el of explicitCandidates) {
+        const style = window.getComputedStyle(el);
+        if (isScrollableOverflow(style.overflowY || '') && el.scrollHeight > el.clientHeight + 40) {
+          return el;
+        }
+      }
+    }
+
     const docEl = document.scrollingElement || document.documentElement;
     if (docEl && docEl.scrollHeight > window.innerHeight + 80) {
       return window;
     }
-    if (platform === 'xiaohongshu') {
-      const anchor = document.querySelector('section.note-item, .note-item, #userPostedFeeds, .feeds-container');
+    if (platform === 'xiaohongshu' || platform === 'douyin') {
+      const anchor =
+        platform === 'xiaohongshu'
+          ? document.querySelector('section.note-item, .note-item, #userPostedFeeds, .feeds-container')
+          : document.querySelector(
+              '[data-e2e="scroll-list"], [data-e2e="user-post-list"], [data-e2e="user-like-list"], a[href*="/video/"], a[href*="/note/"]',
+            );
       let cur = anchor?.parentElement || null;
       while (cur && cur !== document.body && cur !== document.documentElement) {
         const style = window.getComputedStyle(cur);
-        const overflowY = style.overflowY || '';
-        if ((overflowY === 'auto' || overflowY === 'scroll') && cur.scrollHeight > cur.clientHeight + 80) {
+        if (isScrollableOverflow(style.overflowY || '') && cur.scrollHeight > cur.clientHeight + 40) {
           return cur;
         }
         cur = cur.parentElement;
@@ -3470,6 +4394,13 @@
     ) {
       return true;
     }
+    if (
+      pageInfo.platform === 'douyin' &&
+      pageInfo.pageKind === 'profile' &&
+      (options.douyinCollectMode || runtimeState.config?.douyinProfileCollectMode || 'media') === 'media'
+    ) {
+      return true;
+    }
     return false;
   }
 
@@ -3483,7 +4414,7 @@
     if (!pageInfo.supported) {
       return {
         ok: false,
-        error: '请先打开 X、Pixiv、Bluesky、Threads、Instagram 或小红书的作者主页或收藏页。',
+        error: '请先打开 X、Pixiv、Bluesky、Threads、Instagram、小红书或抖音的创作者主页或收藏页。',
       };
     }
 
@@ -3503,6 +4434,17 @@
           ? options.skipRetweets !== false
           : runtimeState.config?.authorMediaSkipRetweets !== false,
       xhsCollectMode: options.xhsCollectMode || runtimeState.config?.xhsProfileCollectMode || 'media',
+      douyinCollectMode:
+        options.douyinCollectMode || runtimeState.config?.douyinProfileCollectMode || 'media',
+      douyinContentFilter: ['all', 'video', 'image'].includes(
+        options.douyinContentFilter || runtimeState.config?.douyinContentFilter,
+      )
+        ? options.douyinContentFilter || runtimeState.config?.douyinContentFilter
+        : 'all',
+      douyinAutoClassify:
+        'douyinAutoClassify' in options
+          ? options.douyinAutoClassify !== false
+          : runtimeState.config?.douyinAutoClassify !== false,
       targetFolderId: 'targetFolderId' in options ? options.targetFolderId : undefined,
       targetBoardId: 'targetBoardId' in options ? options.targetBoardId : undefined,
       targetLabel: options.targetLabel || runtimeState.targetLabel || '收件箱',
@@ -3545,6 +4487,8 @@
       organizeMode,
       includeVideos,
       skipRetweets,
+      douyinContentFilter = 'all',
+      douyinAutoClassify = true,
     } = runOptions;
     let effectiveTargetFolderId = runOptions.targetFolderId;
     const effectiveTargetBoardId = runOptions.targetBoardId;
@@ -3576,6 +4520,8 @@
 
       if (pageInfo.platform === 'xiaohongshu' && !isMediaMode) {
         await ensureXiaohongshuCollectTabActive(pageInfo);
+      } else if (pageInfo.platform === 'douyin' && !isMediaMode) {
+        await ensureDouyinCollectTabActive(pageInfo);
       } else if (isMediaMode) {
         if (pageInfo.platform === 'x') {
           await ensureXAuthorMediaTabActive(pageInfo);
@@ -3632,6 +4578,9 @@
           if (pageInfo.platform === 'xiaohongshu') {
             return harvestVisibleXhsNotes(pageInfo.pageKind);
           }
+          if (pageInfo.platform === 'douyin') {
+            return harvestVisibleDouyinItems(pageInfo, { includeVideos, skipRetweets }, isMediaMode);
+          }
           return [];
         })();
 
@@ -3640,6 +4589,17 @@
           const key = item.dedupKey || `url:${item.originalURL.toLowerCase()}`;
           if (seenThisRun.has(key)) continue;
           seenThisRun.add(key);
+
+          // Items excluded by Douyin content-type filter count toward scroll progress (`addedCount`)
+          // so dense video/photo runs keep scrolling, while NEVER polluting `knownStreak`/`skipped`.
+          if (
+            pageInfo.platform === 'douyin' &&
+            !matchesDouyinContentFilter(item, douyinContentFilter)
+          ) {
+            addedCount += 1;
+            continue;
+          }
+
           batchJob.discovered += 1;
           addedCount += 1;
 
@@ -3665,7 +4625,8 @@
         return addedCount;
       };
 
-      const chunkSize = isMediaMode ? 3 : 5;
+      // Flush Douyin author video downloads immediately (chunkSize = 1) to stay well within short CDN URL TTLs.
+      const chunkSize = isMediaMode ? (pageInfo.platform === 'douyin' && includeVideos ? 1 : 3) : 5;
       const flushChunk = async (isFinal = false) => {
         if (pendingQueue.length === 0) return;
         const batch = pendingQueue.splice(0, isFinal ? pendingQueue.length : chunkSize);
@@ -3742,6 +4703,8 @@
             platform: pageInfo.platform,
             authorHandle: pageInfo.authorHandle || '',
             authorName: readCreatorDisplayName(pageInfo.platform, pageInfo.authorHandle) || pageInfo.authorName || '',
+            autoClassify: pageInfo.platform === 'douyin' ? douyinAutoClassify : false,
+            suggestedFolderName: pageInfo.suggestedFolderName || '抖音收藏',
           });
           return;
         }
@@ -3757,6 +4720,12 @@
             prepared.push(...enrichedPair);
             if (i + 2 < batch.length) await sleep(240);
           }
+        } else if (pageInfo.platform === 'douyin') {
+          // Hydrate any DOM-fallback cards with fresher passively intercepted API metadata before upload
+          prepared = batch.map((card) => {
+            const latest = card.dedupKey ? capturedSocialPostsByKey.get(card.dedupKey) : null;
+            return latest ? convertCapturedDouyinPostToBookmark(latest, pageInfo) : card;
+          });
         }
 
         batchJob.phase = `正在写入 Charkle（${batchJob.targetLabel}）…`;
@@ -3769,6 +4738,10 @@
           isFinalChunk: isFinal,
           badgeText: String(Math.min(999, batchJob.imported + prepared.length)),
         };
+        if (pageInfo.platform === 'douyin') {
+          msgPayload.autoClassify = douyinAutoClassify;
+          msgPayload.suggestedFolderName = pageInfo.suggestedFolderName || '抖音收藏';
+        }
         if (effectiveTargetFolderId !== undefined) msgPayload.targetFolderId = effectiveTargetFolderId;
         if (effectiveTargetBoardId !== undefined) msgPayload.targetBoardId = effectiveTargetBoardId;
         if (runOptions.targetLabel) msgPayload.targetLabel = runOptions.targetLabel;
@@ -3803,7 +4776,11 @@
       try {
         batchJob.phase = `正在扫描${pageInfo.label}…`;
         harvestNow();
-        for (let initWait = 0; batchJob.discovered === 0 && initWait < 2400 && !batchJob.stopRequested; initWait += 300) {
+        for (
+          let initWait = 0;
+          batchJob.discovered === 0 && seenThisRun.size === 0 && initWait < 2400 && !batchJob.stopRequested;
+          initWait += 300
+        ) {
           await sleep(300);
           harvestNow();
         }
@@ -3815,6 +4792,12 @@
         let lastScrollHeight = readScrollMetrics(scrollTarget).scrollHeight;
 
         while (!batchJob.stopRequested && !hitKnownBoundary) {
+          if (pageInfo.platform === 'douyin' && hasDouyinAuthOrVerifyBlocker()) {
+            batchJob.pauseRequested = true;
+            batchJob.status = 'paused';
+            batchJob.phase = '检测到抖音登录或安全验证，请在页面完成后点击「继续」';
+            syncHudAndPush();
+          }
           await waitWhilePaused();
           if (batchJob.stopRequested) break;
           if (maxCount > 0 && batchJob.queued >= maxCount) break;
@@ -3833,7 +4816,11 @@
           await advanceScrollStep(scrollTarget, stepPx);
 
           const baseDelay =
-            pageInfo.platform === 'xiaohongshu' || pageInfo.platform === 'instagram' ? 920 : 700;
+            pageInfo.platform === 'xiaohongshu' ||
+            pageInfo.platform === 'instagram' ||
+            pageInfo.platform === 'douyin'
+              ? 920
+              : 700;
           await sleep(baseDelay);
 
           let spinnerWait = 0;
@@ -3870,7 +4857,10 @@
         await flushChunk(pendingQueue.length <= chunkSize);
       }
 
-      finishBatchJobStatus(pageInfo, isMediaMode, hitKnownBoundary);
+      finishBatchJobStatus(pageInfo, isMediaMode, hitKnownBoundary, {
+        douyinContentFilter,
+        filteredOutAny: seenThisRun.size > 0 && batchJob.discovered === 0,
+      });
     } catch (err) {
       batchJob.status = 'error';
       batchJob.errorMessage = err instanceof Error ? err.message : `批量采集${postNoun}失败，请稍后重试。`;
@@ -3879,7 +4869,7 @@
     }
   }
 
-  function finishBatchJobStatus(pageInfo, isMediaMode, hitKnownBoundary) {
+  function finishBatchJobStatus(pageInfo, isMediaMode, hitKnownBoundary, extra = {}) {
     const noun = SOCIAL_PLATFORM_NOUN[pageInfo.platform] || '作品';
     const platformName = SOCIAL_PLATFORM_DISPLAY[pageInfo.platform] || '社交';
 
@@ -3895,9 +4885,18 @@
         : `增量同步完成 · 新增 ${batchJob.imported} 条`;
     } else if (batchJob.discovered === 0) {
       batchJob.status = 'done';
-      batchJob.phase = isMediaMode
-        ? `未发现可采集的${platformName}${noun}，请确认已登录并处于作品/媒体页`
-        : `未发现可导入的${platformName}收藏，请确认已登录账号`;
+      if (
+        pageInfo.platform === 'douyin' &&
+        extra.filteredOutAny &&
+        (extra.douyinContentFilter === 'video' || extra.douyinContentFilter === 'image')
+      ) {
+        const filterText = extra.douyinContentFilter === 'video' ? '仅视频' : '仅图文';
+        batchJob.phase = `当前列表未发现符合「${filterText}」筛选条件的抖音作品`;
+      } else {
+        batchJob.phase = isMediaMode
+          ? `未发现可采集的${platformName}${noun}，请确认已登录并处于作品/媒体页`
+          : `未发现可导入的${platformName}收藏，请确认已登录账号`;
+      }
     } else {
       batchJob.status = 'done';
       batchJob.phase = isMediaMode
@@ -3917,7 +4916,16 @@
       const u = new URL(trimmed.startsWith('//') ? `https:${trimmed}` : trimmed, window.location.href);
       if (u.protocol !== 'http:' && u.protocol !== 'https:') return '';
       u.hash = '';
-      if (u.hostname.endsWith('xhscdn.com') && u.protocol === 'http:') {
+      if (
+        (u.hostname.endsWith('xhscdn.com') ||
+          u.hostname.endsWith('douyinpic.com') ||
+          u.hostname.endsWith('byteimg.com') ||
+          u.hostname.endsWith('ibytedtos.com') ||
+          u.hostname.endsWith('zjcdn.com') ||
+          u.hostname.endsWith('snssdk.com') ||
+          u.hostname.endsWith('pstatp.com')) &&
+        u.protocol === 'http:'
+      ) {
         u.protocol = 'https:';
       }
       if (u.hostname === 'pbs.twimg.com' && u.pathname.startsWith('/media/')) {
@@ -4189,13 +5197,14 @@
       document.querySelector('meta[name="description"]')?.getAttribute('content') ||
       '';
     const xhsNote = extractCurrentSingleXiaohongshuNote();
+    const socialPost = xhsNote || extractCurrentSingleDouyinPost();
     return {
       ok: true,
       url: window.location.href,
-      title: xhsNote?.articleTitle || document.title || '',
-      description: (xhsNote?.bodyText || descMeta || '').trim().slice(0, 600),
+      title: socialPost?.articleTitle || document.title || '',
+      description: (socialPost?.bodyText || descMeta || '').trim().slice(0, 600),
       selection: selection.slice(0, 12000),
-      socialBookmark: xhsNote,
+      socialBookmark: socialPost,
       collectionPage: detectCurrentCollectionPage(),
       bookmarkJob: snapshotBatchJob(),
     };
@@ -4208,15 +5217,22 @@
     const isTrackedHost =
       isXHost(host) ||
       isXhsHost(host) ||
+      isDouyinHost(host) ||
       isBlueskyHost(host) ||
       isPixivHost(host) ||
       isThreadsHost(host) ||
       isInstagramHost(host);
     if (!isTrackedHost) return;
 
-    let lastSignature = `${window.location.href}|${document.title}|${getActiveXTabText()}`;
+    const readWatchSig = () => {
+      const tabPart = isDouyinHost(host) ? getActiveDouyinTabText() : getActiveXTabText();
+      const colPart = isDouyinHost(host) ? readActiveDouyinCollectionInfo(new URL(window.location.href)).collectionName : '';
+      return `${window.location.href}|${document.title}|${tabPart}|${colPart}`;
+    };
+
+    let lastSignature = readWatchSig();
     const onStateMaybeChanged = () => {
-      const nextSignature = `${window.location.href}|${document.title}|${getActiveXTabText()}`;
+      const nextSignature = readWatchSig();
       if (nextSignature !== lastSignature) {
         lastSignature = nextSignature;
         updateFloatingLauncherVisibility();
@@ -4252,6 +5268,19 @@
       case 'SCAN_PAGE_IMAGES':
         sendResponse({ ok: true, images: scanPageImages() });
         return;
+
+      case 'SCAN_DOUYIN_PICKER_ITEMS':
+        scanDouyinPickerItems(msg.options || {})
+          .then((res) => sendResponse(res))
+          .catch((err) =>
+            sendResponse({
+              ok: false,
+              error: err instanceof Error ? err.message : '扫描抖音作品失败',
+              items: [],
+              canScrollMore: false,
+            }),
+          );
+        return true;
 
       case 'GET_BOOKMARK_JOB_STATE':
         sendResponse({

@@ -55,7 +55,7 @@ export type GalleryLayoutMode =
   | 'galleryFilmstrip'
   | 'ringGallery';
 
-export type SocialPlatform =
+export type KnownSocialPlatform =
   | 'x'
   | 'threads'
   | 'bluesky'
@@ -63,11 +63,31 @@ export type SocialPlatform =
   | 'pixiv'
   | 'instagram'
   | 'youtube'
-  | 'bilibili';
+  | 'bilibili'
+  | 'douyin';
+
+/**
+ * First-class social platform identifier with forward-compatible tolerance for unknown
+ * future platform strings synced across clients.
+ */
+export type SocialPlatform = KnownSocialPlatform | (string & {});
 export type SocialMediaAttachmentKind = 'photo' | 'video' | 'gif';
 
 export function isVideoSocialPlatform(platform: SocialPlatform | string | null | undefined): boolean {
   return platform === 'youtube' || platform === 'bilibili';
+}
+
+export function isVerticalSocialFeedPlatform(
+  platform: SocialPlatform | string | null | undefined,
+): boolean {
+  return platform === 'xiaohongshu' || platform === 'douyin';
+}
+
+export function isZeroDownloadVideoBookmark(
+  post: Pick<SocialPostMetadata, 'platform' | 'hasVideo'> | null | undefined,
+): boolean {
+  if (!post) return false;
+  return isVideoSocialPlatform(post.platform) || (post.platform === 'douyin' && Boolean(post.hasVideo));
 }
 
 export function formatVideoDurationText(seconds: number | null | undefined): string | null {
@@ -191,31 +211,43 @@ export interface BatchLinkMediaExtractionReport {
 }
 
 /**
- * Formats a clean social handle subtitle, omitting empty handles and internal
- * 24-character hex Xiaohongshu userIds, generic `'xiaohongshu'`, or duplicate nicknames.
+ * Formats a clean social handle subtitle, omitting empty handles, internal Xiaohongshu 24-hex
+ * userIds, internal Douyin sec_uid / long numeric UIDs, generic platform tokens, or duplicate nicknames.
  */
 export function formatSocialDisplayHandle(
   post: Pick<SocialPostMetadata, 'platform' | 'authorName' | 'authorHandle'>,
 ): string | null {
   const clean = (post.authorHandle ?? '').trim().replace(/^@+/, '').trim();
   if (!clean) return null;
+  const authorName = (post.authorName ?? '').trim();
+  const lower = clean.toLowerCase();
   if (post.platform === 'xiaohongshu') {
-    if (
-      /^[0-9a-f]{24}$/i.test(clean) ||
-      clean.toLowerCase() === 'xiaohongshu' ||
-      clean === (post.authorName ?? '').trim()
-    ) {
+    if (/^[0-9a-f]{24}$/i.test(clean) || lower === 'xiaohongshu' || clean === authorName) {
       return null;
     }
   }
+  if (post.platform === 'douyin') {
+    const isInternalSecUid = /^MS4wLjAB[A-Za-z0-9_-]{12,}$/.test(clean);
+    const isLongNumericUid = /^\d{12,}$/.test(clean);
+    if (
+      isInternalSecUid ||
+      isLongNumericUid ||
+      lower === 'douyin' ||
+      lower === 'iesdouyin' ||
+      clean === authorName
+    ) {
+      return null;
+    }
+    return clean.startsWith('抖音号') ? clean : `抖音号 ${clean}`;
+  }
   if (post.platform === 'bilibili') {
-    if (clean === (post.authorName ?? '').trim() || clean.toLowerCase() === 'bilibili') {
+    if (clean === authorName || lower === 'bilibili') {
       return null;
     }
     return clean.startsWith('UP ') ? clean : `@${clean}`;
   }
   if (post.platform === 'youtube') {
-    if (clean === (post.authorName ?? '').trim() || clean.toLowerCase() === 'youtube') {
+    if (clean === authorName || lower === 'youtube' || /^UC[A-Za-z0-9_-]{18,}$/.test(clean)) {
       return null;
     }
   }
@@ -224,7 +256,7 @@ export function formatSocialDisplayHandle(
 
 /**
  * Routes Xiaohongshu CDN URLs through `/proxy-xhs` (Referer injection) and X/Twitter, Bluesky,
- * Threads, YouTube, and Bilibili CDN URLs through `/proxy-social` (Rust retry + on-disk cache)
+ * Threads, YouTube, Bilibili, and Douyin CDN URLs through `/proxy-social` (local retry + disk cache)
  * so WebView2 renders social & video bookmark covers/avatars reliably even offline or with hotlink rules.
  */
 export function resolveSocialMediaUrl(
@@ -270,7 +302,21 @@ export function resolveSocialMediaUrl(
       host === 'bilivideo.com' ||
       host.endsWith('.bilivideo.com') ||
       host === 'bilivideo.cn' ||
-      host.endsWith('.bilivideo.cn')
+      host.endsWith('.bilivideo.cn') ||
+      host === 'douyinpic.com' ||
+      host.endsWith('.douyinpic.com') ||
+      host === 'byteimg.com' ||
+      host.endsWith('.byteimg.com') ||
+      host === 'ibytedtos.com' ||
+      host.endsWith('.ibytedtos.com') ||
+      host === 'zjcdn.com' ||
+      host.endsWith('.zjcdn.com') ||
+      host === 'snssdk.com' ||
+      host.endsWith('.snssdk.com') ||
+      host === 'amemv.com' ||
+      host.endsWith('.amemv.com') ||
+      host === 'pstatp.com' ||
+      host.endsWith('.pstatp.com')
     ) {
       return `http://charkle-media.localhost/proxy-social?url=${encodeURIComponent(trimmed)}`;
     }
@@ -281,8 +327,8 @@ export function resolveSocialMediaUrl(
 }
 
 /**
- * Returns every extractable photo/GIF/video attachment across social posts, YouTube/Bilibili video
- * bookmarks, and rich webpages (`richMetadata.webPage.attachments`).
+ * Returns every extractable photo/GIF/video attachment across social posts, zero-download video
+ * bookmarks (YouTube, Bilibili, Douyin), and rich webpages (`richMetadata.webPage.attachments`).
  */
 export function extractableLinkAttachments(
   asset: AssetRecord | null | undefined,
@@ -315,7 +361,9 @@ export function extractableLinkAttachments(
         lower.includes('.m3u8') ||
         lower.includes('/ext_tw_video/') ||
         lower.includes('/amplify_video/') ||
-        lower.includes('video.twimg.com');
+        lower.includes('video.twimg.com') ||
+        lower.includes('douyinvod.com') ||
+        lower.includes('/aweme/v1/play/');
       items.push({
         id: `media-${i}`,
         kind: isVid ? 'video' : 'photo',
@@ -323,7 +371,7 @@ export function extractableLinkAttachments(
         thumbnailURL: post.mediaThumbnailURLs?.[i] ?? null,
       });
     }
-    if (items.length === 0 && isVideoSocialPlatform(post.platform) && post.originalURL?.trim()) {
+    if (items.length === 0 && isZeroDownloadVideoBookmark(post) && post.originalURL?.trim()) {
       items.push({
         id: 'video-bookmark-0',
         kind: 'video',
@@ -1917,6 +1965,19 @@ export function isStreamableVideoUrl(rawUrl?: string | null): boolean {
     host === 'www.dailymotion.com' ||
     host === 'dai.ly' ||
     host === 'geo.dailymotion.com'
+  ) {
+    return true;
+  }
+  if (
+    ((host === 'douyin.com' ||
+      host.endsWith('.douyin.com') ||
+      host === 'iesdouyin.com' ||
+      host.endsWith('.iesdouyin.com')) &&
+      (path.includes('/video/') ||
+        path.includes('/aweme/v1/play/') ||
+        parsed.searchParams.has('modal_id'))) ||
+    host === 'douyinvod.com' ||
+    host.endsWith('.douyinvod.com')
   ) {
     return true;
   }

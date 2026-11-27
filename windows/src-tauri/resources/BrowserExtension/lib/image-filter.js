@@ -50,7 +50,16 @@ export function upgradeImageCandidateUrl(rawUrl) {
     if (u.protocol !== 'http:' && u.protocol !== 'https:') return '';
     u.hash = '';
 
-    if (u.hostname.endsWith('xhscdn.com') && u.protocol === 'http:') {
+    if (
+      (u.hostname.endsWith('xhscdn.com') ||
+        u.hostname.endsWith('douyinpic.com') ||
+        u.hostname.endsWith('byteimg.com') ||
+        u.hostname.endsWith('ibytedtos.com') ||
+        u.hostname.endsWith('zjcdn.com') ||
+        u.hostname.endsWith('snssdk.com') ||
+        u.hostname.endsWith('pstatp.com')) &&
+      u.protocol === 'http:'
+    ) {
       u.protocol = 'https:';
     }
 

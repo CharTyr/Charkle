@@ -3,7 +3,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use uuid::Uuid;
 
 use crate::wire::swift_codec::{cocoa_date, cocoa_date_opt, upper_uuid, upper_uuid_opt};
@@ -109,8 +109,7 @@ impl MediaKind {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SocialPlatform {
     X,
     Threads,
@@ -120,14 +119,53 @@ pub enum SocialPlatform {
     Instagram,
     Youtube,
     Bilibili,
+    Douyin,
+    /// Lossless forward-compatibility bucket preserving unrecognized future wire strings
+    /// across `/.charkle/` sync shards without failing or rolling back SQLite transactions.
+    Unknown(String),
+}
+
+impl Serialize for SocialPlatform {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.raw_value())
+    }
+}
+
+impl<'de> Deserialize<'de> for SocialPlatform {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        let trimmed = raw.trim();
+        Ok(match trimmed.to_ascii_lowercase().as_str() {
+            "x" => Self::X,
+            "threads" => Self::Threads,
+            "bluesky" => Self::Bluesky,
+            "xiaohongshu" => Self::Xiaohongshu,
+            "pixiv" => Self::Pixiv,
+            "instagram" => Self::Instagram,
+            "youtube" => Self::Youtube,
+            "bilibili" => Self::Bilibili,
+            "douyin" => Self::Douyin,
+            _ => Self::Unknown(raw),
+        })
+    }
 }
 
 impl SocialPlatform {
-    pub fn is_video_platform(self) -> bool {
+    /// Platforms rendered with the dedicated 16:9 horizontal video-bookmark card and native
+    /// YouTube/Bilibili resolver pipeline (`YouTube` & `Bilibili`).
+    pub fn is_video_platform(&self) -> bool {
         matches!(self, Self::Youtube | Self::Bilibili)
     }
 
-    pub fn raw_value(self) -> &'static str {
+    /// Platforms whose bookmark cards default to zero-download streaming (storing only cover
+    /// artwork + `.md` archive + `SocialPostMetadata` at ingest, never eagerly downloading MP4s).
+    /// Decoupled from `is_video_platform()` so vertical/hybrid platforms like Douyin keep
+    /// `900×1440` cards and multi-image photo-note support.
+    pub fn prefers_zero_download_video_bookmark(&self) -> bool {
+        matches!(self, Self::Youtube | Self::Bilibili | Self::Douyin)
+    }
+
+    pub fn raw_value(&self) -> &str {
         match self {
             Self::X => "x",
             Self::Threads => "threads",
@@ -137,6 +175,8 @@ impl SocialPlatform {
             Self::Instagram => "instagram",
             Self::Youtube => "youtube",
             Self::Bilibili => "bilibili",
+            Self::Douyin => "douyin",
+            Self::Unknown(raw) => raw.as_str(),
         }
     }
 
@@ -150,11 +190,12 @@ impl SocialPlatform {
             "instagram" | "ig" => Some(Self::Instagram),
             "youtube" | "yt" | "youtu.be" => Some(Self::Youtube),
             "bilibili" | "bili" | "b23" => Some(Self::Bilibili),
+            "douyin" | "iesdouyin" | "dy" => Some(Self::Douyin),
             _ => None,
         }
     }
 
-    pub fn display_name(self) -> &'static str {
+    pub fn display_name(&self) -> &str {
         match self {
             Self::X => "X",
             Self::Threads => "Threads",
@@ -164,20 +205,30 @@ impl SocialPlatform {
             Self::Instagram => "Instagram",
             Self::Youtube => "YouTube",
             Self::Bilibili => "B站",
+            Self::Douyin => "抖音",
+            Self::Unknown(raw) => {
+                let trimmed = raw.trim();
+                if trimmed.is_empty() {
+                    "社交动态"
+                } else {
+                    trimmed
+                }
+            }
         }
     }
 
-    pub fn post_noun(self) -> &'static str {
+    pub fn post_noun(&self) -> &'static str {
         match self {
             Self::X => "推文",
             Self::Xiaohongshu => "笔记",
-            Self::Pixiv => "作品",
+            Self::Pixiv | Self::Douyin => "作品",
             Self::Youtube | Self::Bilibili => "视频",
             Self::Threads | Self::Bluesky | Self::Instagram => "贴文",
+            Self::Unknown(_) => "动态",
         }
     }
 
-    pub fn post_type_label(self) -> &'static str {
+    pub fn post_type_label(&self) -> &'static str {
         match self {
             Self::X => "X 推文",
             Self::Threads => "Threads 贴文",
@@ -187,10 +238,12 @@ impl SocialPlatform {
             Self::Instagram => "Instagram 贴文",
             Self::Youtube => "YouTube 视频",
             Self::Bilibili => "B站 视频",
+            Self::Douyin => "抖音 作品",
+            Self::Unknown(_) => "社交动态",
         }
     }
 
-    pub fn open_action_label(self) -> &'static str {
+    pub fn open_action_label(&self) -> &'static str {
         match self {
             Self::X => "在 X 打开",
             Self::Threads => "在 Threads 打开",
@@ -200,6 +253,8 @@ impl SocialPlatform {
             Self::Instagram => "在 Instagram 打开",
             Self::Youtube => "在 YouTube 打开",
             Self::Bilibili => "在 B 站打开",
+            Self::Douyin => "在抖音打开",
+            Self::Unknown(_) => "在浏览器打开",
         }
     }
 }
@@ -393,6 +448,23 @@ pub struct SocialPostMetadata {
     pub video_cid: Option<i64>,
 }
 
+fn is_douyin_internal_id(candidate: &str) -> bool {
+    let trimmed = candidate.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    if trimmed.starts_with("MS4wLjAB") {
+        return true;
+    }
+    if trimmed.len() >= 12 && trimmed.bytes().all(|b| b.is_ascii_digit()) {
+        return true;
+    }
+    trimmed.len() >= 32
+        && trimmed
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
 impl SocialPostMetadata {
     pub fn has_video_summary_content(&self) -> bool {
         self.video_summary
@@ -414,7 +486,8 @@ impl SocialPostMetadata {
         }
     }
 
-    /// Displayable handle subtitle (omits internal 24-hex Xiaohongshu user IDs and redundant video IDs).
+    /// Displayable handle subtitle (omits internal Xiaohongshu 24-hex IDs, Douyin `sec_uid` /
+    /// long numeric IDs, and redundant video IDs).
     pub fn display_handle_line(&self) -> Option<String> {
         let trimmed = self.author_handle.trim();
         if trimmed.is_empty() {
@@ -430,6 +503,15 @@ impl SocialPostMetadata {
                 return None;
             }
             return Some(format!("小红书号 {trimmed}"));
+        }
+        if self.platform == SocialPlatform::Douyin {
+            if is_douyin_internal_id(trimmed)
+                || trimmed.eq_ignore_ascii_case("douyin")
+                || trimmed == self.author_name.trim()
+            {
+                return None;
+            }
+            return Some(format!("抖音号 {trimmed}"));
         }
         if self.platform == SocialPlatform::Bilibili {
             if trimmed.eq_ignore_ascii_case("bilibili") || trimmed == self.author_name.trim() {
@@ -449,15 +531,19 @@ impl SocialPostMetadata {
         Some(format!("@{trimmed}"))
     }
 
-    /// Clean display author name that never leaks an internal 24-hex Xiaohongshu user ID.
+    /// Clean display author name that never leaks internal Xiaohongshu 24-hex or Douyin `sec_uid` IDs.
     pub fn display_author_name(&self) -> String {
         let name = self.author_name.trim();
         let is_internal_hex = name.len() == 24 && name.bytes().all(|b| b.is_ascii_hexdigit());
-        if !name.is_empty() && !is_internal_hex {
+        let is_douyin_opaque =
+            self.platform == SocialPlatform::Douyin && is_douyin_internal_id(name);
+        if !name.is_empty() && !is_internal_hex && !is_douyin_opaque {
             return name.to_string();
         }
         if self.platform == SocialPlatform::Xiaohongshu {
             "小红书用户".to_string()
+        } else if self.platform == SocialPlatform::Douyin {
+            "抖音用户".to_string()
         } else {
             let handle = self.author_handle.trim();
             if handle.is_empty() {

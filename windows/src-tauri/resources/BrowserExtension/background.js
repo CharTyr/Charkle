@@ -485,6 +485,85 @@ export async function captureVisibleTabAndIngest(tab, overrideTarget = null) {
   }
 }
 
+const douyinFolderCache = new Map();
+
+export function clearDouyinFolderCache() {
+  douyinFolderCache.clear();
+}
+
+export function withDouyinTypeTag(item) {
+  if (!item || item.platform !== 'douyin') return item;
+  const typeTag = item.hasVideo ? '抖音视频' : '抖音图文';
+  const existing = Array.isArray(item.tags) ? item.tags : [];
+  const merged = Array.from(new Set([...existing, typeTag].filter(Boolean))).slice(0, 16);
+  return { ...item, tags: merged };
+}
+
+async function ensureCachedSubfolder(cfg, parentId, folderName, stateTracker) {
+  const cleanName = String(folderName || '').trim();
+  if (!cleanName) return { id: parentId || null, name: '', createdNew: false };
+  const cacheKey = `${cfg.serverUrl || ''}::${parentId || '__root__'}::${cleanName.toLowerCase()}`;
+  const cached = douyinFolderCache.get(cacheKey);
+  if (cached?.id) {
+    return { id: cached.id, name: cached.name || cleanName, createdNew: false };
+  }
+  const res = await createOrReuseFolder(cfg, cleanName, parentId || null, { reuseExisting: true });
+  const folder = res?.folder;
+  if (folder?.id) {
+    douyinFolderCache.set(cacheKey, { id: folder.id, name: folder.name || cleanName });
+    if (!res.reused && stateTracker) stateTracker.createdAny = true;
+    return { id: folder.id, name: folder.name || cleanName, createdNew: !res.reused };
+  }
+  return { id: parentId || null, name: cleanName, createdNew: false };
+}
+
+async function resolveDouyinAutoFolder(
+  cfg,
+  baseTarget,
+  isVideo,
+  { allowCreateRootFromInbox = false, suggestedRootName = '抖音收藏' } = {},
+  stateTracker = null,
+) {
+  if (!baseTarget.targetFolderId && baseTarget.targetBoardId) {
+    return { folderId: null, label: baseTarget.label };
+  }
+  const typeSubName = isVideo ? '视频' : '图文';
+  let parentId = baseTarget.targetFolderId || null;
+  let parentLabel = baseTarget.label || '';
+
+  if (!parentId) {
+    if (!allowCreateRootFromInbox) {
+      return { folderId: null, label: baseTarget.label || '收件箱' };
+    }
+    const rootName = String(suggestedRootName || '抖音收藏').trim() || '抖音收藏';
+    const rootFolder = await ensureCachedSubfolder(cfg, null, rootName, stateTracker);
+    parentId = rootFolder.id;
+    parentLabel = rootFolder.name || rootName;
+  }
+
+  const leafName = String(parentLabel).split('/').pop().trim();
+  if (leafName === typeSubName) {
+    return { folderId: parentId, label: parentLabel };
+  }
+
+  const sub = await ensureCachedSubfolder(cfg, parentId, typeSubName, stateTracker);
+  return {
+    folderId: sub.id || parentId,
+    label: parentLabel ? `${parentLabel} / ${typeSubName}` : typeSubName,
+  };
+}
+
+function scheduleFolderCacheRefresh(cfg) {
+  testConnection(cfg)
+    .then((res) =>
+      saveConfig({
+        cachedFolders: res.folders,
+        cachedBoards: res.boards,
+      }),
+    )
+    .catch(() => {});
+}
+
 export async function captureCurrentPage(tab) {
   const config = await requireConfiguredOrPrompt(tab);
   if (!config) return;
@@ -505,9 +584,9 @@ export async function captureCurrentPage(tab) {
   });
 
   try {
-    // On Xiaohongshu note pages, try pulling live authenticated note data from the tab first.
+    // On Xiaohongshu or Douyin post pages, try pulling live authenticated post data from the tab first.
     let preExtractedBookmark = null;
-    if (sourceInfo.kind === 'xiaohongshu' && tab?.id) {
+    if ((sourceInfo.kind === 'xiaohongshu' || sourceInfo.kind === 'douyin') && tab?.id) {
       const ctxRes = await sendTopFrameTabMessage(tab.id, { type: 'GET_PAGE_CONTEXT' }).catch(
         () => null,
       );
@@ -518,15 +597,35 @@ export async function captureCurrentPage(tab) {
 
     const { res, target } = await withDesktopAutoHeal(async (cfg) => {
       const t = resolveActiveTarget(cfg);
+      let effectiveTarget = t;
       let r;
       if (preExtractedBookmark) {
+        const tagged = withDouyinTypeTag(preExtractedBookmark);
+        let destFolderId = t.targetFolderId;
+        const tracker = { createdAny: false };
+        if (
+          tagged.platform === 'douyin' &&
+          cfg.douyinAutoClassify !== false &&
+          t.targetFolderId
+        ) {
+          const routed = await resolveDouyinAutoFolder(
+            cfg,
+            t,
+            Boolean(tagged.hasVideo),
+            { allowCreateRootFromInbox: false },
+            tracker,
+          );
+          destFolderId = routed.folderId;
+          effectiveTarget = { ...t, targetFolderId: destFolderId, label: routed.label };
+        }
         r = await ingestSocialBookmarksChunk(
           cfg,
-          [preExtractedBookmark],
-          t.targetFolderId,
+          [tagged],
+          destFolderId,
           t.targetBoardId,
           { skipDuplicates: false },
         );
+        if (tracker.createdAny) scheduleFolderCacheRefresh(cfg);
       } else {
         r = await ingestUrl(
           cfg,
@@ -537,7 +636,7 @@ export async function captureCurrentPage(tab) {
           t.targetBoardId,
         );
       }
-      return { res: r, target: t };
+      return { res: r, target: effectiveTarget };
     });
     const savedTitle = res?.assets?.[0]?.title || tab?.title || sourceInfo.hostname;
     flashSuccessBadge();
@@ -782,6 +881,7 @@ export async function handleMessage(msg, sender) {
     }
 
     case 'REFRESH_TARGETS': {
+      clearDouyinFolderCache();
       const { config, result } = await withDesktopAutoHeal(async (cfg) => {
         const res = await testConnection(cfg);
         return { config: cfg, result: res };
@@ -877,6 +977,9 @@ export async function handleMessage(msg, sender) {
         'authorMediaIncludeVideos',
         'authorMediaSkipRetweets',
         'xhsProfileCollectMode',
+        'douyinProfileCollectMode',
+        'douyinContentFilter',
+        'douyinAutoClassify',
       ];
       for (const key of allowedKeys) {
         if (key in msg) patch[key] = msg[key];
@@ -962,17 +1065,86 @@ export async function handleMessage(msg, sender) {
       flashBusyBadge(msg.badgeText || '…');
       try {
         const useUnified = msg.type === 'INGEST_SOCIAL_MEDIA_CHUNK';
+        const taggedPosts = posts.map(withDouyinTypeTag);
         const { res, target } = await withDesktopAutoHeal(async (cfg) => {
           const t = resolveMessageTarget(cfg, msg);
           const ingestFn = useUnified ? ingestSocialMediaChunk : ingestTweetMediaChunk;
-          const r = await ingestFn(
-            cfg,
-            posts,
-            t.targetFolderId,
-            t.targetBoardId,
-            { skipDuplicates: msg.skipDuplicates !== false },
-          );
-          return { res: r, target: t };
+          const shouldAutoClassify =
+            useUnified &&
+            ('autoClassify' in msg ? msg.autoClassify !== false : cfg.douyinAutoClassify !== false) &&
+            taggedPosts.some((p) => p?.platform === 'douyin');
+
+          if (!shouldAutoClassify) {
+            const r = await ingestFn(
+              cfg,
+              taggedPosts,
+              t.targetFolderId,
+              t.targetBoardId,
+              { skipDuplicates: msg.skipDuplicates !== false },
+            );
+            return { res: r, target: t };
+          }
+
+          const tracker = { createdAny: false };
+          const dyVideos = taggedPosts.filter((p) => p?.platform === 'douyin' && p.hasVideo);
+          const dyImages = taggedPosts.filter((p) => p?.platform === 'douyin' && !p.hasVideo);
+          const others = taggedPosts.filter((p) => p?.platform !== 'douyin');
+
+          const merged = {
+            assets: [],
+            created: 0,
+            postsImported: 0,
+            tweetsImported: 0,
+            skipped: 0,
+            createdFolders: 0,
+          };
+          let finalLabel = t.label;
+
+          const runGroup = async (group, destFolderId, destBoardId) => {
+            if (group.length === 0) return;
+            const r = await ingestFn(cfg, group, destFolderId, destBoardId, {
+              skipDuplicates: msg.skipDuplicates !== false,
+            });
+            if (Array.isArray(r.assets)) merged.assets.push(...r.assets);
+            merged.created += Number(r.created || 0);
+            merged.postsImported += Number(r.postsImported ?? r.tweetsImported ?? 0);
+            merged.tweetsImported = merged.postsImported;
+            merged.skipped += Number(r.skipped || 0);
+            merged.createdFolders += Number(r.createdFolders || 0);
+          };
+
+          if (dyVideos.length > 0) {
+            const routed = await resolveDouyinAutoFolder(
+              cfg,
+              t,
+              true,
+              { allowCreateRootFromInbox: true, suggestedRootName: msg.suggestedFolderName || '抖音收藏' },
+              tracker,
+            );
+            finalLabel = routed.label;
+            await runGroup(dyVideos, routed.folderId, t.targetBoardId);
+          }
+          if (dyImages.length > 0) {
+            const routed = await resolveDouyinAutoFolder(
+              cfg,
+              t,
+              false,
+              { allowCreateRootFromInbox: true, suggestedRootName: msg.suggestedFolderName || '抖音收藏' },
+              tracker,
+            );
+            finalLabel =
+              dyVideos.length > 0
+                ? t.targetFolderId
+                  ? t.label
+                  : msg.suggestedFolderName || '抖音收藏'
+                : routed.label;
+            await runGroup(dyImages, routed.folderId, t.targetBoardId);
+          }
+          if (others.length > 0) {
+            await runGroup(others, t.targetFolderId, t.targetBoardId);
+          }
+          if (tracker.createdAny) scheduleFolderCacheRefresh(cfg);
+          return { res: merged, target: { ...t, label: finalLabel } };
         });
         if (msg.isFinalChunk) {
           flashSuccessBadge();
@@ -1000,16 +1172,74 @@ export async function handleMessage(msg, sender) {
       }
       flashBusyBadge(msg.badgeText || '…');
       try {
+        const taggedBookmarks = bookmarks.map(withDouyinTypeTag);
         const { res, target } = await withDesktopAutoHeal(async (cfg) => {
           const t = resolveMessageTarget(cfg, msg);
-          const r = await ingestSocialBookmarksChunk(
-            cfg,
-            bookmarks,
-            t.targetFolderId,
-            t.targetBoardId,
-            { skipDuplicates: msg.skipDuplicates !== false },
-          );
-          return { res: r, target: t };
+          const shouldAutoClassify =
+            ('autoClassify' in msg ? msg.autoClassify !== false : cfg.douyinAutoClassify !== false) &&
+            taggedBookmarks.some((b) => b?.platform === 'douyin');
+
+          if (!shouldAutoClassify) {
+            const r = await ingestSocialBookmarksChunk(
+              cfg,
+              taggedBookmarks,
+              t.targetFolderId,
+              t.targetBoardId,
+              { skipDuplicates: msg.skipDuplicates !== false },
+            );
+            return { res: r, target: t };
+          }
+
+          const tracker = { createdAny: false };
+          const dyVideos = taggedBookmarks.filter((b) => b?.platform === 'douyin' && b.hasVideo);
+          const dyImages = taggedBookmarks.filter((b) => b?.platform === 'douyin' && !b.hasVideo);
+          const others = taggedBookmarks.filter((b) => b?.platform !== 'douyin');
+
+          const merged = { assets: [], created: 0, skipped: 0 };
+          let finalLabel = t.label;
+
+          const runGroup = async (group, destFolderId, destBoardId) => {
+            if (group.length === 0) return;
+            const r = await ingestSocialBookmarksChunk(cfg, group, destFolderId, destBoardId, {
+              skipDuplicates: msg.skipDuplicates !== false,
+            });
+            if (Array.isArray(r.assets)) merged.assets.push(...r.assets);
+            merged.created += Number(r.created || 0);
+            merged.skipped += Number(r.skipped || 0);
+          };
+
+          if (dyVideos.length > 0) {
+            const routed = await resolveDouyinAutoFolder(
+              cfg,
+              t,
+              true,
+              { allowCreateRootFromInbox: true, suggestedRootName: msg.suggestedFolderName || '抖音收藏' },
+              tracker,
+            );
+            finalLabel = routed.label;
+            await runGroup(dyVideos, routed.folderId, t.targetBoardId);
+          }
+          if (dyImages.length > 0) {
+            const routed = await resolveDouyinAutoFolder(
+              cfg,
+              t,
+              false,
+              { allowCreateRootFromInbox: true, suggestedRootName: msg.suggestedFolderName || '抖音收藏' },
+              tracker,
+            );
+            finalLabel =
+              dyVideos.length > 0
+                ? t.targetFolderId
+                  ? t.label
+                  : msg.suggestedFolderName || '抖音收藏'
+                : routed.label;
+            await runGroup(dyImages, routed.folderId, t.targetBoardId);
+          }
+          if (others.length > 0) {
+            await runGroup(others, t.targetFolderId, t.targetBoardId);
+          }
+          if (tracker.createdAny) scheduleFolderCacheRefresh(cfg);
+          return { res: merged, target: { ...t, label: finalLabel } };
         });
         if (msg.isFinalChunk) {
           flashSuccessBadge();
@@ -1054,18 +1284,37 @@ export async function handleMessage(msg, sender) {
       try {
         const { res, target } = await withDesktopAutoHeal(async (cfg) => {
           const t = resolveMessageTarget(cfg, msg);
+          let effectiveTarget = t;
           let r;
           if (msg.socialBookmark) {
-            const payload = { ...msg.socialBookmark };
+            const payload = withDouyinTypeTag({ ...msg.socialBookmark });
             if (msg.title) payload.articleTitle = msg.title;
             if (msg.notes) payload.bodyText = msg.notes;
+            let destFolderId = t.targetFolderId;
+            const tracker = { createdAny: false };
+            if (
+              payload.platform === 'douyin' &&
+              cfg.douyinAutoClassify !== false &&
+              t.targetFolderId
+            ) {
+              const routed = await resolveDouyinAutoFolder(
+                cfg,
+                t,
+                Boolean(payload.hasVideo),
+                { allowCreateRootFromInbox: false },
+                tracker,
+              );
+              destFolderId = routed.folderId;
+              effectiveTarget = { ...t, targetFolderId: destFolderId, label: routed.label };
+            }
             r = await ingestSocialBookmarksChunk(
               cfg,
               [payload],
-              t.targetFolderId,
+              destFolderId,
               t.targetBoardId,
               { skipDuplicates: false },
             );
+            if (tracker.createdAny) scheduleFolderCacheRefresh(cfg);
           } else {
             r = await ingestUrl(
               cfg,
@@ -1076,7 +1325,7 @@ export async function handleMessage(msg, sender) {
               t.targetBoardId,
             );
           }
-          return { res: r, target: t };
+          return { res: r, target: effectiveTarget };
         });
         flashSuccessBadge();
         return { ok: true, assets: res.assets || [], targetLabel: target.label };

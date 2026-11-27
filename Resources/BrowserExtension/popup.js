@@ -3,6 +3,7 @@
  */
 
 import { isLargeImageCandidate } from './lib/image-filter.js';
+import { resolvePostOrganizationFolderName } from './lib/social-collectors.js';
 import {
   buildFolderOptions,
   DEFAULT_DESKTOP_SERVER_URL,
@@ -28,6 +29,7 @@ const PLATFORM_BADGE_MAP = {
   threads: { author_media: 'Threads 作者', likes: 'Threads 喜欢', default: 'Threads 保存' },
   instagram: { author_media: 'Instagram', default: 'IG 收藏' },
   xiaohongshu: { profile: '小红书作者', likes: '小红书点赞', default: '小红书' },
+  douyin: { profile: '抖音作者', likes: '抖音喜欢', board: '抖音收藏夹', default: '抖音收藏' },
 };
 
 const PLATFORM_NOUN_MAP = {
@@ -37,6 +39,7 @@ const PLATFORM_NOUN_MAP = {
   threads: '贴文',
   instagram: '贴文',
   xiaohongshu: '笔记',
+  douyin: '作品',
 };
 
 const state = {
@@ -55,6 +58,14 @@ const state = {
   organizeMode: 'per_tweet',
   maxCount: 0,
   xhsCollectMode: 'media',
+  douyinCollectMode: 'media',
+  douyinContentFilter: 'all',
+  douyinAutoClassify: true,
+  douyinPickerOpen: false,
+  douyinPickerLoading: false,
+  douyinPickerItems: [],
+  douyinPickerCanScrollMore: true,
+  selectedDouyinKeys: new Set(),
 };
 
 let statusTimer = null;
@@ -107,7 +118,25 @@ function isMediaModeForPage(page) {
   if (page.platform === 'xiaohongshu' && page.pageKind === 'profile' && state.xhsCollectMode === 'media') {
     return true;
   }
+  if (page.platform === 'douyin' && page.pageKind === 'profile' && state.douyinCollectMode === 'media') {
+    return true;
+  }
   return false;
+}
+
+function resolveSuggestedFolderForPage(page) {
+  if (!page?.supported) return '社交收藏';
+  if (page.platform === 'xiaohongshu' && page.pageKind === 'profile') {
+    return state.xhsCollectMode === 'bookmarks'
+      ? '小红书收藏'
+      : page.authorName || page.suggestedFolderName || '小红书收藏';
+  }
+  if (page.platform === 'douyin' && page.pageKind === 'profile') {
+    return state.douyinCollectMode === 'bookmarks'
+      ? '抖音收藏'
+      : page.authorName || page.suggestedFolderName || '抖音收藏';
+  }
+  return page.suggestedFolderName || '专属目录';
 }
 
 // MARK: - Status & Header Helpers
@@ -287,8 +316,22 @@ function switchTab(tabKey) {
   for (const panel of document.querySelectorAll('.tab-panel')) {
     panel.hidden = panel.id !== `panel-${tabKey}`;
   }
-  if (tabKey === 'images' && !state.imagesScanned) {
-    void scanCurrentPageImages();
+  if (tabKey === 'images') {
+    updateImagesSocialHintVisibility();
+    if (!state.imagesScanned) {
+      void scanCurrentPageImages();
+    }
+  }
+}
+
+function updateImagesSocialHintVisibility() {
+  const page = state.collectionPage;
+  const shouldShow = Boolean(
+    page?.supported && (page.platform === 'douyin' || page.platform === 'xiaohongshu'),
+  );
+  $('images-social-hint').hidden = !shouldShow;
+  if (shouldShow) {
+    $('btn-images-goto-picker').textContent = page.platform === 'douyin' ? '去挑选导入' : '去批量导入';
   }
 }
 
@@ -397,7 +440,7 @@ async function handleCaptureVisible() {
   }
 }
 
-// MARK: - Panel 2: Context-First 6-Platform Batch Collector
+// MARK: - Panel 2: Context-First 7-Platform Batch Collector
 
 function renderBatchSegmentedState() {
   for (const btn of document.querySelectorAll('.seg-btn[data-org-mode]')) {
@@ -406,8 +449,47 @@ function renderBatchSegmentedState() {
   for (const btn of document.querySelectorAll('.seg-btn[data-max-count]')) {
     btn.setAttribute('aria-checked', String(Number(btn.dataset.maxCount) === state.maxCount));
   }
+  const activeProfileMode =
+    state.collectionPage?.platform === 'douyin' ? state.douyinCollectMode : state.xhsCollectMode;
   for (const btn of document.querySelectorAll('.seg-btn[data-xhs-mode]')) {
-    btn.setAttribute('aria-checked', String(btn.dataset.xhsMode === state.xhsCollectMode));
+    btn.setAttribute('aria-checked', String(btn.dataset.xhsMode === activeProfileMode));
+  }
+  for (const btn of document.querySelectorAll('.seg-btn[data-dy-filter]')) {
+    btn.setAttribute('aria-checked', String(btn.dataset.dyFilter === state.douyinContentFilter));
+  }
+}
+
+function formatShortDuration(sec) {
+  const total = Math.round(Number(sec) || 0);
+  if (total <= 0) return '';
+  const mins = Math.floor(total / 60);
+  const secs = total % 60;
+  return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+}
+
+function getFilteredDouyinPickerItems() {
+  const items = state.douyinPickerItems || [];
+  if (state.douyinContentFilter === 'video') return items.filter((i) => i.hasVideo === true);
+  if (state.douyinContentFilter === 'image') return items.filter((i) => i.hasVideo === false);
+  return items;
+}
+
+function updateDouyinFilterLabels() {
+  const allBtn = $('btn-dy-filter-all');
+  const videoBtn = $('btn-dy-filter-video');
+  const imageBtn = $('btn-dy-filter-image');
+  if (!allBtn || !videoBtn || !imageBtn) return;
+  if (state.douyinPickerOpen && state.douyinPickerItems.length > 0) {
+    const allCount = state.douyinPickerItems.length;
+    const videoCount = state.douyinPickerItems.filter((i) => i.hasVideo === true).length;
+    const imageCount = state.douyinPickerItems.filter((i) => i.hasVideo === false).length;
+    allBtn.textContent = `全部 (${allCount})`;
+    videoBtn.textContent = `仅视频 (${videoCount})`;
+    imageBtn.textContent = `仅图文 (${imageCount})`;
+  } else {
+    allBtn.textContent = '全部';
+    videoBtn.textContent = '仅视频';
+    imageBtn.textContent = '仅图文';
   }
 }
 
@@ -430,10 +512,16 @@ function updateBatchRulesSummary() {
       if ($('bm-opt-skip-retweets').checked) parts.push('仅原创');
     }
   } else {
-    parts.push('富卡片书签模式');
+    parts.push(page.platform === 'douyin' ? '收藏卡片 · 在线播放' : '富卡片书签模式');
     if (page.platform === 'xiaohongshu' && $('bm-opt-xhs-detail').checked) {
       parts.push('提取多图正文');
     }
+  }
+
+  if (page.platform === 'douyin') {
+    if (state.douyinContentFilter === 'video') parts.push('仅视频');
+    else if (state.douyinContentFilter === 'image') parts.push('仅图文');
+    if ($('bm-opt-dy-classify').checked) parts.push('自动分目录');
   }
 
   if ($('bm-opt-skip-dups').checked) {
@@ -477,7 +565,12 @@ function syncBatchModeVisibility() {
   $('bm-opt-retweets-row').hidden =
     !['x', 'bluesky', 'threads'].includes(page.platform) || page.pageKind !== 'author_media';
   $('bm-opt-xhs-row').hidden = !(page.platform === 'xiaohongshu' && !isMedia);
+  $('bm-opt-dy-classify-row').hidden = page.platform !== 'douyin';
+  $('bm-douyin-filter-wrap').hidden = page.platform !== 'douyin';
+  $('btn-bm-open-picker').hidden = page.platform !== 'douyin';
   $('bm-opt-max-count-label').textContent = isMedia ? `单次${noun}上限` : '单次导入上限';
+  $('btn-bm-quick-folder').textContent = `+ ${resolveSuggestedFolderForPage(page)}`;
+  updateDouyinFilterLabels();
   updateBatchRulesSummary();
 }
 
@@ -506,8 +599,15 @@ function hydrateBookmarksTab() {
     ? Number(cfg.bookmarkMaxCount)
     : 0;
   state.xhsCollectMode = cfg.xhsProfileCollectMode === 'bookmarks' ? 'bookmarks' : 'media';
+  state.douyinCollectMode = cfg.douyinProfileCollectMode === 'bookmarks' ? 'bookmarks' : 'media';
+  state.douyinContentFilter = ['all', 'video', 'image'].includes(cfg.douyinContentFilter)
+    ? cfg.douyinContentFilter
+    : 'all';
+  state.douyinAutoClassify = cfg.douyinAutoClassify !== false;
+  $('bm-opt-dy-classify').checked = state.douyinAutoClassify;
 
   renderBatchSegmentedState();
+  updateImagesSocialHintVisibility();
 
   const supportedBlock = $('bm-supported-block');
   const guideBlock = $('bm-guide-block');
@@ -523,8 +623,18 @@ function hydrateBookmarksTab() {
 
     $('bm-page-label').textContent = detected.label;
     $('bm-page-label').title = detected.label;
-    $('btn-bm-quick-folder').textContent = `+ ${detected.suggestedFolderName || '专属目录'}`;
-    $('bm-xhs-mode-wrap').hidden = !(detected.platform === 'xiaohongshu' && detected.pageKind === 'profile');
+    $('btn-bm-quick-folder').textContent = `+ ${resolveSuggestedFolderForPage(detected)}`;
+
+    const isProfileDualMode =
+      (detected.platform === 'xiaohongshu' || detected.platform === 'douyin') &&
+      detected.pageKind === 'profile';
+    $('bm-xhs-mode-wrap').hidden = !isProfileDualMode;
+    if (isProfileDualMode) {
+      $('btn-profile-mode-media').textContent =
+        detected.platform === 'douyin' ? '作者作品原文件' : '作者作品原图';
+      $('btn-profile-mode-bookmarks').textContent =
+        detected.platform === 'douyin' ? '收藏与喜欢卡片' : '收藏与点赞卡片';
+    }
 
     tabDot.hidden = detected.isCollectionRoute === false;
     syncBatchModeVisibility();
@@ -541,7 +651,9 @@ function renderBookmarkJobProgress(job) {
   state.bookmarkJob = job || null;
   const card = $('bm-progress-card');
   const startBtn = $('btn-bm-start');
+  const pickerBtn = $('btn-bm-open-picker');
   const controls = $('bm-progress-controls');
+  const isDouyin = state.collectionPage?.platform === 'douyin';
   const isMedia = job?.mode === 'author_media' || isMediaModeForPage(state.collectionPage);
   const noun = PLATFORM_NOUN_MAP[job?.platform || state.collectionPage?.platform] || '作品';
 
@@ -549,6 +661,8 @@ function renderBookmarkJobProgress(job) {
     card.hidden = true;
     startBtn.hidden = false;
     startBtn.disabled = false;
+    pickerBtn.hidden = !isDouyin;
+    pickerBtn.disabled = false;
     return;
   }
 
@@ -572,16 +686,22 @@ function renderBookmarkJobProgress(job) {
   $('bm-progress-last').textContent = job.lastItemTitle ? `最新：${job.lastItemTitle}` : '';
 
   const isActive = job.status === 'running' || job.status === 'paused';
+  if (isActive && state.douyinPickerOpen) {
+    setDouyinPickerVisibility(false);
+  }
   controls.hidden = !isActive;
   $('btn-bm-pause').textContent = job.status === 'paused' ? '继续' : '暂停';
   startBtn.hidden = isActive;
   startBtn.disabled = isActive;
+  pickerBtn.hidden = isActive || !isDouyin;
+  pickerBtn.disabled = isActive;
   if (!isActive) {
     startBtn.textContent = isMedia ? '再次扫描并采集新增' : '再次扫描并导入新增';
   }
 }
 
 async function persistBatchOptions() {
+  state.douyinAutoClassify = $('bm-opt-dy-classify').checked;
   await persistTargetPatch({
     bookmarkSkipDuplicates: $('bm-opt-skip-dups').checked,
     bookmarkStopOnKnownStreak: $('bm-opt-stop-streak').checked,
@@ -591,6 +711,9 @@ async function persistBatchOptions() {
     authorMediaIncludeVideos: $('bm-opt-include-videos').checked,
     authorMediaSkipRetweets: $('bm-opt-skip-retweets').checked,
     xhsProfileCollectMode: state.xhsCollectMode,
+    douyinProfileCollectMode: state.douyinCollectMode,
+    douyinContentFilter: state.douyinContentFilter,
+    douyinAutoClassify: state.douyinAutoClassify,
   });
 }
 
@@ -623,6 +746,9 @@ async function handleStartBookmarkImport() {
       includeVideos,
       skipRetweets,
       xhsCollectMode: state.xhsCollectMode,
+      douyinCollectMode: state.douyinCollectMode,
+      douyinContentFilter: state.douyinContentFilter,
+      douyinAutoClassify: $('bm-opt-dy-classify').checked,
       preferredPlatform: state.collectionPage?.platform || null,
       preferredLabel: state.collectionPage?.label || null,
       preferredPageKind: state.collectionPage?.pageKind || null,
@@ -643,7 +769,7 @@ async function handleStartBookmarkImport() {
 }
 
 async function handleQuickCreateCollectionFolder() {
-  const suggested = state.collectionPage?.suggestedFolderName || '社交收藏';
+  const suggested = resolveSuggestedFolderForPage(state.collectionPage);
   const btn = $('btn-bm-quick-folder');
   btn.disabled = true;
   try {
@@ -661,6 +787,336 @@ async function handleQuickCreateCollectionFolder() {
     }
   } finally {
     btn.disabled = false;
+  }
+}
+
+// MARK: - Douyin Built-in Multi-Select Picker
+
+function setDouyinPickerVisibility(open) {
+  state.douyinPickerOpen = Boolean(open);
+  $('bm-douyin-picker').hidden = !state.douyinPickerOpen;
+  $('bm-primary-actions').hidden = state.douyinPickerOpen;
+  $('bm-options-disclosure').hidden = state.douyinPickerOpen;
+  $('bm-rules-summary').hidden = state.douyinPickerOpen;
+  updateDouyinFilterLabels();
+}
+
+function updateDouyinPickerActionUI() {
+  const visible = getFilteredDouyinPickerItems();
+  const visibleSelectedCount = visible.filter((i) => state.selectedDouyinKeys.has(i.dedupKey)).length;
+  const unimportedCount = visible.filter((i) => !i.alreadyImported).length;
+  $('bm-picker-summary').textContent = state.douyinPickerLoading
+    ? '正在读取当前页作品…'
+    : `已载入 ${visible.length} 条 · 未导入 ${unimportedCount}`;
+  const importBtn = $('btn-picker-import');
+  importBtn.disabled = state.isBusy || state.douyinPickerLoading || visibleSelectedCount === 0;
+  if (!state.isBusy) {
+    importBtn.textContent = `导入所选 (${visibleSelectedCount})`;
+  }
+  $('btn-picker-more').disabled = state.isBusy || state.douyinPickerLoading;
+  $('btn-picker-refresh').disabled = state.isBusy || state.douyinPickerLoading;
+}
+
+function renderDouyinPickerList() {
+  updateDouyinFilterLabels();
+  const listEl = $('bm-picker-list');
+  const emptyEl = $('bm-picker-empty');
+  const emptyText = $('bm-picker-empty-text');
+  const visible = getFilteredDouyinPickerItems();
+
+  listEl.innerHTML = '';
+
+  if (visible.length === 0) {
+    listEl.hidden = true;
+    emptyEl.hidden = false;
+    emptyText.textContent = state.douyinPickerLoading
+      ? '正在扫描当前页作品…'
+      : state.douyinPickerItems.length > 0
+        ? '当前筛选类型下暂无已载入作品，可切换筛选或点击「加载更多」'
+        : '当前页尚未捕获到作品，可先向下滚动页面或点击「加载更多」';
+    updateDouyinPickerActionUI();
+    return;
+  }
+
+  emptyEl.hidden = true;
+  listEl.hidden = false;
+
+  const fragment = document.createDocumentFragment();
+  for (const item of visible) {
+    const selected = state.selectedDouyinKeys.has(item.dedupKey);
+    const row = document.createElement('button');
+    row.type = 'button';
+    row.className = 'dy-picker-row';
+    if (selected) row.classList.add('is-selected');
+    if (item.alreadyImported) row.classList.add('is-imported');
+    row.setAttribute('role', 'listitem');
+    row.setAttribute('aria-pressed', String(selected));
+    row.dataset.key = item.dedupKey;
+
+    const thumb = document.createElement('div');
+    thumb.className = 'dy-picker-thumb';
+    if (item.coverUrl) {
+      const img = document.createElement('img');
+      img.src = item.coverUrl;
+      img.alt = '';
+      img.loading = 'lazy';
+      img.decoding = 'async';
+      img.referrerPolicy = 'no-referrer';
+      thumb.appendChild(img);
+    }
+    const kindBadge = document.createElement('span');
+    kindBadge.className = 'dy-picker-kind';
+    if (item.hasVideo) {
+      const dur = formatShortDuration(item.durationSeconds);
+      kindBadge.textContent = dur ? `视频 ${dur}` : '视频';
+    } else {
+      kindBadge.textContent = item.imageCount > 1 ? `图文 ${item.imageCount}图` : '图文';
+    }
+    thumb.appendChild(kindBadge);
+
+    const meta = document.createElement('div');
+    meta.className = 'dy-picker-meta';
+    const titleEl = document.createElement('span');
+    titleEl.className = 'dy-picker-title';
+    titleEl.textContent = item.title || '无标题抖音作品';
+
+    const sub = document.createElement('div');
+    sub.className = 'dy-picker-sub';
+    const author = document.createElement('span');
+    author.className = 'dy-picker-author';
+    author.textContent = item.authorName || '抖音用户';
+    sub.appendChild(author);
+
+    if (item.alreadyImported) {
+      const imp = document.createElement('span');
+      imp.className = 'dy-picker-imported-pill';
+      imp.textContent = '已导入';
+      sub.appendChild(imp);
+    }
+    meta.append(titleEl, sub);
+
+    const check = document.createElement('span');
+    check.className = 'dy-picker-check';
+    check.innerHTML =
+      '<svg width="11" height="11" viewBox="0 0 12 12" fill="none" aria-hidden="true"><path d="M2.4 6.2L4.9 8.7L9.6 3.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+
+    row.append(thumb, meta, check);
+    row.addEventListener('click', () => {
+      if (state.selectedDouyinKeys.has(item.dedupKey)) {
+        state.selectedDouyinKeys.delete(item.dedupKey);
+        row.classList.remove('is-selected');
+        row.setAttribute('aria-pressed', 'false');
+      } else {
+        state.selectedDouyinKeys.add(item.dedupKey);
+        row.classList.add('is-selected');
+        row.setAttribute('aria-pressed', 'true');
+      }
+      updateDouyinPickerActionUI();
+    });
+    fragment.appendChild(row);
+  }
+
+  listEl.appendChild(fragment);
+  updateDouyinPickerActionUI();
+}
+
+async function scanDouyinPickerItemsFromTab({ scrollMore = false } = {}) {
+  if (!state.activeTab?.id || state.douyinPickerLoading) return;
+  state.douyinPickerLoading = true;
+  updateDouyinPickerActionUI();
+  hideStatus();
+
+  try {
+    const isMedia = isMediaModeForPage(state.collectionPage);
+    const [scanRes, existingRes] = await Promise.all([
+      queryTabContent(state.activeTab, {
+        type: 'SCAN_DOUYIN_PICKER_ITEMS',
+        options: {
+          scrollMore,
+          preferredPlatform: state.collectionPage?.platform || 'douyin',
+          preferredPageKind: state.collectionPage?.pageKind || null,
+          preferredLabel: state.collectionPage?.label || null,
+        },
+      }),
+      sendBg({ type: 'FETCH_EXISTING_SOURCES' }).catch(() => null),
+    ]);
+
+    const knownKeys = new Set();
+    if (existingRes?.ok) {
+      const keys =
+        isMedia && Array.isArray(existingRes.mediaCanonicalKeys)
+          ? existingRes.mediaCanonicalKeys
+          : existingRes.canonicalKeys || [];
+      for (const k of keys) knownKeys.add(k);
+    }
+
+    if (scanRes?.ok && Array.isArray(scanRes.items)) {
+      if (scanRes.pageInfo?.supported) {
+        state.collectionPage = scanRes.pageInfo;
+        $('btn-bm-quick-folder').textContent = `+ ${resolveSuggestedFolderForPage(scanRes.pageInfo)}`;
+      }
+      state.douyinPickerCanScrollMore = Boolean(scanRes.canScrollMore);
+      const prevImported = new Set(
+        state.douyinPickerItems.filter((i) => i.alreadyImported).map((i) => i.dedupKey),
+      );
+      state.douyinPickerItems = scanRes.items.map((item) => ({
+        ...item,
+        alreadyImported: knownKeys.has(item.dedupKey) || prevImported.has(item.dedupKey),
+      }));
+    } else if (scanRes?.error) {
+      showStatus('error', scanRes.error, 3800);
+    }
+  } catch (err) {
+    showStatus('error', err instanceof Error ? err.message : '读取当前页抖音作品失败', 3800);
+  } finally {
+    state.douyinPickerLoading = false;
+    renderDouyinPickerList();
+  }
+}
+
+async function openDouyinPicker() {
+  if (!state.collectionPage?.supported || state.collectionPage.platform !== 'douyin') return;
+  setDouyinPickerVisibility(true);
+  await scanDouyinPickerItemsFromTab({ scrollMore: false });
+}
+
+function handlePickerSelectUnimported() {
+  const visible = getFilteredDouyinPickerItems();
+  for (const item of visible) {
+    if (!item.alreadyImported) {
+      state.selectedDouyinKeys.add(item.dedupKey);
+    }
+  }
+  renderDouyinPickerList();
+}
+
+function handlePickerClearSelection() {
+  state.selectedDouyinKeys.clear();
+  renderDouyinPickerList();
+}
+
+async function handleImportSelectedDouyinItems() {
+  if (state.isBusy) return;
+  const selectedItems = getFilteredDouyinPickerItems().filter((i) =>
+    state.selectedDouyinKeys.has(i.dedupKey),
+  );
+  if (selectedItems.length === 0) return;
+
+  state.isBusy = true;
+  const importBtn = $('btn-picker-import');
+  importBtn.disabled = true;
+  importBtn.textContent = `正在导入 0/${selectedItems.length}…`;
+  hideStatus();
+
+  const isMedia = isMediaModeForPage(state.collectionPage);
+  const autoClassify = $('bm-opt-dy-classify').checked;
+  const includeVideos = $('bm-opt-include-videos').checked;
+  const suggestedFolder = resolveSuggestedFolderForPage(state.collectionPage);
+
+  let totalCreated = 0;
+  let totalFailed = 0;
+  let completed = 0;
+  let lastTargetLabel = '';
+
+  try {
+    let mediaRootFolderId = null;
+    if (isMedia) {
+      const rootName = state.collectionPage?.authorName || suggestedFolder || '抖音作品';
+      const rootRes = await sendBg({ type: 'ENSURE_AUTHOR_ROOT_FOLDER', name: rootName });
+      if (!rootRes?.ok || !rootRes.folder?.id) {
+        throw new Error(rootRes?.error || `无法准备目录「${rootName}」`);
+      }
+      mediaRootFolderId = rootRes.folder.id;
+      lastTargetLabel = rootRes.targetLabel || rootName;
+    }
+
+    const chunkSize = isMedia ? (includeVideos ? 1 : 3) : 5;
+    for (let i = 0; i < selectedItems.length; i += chunkSize) {
+      const chunk = selectedItems.slice(i, i + chunkSize);
+      const isFinalChunk = i + chunkSize >= selectedItems.length;
+      let res;
+
+      if (isMedia) {
+        const posts = chunk
+          .map((item) => {
+            const p = item.mediaPost || {};
+            const media = includeVideos
+              ? p.media || []
+              : (p.media || []).filter((m) => m && m.kind === 'photo');
+            if (media.length === 0) return null;
+            return {
+              ...p,
+              media,
+              hasVideo: media.some((m) => m.kind === 'video' || m.kind === 'gif'),
+              subfolderName: resolvePostOrganizationFolderName(p, state.organizeMode),
+              organizeMode: state.organizeMode,
+              includeVideos,
+            };
+          })
+          .filter(Boolean);
+
+        if (posts.length > 0) {
+          res = await sendBg({
+            type: 'INGEST_SOCIAL_MEDIA_CHUNK',
+            posts,
+            targetFolderId: mediaRootFolderId,
+            targetBoardId: null,
+            skipDuplicates: false,
+            autoClassify,
+            suggestedFolderName: suggestedFolder,
+            isFinalChunk,
+          });
+        } else {
+          res = { ok: true, created: 0 };
+        }
+      } else {
+        const bookmarks = chunk.map((item) => item.bookmark).filter(Boolean);
+        res = await sendBg({
+          type: 'INGEST_SOCIAL_BOOKMARKS_CHUNK',
+          bookmarks,
+          skipDuplicates: false,
+          autoClassify,
+          suggestedFolderName: suggestedFolder,
+          isFinalChunk,
+        });
+      }
+
+      if (res?.ok) {
+        totalCreated += Number(res.created || 0);
+        if (res.targetLabel) lastTargetLabel = res.targetLabel;
+        const doneKeys = new Set(chunk.map((item) => item.dedupKey));
+        state.douyinPickerItems = state.douyinPickerItems.map((entry) =>
+          doneKeys.has(entry.dedupKey) ? { ...entry, alreadyImported: true } : entry,
+        );
+        for (const k of doneKeys) state.selectedDouyinKeys.delete(k);
+      } else {
+        totalFailed += chunk.length;
+      }
+
+      completed += chunk.length;
+      importBtn.textContent = `正在导入 ${completed}/${selectedItems.length}…`;
+      renderDouyinPickerList();
+    }
+
+    if (totalCreated > 0 && autoClassify) {
+      void refreshTargetsLive(true);
+    }
+
+    if (totalFailed === 0) {
+      const destText = lastTargetLabel ? `到 ${lastTargetLabel}` : '';
+      showStatus('success', `已导入 ${totalCreated || selectedItems.length} 条抖音作品${destText}`, 3800);
+    } else {
+      showStatus(
+        'error',
+        `已导入 ${totalCreated} 条，${totalFailed} 条导入失败，请稍后重试`,
+        4500,
+      );
+    }
+  } catch (err) {
+    showStatus('error', err instanceof Error ? err.message : '导入所选抖音作品失败', 4500);
+  } finally {
+    state.isBusy = false;
+    renderDouyinPickerList();
   }
 }
 
@@ -1262,7 +1718,24 @@ function bindEvents() {
 
   // Panel 2: Batch Collector
   $('btn-bm-start').addEventListener('click', () => void handleStartBookmarkImport());
+  $('btn-bm-open-picker').addEventListener('click', () => void openDouyinPicker());
   $('btn-bm-quick-folder').addEventListener('click', () => void handleQuickCreateCollectionFolder());
+  $('btn-picker-select-new').addEventListener('click', handlePickerSelectUnimported);
+  $('btn-picker-clear').addEventListener('click', handlePickerClearSelection);
+  $('btn-picker-more').addEventListener('click', () => void scanDouyinPickerItemsFromTab({ scrollMore: true }));
+  $('btn-picker-refresh').addEventListener('click', () => void scanDouyinPickerItemsFromTab({ scrollMore: false }));
+  $('btn-picker-close').addEventListener('click', () => setDouyinPickerVisibility(false));
+  $('btn-picker-import').addEventListener('click', () => void handleImportSelectedDouyinItems());
+
+  for (const btn of document.querySelectorAll('.seg-btn[data-dy-filter]')) {
+    btn.addEventListener('click', () => {
+      state.douyinContentFilter = btn.dataset.dyFilter || 'all';
+      renderBatchSegmentedState();
+      updateBatchRulesSummary();
+      if (state.douyinPickerOpen) renderDouyinPickerList();
+      void persistBatchOptions();
+    });
+  }
   $('btn-bm-pause').addEventListener('click', async () => {
     if (!state.activeTab?.id) return;
     const msgType = state.bookmarkJob?.status === 'paused' ? 'RESUME_BOOKMARK_IMPORT' : 'PAUSE_BOOKMARK_IMPORT';
@@ -1295,7 +1768,12 @@ function bindEvents() {
 
   for (const btn of document.querySelectorAll('.seg-btn[data-xhs-mode]')) {
     btn.addEventListener('click', () => {
-      state.xhsCollectMode = btn.dataset.xhsMode === 'bookmarks' ? 'bookmarks' : 'media';
+      const nextMode = btn.dataset.xhsMode === 'bookmarks' ? 'bookmarks' : 'media';
+      if (state.collectionPage?.platform === 'douyin') {
+        state.douyinCollectMode = nextMode;
+      } else {
+        state.xhsCollectMode = nextMode;
+      }
       renderBatchSegmentedState();
       syncBatchModeVisibility();
       void persistBatchOptions();
@@ -1306,6 +1784,7 @@ function bindEvents() {
     'bm-opt-include-videos',
     'bm-opt-skip-retweets',
     'bm-opt-xhs-detail',
+    'bm-opt-dy-classify',
     'bm-opt-skip-dups',
     'bm-opt-stop-streak',
   ]) {
@@ -1323,6 +1802,12 @@ function bindEvents() {
   }
 
   // Panel 3: Images
+  $('btn-images-goto-picker').addEventListener('click', () => {
+    switchTab('bookmarks');
+    if (state.collectionPage?.platform === 'douyin') {
+      void openDouyinPicker();
+    }
+  });
   $('btn-select-large').addEventListener('click', handleSelectLargeImages);
   $('btn-clear-images').addEventListener('click', handleClearImages);
   $('btn-rescan-images').addEventListener('click', () => void scanCurrentPageImages());

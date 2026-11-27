@@ -31,10 +31,17 @@ import {
   detectPixivCollectionUrl,
   detectThreadsProfileUrl,
   extractArtworkFromPixivPayloads,
+  extractDouyinCollectionsFromPayload,
+  extractDouyinPostsFromPayload,
+  extractDouyinShareCopyUrl,
   extractPostsFromBlueskyFeedPayload,
   extractPostsFromInstagramPayload,
   extractPostsFromThreadsGraphQLPayload,
   filterCreatorMediaPost,
+  normalizeDouyinPostUrl,
+  parseDouyinMetricCount,
+  pickBestDouyinImageUrl,
+  pickBestDouyinVideoUrl,
 } from '../lib/social-collectors.js';
 import {
   buildAuthorRootFolderName,
@@ -54,6 +61,7 @@ import {
 } from '../lib/image-filter.js';
 import {
   buildFolderOptions,
+  DEFAULT_CONFIG,
   DEFAULT_DESKTOP_SERVER_URL,
   getConfig,
   isConfigured,
@@ -68,6 +76,7 @@ import {
   isDirectImageUrl,
   isLightHex,
   isSameOriginUrl,
+  isValidDouyinAwemeId,
   normalizeHexColor,
   normalizeServerUrl,
 } from '../lib/url-detect.js';
@@ -159,7 +168,9 @@ test('CSS, HTML, and runtime UI files pass motion, token, CSP, DOM-ID, and clean
   assert.equal(/--ease-in\b|cubic-bezier\(\s*0\.42\s*,\s*0\s*,\s*1\s*,\s*1\s*\)/.test(contentJs), false);
   assert.ok(contentJs.includes('if (window !== window.top) return;'), 'content.js must ignore sub-iframes');
   assert.ok(
-    contentJs.includes("case 'START_BOOKMARK_IMPORT':\n        sendResponse(startBookmarkImport(msg.options || {}));"),
+    contentJs
+      .replace(/\r\n/g, '\n')
+      .includes("case 'START_BOOKMARK_IMPORT':\n        sendResponse(startBookmarkImport(msg.options || {}));"),
     'START_BOOKMARK_IMPORT must respond synchronously after launching detached loop',
   );
 
@@ -1428,4 +1439,1375 @@ test('multi-platform payload extractors normalize Bluesky, Pixiv multi-page, Thr
   assert.equal(posted[0].inputs[0].type, 'socialMedia');
   assert.equal(posted[0].inputs[0].platform, 'pixiv');
   assert.equal(posted[0].inputs[0].referer, 'https://www.pixiv.net/');
+});
+
+// MARK: - 12. Douyin (抖音) URL Detection, Parser, Passive Page-Bridge & Classic-Script Parity Tests
+
+test('Douyin URL detection, short links, share copy, canonicalDedupKey, and 6 route shapes align 1:1 with Xiaohongshu', () => {
+  // Valid / invalid aweme IDs
+  assert.equal(isValidDouyinAwemeId('7412345678901234567'), true);
+  assert.equal(isValidDouyinAwemeId('12345'), false);
+  assert.equal(isValidDouyinAwemeId('abc7412345678901234'), false);
+
+  // Single-post special sources (video, note, share, modal_id, v.douyin.com short link)
+  const vSrc = detectSpecialSource('https://www.douyin.com/video/7412345678901234567');
+  assert.equal(vSrc.kind, 'douyin');
+  assert.equal(vSrc.postID, '7412345678901234567');
+  assert.equal(vSrc.badgeText, '抖音作品');
+
+  const nSrc = detectSpecialSource('https://www.douyin.com/note/7412345678901234568');
+  assert.equal(nSrc.kind, 'douyin');
+  assert.equal(nSrc.postID, '7412345678901234568');
+
+  const modalSrc = detectSpecialSource(
+    'https://www.douyin.com/user/self?showTab=favorite_collection&modal_id=7412345678901234567',
+  );
+  assert.equal(modalSrc.kind, 'douyin');
+  assert.equal(modalSrc.postID, '7412345678901234567');
+
+  const shareSrc = detectSpecialSource('https://www.iesdouyin.com/share/video/7412345678901234567/');
+  assert.equal(shareSrc.kind, 'douyin');
+  assert.equal(shareSrc.postID, '7412345678901234567');
+
+  const shortSrc = detectSpecialSource('https://v.douyin.com/iR8xYz9A/');
+  assert.equal(shortSrc.kind, 'douyin');
+  assert.equal(shortSrc.hostname, 'v.douyin.com');
+
+  // Share copy extraction
+  assert.equal(
+    extractDouyinShareCopyUrl('7.48 复制打开抖音，看看【摄影师】的作品 https://v.douyin.com/iR8xYz9A/ 复制此链接'),
+    'https://v.douyin.com/iR8xYz9A/',
+  );
+
+  // Canonical deduplication key collapses video/note/share/modal_id identically
+  assert.equal(
+    canonicalDedupKey('https://www.douyin.com/video/7412345678901234567?from=collect'),
+    'douyin:7412345678901234567',
+  );
+  assert.equal(
+    canonicalDedupKey('https://www.douyin.com/note/7412345678901234567'),
+    'douyin:7412345678901234567',
+  );
+  assert.equal(
+    canonicalDedupKey('https://www.douyin.com/user/self?showTab=favorite_collection&modal_id=7412345678901234567'),
+    'douyin:7412345678901234567',
+  );
+  assert.equal(
+    canonicalDedupKey('https://www.iesdouyin.com/share/video/7412345678901234567/'),
+    'douyin:7412345678901234567',
+  );
+
+  // URL normalizer
+  const normNote = normalizeDouyinPostUrl('/note/7412345678901234568?enter_from=fav');
+  assert.equal(normNote.kind, 'note');
+  assert.equal(normNote.url, 'https://www.douyin.com/note/7412345678901234568');
+  assert.equal(normNote.dedupKey, 'douyin:7412345678901234568');
+
+  // 6 Douyin collection / profile / single-post route checks
+  const dyCollect = detectBookmarkCollectionPage('https://www.douyin.com/user/self?showTab=favorite_collection');
+  assert.equal(dyCollect.supported, true);
+  assert.equal(dyCollect.isCollectionRoute, true);
+  assert.equal(dyCollect.platform, 'douyin');
+  assert.equal(dyCollect.pageKind, 'collect');
+  assert.equal(dyCollect.suggestedFolderName, '抖音收藏');
+
+  const dySubBoard = detectBookmarkCollectionPage(
+    'https://www.douyin.com/user/self?showTab=favorite_collection&collects_id=7333444555666',
+  );
+  assert.equal(dySubBoard.supported, true);
+  assert.equal(dySubBoard.pageKind, 'board');
+  assert.equal(dySubBoard.collectionId, '7333444555666');
+
+  const dyBoardPath = detectBookmarkCollectionPage('https://www.douyin.com/collection/7333444555666');
+  assert.equal(dyBoardPath.supported, true);
+  assert.equal(dyBoardPath.pageKind, 'board');
+
+  const dyLikes = detectBookmarkCollectionPage('https://www.douyin.com/user/self?showTab=like');
+  assert.equal(dyLikes.supported, true);
+  assert.equal(dyLikes.pageKind, 'likes');
+  assert.equal(dyLikes.suggestedFolderName, '抖音喜欢');
+
+  const dyProfile = detectBookmarkCollectionPage('https://www.douyin.com/user/MS4wLjABAAAA_demo_sec_uid');
+  assert.equal(dyProfile.supported, true);
+  assert.equal(dyProfile.pageKind, 'profile');
+
+  // Dedicated single video/note pages are NOT batch collection routes
+  assert.equal(detectBookmarkCollectionPage('https://www.douyin.com/video/7412345678901234567').supported, false);
+  assert.equal(detectBookmarkCollectionPage('https://www.douyin.com/note/7412345678901234568').supported, false);
+});
+
+test('douyin-parser normalizes short video (H.264, non-HEIC cover, duration), multi-image photo-note, and collects_list', () => {
+  assert.equal(parseDouyinMetricCount('2.4万'), 24000);
+  assert.equal(parseDouyinMetricCount('1.5亿'), 150000000);
+  assert.equal(parseDouyinMetricCount('8.6k'), 8600);
+  assert.equal(
+    pickBestDouyinImageUrl([
+      'http://p3-pc-sign.douyinpic.com/tos-cn-i-0813/a~tplv-dy-heic.heic',
+      'http://p3-pc-sign.douyinpic.com/tos-cn-i-0813/a~tplv-dy-aweme-images.jpeg',
+    ]),
+    'https://p3-pc-sign.douyinpic.com/tos-cn-i-0813/a~tplv-dy-aweme-images.jpeg',
+  );
+
+  // Prefers H.264 watermark-free MP4 over H.265 / playwm
+  const pickedMp4 = pickBestDouyinVideoUrl({
+    bit_rate: [
+      {
+        gear_name: 'normal_1080_265',
+        is_h265: 1,
+        bit_rate: 4_500_000,
+        play_addr: { width: 1080, height: 1920, url_list: ['https://v26-web.douyinvod.com/hevc_1080'] },
+      },
+      {
+        gear_name: 'normal_1080_0',
+        is_h265: 0,
+        bit_rate: 3_200_000,
+        play_addr: {
+          width: 1080,
+          height: 1920,
+          url_list: [
+            'https://www.douyin.com/aweme/v1/playwm/?video_id=wm',
+            'https://v26-web.douyinvod.com/h264_1080_clean',
+          ],
+        },
+      },
+    ],
+  });
+  assert.equal(pickedMp4, 'https://v26-web.douyinvod.com/h264_1080_clean');
+
+  const samplePayload = {
+    aweme_list: [
+      {
+        aweme_id: '7412345678901234567',
+        aweme_type: 0,
+        desc: '室内建筑布光拆解 #布光 #建筑摄影',
+        create_time: 1763625600,
+        author: {
+          nickname: '光影工作室',
+          unique_id: 'MS4wLjABAAAA_hidden_sec',
+          short_id: '886622',
+          avatar_thumb: { url_list: ['http://p3-pc.douyinpic.com/avatar.jpeg'] },
+        },
+        statistics: { digg_count: 15800, comment_count: 342, share_count: 910, play_count: 120000 },
+        text_extra: [{ hashtag_name: '布光' }, { hashtag_name: '建筑摄影' }],
+        video: {
+          duration: 15400,
+          width: 1080,
+          height: 1920,
+          origin_cover: {
+            url_list: [
+              'https://p3-pc-sign.douyinpic.com/cover.heic',
+              'https://p3-pc-sign.douyinpic.com/cover.jpeg',
+            ],
+          },
+          bit_rate: [
+            {
+              is_h265: 0,
+              bit_rate: 2_800_000,
+              play_addr: { width: 1080, height: 1920, url_list: ['https://v26-web.douyinvod.com/v1_h264'] },
+            },
+          ],
+        },
+      },
+      {
+        aweme_id: '7412345678901234568',
+        aweme_type: 68,
+        item_title: '胶片调色预设分享',
+        desc: '6 张实拍对比 #调色',
+        create_time: 1763629200,
+        author: { nickname: '森野胶片', unique_id: 'senye_film' },
+        statistics: { digg_count: 4200, comment_count: 55, share_count: 180 },
+        images: [
+          { width: 1440, height: 1920, url_list: ['https://p3-pc-sign.douyinpic.com/img1.heic', 'https://p3-pc-sign.douyinpic.com/img1.webp'] },
+          { width: 1440, height: 1920, url_list: ['https://p3-pc-sign.douyinpic.com/img2.jpeg'] },
+        ],
+      },
+    ],
+  };
+
+  const posts = extractDouyinPostsFromPayload(samplePayload, { collectionId: '778899' });
+  assert.equal(posts.length, 2);
+
+  const vid = posts[0];
+  assert.equal(vid.platform, 'douyin');
+  assert.equal(vid.dedupKey, 'douyin:7412345678901234567');
+  assert.equal(vid.originalURL, 'https://www.douyin.com/video/7412345678901234567');
+  assert.equal(vid.authorName, '光影工作室');
+  assert.equal(vid.authorHandle, '886622', 'Must never expose MS4wLjAB sec_uid as handle');
+  assert.equal(vid.authorAvatarURL, 'https://p3-pc.douyinpic.com/avatar.jpeg');
+  assert.equal(vid.hasVideo, true);
+  assert.equal(vid.videoURL, 'https://v26-web.douyinvod.com/v1_h264');
+  assert.equal(vid.durationSeconds, 15.4);
+  assert.equal(vid.videoDurationSeconds, 15.4);
+  assert.equal(vid.media.length, 1);
+  assert.equal(vid.media[0].kind, 'video');
+  assert.equal(vid.media[0].thumbnailURL, 'https://p3-pc-sign.douyinpic.com/cover.jpeg');
+  assert.equal(vid.likeCount, 15800);
+  assert.equal(vid.viewCount, 120000);
+  assert.deepEqual(vid.tags, ['布光', '建筑摄影']);
+  assert.equal(vid.collectionId, '778899');
+  assert.equal(vid.referer, 'https://www.douyin.com/');
+
+  const photoNote = posts[1];
+  assert.equal(photoNote.originalURL, 'https://www.douyin.com/note/7412345678901234568');
+  assert.equal(photoNote.hasVideo, false);
+  assert.equal(photoNote.videoURL, null);
+  assert.equal(photoNote.title, '胶片调色预设分享');
+  assert.equal(photoNote.media.length, 2);
+  assert.equal(photoNote.media[0].url, 'https://p3-pc-sign.douyinpic.com/img1.webp');
+  assert.equal(photoNote.media[1].url, 'https://p3-pc-sign.douyinpic.com/img2.jpeg');
+
+  // Collection directory extraction & creator root folder naming
+  const cols = extractDouyinCollectionsFromPayload({
+    collects_list: [
+      { collects_id_str: '778899', collects_name: '运镜参考', total_number: 42 },
+      { collects_id: 778900, collects_name: '调色灵感', total_number: 18 },
+    ],
+  });
+  assert.deepEqual(cols, [
+    { id: '778899', name: '运镜参考', totalCount: 42 },
+    { id: '778900', name: '调色灵感', totalCount: 18 },
+  ]);
+  assert.equal(buildCreatorRootFolderName('douyin', 'MS4wLjABAAAA_sec', '光影工作室'), '光影工作室');
+});
+
+test('manifest, classic-script constraints, Safari url-detect isolation, and page-bridge Douyin passive interception hold end-to-end', async () => {
+  const manifest = JSON.parse(fs.readFileSync(path.join(EXT_ROOT, 'manifest.json'), 'utf8'));
+  const bridgeLoaderMatches = manifest.content_scripts[0].matches;
+  const warMatches = manifest.web_accessible_resources[1].matches;
+  for (const pat of ['https://douyin.com/*', 'https://www.douyin.com/*', 'https://m.douyin.com/*']) {
+    assert.ok(bridgeLoaderMatches.includes(pat), `Missing Douyin content_scripts match: ${pat}`);
+    assert.ok(warMatches.includes(pat), `Missing Douyin web_accessible_resources match: ${pat}`);
+  }
+
+  // Classic scripts must contain zero static ESM import/export declarations
+  for (const classicFile of ['page-bridge.js', 'content.js', 'x-bridge-loader.js']) {
+    const src = fs.readFileSync(path.join(EXT_ROOT, classicFile), 'utf8');
+    assert.equal(/^\s*(?:import|export)\s/m.test(src), false, `${classicFile} must stay a classic script`);
+  }
+
+  // url-detect.js must NOT import from douyin-parser.js (preserves Safari 4-file classic SW bundler)
+  const urlDetectSrc = fs.readFileSync(path.join(EXT_ROOT, 'lib/url-detect.js'), 'utf8');
+  assert.equal(urlDetectSrc.includes('douyin-parser.js'), false);
+
+  // Execute page-bridge.js in a sandboxed Douyin window context and verify passive fetch interception
+  const bridgeSrc = fs.readFileSync(path.join(EXT_ROOT, 'page-bridge.js'), 'utf8');
+  const postedMessages = [];
+  const mockFetchResponses = new Map([
+    [
+      'https://www.douyin.com/aweme/v1/web/collects/list/?cursor=0&count=20',
+      JSON.stringify({ collects_list: [{ collects_id_str: '778899', collects_name: '运镜参考', total_number: 12 }] }),
+    ],
+    [
+      'https://www.douyin.com/aweme/v1/web/collects/video/list/?collects_id=778899&cursor=0',
+      JSON.stringify({
+        aweme_list: [
+          {
+            aweme_id: '7412345678901234569',
+            aweme_type: 0,
+            desc: '手持跟拍运镜 #运镜',
+            create_time: 1763625600,
+            author: { nickname: '镜头日记', unique_id: 'lens_diary' },
+            statistics: { digg_count: 990 },
+            video: {
+              duration: 12000,
+              origin_cover: { url_list: ['https://p3-pc-sign.douyinpic.com/c.jpeg'] },
+              play_addr: { url_list: ['https://v26-web.douyinvod.com/lens_clean'] },
+            },
+          },
+        ],
+      }),
+    ],
+    [
+      'https://www.douyin.com/aweme/v1/web/other/unrelated/',
+      JSON.stringify({ aweme_list: [{ aweme_id: '7412345678909999999', desc: 'ignored' }] }),
+    ],
+  ]);
+
+  const sandboxWindow = {
+    location: { origin: 'https://www.douyin.com', hostname: 'www.douyin.com', href: 'https://www.douyin.com/user/self?showTab=favorite_collection' },
+    postMessage(msg, origin) {
+      postedMessages.push({ msg, origin });
+    },
+    fetch: async (url) => {
+      const body = mockFetchResponses.get(url) || '{}';
+      return {
+        ok: true,
+        clone() {
+          return { text: async () => body };
+        },
+      };
+    },
+  };
+  const sandbox = {
+    window: sandboxWindow,
+    URL,
+    Date,
+    Set,
+    Map,
+    Array,
+    Object,
+    String,
+    Number,
+    Boolean,
+    Math,
+    JSON,
+    RegExp,
+    XMLHttpRequest: undefined,
+  };
+  vm.runInNewContext(bridgeSrc, sandbox);
+
+  await sandboxWindow.fetch('https://www.douyin.com/aweme/v1/web/collects/list/?cursor=0&count=20');
+  await sandboxWindow.fetch('https://www.douyin.com/aweme/v1/web/collects/video/list/?collects_id=778899&cursor=0');
+  await sandboxWindow.fetch('https://www.douyin.com/aweme/v1/web/other/unrelated/');
+  await new Promise((r) => setTimeout(r, 20));
+
+  const colMsg = postedMessages.find((m) => m.msg?.type === 'DOUYIN_COLLECTIONS');
+  assert.ok(colMsg, 'page-bridge must emit DOUYIN_COLLECTIONS on /collects/list/');
+  assert.equal(colMsg.msg.collections[0].name, '运镜参考');
+
+  const postMsg = postedMessages.find((m) => m.msg?.type === 'GRAPHQL_POSTS');
+  assert.ok(postMsg, 'page-bridge must emit GRAPHQL_POSTS on /collects/video/list/');
+  assert.equal(postMsg.msg.platform, 'douyin');
+  assert.equal(postMsg.msg.collectionId, '778899');
+  assert.equal(postMsg.msg.sourceEndpoint, 'collects_video_list');
+  assert.equal(postMsg.msg.posts.length, 1);
+  assert.equal(postMsg.msg.posts[0].dedupKey, 'douyin:7412345678901234569');
+  assert.equal(postMsg.msg.posts[0].durationSeconds, 12);
+  assert.equal(postMsg.msg.posts[0].videoURL, 'https://v26-web.douyinvod.com/lens_clean');
+  assert.equal(
+    postedMessages.some((m) => m.msg?.posts?.some((p) => p.postID === '7412345678909999999')),
+    false,
+    'Non-target endpoints must not be emitted',
+  );
+});
+
+test('Douyin storage config, content.js hooks, and background single-page capture work seamlessly', async () => {
+  const mem = new Map();
+  const mockStorage = {
+    async get(key) { return { [key]: mem.get(key) }; },
+    async set(obj) { for (const [k, v] of Object.entries(obj)) mem.set(k, v); },
+  };
+
+  let cfg = await getConfig(mockStorage);
+  assert.equal(cfg.douyinProfileCollectMode, 'media');
+  cfg = await saveConfig({ douyinProfileCollectMode: 'bookmarks' }, mockStorage);
+  assert.equal(cfg.douyinProfileCollectMode, 'bookmarks');
+  cfg = await saveConfig({ douyinProfileCollectMode: 'invalid_val' }, mockStorage);
+  assert.equal(cfg.douyinProfileCollectMode, 'media');
+
+  const contentJs = fs.readFileSync(path.join(EXT_ROOT, 'content.js'), 'utf8');
+  for (const sym of [
+    'isDouyinHost',
+    'DOUYIN_COLLECTIONS',
+    'ensureDouyinCollectTabActive',
+    'harvestVisibleDouyinItems',
+    'extractCurrentSingleDouyinPost',
+    'hasDouyinAuthOrVerifyBlocker',
+    'douyinProfileCollectMode',
+  ]) {
+    assert.ok(contentJs.includes(sym), `content.js missing Douyin symbol: ${sym}`);
+  }
+
+  // Verify background.js captureCurrentPage pulls GET_PAGE_CONTEXT socialBookmark on Douyin pages
+  const prevBrowser = globalThis.browser;
+  const prevChrome = globalThis.chrome;
+  const prevFetch = globalThis.fetch;
+  const postedPayloads = [];
+  let requestedPageContext = false;
+
+  const bgMem = new Map();
+  const mockChrome = {
+    storage: {
+      local: {
+        async get(key) { return { [key]: bgMem.get(key) }; },
+        async set(obj) { for (const [k, v] of Object.entries(obj)) bgMem.set(k, v); },
+      },
+    },
+    action: { setBadgeText() {}, setBadgeBackgroundColor() {}, setBadgeTextColor() {} },
+    tabs: {
+      async sendMessage(_tabId, payload) {
+        if (payload?.type === 'GET_PAGE_CONTEXT') {
+          requestedPageContext = true;
+          return {
+            ok: true,
+            socialBookmark: {
+              platform: 'douyin',
+              postID: '7412345678901234567',
+              videoID: '7412345678901234567',
+              originalURL: 'https://www.douyin.com/video/7412345678901234567',
+              dedupKey: 'douyin:7412345678901234567',
+              authorName: '光影工作室',
+              authorHandle: '886622',
+              articleTitle: '室内建筑布光拆解',
+              bodyText: '室内建筑布光拆解 #布光',
+              hasVideo: true,
+              videoURL: 'https://v26-web.douyinvod.com/v1_h264',
+              durationSeconds: 15.4,
+              videoDurationSeconds: 15.4,
+              attachments: [
+                {
+                  kind: 'video',
+                  url: 'https://v26-web.douyinvod.com/v1_h264',
+                  thumbnailURL: 'https://p3-pc-sign.douyinpic.com/cover.jpeg',
+                },
+              ],
+              tags: ['抖音', '布光'],
+            },
+          };
+        }
+        return { ok: true };
+      },
+      async query() { return []; },
+    },
+    runtime: {
+      lastError: null,
+      getURL: (p) => `chrome-extension://test/${p}`,
+      sendMessage: async () => ({ ok: true }),
+      openOptionsPage() {},
+      onInstalled: { addListener() {} },
+      onStartup: { addListener() {} },
+      onMessage: { addListener() {} },
+    },
+    contextMenus: { removeAll(cb) { cb?.(); }, create(_i, cb) { cb?.(); }, onClicked: { addListener() {} } },
+    commands: { onCommand: { addListener() {} } },
+    notifications: { create(_o, cb) { cb?.(); } },
+  };
+
+  globalThis.browser = undefined;
+  globalThis.chrome = mockChrome;
+  globalThis.fetch = async (url, init = {}) => {
+    if (String(url).endsWith('/api/v1/assets/ingest')) {
+      postedPayloads.push(JSON.parse(init.body));
+      return createJsonResponse({ assets: [{ id: 'DY-1', title: '室内建筑布光拆解' }], created: 1, skipped: 0 }, 201);
+    }
+    return createJsonResponse({ ok: true });
+  };
+
+  try {
+    await saveConfig(
+      { connectionMode: 'desktop', serverUrl: 'http://127.0.0.1:41937', apiToken: 'tok_dy', targetMode: 'inbox' },
+      mockChrome.storage.local,
+    );
+    const bg = await import('../background.js?test=douyin-single');
+    await bg.captureCurrentPage({
+      id: 42,
+      windowId: 1,
+      url: 'https://www.douyin.com/video/7412345678901234567',
+      title: '室内建筑布光拆解 - 抖音',
+    });
+    assert.equal(requestedPageContext, true);
+    assert.equal(postedPayloads.length, 1);
+    assert.equal(postedPayloads[0].inputs[0].type, 'socialBookmark');
+    assert.equal(postedPayloads[0].inputs[0].platform, 'douyin');
+    assert.equal(postedPayloads[0].inputs[0].videoDurationSeconds, 15.4);
+  } finally {
+    globalThis.browser = prevBrowser;
+    globalThis.chrome = prevChrome;
+    globalThis.fetch = prevFetch;
+  }
+});
+
+test('Douyin live-page regression audit: hidden nocaptcha iframe, protocol-relative //note/, route-scroll-container, dual semi-tabs, and XHR POST/GET', async () => {
+  // 1. Protocol-relative //www.douyin.com/note/<id> across url-detect.js & douyin-parser.js
+  const protoRelNote = '//www.douyin.com/note/7697580146296325233';
+  const relSrc = detectSpecialSource(protoRelNote);
+  assert.equal(relSrc.kind, 'douyin');
+  assert.equal(relSrc.postID, '7697580146296325233');
+  assert.equal(canonicalDedupKey(protoRelNote), 'douyin:7697580146296325233');
+  assert.equal(normalizeDouyinPostUrl(protoRelNote).url, 'https://www.douyin.com/note/7697580146296325233');
+  assert.equal(
+    detectBookmarkCollectionPage('https://www.douyin.com/user/self?showSubTab=video&showTab=favorite_collection')
+      .pageKind,
+    'collect',
+  );
+
+  // 2. XHR interception in page-bridge.js across all 4 live endpoints (POST + GET, text / json / arraybuffer)
+  const bridgeSrc = fs.readFileSync(path.join(EXT_ROOT, 'page-bridge.js'), 'utf8');
+  const xhrMessages = [];
+
+  class MockXHR {
+    constructor() {
+      this._listeners = new Map();
+      this.status = 200;
+      this.responseType = '';
+      this.responseText = '';
+      this.response = null;
+    }
+    open(method, url) {
+      this._method = method;
+      this._url = url;
+    }
+    addEventListener(evt, fn) {
+      if (!this._listeners.has(evt)) this._listeners.set(evt, []);
+      this._listeners.get(evt).push(fn);
+    }
+    send(body) {
+      this._body = body;
+      const fns = this._listeners.get('load') || [];
+      for (const fn of fns) fn();
+    }
+  }
+
+  const sandboxWindow = {
+    location: {
+      origin: 'https://www.douyin.com',
+      hostname: 'www.douyin.com',
+      href: 'https://www.douyin.com/user/self?showSubTab=video&showTab=favorite_collection',
+    },
+    postMessage(msg, origin) {
+      xhrMessages.push({ msg, origin });
+    },
+    fetch: undefined,
+  };
+
+  vm.runInNewContext(bridgeSrc, {
+    window: sandboxWindow,
+    XMLHttpRequest: MockXHR,
+    URL,
+    URLSearchParams,
+    TextDecoder,
+    Date,
+    Set,
+    Map,
+    Array,
+    Object,
+    String,
+    Number,
+    Boolean,
+    Math,
+    JSON,
+    RegExp,
+  });
+
+  // 2a. POST /aweme/v1/web/aweme/listcollection/ with responseType '' (text)
+  const xhr1 = new MockXHR();
+  xhr1.responseType = '';
+  xhr1.responseText = JSON.stringify({
+    aweme_list: [
+      {
+        aweme_id: '7706622133079146481',
+        aweme_type: 0,
+        desc: '收藏视频实测',
+        author: { nickname: '创作者A' },
+        video: {
+          duration: 9500,
+          origin_cover: { url_list: ['https://p3-pc-sign.douyinpic.com/v.jpeg'] },
+          play_addr: { url_list: ['https://v26-web.douyinvod.com/v_live'] },
+        },
+      },
+    ],
+  });
+  xhr1.open('POST', '/aweme/v1/web/aweme/listcollection/?device_platform=webapp');
+  xhr1.send('count=20&cursor=0');
+
+  // 2b. GET /aweme/v1/web/collects/list/ with responseType 'json'
+  const xhr2 = new MockXHR();
+  xhr2.responseType = 'json';
+  xhr2.response = {
+    collects_list: [{ collects_id: 7111222333, collects_id_str: '7111222333', collects_name: '分镜库', total_number: 7 }],
+  };
+  xhr2.open('GET', 'https://www.douyin.com/aweme/v1/web/collects/list/?cursor=0&count=20');
+  xhr2.send();
+
+  // 2c. GET /aweme/v1/web/collects/video/list/?collects_id=7111222333 with responseType 'text'
+  const xhr3 = new MockXHR();
+  xhr3.responseType = 'text';
+  xhr3.responseText = JSON.stringify({
+    aweme_list: [
+      {
+        aweme_id: '7697580146296325233',
+        aweme_type: 68,
+        desc: '实测图文作品',
+        author: { nickname: '创作者B' },
+        images: [{ url_list: ['https://p3-pc-sign.douyinpic.com/n1.webp'] }],
+      },
+    ],
+  });
+  xhr3.open('GET', 'https://www.douyin.com/aweme/v1/web/collects/video/list/?collects_id=7111222333&cursor=0');
+  xhr3.send();
+
+  // 2d. GET /aweme/v1/web/aweme/favorite/ with responseType 'arraybuffer'
+  const xhr4 = new MockXHR();
+  xhr4.responseType = 'arraybuffer';
+  xhr4.response = new TextEncoder().encode(
+    JSON.stringify({
+      aweme_list: [
+        {
+          aweme_id: '7700000000000000001',
+          aweme_type: 68,
+          desc: '喜欢图文',
+          author: { nickname: '创作者C' },
+          images: [{ url_list: ['https://p3-pc-sign.douyinpic.com/fav1.jpeg'] }],
+        },
+      ],
+    }),
+  ).buffer;
+  xhr4.open('GET', '/aweme/v1/web/aweme/favorite/?sec_user_id=MS4wLjAB_demo');
+  xhr4.send();
+
+  assert.equal(xhrMessages.filter((m) => m.msg?.type === 'DOUYIN_COLLECTIONS').length, 1);
+  assert.equal(
+    xhrMessages.find((m) => m.msg?.type === 'DOUYIN_COLLECTIONS').msg.collections[0].name,
+    '分镜库',
+  );
+  const postEvents = xhrMessages.filter((m) => m.msg?.type === 'GRAPHQL_POSTS');
+  assert.equal(postEvents.length, 3);
+  assert.equal(postEvents[0].msg.sourceEndpoint, 'listcollection');
+  assert.equal(postEvents[0].msg.posts[0].dedupKey, 'douyin:7706622133079146481');
+  assert.equal(postEvents[1].msg.sourceEndpoint, 'collects_video_list');
+  assert.equal(postEvents[1].msg.collectionId, '7111222333');
+  assert.equal(postEvents[1].msg.posts[0].originalURL, 'https://www.douyin.com/note/7697580146296325233');
+  assert.equal(postEvents[1].msg.posts[0].hasVideo, false);
+  assert.equal(postEvents[2].msg.sourceEndpoint, 'favorite');
+  assert.equal(postEvents[2].msg.posts[0].dedupKey, 'douyin:7700000000000000001');
+
+  // 3. Execute real content.js helpers in isolated VM to verify nocaptcha, route-scroll-container, //note/, and dual semi-tabs
+  const contentJs = fs.readFileSync(path.join(EXT_ROOT, 'content.js'), 'utf8');
+  const instrumented = contentJs.replace(
+    'initConfigSync();',
+    'globalThis.__dyTestExports = { hasDouyinAuthOrVerifyBlocker, findActiveScrollTarget, normalizeDouyinHref, detectCurrentCollectionPage, getActiveDouyinPrimaryTabText, getActiveDouyinSubTabText }; initConfigSync();',
+  );
+
+  const hiddenNocaptcha = {
+    id: 'nocaptcha-container',
+    _style: { display: 'none', visibility: 'hidden', opacity: '0' },
+    getBoundingClientRect: () => ({ width: 0, height: 0 }),
+  };
+  let visibleCaptcha = null;
+  const routeScrollEl = {
+    className: 'parent-route-container route-scroll-container',
+    scrollHeight: 2389,
+    clientHeight: 811,
+    _style: { overflowY: 'auto' },
+  };
+  const primaryActiveTab = { textContent: '收藏' };
+  const secondaryActiveTab = { textContent: '视频' };
+
+  const mockDoc = {
+    title: '我的主页 - 抖音',
+    documentElement: { scrollHeight: 811, clientHeight: 811 },
+    scrollingElement: { scrollHeight: 811, clientHeight: 811 },
+    body: { scrollHeight: 811, clientHeight: 811, innerText: '' },
+    addEventListener() {},
+    querySelector(sel) {
+      if (sel.includes('route-scroll-container')) return routeScrollEl;
+      return null;
+    },
+    querySelectorAll(sel) {
+      if (sel.includes('iframe[src*="captcha"]')) {
+        return visibleCaptcha ? [hiddenNocaptcha, visibleCaptcha] : [hiddenNocaptcha];
+      }
+      if (sel.includes('.route-scroll-container')) return [routeScrollEl];
+      if (sel.includes('[role="tab"][aria-selected="true"]')) {
+        return [secondaryActiveTab, primaryActiveTab];
+      }
+      return [];
+    },
+  };
+  const contentWin = {
+    location: {
+      origin: 'https://www.douyin.com',
+      hostname: 'www.douyin.com',
+      href: 'https://www.douyin.com/user/self?showSubTab=video&showTab=favorite_collection',
+    },
+    innerHeight: 811,
+    addEventListener() {},
+    getComputedStyle: (el) => el?._style || {},
+  };
+  contentWin.window = contentWin;
+  contentWin.top = contentWin;
+
+  const contentSandbox = {
+    window: contentWin,
+    document: mockDoc,
+    chrome: { runtime: { onMessage: { addListener() {} } }, storage: { local: { get: async () => ({}) } } },
+    URL,
+    URLSearchParams,
+    Date,
+    Set,
+    Map,
+    Array,
+    Object,
+    String,
+    Number,
+    Boolean,
+    Math,
+    JSON,
+    RegExp,
+    Element: class {},
+    setInterval: () => 0,
+    setTimeout: () => 0,
+    clearTimeout() {},
+    requestAnimationFrame: () => 0,
+  };
+  contentSandbox.globalThis = contentSandbox;
+  vm.runInNewContext(instrumented, contentSandbox);
+
+  const dy = contentSandbox.__dyTestExports;
+  assert.equal(dy.hasDouyinAuthOrVerifyBlocker(), false, '0x0 hidden nocaptcha-container must NOT trigger blocker');
+  visibleCaptcha = {
+    id: 'real-captcha',
+    _style: { display: 'block', visibility: 'visible', opacity: '1' },
+    getBoundingClientRect: () => ({ width: 340, height: 280 }),
+  };
+  assert.equal(dy.hasDouyinAuthOrVerifyBlocker(), true, 'Visible captcha iframe must pause batch sync');
+
+  assert.equal(
+    dy.normalizeDouyinHref('//www.douyin.com/note/7697580146296325233')?.url,
+    'https://www.douyin.com/note/7697580146296325233',
+  );
+  assert.equal(
+    dy.findActiveScrollTarget('douyin'),
+    routeScrollEl,
+    'findActiveScrollTarget must select div.parent-route-container.route-scroll-container',
+  );
+  assert.equal(dy.getActiveDouyinPrimaryTabText(), '收藏');
+  assert.equal(dy.getActiveDouyinSubTabText(), '视频');
+  const detectedPage = dy.detectCurrentCollectionPage(contentWin.location.href);
+  assert.equal(detectedPage.platform, 'douyin');
+  assert.equal(detectedPage.pageKind, 'collect');
+  assert.equal(detectedPage.suggestedFolderName, '抖音收藏');
+});
+
+test('Douyin UX upgrades: storage defaults & validation for douyinContentFilter and douyinAutoClassify', async () => {
+  assert.equal(DEFAULT_CONFIG.douyinContentFilter, 'all');
+  assert.equal(DEFAULT_CONFIG.douyinAutoClassify, true);
+
+  const mem = {};
+  const mockStorage = {
+    async get(key) {
+      return { [key]: mem[key] };
+    },
+    async set(obj) {
+      Object.assign(mem, obj);
+    },
+  };
+
+  const initial = await getConfig(mockStorage);
+  assert.equal(initial.douyinContentFilter, 'all');
+  assert.equal(initial.douyinAutoClassify, true);
+
+  const savedImageOff = await saveConfig(
+    { douyinContentFilter: 'image', douyinAutoClassify: false },
+    mockStorage,
+  );
+  assert.equal(savedImageOff.douyinContentFilter, 'image');
+  assert.equal(savedImageOff.douyinAutoClassify, false);
+
+  const savedInvalid = await saveConfig(
+    { douyinContentFilter: 'invalid_mode', douyinAutoClassify: true },
+    mockStorage,
+  );
+  assert.equal(savedInvalid.douyinContentFilter, 'all');
+  assert.equal(savedInvalid.douyinAutoClassify, true);
+
+  const savedVideo = await saveConfig({ douyinContentFilter: 'video' }, mockStorage);
+  assert.equal(savedVideo.douyinContentFilter, 'video');
+});
+
+test('Douyin UX upgrades: background.js lazy auto-classification (tags, zero empty folders, cache hit, Inbox/Folder/Single/AuthorMedia)', async () => {
+  const prevBrowser = globalThis.browser;
+  const prevChrome = globalThis.chrome;
+  const prevFetch = globalThis.fetch;
+
+  const mem = {};
+  const folderCalls = [];
+  const ingestCalls = [];
+  let folderSeq = 1;
+  const createdFolderByKey = new Map();
+
+  const mockChrome = {
+    storage: {
+      local: {
+        async get(key) {
+          return { [key]: mem[key] };
+        },
+        async set(obj) {
+          Object.assign(mem, obj);
+        },
+      },
+    },
+    action: { setBadgeText() {}, setBadgeBackgroundColor() {} },
+    tabs: {
+      async sendMessage() {
+        return { ok: true };
+      },
+      async query() {
+        return [];
+      },
+    },
+    runtime: {
+      lastError: null,
+      getURL: (p) => `chrome-extension://test/${p}`,
+      sendMessage: async () => ({ ok: true }),
+      openOptionsPage() {},
+      onInstalled: { addListener() {} },
+      onStartup: { addListener() {} },
+      onMessage: { addListener() {} },
+    },
+    contextMenus: { removeAll(cb) { cb?.(); }, create(_i, cb) { cb?.(); }, onClicked: { addListener() {} } },
+    commands: { onCommand: { addListener() {} } },
+    notifications: { create(_o, cb) { cb?.(); } },
+  };
+
+  globalThis.browser = undefined;
+  globalThis.chrome = mockChrome;
+  globalThis.fetch = async (url, init = {}) => {
+    const u = String(url);
+    if (u.endsWith('/api/v1/folders') && init.method === 'POST') {
+      const body = JSON.parse(init.body);
+      folderCalls.push(body);
+      const pid = body.parentID || body.parentId || null;
+      const key = `${pid || '__root__'}::${body.name}`;
+      let id = createdFolderByKey.get(key);
+      const reused = Boolean(id);
+      if (!id) {
+        id = `F-${folderSeq++}-${body.name}`;
+        createdFolderByKey.set(key, id);
+      }
+      return createJsonResponse({ folder: { id, name: body.name, parentId: pid }, reused }, 201);
+    }
+    if (u.endsWith('/api/v1/assets/ingest')) {
+      const body = JSON.parse(init.body);
+      ingestCalls.push(body);
+      const inputs = Array.isArray(body.inputs) ? body.inputs : [];
+      return createJsonResponse(
+        { assets: inputs.map((inp, idx) => ({ id: `A-${idx}`, title: inp.articleTitle || inp.title || 'dy' })), created: inputs.length, skipped: 0 },
+        201,
+      );
+    }
+    if (u.includes('/api/v1/folders') || u.includes('/api/v1/boards') || u.includes('/api/v1/auth/me')) {
+      return createJsonResponse({ folders: [], boards: [], user: { username: 'desktop', displayName: 'Charkle' } }, 200);
+    }
+    return createJsonResponse({ ok: true });
+  };
+
+  try {
+    const bg = await import('../background.js?test=douyin-auto-classify');
+    bg.clearDouyinFolderCache();
+
+    // Case A: Batch folder target with ONLY video items -> lazily creates ONLY `视频`, NEVER `图文`
+    await saveConfig(
+      {
+        connectionMode: 'desktop',
+        serverUrl: 'http://127.0.0.1:41937',
+        apiToken: 'tok_dy_ac',
+        targetMode: 'folder',
+        targetFolderId: 'F-ROOT',
+        targetFolderName: '摄影灵感',
+        douyinAutoClassify: true,
+      },
+      mockChrome.storage.local,
+    );
+
+    const resA = await bg.handleMessage({
+      type: 'INGEST_SOCIAL_BOOKMARKS_CHUNK',
+      bookmarks: [
+        {
+          platform: 'douyin',
+          postID: '7410000000000000001',
+          originalURL: 'https://www.douyin.com/video/7410000000000000001',
+          hasVideo: true,
+          articleTitle: '布光视频1',
+          tags: ['抖音'],
+        },
+        {
+          platform: 'douyin',
+          postID: '7410000000000000002',
+          originalURL: 'https://www.douyin.com/video/7410000000000000002',
+          hasVideo: true,
+          articleTitle: '布光视频2',
+          tags: ['抖音', '抖音视频'],
+        },
+      ],
+      skipDuplicates: true,
+      autoClassify: true,
+      isFinalChunk: true,
+    });
+    assert.equal(resA.ok, true);
+    assert.equal(folderCalls.length, 1, 'Only 视频 subfolder must be created when chunk has only videos');
+    assert.deepEqual(folderCalls[0], { name: '视频', parentID: 'F-ROOT', reuseExisting: true });
+    assert.equal(ingestCalls.length, 1);
+    assert.equal(ingestCalls[0].targetFolderID, createdFolderByKey.get('F-ROOT::视频'));
+    assert.ok(ingestCalls[0].inputs[0].tags.includes('抖音视频'));
+    assert.equal(ingestCalls[0].inputs[0].tags.includes('抖音图文'), false);
+    assert.equal(
+      ingestCalls[0].inputs[1].tags.filter((t) => t === '抖音视频').length,
+      1,
+      '抖音视频 tag must be deduplicated',
+    );
+
+    // Case B: Batch Inbox target with mixed video + photo-note -> lazily creates root `运镜参考` + `视频` + `图文`, cached on chunk 2
+    folderCalls.length = 0;
+    ingestCalls.length = 0;
+    await saveConfig(
+      {
+        targetMode: 'inbox',
+        targetFolderId: null,
+        targetFolderName: '',
+        targetBoardId: null,
+        targetBoardName: '',
+        douyinAutoClassify: true,
+      },
+      mockChrome.storage.local,
+    );
+
+    const mixedChunk = [
+      {
+        platform: 'douyin',
+        postID: '7410000000000000010',
+        originalURL: 'https://www.douyin.com/video/7410000000000000010',
+        hasVideo: true,
+        articleTitle: '运镜教程',
+        tags: ['抖音'],
+      },
+      {
+        platform: 'douyin',
+        postID: '7410000000000000011',
+        originalURL: 'https://www.douyin.com/note/7410000000000000011',
+        hasVideo: false,
+        articleTitle: '构图参考图集',
+        tags: ['抖音'],
+      },
+    ];
+    const resB1 = await bg.handleMessage({
+      type: 'INGEST_SOCIAL_BOOKMARKS_CHUNK',
+      bookmarks: mixedChunk,
+      autoClassify: true,
+      suggestedFolderName: '运镜参考',
+      isFinalChunk: false,
+    });
+    assert.equal(resB1.ok, true);
+    assert.equal(resB1.targetLabel, '运镜参考');
+    assert.equal(folderCalls.length, 3, 'Inbox batch should create root + 视频 + 图文');
+    assert.equal(folderCalls[0].name, '运镜参考');
+    assert.equal(folderCalls[0].parentID, null);
+    const sugRootId = createdFolderByKey.get('__root__::运镜参考');
+    assert.equal(folderCalls[1].parentID, sugRootId);
+    assert.equal(folderCalls[1].name, '视频');
+    assert.equal(folderCalls[2].parentID, sugRootId);
+    assert.equal(folderCalls[2].name, '图文');
+    assert.equal(ingestCalls.length, 2);
+    assert.equal(ingestCalls[0].targetFolderID, createdFolderByKey.get(`${sugRootId}::视频`));
+    assert.ok(ingestCalls[0].inputs[0].tags.includes('抖音视频'));
+    assert.equal(ingestCalls[1].targetFolderID, createdFolderByKey.get(`${sugRootId}::图文`));
+    assert.ok(ingestCalls[1].inputs[0].tags.includes('抖音图文'));
+
+    // Second chunk hits douyinFolderCache -> ZERO additional folder creation requests
+    folderCalls.length = 0;
+    const resB2 = await bg.handleMessage({
+      type: 'INGEST_SOCIAL_BOOKMARKS_CHUNK',
+      bookmarks: mixedChunk,
+      autoClassify: true,
+      suggestedFolderName: '运镜参考',
+      isFinalChunk: true,
+    });
+    assert.equal(resB2.ok, true);
+    assert.equal(folderCalls.length, 0, 'Cached Douyin folders must prevent redundant POST /api/v1/folders');
+
+    // Case C: Single-page INGEST_URL -> Inbox creates ZERO folders (still attaches tag); selected folder routes to 视频/图文 without double nesting
+    folderCalls.length = 0;
+    ingestCalls.length = 0;
+    const resCInbox = await bg.handleMessage({
+      type: 'INGEST_URL',
+      url: 'https://www.douyin.com/note/7410000000000000020',
+      socialBookmark: {
+        platform: 'douyin',
+        postID: '7410000000000000020',
+        originalURL: 'https://www.douyin.com/note/7410000000000000020',
+        hasVideo: false,
+        articleTitle: '单页图文收藏',
+        tags: ['抖音'],
+      },
+    });
+    assert.equal(resCInbox.ok, true);
+    assert.equal(folderCalls.length, 0, 'Single-page clip to Inbox must NOT create folders');
+    assert.equal(ingestCalls[0].targetFolderID, null);
+    assert.ok(ingestCalls[0].inputs[0].tags.includes('抖音图文'));
+
+    // Selected folder routes single photo-note into `F-ROOT/图文`
+    folderCalls.length = 0;
+    ingestCalls.length = 0;
+    await saveConfig(
+      { targetMode: 'folder', targetFolderId: 'F-ROOT', targetFolderName: '摄影灵感' },
+      mockChrome.storage.local,
+    );
+    const resCFolder = await bg.handleMessage({
+      type: 'INGEST_URL',
+      url: 'https://www.douyin.com/note/7410000000000000021',
+      socialBookmark: {
+        platform: 'douyin',
+        postID: '7410000000000000021',
+        originalURL: 'https://www.douyin.com/note/7410000000000000021',
+        hasVideo: false,
+        articleTitle: '单页图文到目录',
+        tags: ['抖音'],
+      },
+    });
+    assert.equal(resCFolder.ok, true);
+    assert.equal(folderCalls.length, 1);
+    assert.deepEqual(folderCalls[0], { name: '图文', parentID: 'F-ROOT', reuseExisting: true });
+    assert.equal(ingestCalls[0].targetFolderID, createdFolderByKey.get('F-ROOT::图文'));
+
+    // Already targeting a folder named `视频` must NOT create nested `视频/视频`
+    folderCalls.length = 0;
+    ingestCalls.length = 0;
+    const vidFolderId = createdFolderByKey.get('F-ROOT::视频');
+    await saveConfig(
+      { targetMode: 'folder', targetFolderId: vidFolderId, targetFolderName: '视频' },
+      mockChrome.storage.local,
+    );
+    await bg.handleMessage({
+      type: 'INGEST_URL',
+      url: 'https://www.douyin.com/video/7410000000000000022',
+      socialBookmark: {
+        platform: 'douyin',
+        postID: '7410000000000000022',
+        originalURL: 'https://www.douyin.com/video/7410000000000000022',
+        hasVideo: true,
+        articleTitle: '避免嵌套',
+        tags: ['抖音'],
+      },
+    });
+    assert.equal(folderCalls.length, 0, 'Must not double-nest 视频/视频');
+    assert.equal(ingestCalls[0].targetFolderID, vidFolderId);
+
+    // Case D: INGEST_SOCIAL_MEDIA_CHUNK (author_media) splits under <作者名>/视频 & <作者名>/图文, and respects autoClassify: false
+    folderCalls.length = 0;
+    ingestCalls.length = 0;
+    const resDOn = await bg.handleMessage({
+      type: 'INGEST_SOCIAL_MEDIA_CHUNK',
+      targetFolderId: 'F-AUTHOR-1',
+      targetBoardId: null,
+      targetLabel: '某创作者',
+      autoClassify: true,
+      posts: [
+        {
+          platform: 'douyin',
+          postID: '7410000000000000031',
+          originalURL: 'https://www.douyin.com/video/7410000000000000031',
+          hasVideo: true,
+          media: [{ kind: 'video', url: 'https://v26-web.douyinvod.com/v1.mp4' }],
+          tags: ['抖音'],
+        },
+        {
+          platform: 'douyin',
+          postID: '7410000000000000032',
+          originalURL: 'https://www.douyin.com/note/7410000000000000032',
+          hasVideo: false,
+          media: [{ kind: 'photo', url: 'https://p3-pc-sign.douyinpic.com/p1.jpeg' }],
+          tags: ['抖音'],
+        },
+      ],
+      isFinalChunk: true,
+    });
+    assert.equal(resDOn.ok, true);
+    assert.equal(folderCalls.length, 2);
+    assert.deepEqual(folderCalls[0], { name: '视频', parentID: 'F-AUTHOR-1', reuseExisting: true });
+    assert.deepEqual(folderCalls[1], { name: '图文', parentID: 'F-AUTHOR-1', reuseExisting: true });
+    assert.equal(ingestCalls[0].targetFolderID, createdFolderByKey.get('F-AUTHOR-1::视频'));
+    assert.ok(ingestCalls[0].inputs[0].tags.includes('抖音视频'));
+    assert.equal(ingestCalls[1].targetFolderID, createdFolderByKey.get('F-AUTHOR-1::图文'));
+    assert.ok(ingestCalls[1].inputs[0].tags.includes('抖音图文'));
+
+    // autoClassify: false skips subfolder creation while still attaching 抖音视频/抖音图文 tags
+    folderCalls.length = 0;
+    ingestCalls.length = 0;
+    const resDOff = await bg.handleMessage({
+      type: 'INGEST_SOCIAL_MEDIA_CHUNK',
+      targetFolderId: 'F-AUTHOR-OFF',
+      targetBoardId: null,
+      targetLabel: '不分类作者',
+      autoClassify: false,
+      posts: [
+        {
+          platform: 'douyin',
+          postID: '7410000000000000033',
+          originalURL: 'https://www.douyin.com/note/7410000000000000033',
+          hasVideo: false,
+          media: [{ kind: 'photo', url: 'https://p3-pc-sign.douyinpic.com/p2.jpeg' }],
+          tags: ['抖音'],
+        },
+      ],
+      isFinalChunk: true,
+    });
+    assert.equal(resDOff.ok, true);
+    assert.equal(folderCalls.length, 0, 'autoClassify: false must NOT create any subfolder');
+    assert.equal(ingestCalls[0].targetFolderID, 'F-AUTHOR-OFF');
+    assert.ok(ingestCalls[0].inputs[0].tags.includes('抖音图文'));
+  } finally {
+    globalThis.browser = prevBrowser;
+    globalThis.chrome = prevChrome;
+    globalThis.fetch = prevFetch;
+  }
+});
+
+test('Douyin UX upgrades: content.js filter never pollutes knownStreak, picker scans & scrolls route-scroll-container, and popup UI contracts hold', async () => {
+  const contentJs = fs.readFileSync(path.join(EXT_ROOT, 'content.js'), 'utf8');
+  const instrumented = contentJs.replace(
+    'initConfigSync();',
+    'globalThis.__dyUxExports = { matchesDouyinContentFilter, ensureDouyinTypeTagList, capturedSocialPostsByKey, startBookmarkImport, snapshotBatchJob, scanDouyinPickerItems }; initConfigSync();',
+  );
+
+  let registeredOnMessage = null;
+  const sentMessages = [];
+  const routeScrollEl = {
+    className: 'parent-route-container route-scroll-container',
+    scrollTop: 0,
+    scrollHeight: 2600,
+    clientHeight: 800,
+    _style: { overflowY: 'auto' },
+    scrollBy(optsOrX, y) {
+      const delta = typeof optsOrX === 'object' ? Number(optsOrX.top || 0) : Number(y || 0);
+      this.scrollTop = Math.min(this.scrollHeight - this.clientHeight, this.scrollTop + delta);
+    },
+  };
+
+  // Pre-seed 10 already-known videos + 2 unseen photo-notes to prove `仅图文` NEVER trips knownStreak >= 8
+  const knownVideoKeys = Array.from({ length: 10 }, (_, idx) => `douyin:74200000000000000${String(idx).padStart(2, '0')}`);
+
+  const makeMockEl = () => ({
+    className: '',
+    dataset: {},
+    style: {},
+    hidden: false,
+    innerHTML: '',
+    textContent: '',
+    setAttribute() {},
+    getAttribute() {
+      return null;
+    },
+    addEventListener() {},
+    append() {},
+    appendChild() {},
+    remove() {},
+    classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
+    attachShadow() {
+      return { append() {}, appendChild() {}, querySelector: () => makeMockEl() };
+    },
+    querySelector: () => makeMockEl(),
+    querySelectorAll: () => [],
+  });
+
+  const mockDoc = {
+    title: '我的主页 - 抖音',
+    documentElement: { scrollHeight: 800, clientHeight: 800, appendChild() {} },
+    scrollingElement: { scrollHeight: 800, clientHeight: 800 },
+    body: { scrollHeight: 800, clientHeight: 800, innerText: '', appendChild() {} },
+    createElement: () => makeMockEl(),
+    addEventListener() {},
+    querySelector(sel) {
+      if (sel.includes('route-scroll-container')) return routeScrollEl;
+      return null;
+    },
+    querySelectorAll(sel) {
+      if (sel.includes('.route-scroll-container')) return [routeScrollEl];
+      return [];
+    },
+  };
+
+  const contentWin = {
+    location: {
+      origin: 'https://www.douyin.com',
+      hostname: 'www.douyin.com',
+      href: 'https://www.douyin.com/user/self?showTab=favorite_collection',
+      search: '?showTab=favorite_collection',
+      pathname: '/user/self',
+    },
+    innerHeight: 800,
+    addEventListener() {},
+    getComputedStyle: (el) => el?._style || {},
+  };
+  contentWin.window = contentWin;
+  contentWin.top = contentWin;
+
+  class FastMutationObserver {
+    observe() {}
+    disconnect() {}
+  }
+
+  const contentSandbox = {
+    window: contentWin,
+    document: mockDoc,
+    MutationObserver: FastMutationObserver,
+    Element: class {},
+    chrome: {
+      storage: { local: { get: async () => ({}) }, onChanged: { addListener() {} } },
+      runtime: {
+        getURL: (p) => p,
+        onMessage: {
+          addListener(fn) {
+            registeredOnMessage = fn;
+          },
+        },
+        async sendMessage(msg) {
+          sentMessages.push(msg);
+          if (msg.type === 'FETCH_EXISTING_SOURCES') {
+            return { ok: true, canonicalKeys: knownVideoKeys, mediaCanonicalKeys: [], sources: [] };
+          }
+          if (msg.type === 'INGEST_SOCIAL_BOOKMARKS_CHUNK') {
+            return {
+              ok: true,
+              created: msg.bookmarks.length,
+              skipped: 0,
+              assets: msg.bookmarks.map((b, i) => ({ id: `B-${i}`, title: b.articleTitle || 'dy' })),
+            };
+          }
+          return { ok: true };
+        },
+      },
+    },
+    URL,
+    URLSearchParams,
+    Date,
+    Set,
+    Map,
+    Array,
+    Object,
+    String,
+    Number,
+    Boolean,
+    Math,
+    JSON,
+    RegExp,
+    Promise,
+    // Fast immediate timer so scroll loop finishes in milliseconds inside the unit test
+    setTimeout: (fn) => globalThis.setTimeout(fn, 0),
+    clearTimeout: (id) => globalThis.clearTimeout(id),
+    setInterval: () => 0,
+    clearInterval() {},
+    requestAnimationFrame: (fn) => {
+      fn();
+      return 0;
+    },
+  };
+  contentSandbox.globalThis = contentSandbox;
+  vm.runInNewContext(instrumented, contentSandbox);
+
+  const ux = contentSandbox.__dyUxExports;
+  assert.equal(ux.matchesDouyinContentFilter({ hasVideo: true }, 'all'), true);
+  assert.equal(ux.matchesDouyinContentFilter({ hasVideo: true }, 'video'), true);
+  assert.equal(ux.matchesDouyinContentFilter({ hasVideo: true }, 'image'), false);
+  assert.equal(ux.matchesDouyinContentFilter({ hasVideo: false }, 'image'), true);
+  assert.equal(ux.matchesDouyinContentFilter({ hasVideo: false }, 'video'), false);
+
+  // Populate 10 already-known videos followed by 2 unseen photo-notes
+  for (let i = 0; i < 10; i++) {
+    const id = `74200000000000000${String(i).padStart(2, '0')}`;
+    ux.capturedSocialPostsByKey.set(`douyin:${id}`, {
+      platform: 'douyin',
+      postID: id,
+      dedupKey: `douyin:${id}`,
+      originalURL: `https://www.douyin.com/video/${id}`,
+      title: `已导入视频 ${i}`,
+      bodyText: `已导入视频 ${i}`,
+      authorName: '视频作者',
+      hasVideo: true,
+      durationSeconds: 18 + i,
+      coverUrl: `https://p3-pc-sign.douyinpic.com/v${i}.jpeg`,
+      media: [{ kind: 'video', url: `https://v26-web.douyinvod.com/v${i}.mp4`, thumbnailURL: `https://p3-pc-sign.douyinpic.com/v${i}.jpeg` }],
+    });
+  }
+  for (let j = 0; j < 2; j++) {
+    const id = `743000000000000000${j}`;
+    ux.capturedSocialPostsByKey.set(`douyin:${id}`, {
+      platform: 'douyin',
+      postID: id,
+      dedupKey: `douyin:${id}`,
+      originalURL: `https://www.douyin.com/note/${id}`,
+      title: `待导入图文 ${j}`,
+      bodyText: `待导入图文 ${j}`,
+      authorName: '图文作者',
+      hasVideo: false,
+      coverUrl: `https://p3-pc-sign.douyinpic.com/n${j}_1.jpeg`,
+      media: [
+        { kind: 'photo', url: `https://p3-pc-sign.douyinpic.com/n${j}_1.jpeg` },
+        { kind: 'photo', url: `https://p3-pc-sign.douyinpic.com/n${j}_2.jpeg` },
+        { kind: 'photo', url: `https://p3-pc-sign.douyinpic.com/n${j}_3.jpeg` },
+      ],
+    });
+  }
+
+  // 1. Test SCAN_DOUYIN_PICKER_ITEMS via onMessage handler (initial + scrollMore: true)
+  const pickerInitial = await new Promise((resolve) => {
+    const keptOpen = registeredOnMessage({ type: 'SCAN_DOUYIN_PICKER_ITEMS', options: { scrollMore: false } }, {}, resolve);
+    assert.equal(keptOpen, true, 'SCAN_DOUYIN_PICKER_ITEMS must return true for async sendResponse');
+  });
+  assert.equal(pickerInitial.ok, true);
+  assert.equal(pickerInitial.items.length, 12);
+  assert.equal(pickerInitial.canScrollMore, true);
+  const sampleVid = pickerInitial.items.find((i) => i.postID === '7420000000000000000');
+  const sampleNote = pickerInitial.items.find((i) => i.postID === '7430000000000000000');
+  assert.equal(sampleVid.hasVideo, true);
+  assert.equal(sampleVid.durationSeconds, 18);
+  assert.ok(sampleVid.bookmark && sampleVid.mediaPost);
+  assert.equal(sampleNote.hasVideo, false);
+  assert.equal(sampleNote.imageCount, 3);
+  assert.ok(sampleNote.bookmark.tags.includes('抖音图文'));
+
+  const pickerMore = await new Promise((resolve) => {
+    registeredOnMessage({ type: 'SCAN_DOUYIN_PICKER_ITEMS', options: { scrollMore: true } }, {}, resolve);
+  });
+  assert.equal(pickerMore.ok, true);
+  assert.ok(routeScrollEl.scrollTop > 0, 'scrollMore: true must scroll route-scroll-container');
+
+  // 2. Test batch import with douyinContentFilter: 'image' -> 10 known videos must NOT trip knownStreak or increment skipped
+  routeScrollEl.scrollTop = routeScrollEl.scrollHeight - routeScrollEl.clientHeight;
+  const started = ux.startBookmarkImport({
+    douyinContentFilter: 'image',
+    douyinAutoClassify: true,
+    skipDuplicates: true,
+    stopOnKnownStreak: true,
+  });
+  assert.equal(started.ok, true);
+
+  // Wait for async batch loop to settle cleanly
+  for (let tick = 0; tick < 80; tick++) {
+    await new Promise((r) => setTimeout(r, 15));
+    const snap = ux.snapshotBatchJob();
+    if (snap.status === 'done' || snap.status === 'error' || snap.status === 'stopped') break;
+  }
+
+  const finalSnap = ux.snapshotBatchJob();
+  assert.equal(finalSnap.status, 'done');
+  assert.equal(finalSnap.discovered, 2, 'Only the 2 matching photo-notes should count as discovered');
+  assert.equal(finalSnap.skipped, 0, 'Filtered-out known videos must NEVER increment skipped or knownStreak');
+  assert.equal(finalSnap.imported, 2, 'Both unseen photo-notes must be imported past 10 known videos');
+
+  const ingestMsgs = sentMessages.filter((m) => m.type === 'INGEST_SOCIAL_BOOKMARKS_CHUNK');
+  assert.equal(ingestMsgs.length, 1);
+  assert.equal(ingestMsgs[0].autoClassify, true);
+  assert.equal(ingestMsgs[0].bookmarks.length, 2);
+  assert.ok(ingestMsgs[0].bookmarks.every((b) => b.hasVideo === false && b.tags.includes('抖音图文')));
+
+  // 3. Verify popup.html & popup.js contract for filter bar, auto-classify checkbox, picker DOM, and Images social hint
+  const popupHtml = fs.readFileSync(path.join(EXT_ROOT, 'popup.html'), 'utf8');
+  const popupJs = fs.readFileSync(path.join(EXT_ROOT, 'popup.js'), 'utf8');
+  for (const requiredId of [
+    'bm-douyin-filter-wrap',
+    'btn-dy-filter-all',
+    'btn-dy-filter-video',
+    'btn-dy-filter-image',
+    'bm-opt-dy-classify-row',
+    'bm-opt-dy-classify',
+    'bm-primary-actions',
+    'btn-bm-open-picker',
+    'bm-douyin-picker',
+    'bm-picker-list',
+    'btn-picker-import',
+    'images-social-hint',
+    'btn-images-goto-picker',
+  ]) {
+    assert.ok(popupHtml.includes(`id="${requiredId}"`), `popup.html missing #${requiredId}`);
+  }
+  for (const fnName of [
+    'function formatShortDuration(',
+    'function getFilteredDouyinPickerItems(',
+    'function updateDouyinFilterLabels(',
+    'async function openDouyinPicker(',
+    'async function handleImportSelectedDouyinItems(',
+    'function updateImagesSocialHintVisibility(',
+  ]) {
+    assert.ok(popupJs.includes(fnName), `popup.js missing ${fnName}`);
+  }
 });

@@ -366,7 +366,7 @@ export async function ingestUrl(
 }
 
 /**
- * Ingests one or more rich social bookmarks (X / Xiaohongshu) in a single chunk,
+ * Ingests one or more rich social bookmarks (X / Xiaohongshu / Douyin) in a single chunk,
  * automatically falling back to `webURL` inputs when connected to an older Charkle Web server.
  */
 export async function ingestSocialBookmarksChunk(
@@ -558,7 +558,7 @@ export async function ingestTweetMediaChunk(
 }
 
 /**
- * Ingests a batch of creator media posts across X, Bluesky, Pixiv, Threads, Instagram, and Xiaohongshu
+ * Ingests a batch of creator media posts across X, Bluesky, Pixiv, Threads, Instagram, Xiaohongshu, and Douyin
  * organized by post subfolder on desktop, with graceful HTTP 400 fallback for older servers.
  */
 export async function ingestSocialMediaChunk(

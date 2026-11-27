@@ -25,6 +25,7 @@ use uuid::Uuid;
 
 use crate::engine::LiveCharkleEngine;
 use crate::error::{CoreError, CoreResult};
+use crate::media::douyin::{douyin_classification_tag, DouyinURLParser};
 use crate::media::eaglepack::StagingDirGuard;
 use crate::media::resolvers::{
     canonical_dedup_key, SocialPostReference, SocialPostResolver, SocialPostURLParser,
@@ -1184,6 +1185,9 @@ fn parse_social_media_job(item: &serde_json::Map<String, Value>) -> Option<Socia
                 SocialPostReference::Xiaohongshu(xhs) => {
                     xhs.note_id.clone().unwrap_or_else(|| xhs.dedup_key())
                 }
+                SocialPostReference::Douyin(dy) => {
+                    dy.aweme_id.clone().unwrap_or_else(|| dy.dedup_key())
+                }
                 SocialPostReference::Pixiv { illust_id, .. } => illust_id.clone(),
                 SocialPostReference::Instagram { shortcode, .. } => shortcode.clone(),
                 SocialPostReference::Video(v) => v.dedup_key(),
@@ -1401,7 +1405,7 @@ fn clean_tweet_headline(body: &str, max_chars: usize) -> String {
 }
 
 fn synthesize_post_subfolder_name(
-    platform: SocialPlatform,
+    platform: &SocialPlatform,
     post_id: &str,
     published_at_text: Option<&str>,
     headline_source: &str,
@@ -1467,6 +1471,49 @@ fn sanitize_bridge_filename_part(raw: &str) -> String {
     }
 }
 
+fn build_social_media_tags(
+    job: &SocialMediaBatchJob,
+    resolved_media: &[SocialMediaBatchItem],
+    resolved_author_name: &str,
+    resolved_handle: &str,
+) -> Vec<String> {
+    let mut merged_tags: HashSet<String> = job
+        .tags
+        .iter()
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .collect();
+    merged_tags.insert(job.platform.display_name().to_string());
+    if job.platform == SocialPlatform::Douyin {
+        let has_video = job.has_video
+            || resolved_media.iter().any(|m| {
+                matches!(
+                    m.kind,
+                    SocialMediaAttachmentKind::Video | SocialMediaAttachmentKind::Gif
+                )
+            });
+        merged_tags.insert(douyin_classification_tag(has_video).to_string());
+    }
+    if matches!(
+        job.platform,
+        SocialPlatform::Pixiv | SocialPlatform::Xiaohongshu | SocialPlatform::Douyin
+    ) {
+        if !resolved_author_name.is_empty() {
+            merged_tags.insert(resolved_author_name.to_string());
+        }
+    } else {
+        merged_tags.insert(format!("@{resolved_handle}"));
+        if !resolved_author_name.is_empty()
+            && !resolved_author_name.eq_ignore_ascii_case(resolved_handle)
+        {
+            merged_tags.insert(resolved_author_name.to_string());
+        }
+    }
+    let mut sorted_tags: Vec<String> = merged_tags.into_iter().collect();
+    sorted_tags.sort();
+    sorted_tags
+}
+
 async fn ingest_social_media_jobs(
     engine: &LiveCharkleEngine,
     jobs: Vec<SocialMediaBatchJob>,
@@ -1511,7 +1558,10 @@ async fn ingest_social_media_jobs(
                     handle: resolved_handle.clone(),
                     tweet_id: job.post_id.clone(),
                 }))
-            } else if job.platform == SocialPlatform::Bluesky {
+            } else if matches!(
+                job.platform,
+                SocialPlatform::Bluesky | SocialPlatform::Douyin
+            ) {
                 Url::parse(&job.original_url)
                     .ok()
                     .and_then(|u| SocialPostURLParser::parse(&u))
@@ -1576,7 +1626,7 @@ async fn ingest_social_media_jobs(
                 .clone()
                 .unwrap_or_else(|| {
                     synthesize_post_subfolder_name(
-                        job.platform,
+                        &job.platform,
                         &job.post_id,
                         resolved_published_at.as_deref(),
                         headline_src,
@@ -1696,7 +1746,7 @@ async fn ingest_social_media_jobs(
         let mut note_sections = Vec::new();
         let author_line = if matches!(
             job.platform,
-            SocialPlatform::Pixiv | SocialPlatform::Xiaohongshu
+            SocialPlatform::Pixiv | SocialPlatform::Xiaohongshu | SocialPlatform::Douyin
         ) {
             resolved_author_name.clone()
         } else if resolved_author_name.eq_ignore_ascii_case(&resolved_handle) {
@@ -1718,47 +1768,30 @@ async fn ingest_social_media_jobs(
         }
         let source_prefix = match job.platform {
             SocialPlatform::X => "原推文：",
-            SocialPlatform::Pixiv => "原作品：",
+            SocialPlatform::Pixiv | SocialPlatform::Douyin => "原作品：",
             SocialPlatform::Xiaohongshu => "原笔记：",
             SocialPlatform::Youtube | SocialPlatform::Bilibili => "原视频：",
             SocialPlatform::Bluesky | SocialPlatform::Threads | SocialPlatform::Instagram => {
                 "原贴文："
             }
+            SocialPlatform::Unknown(_) => "原链接：",
         };
         note_sections.push(format!("{source_prefix}{}", job.original_url));
         let formatted_notes = note_sections.join("\n\n");
 
-        let mut merged_tags: HashSet<String> = job
-            .tags
-            .iter()
-            .map(|t| t.trim().to_string())
-            .filter(|t| !t.is_empty())
-            .collect();
-        merged_tags.insert(job.platform.display_name().to_string());
-        if matches!(
-            job.platform,
-            SocialPlatform::Pixiv | SocialPlatform::Xiaohongshu
-        ) {
-            if !resolved_author_name.is_empty() {
-                merged_tags.insert(resolved_author_name.clone());
-            }
-        } else {
-            merged_tags.insert(format!("@{resolved_handle}"));
-            if !resolved_author_name.is_empty()
-                && !resolved_author_name.eq_ignore_ascii_case(&resolved_handle)
-            {
-                merged_tags.insert(resolved_author_name.clone());
-            }
-        }
-        let mut sorted_tags: Vec<String> = merged_tags.into_iter().collect();
-        sorted_tags.sort();
+        let sorted_tags = build_social_media_tags(
+            &job,
+            &resolved_media,
+            &resolved_author_name,
+            &resolved_handle,
+        );
 
         let source_domain = Url::parse(&job.original_url)
             .ok()
             .and_then(|u| u.host_str().map(String::from));
         let author_prefix = if matches!(
             job.platform,
-            SocialPlatform::Pixiv | SocialPlatform::Xiaohongshu
+            SocialPlatform::Pixiv | SocialPlatform::Xiaohongshu | SocialPlatform::Douyin
         ) {
             resolved_author_name.clone()
         } else {
@@ -2482,11 +2515,47 @@ fn parse_social_bookmark_payload(
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .map(str::to_string);
+        .map(str::to_string)
+        .or_else(|| {
+            attachments
+                .iter()
+                .find(|a| {
+                    matches!(
+                        a.kind,
+                        SocialMediaAttachmentKind::Video | SocialMediaAttachmentKind::Gif
+                    )
+                })
+                .map(|a| a.url.clone())
+        });
     let has_video = item
         .get("hasVideo")
         .and_then(Value::as_bool)
-        .unwrap_or_else(|| video_url.is_some());
+        .unwrap_or_else(|| {
+            video_url.is_some()
+                || attachments.iter().any(|a| {
+                    matches!(
+                        a.kind,
+                        SocialMediaAttachmentKind::Video | SocialMediaAttachmentKind::Gif
+                    )
+                })
+        });
+    let video_duration_seconds = item
+        .get("videoDurationSeconds")
+        .or_else(|| item.get("durationSeconds"))
+        .and_then(|v| {
+            v.as_f64()
+                .or_else(|| v.as_str().and_then(|s| s.trim().parse::<f64>().ok()))
+        })
+        .filter(|&d| d.is_finite() && d > 0.0);
+    let video_id = item
+        .get("videoID")
+        .or_else(|| item.get("postID"))
+        .or_else(|| item.get("awemeID"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(|| DouyinURLParser::parse(&parsed_url).and_then(|r| r.aweme_id));
     let avatar_url = item
         .get("authorAvatarURL")
         .and_then(Value::as_str)
@@ -2561,10 +2630,10 @@ fn parse_social_bookmark_payload(
             .and_then(XiaohongshuPostResolver::parse_chinese_metric_count),
         original_url: raw_url.to_string(),
         media_fetch_failed: false,
-        video_duration_seconds: None,
+        video_duration_seconds,
         video_summary: None,
         video_outline: Vec::new(),
-        video_id: None,
+        video_id,
         video_cid: None,
     };
 
@@ -3339,6 +3408,267 @@ mod tests {
         assert_eq!(job_bsky.dedup_key, "bsky:alice.bsky.social:3kabcdefg");
 
         let _ = engine;
+        bridge.stop().await;
+    }
+
+    #[tokio::test]
+    async fn douyin_bridge_bookmark_dedup_and_social_media_job_parsing() {
+        let (_tmp, engine, bridge, port, token) = spawn_test_bridge().await;
+        let client = reqwest::Client::new();
+        let base = format!("http://127.0.0.1:{port}");
+        let auth = format!("Bearer {token}");
+
+        let cover_png = MediaArtwork::encode_png(&DynamicImage::ImageRgba8(RgbaImage::from_pixel(
+            60,
+            80,
+            Rgba([22, 24, 35, 255]),
+        )))
+        .unwrap();
+        let cover_data_url = format!("data:image/png;base64,{}", BASE64_STD.encode(&cover_png));
+
+        // 1. Ingest a Douyin video socialBookmark -> 900x1440 card, zero MP4 download, duration & videoID preserved
+        let bm_res = client
+            .post(format!("{base}/api/v1/assets/ingest"))
+            .header("Authorization", &auth)
+            .json(&json!({
+                "skipDuplicates": true,
+                "inputs": [{
+                    "type": "socialBookmark",
+                    "platform": "douyin",
+                    "postID": "7456789012345678901",
+                    "originalURL": "https://www.douyin.com/video/7456789012345678901",
+                    "authorName": "光影漫步",
+                    "authorHandle": "studio_alpha",
+                    "title": "冬日配色分解",
+                    "bodyText": "冬日配色分解 #摄影",
+                    "likeCount": "1.5万",
+                    "durationSeconds": 65,
+                    "hasVideo": true,
+                    "videoURL": "https://127.0.0.1:9/must-not-eager-download.mp4",
+                    "attachments": [{
+                        "kind": "video",
+                        "url": "https://127.0.0.1:9/must-not-eager-download.mp4",
+                        "thumbnailURL": "https://p3-pc.douyinpic.com/img/cover.jpeg"
+                    }],
+                    "coverDataUrl": cover_data_url,
+                    "tags": ["抖音视频", "抖音收藏", "摄影"]
+                }]
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(bm_res.status(), 201);
+        let bm_json: Value = bm_res.json().await.unwrap();
+        assert_eq!(bm_json["created"], 1);
+        assert_eq!(bm_json["skipped"], 0);
+
+        let assets = engine.fetch_assets(&FilterCriteria::default()).unwrap();
+        assert_eq!(assets.len(), 1);
+        assert_eq!(assets[0].media_kind, MediaKind::WebBookmark);
+        assert_eq!(assets[0].pixel_width, 900);
+        assert_eq!(assets[0].pixel_height, 1440);
+        assert_eq!(assets[0].duration_seconds, Some(65.0));
+        assert_eq!(
+            assets[0]
+                .tags
+                .iter()
+                .filter(|t| t.as_str() == "抖音视频")
+                .count(),
+            1,
+            "Douyin video bookmark must carry exactly one `抖音视频` tag without duplicates"
+        );
+        assert!(!assets[0].tags.iter().any(|t| t == "抖音图文"));
+        assert!(assets[0].tags.iter().any(|t| t == "抖音"));
+        assert!(assets[0].tags.iter().any(|t| t == "抖音收藏"));
+        assert!(assets[0].tags.iter().any(|t| t == "摄影"));
+        let post = assets[0]
+            .rich_metadata
+            .as_ref()
+            .and_then(|r| r.social_post.as_ref())
+            .expect("socialPost stored");
+        assert_eq!(post.platform, SocialPlatform::Douyin);
+        assert!(post.has_video);
+        assert_eq!(post.video_duration_seconds, Some(65.0));
+        assert_eq!(post.video_id.as_deref(), Some("7456789012345678901"));
+        assert_eq!(post.like_count, Some(15_000));
+
+        // 2. existing-sources exposes `douyin:7456789012345678901` in canonicalKeys (not mediaCanonicalKeys)
+        let existing: Value = client
+            .get(format!("{base}/api/v1/assets/existing-sources"))
+            .header("Authorization", &auth)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let canonical: Vec<&str> = existing["canonicalKeys"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        let media_keys: Vec<&str> = existing["mediaCanonicalKeys"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert!(canonical.contains(&"douyin:7456789012345678901"));
+        assert!(!media_keys.contains(&"douyin:7456789012345678901"));
+
+        // 3. Re-submitting the same aweme via `?modal_id=` deduplicates cleanly
+        let dup_res = client
+            .post(format!("{base}/api/v1/assets/ingest"))
+            .header("Authorization", &auth)
+            .json(&json!({
+                "skipDuplicates": true,
+                "inputs": [{
+                    "type": "socialBookmark",
+                    "platform": "douyin",
+                    "originalURL": "https://www.douyin.com/user/self?showTab=favorite_collection&modal_id=7456789012345678901",
+                    "authorName": "光影漫步",
+                    "bodyText": "duplicate check",
+                    "coverDataUrl": cover_data_url
+                }]
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(dup_res.status(), 200);
+        let dup_json: Value = dup_res.json().await.unwrap();
+        assert_eq!(dup_json["skipped"], 1);
+        assert_eq!(dup_json["created"], 0);
+
+        // 4. Ingest a Douyin photo-note socialBookmark (without pre-supplied type tag) -> auto-appends `抖音图文`
+        let note_res = client
+            .post(format!("{base}/api/v1/assets/ingest"))
+            .header("Authorization", &auth)
+            .json(&json!({
+                "skipDuplicates": true,
+                "inputs": [{
+                    "type": "socialBookmark",
+                    "platform": "douyin",
+                    "postID": "7456789012345678903",
+                    "originalURL": "https://www.douyin.com/note/7456789012345678903",
+                    "authorName": "建筑笔记",
+                    "authorHandle": "arch_notes",
+                    "title": "冬日建筑配色组图",
+                    "bodyText": "冬日建筑配色组图 #建筑",
+                    "hasVideo": false,
+                    "attachments": [{
+                        "kind": "photo",
+                        "url": "https://p3-pc.douyinpic.com/img/slide-1.jpeg",
+                        "thumbnailURL": "https://p3-pc.douyinpic.com/img/slide-1.jpeg"
+                    }],
+                    "coverDataUrl": cover_data_url,
+                    "tags": ["抖音收藏", "建筑"]
+                }]
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(note_res.status(), 201);
+        let all_after_note = engine.fetch_assets(&FilterCriteria::default()).unwrap();
+        let note_asset = all_after_note
+            .iter()
+            .find(|a| {
+                a.source_url.as_deref() == Some("https://www.douyin.com/note/7456789012345678903")
+            })
+            .expect("Douyin photo-note asset persisted");
+        assert_eq!(
+            note_asset
+                .tags
+                .iter()
+                .filter(|t| t.as_str() == "抖音图文")
+                .count(),
+            1
+        );
+        assert!(!note_asset.tags.iter().any(|t| t == "抖音视频"));
+        assert!(note_asset.tags.iter().any(|t| t == "抖音"));
+        assert!(note_asset.tags.iter().any(|t| t == "抖音收藏"));
+        assert!(note_asset.tags.iter().any(|t| t == "建筑"));
+
+        // 5. parse_social_media_job + build_social_media_tags handle Douyin video & photo-note tags cleanly
+        let dy_media_obj = json!({
+            "type": "socialMedia",
+            "platform": "douyin",
+            "postID": "7456789012345678902",
+            "originalURL": "https://www.douyin.com/video/7456789012345678902",
+            "authorName": "光影漫步",
+            "authorHandle": "studio_alpha",
+            "includeVideos": true,
+            "hasVideo": true,
+            "referer": "https://www.douyin.com/",
+            "tags": ["抖音视频", "抖音收藏", "摄影"],
+            "media": [
+                { "kind": "photo", "url": "https://p3-pc.douyinpic.com/img/slide-1.jpeg" },
+                { "kind": "video", "url": "https://v26-web.douyinvod.com/aweme/play/demo" }
+            ]
+        });
+        let job_dy = parse_social_media_job(dy_media_obj.as_object().unwrap()).unwrap();
+        assert_eq!(job_dy.platform, SocialPlatform::Douyin);
+        assert_eq!(job_dy.post_id, "7456789012345678902");
+        assert_eq!(job_dy.dedup_key, "douyin:7456789012345678902");
+        assert!(job_dy.include_videos);
+        assert_eq!(job_dy.media.len(), 2);
+        assert_eq!(
+            SocialPostResolver::resolve_cdn_referer(
+                &Url::parse(&job_dy.media[1].url).unwrap(),
+                None
+            ),
+            Some("https://www.douyin.com/")
+        );
+        let dy_video_tags = build_social_media_tags(
+            &job_dy,
+            &job_dy.media,
+            &job_dy.author_name,
+            &job_dy.author_handle,
+        );
+        assert_eq!(
+            dy_video_tags
+                .iter()
+                .filter(|t| t.as_str() == "抖音视频")
+                .count(),
+            1
+        );
+        assert!(!dy_video_tags.iter().any(|t| t == "抖音图文"));
+        assert!(dy_video_tags.iter().any(|t| t == "抖音"));
+        assert!(dy_video_tags.iter().any(|t| t == "抖音收藏"));
+
+        let dy_note_media_obj = json!({
+            "type": "socialMedia",
+            "platform": "douyin",
+            "postID": "7456789012345678904",
+            "originalURL": "https://www.douyin.com/note/7456789012345678904",
+            "authorName": "建筑笔记",
+            "authorHandle": "arch_notes",
+            "includeVideos": false,
+            "hasVideo": false,
+            "referer": "https://www.douyin.com/",
+            "tags": ["抖音图文", "建筑"],
+            "media": [
+                { "kind": "photo", "url": "https://p3-pc.douyinpic.com/img/slide-1.jpeg" }
+            ]
+        });
+        let job_dy_note = parse_social_media_job(dy_note_media_obj.as_object().unwrap()).unwrap();
+        let dy_note_tags = build_social_media_tags(
+            &job_dy_note,
+            &job_dy_note.media,
+            &job_dy_note.author_name,
+            &job_dy_note.author_handle,
+        );
+        assert_eq!(
+            dy_note_tags
+                .iter()
+                .filter(|t| t.as_str() == "抖音图文")
+                .count(),
+            1
+        );
+        assert!(!dy_note_tags.iter().any(|t| t == "抖音视频"));
+        assert!(dy_note_tags.iter().any(|t| t == "抖音"));
+        assert!(dy_note_tags.iter().any(|t| t == "建筑"));
+
         bridge.stop().await;
     }
 }
