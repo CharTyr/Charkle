@@ -1,0 +1,19 @@
+# Gradle & Android Studio
+.gradle/
+.kotlin/
+build/
+local.properties
+*.iml
+.idea/
+.cxx/
+.DS_Store
+
+# Rust build artifacts & generated native libs/bindings
+rust/charkle-android-ffi/target/
+app/src/main/jniLibs/
+app/src/main/java/uniffi/
+
+# Local OAuth secrets
+GoogleOAuthClient*.json
+*.keystore
+*.jks

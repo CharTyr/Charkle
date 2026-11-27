@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Charkle</string>
+    <string name="share_receive_label">收藏到 Charkle</string>
+    <string name="qs_tile_capture_label">Charkle 闪采</string>
+    <string name="widget_inspiration_label">Charkle 灵感日签</string>
+    <string name="widget_inspiration_description">在主屏幕随机展示你的视觉灵感收藏与提取主色板，一键打开详情预览</string>
+</resources>
