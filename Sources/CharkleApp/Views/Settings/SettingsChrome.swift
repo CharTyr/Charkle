@@ -424,15 +424,27 @@ public enum SettingsHelpers {
         string: "https://typesafe.ai"
     )!
 
+    private static let fallbackDateFormatter: DateFormatter = {
+        let fmt = DateFormatter()
+        fmt.dateFormat = "MM-dd HH:mm"
+        return fmt
+    }()
+
+    private static let cachedChatGPTBrandMarkImage: NSImage? = {
+        let url = Bundle.module.url(forResource: "chatgpt-mark", withExtension: "svg")
+            ?? Bundle.module.url(forResource: "chatgpt-mark", withExtension: "svg", subdirectory: "Icons")
+        guard let url, let img = NSImage(contentsOf: url) else { return nil }
+        img.isTemplate = true
+        return img
+    }()
+
     public static func relativeTimeText(_ date: Date) -> String {
         let elapsed = max(0, Date().timeIntervalSince(date))
         if elapsed < 15 { return "刚刚" }
         if elapsed < 60 { return "\(Int(elapsed)) 秒前" }
         if elapsed < 3600 { return "\(Int(elapsed / 60)) 分钟前" }
         if elapsed < 86400 { return "\(Int(elapsed / 3600)) 小时前" }
-        let fmt = DateFormatter()
-        fmt.dateFormat = "MM-dd HH:mm"
-        return fmt.string(from: date)
+        return fallbackDateFormatter.string(from: date)
     }
 
     public static func copyToClipboard(_ text: String, toast: String, syncAndAI: SyncAndAIStore) {
@@ -481,10 +493,7 @@ public enum SettingsHelpers {
 
     @ViewBuilder
     public static func chatGPTBrandMark(size: CGFloat, color: Color) -> some View {
-        let url = Bundle.module.url(forResource: "chatgpt-mark", withExtension: "svg")
-            ?? Bundle.module.url(forResource: "chatgpt-mark", withExtension: "svg", subdirectory: "Icons")
-        if let url, let nsImage = NSImage(contentsOf: url) {
-            let _ = { nsImage.isTemplate = true }()
+        if let nsImage = cachedChatGPTBrandMarkImage {
             Image(nsImage: nsImage)
                 .renderingMode(.template)
                 .resizable()

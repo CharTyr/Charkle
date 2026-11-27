@@ -37,7 +37,7 @@ public nonisolated struct FigmaBridgeExportReport: Sendable {
 /// - Original pixel fidelity: >4096px images are split into lossless ≤4096×4096 PNG tiles with SHA-256 verification.
 /// - Native GIF preservation: original GIF bytes archived in `originals/` for native `figma.createGif` in FigJam.
 /// - Works identically for both Auto Editorial and Freeform moodboards; requires zero Figma API tokens.
-public enum FigmaBridgeExporter {
+public nonisolated enum FigmaBridgeExporter {
     public static func bundledPluginDirectoryURL() -> URL? {
         if let resURL = Bundle.main.resourceURL?.appending(path: "FigmaPlugin", directoryHint: .isDirectory),
            FileManager.default.fileExists(atPath: resURL.appending(path: "manifest.json").path) {
@@ -60,6 +60,7 @@ public enum FigmaBridgeExporter {
         return nil
     }
 
+    @concurrent
     public static func exportBundle(
         document: MoodboardDocument,
         assetsByID: [UUID: AssetRecord],
@@ -544,14 +545,16 @@ public enum FigmaBridgeExporter {
                 }
                 let relPath = "tiles/\(prefix)-\(x)-\(y).png"
                 let fileURL = stagingDir.appending(path: relPath)
-                guard let dest = CGImageDestinationCreateWithURL(fileURL as CFURL, UTType.png.identifier as CFString, 1, nil) else {
-                    throw FigmaBridgeExportError("无法写入 PNG 分块文件。")
+                let mutableData = NSMutableData()
+                guard let dest = CGImageDestinationCreateWithData(mutableData as CFMutableData, UTType.png.identifier as CFString, 1, nil) else {
+                    throw FigmaBridgeExportError("无法编码 PNG 分块数据。")
                 }
                 CGImageDestinationAddImage(dest, crop, nil)
                 guard CGImageDestinationFinalize(dest) else {
                     throw FigmaBridgeExportError("保存 PNG 分块失败。")
                 }
-                let pngBytes = try Data(contentsOf: fileURL)
+                let pngBytes = mutableData as Data
+                try pngBytes.write(to: fileURL, options: .atomic)
                 tiles.append([
                     "file": relPath,
                     "x": x,

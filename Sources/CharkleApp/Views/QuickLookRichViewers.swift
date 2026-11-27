@@ -13,6 +13,7 @@ import WebKit
 
 struct QuickLookGitHubRepoCard: View {
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     let asset: AssetRecord
     let repo: GitHubRepoMetadata
@@ -64,7 +65,13 @@ struct QuickLookGitHubRepoCard: View {
                     } label: {
                         Image(systemName: "arrow.clockwise")
                             .font(.system(size: 12, weight: .semibold))
-                            .rotationEffect(.degrees(isRefreshing ? 360 : 0))
+                            .rotationEffect(.degrees(isRefreshing && !reduceMotion ? 360 : 0))
+                            .animation(
+                                isRefreshing && !reduceMotion
+                                    ? .linear(duration: 0.9).repeatForever(autoreverses: false)
+                                    : .default,
+                                value: isRefreshing
+                            )
                             .frame(width: 28, height: 28)
                             .background(Color.primary.opacity(0.08), in: Circle())
                     }
@@ -249,6 +256,8 @@ struct QuickLookSocialPostCard: View {
     let onExtractAllMedia: (() -> Void)?
     let onRetryFetch: () -> Void
     var onSetCoverFrame: (@MainActor (_ jpegData: Data, _ timestampSeconds: Double?) async -> Void)? = nil
+    var onCaptureCoverFailed: (@MainActor () -> Void)? = nil
+    var fallbackCoverImage: NSImage? = nil
     var isPlaybackSuspended: Bool = false
 
     @State private var extractingIndex: Int?
@@ -547,11 +556,13 @@ struct QuickLookSocialPostCard: View {
                 QuickLookStreamingVideoView(
                     playbackKey: "\(asset.id.uuidString):\(post.originalURL)",
                     coverURL: thumbURL,
+                    fallbackCoverImage: fallbackCoverImage,
                     durationText: post.formattedVideoDuration,
                     watchURL: URL(string: post.originalURL),
                     openActionLabel: post.platform.openActionLabel,
                     isPlaybackSuspended: isPlaybackSuspended,
                     onSetCoverFrame: onSetCoverFrame,
+                    onCaptureCoverFailed: onCaptureCoverFailed,
                     resolvePlan: {
                         await VideoPlatformResolver.resolvePlaybackPlan(for: post)
                     }
@@ -728,8 +739,10 @@ struct QuickLookSocialPostCard: View {
             isCapturingInlineCover = true
             Task { @MainActor in
                 defer { isCapturingInlineCover = false }
-                if let captured = await inlineVideoCaptureBridge.captureCurrentFrame?() {
+                if let captured = await inlineVideoCaptureBridge.captureCurrentFrame() {
                     await onSetCoverFrame(captured.jpegData, captured.timestampSeconds)
+                } else {
+                    onCaptureCoverFailed?()
                 }
             }
         } label: {
@@ -766,7 +779,25 @@ struct QuickLookSocialPostCard: View {
 
 @MainActor
 final class StreamingFrameCaptureBridge {
-    var captureCurrentFrame: (@MainActor () async -> (jpegData: Data, timestampSeconds: Double?)?)?
+    typealias CaptureHandler = @MainActor () async -> (jpegData: Data, timestampSeconds: Double?)?
+
+    private var ownerID: UUID?
+    private var handler: CaptureHandler?
+
+    func register(ownerID: UUID, handler: @escaping CaptureHandler) {
+        self.ownerID = ownerID
+        self.handler = handler
+    }
+
+    func unregister(ownerID: UUID) {
+        guard self.ownerID == ownerID else { return }
+        self.ownerID = nil
+        self.handler = nil
+    }
+
+    func captureCurrentFrame() async -> (jpegData: Data, timestampSeconds: Double?)? {
+        await handler?()
+    }
 }
 
 private struct SocialPostInlineVideoPlayer: NSViewRepresentable {
@@ -776,6 +807,7 @@ private struct SocialPostInlineVideoPlayer: NSViewRepresentable {
 
     @MainActor
     final class Coordinator {
+        let bridgeOwnerID = UUID()
         var currentURL: URL?
         var wasSuspended: Bool = false
         var loadTask: Task<Void, Never>?
@@ -801,7 +833,7 @@ private struct SocialPostInlineVideoPlayer: NSViewRepresentable {
                 self.videoOutput = output
                 let player = AVPlayer(playerItem: item)
                 view.player = player
-                self.captureBridge?.captureCurrentFrame = { [weak player, weak output] in
+                self.captureBridge?.register(ownerID: self.bridgeOwnerID) { [weak player, weak output] in
                     guard let player,
                           let result = await VideoFrameCapture.captureCurrentFrameJPEG(from: player, videoOutput: output) else {
                         return nil
@@ -814,7 +846,7 @@ private struct SocialPostInlineVideoPlayer: NSViewRepresentable {
         func teardown(_ view: AVPlayerView) {
             loadTask?.cancel()
             loadTask = nil
-            captureBridge?.captureCurrentFrame = nil
+            captureBridge?.unregister(ownerID: bridgeOwnerID)
             videoOutput = nil
             view.player?.pause()
             view.player?.replaceCurrentItem(with: nil)
@@ -864,6 +896,7 @@ struct QuickLookStreamingVideoView: View {
     let openActionLabel: String
     var isPlaybackSuspended: Bool = false
     var onSetCoverFrame: (@MainActor (_ jpegData: Data, _ timestampSeconds: Double?) async -> Void)? = nil
+    var onCaptureCoverFailed: (@MainActor () -> Void)? = nil
     let resolvePlan: () async -> VideoStreamPlaybackPlan
 
     @State private var plan: VideoStreamPlaybackPlan?
@@ -969,8 +1002,10 @@ struct QuickLookStreamingVideoView: View {
                                 isCapturingCover = true
                                 Task { @MainActor in
                                     defer { isCapturingCover = false }
-                                    if let captured = await captureBridge.captureCurrentFrame?() {
+                                    if let captured = await captureBridge.captureCurrentFrame() {
                                         await onSetCoverFrame(captured.jpegData, captured.timestampSeconds)
+                                    } else {
+                                        onCaptureCoverFailed?()
                                     }
                                 }
                             } label: {
@@ -1042,7 +1077,11 @@ struct QuickLookStreamingVideoView: View {
     @ViewBuilder
     private var coverSurface: some View {
         ZStack {
-            if let coverURL {
+            // Prefer the local cover thumbnail when present so custom frames captured via
+            // "设当前帧为封面" take precedence over stale remote CDN thumbnails.
+            if fallbackCoverImage != nil {
+                fallbackCoverView
+            } else if let coverURL {
                 RemoteCachedImageView(url: coverURL, contentMode: .fill) {
                     fallbackCoverView
                 } failurePlaceholder: {
@@ -1106,6 +1145,7 @@ private struct DirectStreamAVPlayerViewMac: NSViewRepresentable {
 
     @MainActor
     final class Coordinator {
+        let bridgeOwnerID = UUID()
         var currentStream: VideoStreamPlaybackPlan.DirectStream?
         var wasSuspended: Bool = false
         var loadTask: Task<Void, Never>?
@@ -1158,7 +1198,7 @@ private struct DirectStreamAVPlayerViewMac: NSViewRepresentable {
                 let player = AVPlayer(playerItem: item)
                 player.automaticallyWaitsToMinimizeStalling = true
                 view.player = player
-                self.captureBridge?.captureCurrentFrame = { [weak player, weak output] in
+                self.captureBridge?.register(ownerID: self.bridgeOwnerID) { [weak player, weak output] in
                     guard let player,
                           let result = await VideoFrameCapture.captureCurrentFrameJPEG(from: player, videoOutput: output) else {
                         return nil
@@ -1182,7 +1222,7 @@ private struct DirectStreamAVPlayerViewMac: NSViewRepresentable {
             loadTask = nil
             statusObservation?.invalidate()
             statusObservation = nil
-            captureBridge?.captureCurrentFrame = nil
+            captureBridge?.unregister(ownerID: bridgeOwnerID)
             videoOutput = nil
             view.player?.pause()
             view.player?.replaceCurrentItem(with: nil)
@@ -1241,6 +1281,7 @@ private struct EmbedStreamWebPlayerViewMac: NSViewRepresentable {
 
     @MainActor
     final class Coordinator {
+        let bridgeOwnerID = UUID()
         var loadedEmbed: VideoStreamPlaybackPlan.EmbedPlayer?
         var wasSuspended: Bool = false
         weak var captureBridge: StreamingFrameCaptureBridge?
@@ -1257,38 +1298,52 @@ private struct EmbedStreamWebPlayerViewMac: NSViewRepresentable {
         config.preferences.isElementFullscreenEnabled = true
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.setValue(false, forKey: "drawsBackground")
-        if let ua = embed.userAgent {
-            webView.customUserAgent = ua
-        }
+        webView.customUserAgent = embed.userAgent
         context.coordinator.captureBridge = captureBridge
-        registerSnapshotBridge(for: webView)
-        loadEmbed(embed, into: webView, coordinator: context.coordinator)
+        context.coordinator.wasSuspended = isPlaybackSuspended
+        registerSnapshotBridge(for: webView, ownerID: context.coordinator.bridgeOwnerID)
+        // Defer loading auto-playing embeds while suspended behind modal overlays to prevent phantom audio.
+        if !isPlaybackSuspended {
+            loadEmbed(embed, into: webView, coordinator: context.coordinator)
+        }
         return webView
     }
 
     func updateNSView(_ nsView: WKWebView, context: Context) {
         context.coordinator.captureBridge = captureBridge
-        registerSnapshotBridge(for: nsView)
+        registerSnapshotBridge(for: nsView, ownerID: context.coordinator.bridgeOwnerID)
         if context.coordinator.loadedEmbed != embed {
-            loadEmbed(embed, into: nsView, coordinator: context.coordinator)
+            nsView.customUserAgent = embed.userAgent
+            if !isPlaybackSuspended {
+                loadEmbed(embed, into: nsView, coordinator: context.coordinator)
+            } else {
+                context.coordinator.loadedEmbed = nil
+            }
         }
         if context.coordinator.wasSuspended != isPlaybackSuspended {
             context.coordinator.wasSuspended = isPlaybackSuspended
             if isPlaybackSuspended {
+                nsView.pauseAllMediaPlayback(completionHandler: nil)
+                nsView.closeAllMediaPresentations(completionHandler: nil)
                 nsView.evaluateJavaScript("document.querySelectorAll('video,audio').forEach(e=>e.pause());", completionHandler: nil)
+            } else if context.coordinator.loadedEmbed != embed {
+                nsView.customUserAgent = embed.userAgent
+                loadEmbed(embed, into: nsView, coordinator: context.coordinator)
             }
         }
     }
 
     static func dismantleNSView(_ nsView: WKWebView, coordinator: Coordinator) {
-        coordinator.captureBridge?.captureCurrentFrame = nil
+        coordinator.captureBridge?.unregister(ownerID: coordinator.bridgeOwnerID)
+        nsView.pauseAllMediaPlayback(completionHandler: nil)
+        nsView.closeAllMediaPresentations(completionHandler: nil)
         nsView.stopLoading()
         nsView.loadHTMLString("", baseURL: nil)
         coordinator.loadedEmbed = nil
     }
 
-    private func registerSnapshotBridge(for webView: WKWebView) {
-        captureBridge.captureCurrentFrame = { [weak webView] in
+    private func registerSnapshotBridge(for webView: WKWebView, ownerID: UUID) {
+        captureBridge.register(ownerID: ownerID) { [weak webView] in
             guard let webView else { return nil }
             let config = WKSnapshotConfiguration()
             config.afterScreenUpdates = false
@@ -1500,6 +1555,7 @@ private struct RemoteCachedImageView<Placeholder: View, Failure: View>: View {
     let failurePlaceholder: () -> Failure
 
     @State private var loadedImage: NSImage?
+    @State private var loadedURL: URL?
     @State private var didFail: Bool = false
 
     init(
@@ -1518,7 +1574,9 @@ private struct RemoteCachedImageView<Placeholder: View, Failure: View>: View {
         self.maxHeight = maxHeight
         self.placeholder = placeholder
         self.failurePlaceholder = failurePlaceholder
-        _loadedImage = State(initialValue: RemoteImageMemoryCache.shared.image(for: url))
+        let cached = RemoteImageMemoryCache.shared.image(for: url)
+        _loadedImage = State(initialValue: cached)
+        _loadedURL = State(initialValue: cached != nil ? url : nil)
     }
 
     init(
@@ -1541,8 +1599,10 @@ private struct RemoteCachedImageView<Placeholder: View, Failure: View>: View {
     }
 
     var body: some View {
+        let activeImage = (loadedURL == url ? loadedImage : nil) ?? RemoteImageMemoryCache.shared.image(for: url)
+        let activeFailed = (loadedURL == url) && didFail
         Group {
-            if let img = loadedImage {
+            if let img = activeImage {
                 let base = Image(nsImage: img)
                     .renderingMode(.original)
                     .resizable()
@@ -1559,27 +1619,32 @@ private struct RemoteCachedImageView<Placeholder: View, Failure: View>: View {
                 } else {
                     base
                 }
-            } else if didFail {
+            } else if activeFailed {
                 failurePlaceholder()
             } else {
                 placeholder()
             }
         }
         .task(id: url) {
-            if let cached = RemoteImageMemoryCache.shared.image(for: url) {
+            let targetURL = url
+            if let cached = RemoteImageMemoryCache.shared.image(for: targetURL) {
+                loadedURL = targetURL
                 loadedImage = cached
                 didFail = false
                 return
             }
             // Clear stale image from any prior asset immediately so it never flashes or masks load failures.
+            loadedURL = targetURL
             loadedImage = nil
             didFail = false
-            let fetchedBox = await RemoteImageFetcher.fetchImageOffMain(url: url)
+            let fetchedBox = await RemoteImageFetcher.fetchImageOffMain(url: targetURL)
             guard !Task.isCancelled else { return }
             if let fetched = fetchedBox?.image {
-                RemoteImageMemoryCache.shared.store(fetched, for: url)
+                RemoteImageMemoryCache.shared.store(fetched, for: targetURL)
+                loadedURL = targetURL
                 loadedImage = fetched
             } else {
+                loadedURL = targetURL
                 didFail = true
             }
         }

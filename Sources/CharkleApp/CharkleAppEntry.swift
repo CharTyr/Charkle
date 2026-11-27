@@ -838,8 +838,10 @@ public final class CharkleRuntime {
         case .inbox:
             return (nil, nil, "收件箱")
         case .folder:
-            let fid = state.selectedFolderID ?? library.folders.first?.id
-            let name = library.folders.first(where: { $0.id == fid })?.name ?? "收件箱"
+            let fid = state.selectedFolderID
+                ?? library.folderHierarchyRoots.first?.folder.id
+                ?? library.folders.first?.id
+            let name = fid.flatMap { library.folder(byID: $0)?.name } ?? "收件箱"
             return (fid, nil, name)
         case .activeMoodboard:
             let bid = coordinator.activeMoodboardID ?? moodboards.boards.first?.id
@@ -1114,12 +1116,19 @@ struct CharkleApp: App {
                     if willOpen {
                         runtime.coordinator.closeQuickLook()
                         runtime.coordinator.closeSettings()
+                        runtime.coordinator.closeSmartDeduplication()
                     }
                     runtime.coordinator.isJumpAnywherePresented = willOpen
                 }
                 .keyboardShortcut("j", modifiers: .command)
 
                 Button("显示 / 隐藏筛选面板") {
+                    guard !runtime.coordinator.isViewingMoodboard,
+                          runtime.coordinator.selectedDestination != .moodboardsHome,
+                          runtime.coordinator.selectedDestination != .pinterest,
+                          !runtime.coordinator.isModalOverlayPresented else {
+                        return
+                    }
                     runtime.coordinator.isVisualFilterBarPresented.toggle()
                 }
                 .keyboardShortcut("s", modifiers: [.command, .shift])
@@ -1136,20 +1145,19 @@ struct CharkleApp: App {
 
                 Divider()
 
-                Button("区域截图采集") {
+                // Global capture shortcuts are handled exclusively by `GlobalHotkeyManager` (`KeyboardShortcuts`)
+                // so frontmost keypresses never double-trigger and user-customized bindings stay authoritative.
+                Button("区域截图采集 (\(GlobalHotkeyManager.displayString(for: .captureArea, fallback: "⌥⇧A")))") {
                     runtime.captureRegionScreenshot()
                 }
-                .keyboardShortcut("a", modifiers: [.option, .shift])
 
-                Button("采集剪贴板内容") {
+                Button("采集剪贴板内容 (\(GlobalHotkeyManager.displayString(for: .collectClipboard, fallback: "⌥⇧V")))") {
                     runtime.collectClipboard()
                 }
-                .keyboardShortcut("v", modifiers: [.option, .shift])
 
-                Button("展开 / 收起刘海浮窗") {
+                Button("展开 / 收起刘海浮窗 (\(GlobalHotkeyManager.displayString(for: .toggleNotchShelf, fallback: "⌥⇧S")))") {
                     runtime.toggleNotchShelf()
                 }
-                .keyboardShortcut("s", modifiers: [.option, .shift])
 
                 Divider()
 

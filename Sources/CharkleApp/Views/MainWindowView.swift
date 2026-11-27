@@ -60,7 +60,7 @@ public struct MainWindowView: View {
         AppCoordinatorStore.clampedSidebarWidth(
             liveDraggedSidebarWidth ?? coordinator.sidebarWidth,
             windowWidth: windowContentWidth,
-            isInspectorVisible: coordinator.isInspectorVisible,
+            isInspectorVisible: coordinator.isInspectorVisible && coordinator.selectedDestination != .pinterest,
             inspectorWidth: liveDraggedInspectorWidth ?? coordinator.inspectorWidth
         )
     }
@@ -135,6 +135,7 @@ public struct MainWindowView: View {
                     library: library,
                     moodboards: moodboards,
                     expandedWidth: effectiveExpandedSidebarWidth,
+                    isDraggingDivider: isDraggingSidebarDivider,
                     onImportMaterialPackage: onImportMaterialPackage,
                     onExportFolderToPureRef: { folder, openInPureRef in
                         exportFolderToPureRef(folder, openInPureRef: openInPureRef)
@@ -228,6 +229,7 @@ public struct MainWindowView: View {
                     coordinator: coordinator,
                     library: library,
                     moodboards: moodboards,
+                    isActive: showRightInspector && coordinator.quickLookAssetID == nil,
                     panelWidth: effectiveInspectorWidth,
                     onCopyHex: { copyColorHex($0) },
                     onFilterByColor: { hex in
@@ -703,6 +705,9 @@ public struct MainWindowView: View {
                             await library.restoreAssets(ids)
                             coordinator.showToast("已放回原处 (\(ids.count) 项)", icon: "arrow.uturn.backward")
                         }
+                    },
+                    onFocusedAssetChanged: { focusedID in
+                        coordinator.focusedStageAssetID = focusedID
                     }
                 )
             } else if coordinator.galleryLayoutMode == .galleryFilmstrip {
@@ -833,6 +838,9 @@ public struct MainWindowView: View {
                                 coordinator.showToast("已重新拉取最新内容", icon: "arrow.clockwise")
                             }
                         }
+                    },
+                    onFocusedAssetChanged: { focusedID in
+                        coordinator.focusedStageAssetID = focusedID
                     }
                 )
             } else {
@@ -857,6 +865,7 @@ public struct MainWindowView: View {
                     isLivePaneResizing: isDraggingSidebarDivider || isDraggingInspectorDivider,
                     heroNamespace: heroNamespace,
                     activeQuickLookID: coordinator.quickLookAssetID,
+                    isOverlayPresented: coordinator.isModalOverlayPresented || showInboxBatchTriageSheet,
                     revealRequest: coordinator.pendingGalleryReveal,
                     callbacks: MasonryCallbacks(
                         onOpenQuickLook: { asset in openQuickLook(asset) },
@@ -1021,27 +1030,10 @@ public struct MainWindowView: View {
         .animation(CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion), value: library.selectedAssetIDs.count >= 2)
         .onKeyPress(characters: CharacterSet(charactersIn: "123456789")) { press in
             let primaryMods = press.modifiers.intersection([.command, .option, .control, .shift])
-            let orderedFolders = library.flattenedFolderHierarchy.map(\.folder)
-            guard isInbox, primaryMods.isEmpty,
-                  !coordinator.isModalOverlayPresented,
-                  !showInboxBatchTriageSheet,
-                  !showBatchTagPopover,
-                  !showCreateSubfolderPopover,
-                  !isEditingText(in: NSApp?.keyWindow),
+            guard primaryMods.isEmpty,
                   let digit = Int(press.characters),
-                  digit >= 1, digit <= orderedFolders.count else { return .ignored }
-            let targetFolder = orderedFolders[digit - 1]
-            let targetIDs: [UUID] = if !library.selectedAssetIDs.isEmpty {
-                Array(library.selectedAssetIDs)
-            } else if let first = library.assets.first {
-                [first.id]
-            } else {
-                []
-            }
-            guard !targetIDs.isEmpty else { return .ignored }
-            Task {
-                await library.moveAssets(targetIDs, toFolderID: targetFolder.id)
-                coordinator.showToast("已快捷键归档至「\(library.folderDisplayPath(for: targetFolder.id))」", icon: "folder.fill")
+                  triggerInboxQuickTriage(digit: digit, in: NSApp?.keyWindow) else {
+                return .ignored
             }
             return .handled
         }
@@ -2206,6 +2198,7 @@ public struct MainWindowView: View {
                             .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
                         }
                         .menuStyle(.borderlessButton)
+                        .menuIndicator(.hidden)
                         .fixedSize()
                     }
                 }
@@ -2244,6 +2237,7 @@ public struct MainWindowView: View {
                 .background(Color.primary.opacity(0.07), in: Capsule(style: .continuous))
             }
             .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
             .fixedSize()
         }
         .padding(.horizontal, 12)
@@ -2600,6 +2594,7 @@ public struct MainWindowView: View {
                         }
                     }
                     .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
                     .fixedSize()
                     .help("移动到文件夹")
 
@@ -2754,6 +2749,7 @@ public struct MainWindowView: View {
                         }
                     }
                     .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
                     .fixedSize()
                     .help("批量评分")
 
@@ -3447,8 +3443,22 @@ public struct MainWindowView: View {
                 coordinator.isJumpAnywherePresented = false
                 return nil
             }
+            if coordinator.isSmartDeduplicationPresented && coordinator.quickLookAssetID == nil {
+                if event.isARepeat { return nil }
+                resignTextFocusIfNeeded()
+                withAnimation(CharkleMotion.enterExit(false, enter: CharkleMotion.enterMd, exit: CharkleMotion.exitMd, reduced: reduceMotion)) {
+                    coordinator.closeSmartDeduplication()
+                }
+                return nil
+            }
             if coordinator.selectedDestination == .pinterest, pinterestController.activeDetailPin != nil {
                 if event.isARepeat { return nil }
+                if coordinator.isPinterestDetailImageExpanded {
+                    withAnimation(CharkleMotion.accessible(CharkleMotion.exitSm, reduced: reduceMotion)) {
+                        coordinator.isPinterestDetailImageExpanded = false
+                    }
+                    return nil
+                }
                 withAnimation(CharkleMotion.accessible(CharkleMotion.exitSm, reduced: reduceMotion)) {
                     pinterestController.closePinDetail()
                 }
@@ -3459,6 +3469,21 @@ public struct MainWindowView: View {
         let isInGalleryStage = !coordinator.isViewingMoodboard
             && coordinator.selectedDestination != .moodboardsHome
             && coordinator.selectedDestination != .pinterest
+
+        // Inbox 1-9 rapid folder triage handled at window level so AppKit firstResponders
+        // (VirtualizedMasonryView, RingGalleryMTKView) never swallow digit shortcuts.
+        if primaryModifiers.isEmpty,
+           event.window === hostWindow,
+           coordinator.selectedDestination == .inbox,
+           let chars = event.charactersIgnoringModifiers,
+           chars.count == 1,
+           let digit = Int(chars),
+           (1...9).contains(digit),
+           !isComposingIME(in: hostWindow) {
+            if !event.isARepeat, triggerInboxQuickTriage(digit: digit, in: hostWindow) {
+                return nil
+            }
+        }
 
         // Support ⌘V paste in Gallery Filmstrip & 3D Ring Gallery (Masonry & Moodboard handle ⌘V directly)
         if primaryModifiers == [.command],
@@ -3487,16 +3512,20 @@ public struct MainWindowView: View {
             return event
         }
 
-        // 1. Quick Look is OPEN -> Space closes Quick Look (unless user is actively editing in Quick Look's Inspector)
+        // 1. Quick Look is OPEN -> Space requests QuickLookOverlayView.performDismiss() so connected
+        //    fly-back motion and delete-popconfirm guards stay intact (even when launched atop Smart Deduplication).
         if coordinator.quickLookAssetID != nil {
             if isEditingText(in: event.window) || isEditingText(in: hostWindow) {
                 return event
             }
             if event.isARepeat { return nil }
-            withAnimation(CharkleMotion.accessible(CharkleMotion.exitSm, reduced: reduceMotion)) {
-                coordinator.closeQuickLook()
-            }
+            coordinator.requestQuickLookDismiss()
             return nil
+        }
+
+        // Block Spacebar gallery preview while Smart Deduplication studio covers the gallery.
+        guard !coordinator.isSmartDeduplicationPresented else {
+            return event
         }
 
         // 2. Quick Look is CLOSED -> Only handle events targeted directly at the main window (never popovers/panels)
@@ -3511,9 +3540,12 @@ public struct MainWindowView: View {
 
         if event.isARepeat { return nil }
 
-        // Gallery Filmstrip & Ring Gallery: always preview the selected or currently displayed stage asset
+        // Gallery Filmstrip & Ring Gallery: always preview the focused stage asset first
         if coordinator.galleryLayoutMode == .galleryFilmstrip || coordinator.galleryLayoutMode == .ringGallery {
-            let target = library.assets.first(where: { library.selectedAssetIDs.contains($0.id) })
+            let target = coordinator.focusedStageAssetID.flatMap { focusedID in
+                library.assets.first(where: { $0.id == focusedID })
+            }
+                ?? library.assets.first(where: { library.selectedAssetIDs.contains($0.id) })
                 ?? library.assets.first
             if let asset = target {
                 openQuickLook(asset)
@@ -3532,6 +3564,33 @@ public struct MainWindowView: View {
             }
         }
         return event
+    }
+
+    private func triggerInboxQuickTriage(digit: Int, in window: NSWindow?) -> Bool {
+        let orderedFolders = library.flattenedFolderHierarchy.map(\.folder)
+        guard coordinator.selectedDestination == .inbox,
+              !coordinator.isModalOverlayPresented,
+              !showInboxBatchTriageSheet,
+              !showBatchTagPopover,
+              !showCreateSubfolderPopover,
+              !isEditingText(in: window),
+              digit >= 1, digit <= orderedFolders.count else {
+            return false
+        }
+        let targetFolder = orderedFolders[digit - 1]
+        let targetIDs: [UUID] = if !library.selectedAssetIDs.isEmpty {
+            Array(library.selectedAssetIDs)
+        } else if let first = library.assets.first {
+            [first.id]
+        } else {
+            []
+        }
+        guard !targetIDs.isEmpty else { return false }
+        Task {
+            await library.moveAssets(targetIDs, toFolderID: targetFolder.id)
+            coordinator.showToast("已快捷键归档至「\(library.folderDisplayPath(for: targetFolder.id))」", icon: "folder.fill")
+        }
+        return true
     }
 
     private func pasteIntoCurrentGalleryFolder() {
@@ -4241,15 +4300,19 @@ private struct FloatingSyncStatusPill: View {
         .frame(width: 296)
     }
 
+    private static let fallbackSyncDateFormatter: DateFormatter = {
+        let fmt = DateFormatter()
+        fmt.dateFormat = "MM-dd HH:mm"
+        return fmt
+    }()
+
     private func formatRelativeSyncTime(_ date: Date) -> String {
         let elapsed = max(0, Date().timeIntervalSince(date))
         if elapsed < 15 { return "刚刚" }
         if elapsed < 60 { return "\(Int(elapsed)) 秒前" }
         if elapsed < 3600 { return "\(Int(elapsed / 60)) 分钟前" }
         if elapsed < 86400 { return "\(Int(elapsed / 3600)) 小时前" }
-        let fmt = DateFormatter()
-        fmt.dateFormat = "MM-dd HH:mm"
-        return fmt.string(from: date)
+        return Self.fallbackSyncDateFormatter.string(from: date)
     }
 }
 
@@ -4275,7 +4338,7 @@ private struct InboxZeroCelebrationView: View {
                 Text("收件箱已清空")
                     .font(.system(size: 20, weight: .semibold))
                     .tracking(-0.2)
-                Text("所有灵感都已妥善归档或进入情绪板。随时拖动文件到 MacBook 刘海或按 ⌥⇧A 截图采集。")
+                Text("所有灵感都已妥善归档或进入情绪板。随时拖动文件到 MacBook 刘海或按 \(GlobalHotkeyManager.displayString(for: .captureArea, fallback: "⌥⇧A")) 截图采集。")
                     .font(.system(size: 13))
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
@@ -4341,6 +4404,7 @@ private extension MainWindowView {
                         : effectiveExpandedSidebarWidth
                 },
                 onDragChanged: { deltaX in
+                    let inspectorVisibleForClamp = coordinator.isInspectorVisible && coordinator.selectedDestination != .pinterest
                     if sidebarDragStartedCollapsed {
                         if deltaX >= 40 {
                             if coordinator.isSidebarCollapsed {
@@ -4350,9 +4414,14 @@ private extension MainWindowView {
                             liveDraggedSidebarWidth = AppCoordinatorStore.clampedSidebarWidth(
                                 raw,
                                 windowWidth: windowContentWidth,
-                                isInspectorVisible: coordinator.isInspectorVisible,
+                                isInspectorVisible: inspectorVisibleForClamp,
                                 inspectorWidth: effectiveInspectorWidth
                             )
+                        } else {
+                            if !coordinator.isSidebarCollapsed {
+                                coordinator.isSidebarCollapsed = true
+                            }
+                            liveDraggedSidebarWidth = nil
                         }
                         return
                     }
@@ -4360,12 +4429,12 @@ private extension MainWindowView {
                     liveDraggedSidebarWidth = AppCoordinatorStore.clampedSidebarWidth(
                         raw,
                         windowWidth: windowContentWidth,
-                        isInspectorVisible: coordinator.isInspectorVisible,
+                        isInspectorVisible: inspectorVisibleForClamp,
                         inspectorWidth: effectiveInspectorWidth
                     )
                 },
                 onDragEnded: {
-                    if let finalWidth = liveDraggedSidebarWidth {
+                    if !coordinator.isSidebarCollapsed, let finalWidth = liveDraggedSidebarWidth {
                         coordinator.sidebarWidth = finalWidth
                     }
                     liveDraggedSidebarWidth = nil
@@ -4377,7 +4446,7 @@ private extension MainWindowView {
                     let target = AppCoordinatorStore.clampedSidebarWidth(
                         AppCoordinatorStore.defaultSidebarWidth,
                         windowWidth: windowContentWidth,
-                        isInspectorVisible: coordinator.isInspectorVisible,
+                        isInspectorVisible: coordinator.isInspectorVisible && coordinator.selectedDestination != .pinterest,
                         inspectorWidth: effectiveInspectorWidth
                     )
                     withAnimation(CharkleMotion.accessible(CharkleMotion.drawerEase, reduced: reduceMotion)) {

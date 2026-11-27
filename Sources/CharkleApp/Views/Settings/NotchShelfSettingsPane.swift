@@ -79,7 +79,7 @@ public struct NotchShelfSettingsPane: View {
 
                 SettingsRow(
                     title: "预览顶部浮窗效果",
-                    subtitle: "立即在屏幕顶部展开刘海浮窗，体验收纳与快速拖出交互（快捷键 ⌥⇧S）"
+                    subtitle: "立即在屏幕顶部展开刘海浮窗，体验收纳与快速拖出交互（快捷键 \(GlobalHotkeyManager.displayString(for: .toggleNotchShelf, fallback: "⌥⇧S"))）"
                 ) {
                     Button("预览顶部浮窗") {
                         onToggleNotchPreview()

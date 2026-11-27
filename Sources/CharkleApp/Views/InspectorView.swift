@@ -21,6 +21,7 @@ public struct InspectorView: View {
     public let moodboards: MoodboardStore
     public let pinnedAsset: AssetRecord?
     public let isQuickLookHosted: Bool
+    public let isActive: Bool
     public let panelWidth: CGFloat
     public let onCopyHex: (String) -> Void
     public let onFilterByColor: (String) -> Void
@@ -43,6 +44,9 @@ public struct InspectorView: View {
     @State private var pendingNotesValue: String?
     @State private var boardTitleDraft: String = ""
     @State private var boardSubtitleDraft: String = ""
+    @State private var editingBoardID: UUID? = nil
+    @State private var editingBoardOriginalTitle: String = ""
+    @State private var editingBoardOriginalSubtitle: String = ""
     @State private var boardRefinementDraft: String = ""
     @State private var showBoardAgentTrace: Bool = false
     @State private var pendingPermanentDeleteIDs: [UUID] = []
@@ -80,6 +84,7 @@ public struct InspectorView: View {
         moodboards: MoodboardStore,
         pinnedAsset: AssetRecord? = nil,
         isQuickLookHosted: Bool = false,
+        isActive: Bool = true,
         panelWidth: CGFloat = AppCoordinatorStore.defaultInspectorWidth,
         onCopyHex: @escaping (String) -> Void,
         onFilterByColor: @escaping (String) -> Void,
@@ -97,6 +102,7 @@ public struct InspectorView: View {
         self.moodboards = moodboards
         self.pinnedAsset = pinnedAsset
         self.isQuickLookHosted = isQuickLookHosted
+        self.isActive = isActive
         self.panelWidth = panelWidth
         self.onCopyHex = onCopyHex
         self.onFilterByColor = onFilterByColor
@@ -115,31 +121,37 @@ public struct InspectorView: View {
             CharkleTheme.inspectorBackground(for: colorScheme)
                 .ignoresSafeArea()
 
-            // Subtle low-saturation ambient tint ONLY for Single Asset Inspector
-            let ambientAsset: AssetRecord? = pinnedAsset ?? (!coordinator.isViewingMoodboard ? library.primarySelectedAsset : nil)
-            if let asset = ambientAsset {
-                LinearGradient(
-                    colors: [
-                        CharkleTheme.ambientTint(from: asset.dominantColors.first?.hex, scheme: colorScheme),
-                        .clear
-                    ],
-                    startPoint: .top,
-                    endPoint: .center
-                )
-                .frame(height: 200)
-                .allowsHitTesting(false)
-            }
-
-            if let pinnedAsset {
-                singleAssetInspector(pinnedAsset)
-            } else if coordinator.isViewingMoodboard, let board = moodboards.activeBoard {
-                moodboardRightRail(board)
-            } else if library.selectedAssetIDs.count >= 2 {
-                multiSelectBatchInspector
-            } else if let asset = library.primarySelectedAsset {
-                singleAssetInspector(asset)
+            // When Quick Look is presenting its own hosted Inspector full-bleed above the window,
+            // pause the underlying main-window Inspector body to avoid duplicate invalidation storms.
+            if !isQuickLookHosted && coordinator.quickLookAssetID != nil {
+                Color.clear
             } else {
-                emptyInspectorPlaceholder
+                // Subtle low-saturation ambient tint ONLY for Single Asset Inspector
+                let ambientAsset: AssetRecord? = pinnedAsset ?? (!coordinator.isViewingMoodboard ? library.primarySelectedAsset : nil)
+                if let asset = ambientAsset {
+                    LinearGradient(
+                        colors: [
+                            CharkleTheme.ambientTint(from: asset.dominantColors.first?.hex, scheme: colorScheme),
+                            .clear
+                        ],
+                        startPoint: .top,
+                        endPoint: .center
+                    )
+                    .frame(height: 200)
+                    .allowsHitTesting(false)
+                }
+
+                if let pinnedAsset {
+                    singleAssetInspector(pinnedAsset)
+                } else if coordinator.isViewingMoodboard, let board = moodboards.activeBoard {
+                    moodboardRightRail(board)
+                } else if library.selectedAssetIDs.count >= 2 {
+                    multiSelectBatchInspector
+                } else if let asset = library.primarySelectedAsset {
+                    singleAssetInspector(asset)
+                } else {
+                    emptyInspectorPlaceholder
+                }
             }
         }
         .frame(width: panelWidth)
@@ -222,7 +234,7 @@ public struct InspectorView: View {
         .onAppear {
             titleDraft = asset.title
             notesDraft = asset.notes
-            if isQuickLookHosted || coordinator.isInspectorVisible || coordinator.selectedDestination == .inbox {
+            if isActive, isQuickLookHosted || coordinator.isInspectorVisible || coordinator.selectedDestination == .inbox {
                 library.refreshInspectorContext(for: asset.id)
             }
         }
@@ -233,12 +245,12 @@ public struct InspectorView: View {
             flushPendingNotesSave()
             titleDraft = asset.title
             notesDraft = asset.notes
-            if isQuickLookHosted || coordinator.isInspectorVisible || coordinator.selectedDestination == .inbox {
+            if isActive, isQuickLookHosted || coordinator.isInspectorVisible || coordinator.selectedDestination == .inbox {
                 library.refreshInspectorContext(for: newID)
             }
         }
         .onChange(of: coordinator.isInspectorVisible) { _, isVisible in
-            if isVisible {
+            if isVisible && isActive {
                 library.refreshInspectorContext(for: asset.id)
             }
         }
@@ -473,7 +485,8 @@ public struct InspectorView: View {
             .charkleCleanScrollbars(hidden: true)
         }
         .scrollIndicators(.hidden)
-        .task(id: asset.id) {
+        .task(id: "\(asset.id.uuidString)-\(isActive || isQuickLookHosted)") {
+            guard isActive || isQuickLookHosted else { return }
             await library.hydrateImageMetadataIfNeeded(for: asset.id)
         }
     }
@@ -562,7 +575,7 @@ public struct InspectorView: View {
         ) {
             VStack(alignment: .leading, spacing: 10) {
                 let naturalRatio = max(0.35, min(3.2, CGFloat(asset.aspectRatio)))
-                let previewContentWidth: CGFloat = 256
+                let previewContentWidth = max(160, panelWidth - 44)
                 let fittedHeight = min(272, max(104, (previewContentWidth / naturalRatio).rounded()))
                 let fittedWidth = min(previewContentWidth, (fittedHeight * naturalRatio).rounded())
 
@@ -733,6 +746,7 @@ public struct InspectorView: View {
                             inspectorStandardMenuLabel(title: "加入情绪板", systemImage: "rectangle.3.group")
                         }
                         .menuStyle(.borderlessButton)
+                        .menuIndicator(.hidden)
 
                         Menu {
                             CharkleHierarchicalFolderMenuContent(
@@ -748,6 +762,7 @@ public struct InspectorView: View {
                             inspectorStandardMenuLabel(title: folderName(for: asset.folderID), systemImage: "folder")
                         }
                         .menuStyle(.borderlessButton)
+                        .menuIndicator(.hidden)
                         .help(asset.folderID.map { "当前所在：\(library.folderDisplayPath(for: $0))" } ?? "当前所在：收件箱")
                     }
 
@@ -1717,6 +1732,7 @@ public struct InspectorView: View {
                                     )
                                 }
                                 .menuStyle(.borderlessButton)
+                                .menuIndicator(.hidden)
                             }
 
                             CharkleHairlineDivider()
@@ -2252,21 +2268,36 @@ public struct InspectorView: View {
         }
         .scrollIndicators(.hidden)
         .onAppear {
+            editingBoardID = board.id
+            editingBoardOriginalTitle = board.title
+            editingBoardOriginalSubtitle = board.subtitle
             boardTitleDraft = board.title
             boardSubtitleDraft = board.subtitle
         }
-        .onChange(of: board.id) { _, _ in
+        .onChange(of: board.id) { oldID, _ in
+            if editingBoardID == oldID {
+                flushBoardHeaderIfDirty(
+                    boardID: oldID,
+                    originalTitle: editingBoardOriginalTitle,
+                    originalSubtitle: editingBoardOriginalSubtitle
+                )
+            }
+            editingBoardID = board.id
+            editingBoardOriginalTitle = board.title
+            editingBoardOriginalSubtitle = board.subtitle
             boardTitleDraft = board.title
             boardSubtitleDraft = board.subtitle
             boardRefinementDraft = ""
             showBoardAgentTrace = false
         }
         .onChange(of: board.title) { _, newTitle in
+            editingBoardOriginalTitle = newTitle
             if !isBoardTitleFocused && boardTitleDraft != newTitle {
                 boardTitleDraft = newTitle
             }
         }
         .onChange(of: board.subtitle) { _, newSubtitle in
+            editingBoardOriginalSubtitle = newSubtitle
             if !isBoardSubtitleFocused && boardSubtitleDraft != newSubtitle {
                 boardSubtitleDraft = newSubtitle
             }
@@ -2640,25 +2671,41 @@ public struct InspectorView: View {
     }
 
     private func commitBoardHeader(_ board: MoodboardDocument) {
+        flushBoardHeaderIfDirty(
+            boardID: board.id,
+            originalTitle: board.title,
+            originalSubtitle: board.subtitle
+        )
+    }
+
+    private func flushBoardHeaderIfDirty(boardID: UUID, originalTitle: String, originalSubtitle: String) {
         let trimmed = boardTitleDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-        let nextTitle = trimmed.isEmpty ? board.title : trimmed
-        guard nextTitle != board.title || boardSubtitleDraft != board.subtitle else { return }
-        var next = board
-        next.title = nextTitle
-        next.subtitle = boardSubtitleDraft
-        moodboards.commitMutation(next)
+        let nextTitle = trimmed.isEmpty ? originalTitle : trimmed
+        let nextSubtitle = boardSubtitleDraft
+        guard nextTitle != originalTitle || nextSubtitle != originalSubtitle else { return }
+        if var active = moodboards.activeBoard, active.id == boardID {
+            active.title = nextTitle
+            active.subtitle = nextSubtitle
+            moodboards.commitMutation(active)
+        } else {
+            Task {
+                await moodboards.updateBoardHeader(id: boardID, title: nextTitle, subtitle: nextSubtitle)
+            }
+        }
     }
 
     private func quickAddFilteredAssets(excluding excluded: Set<UUID>) -> [AssetRecord] {
-        let q = quickAddQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let q = quickAddQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         let source = library.cachedRecentActivityAssets
         var results: [AssetRecord] = []
         results.reserveCapacity(9)
         for asset in source {
             guard !asset.isTrashed, !excluded.contains(asset.id) else { continue }
             if !q.isEmpty {
-                let hay = ([asset.title, asset.sourceDomain ?? ""] + asset.tags).joined(separator: " ").lowercased()
-                guard hay.contains(q) else { continue }
+                let matches = asset.title.localizedCaseInsensitiveContains(q)
+                    || (asset.sourceDomain?.localizedCaseInsensitiveContains(q) ?? false)
+                    || asset.tags.contains(where: { $0.localizedCaseInsensitiveContains(q) })
+                guard matches else { continue }
             }
             results.append(asset)
             if results.count >= 9 { break }

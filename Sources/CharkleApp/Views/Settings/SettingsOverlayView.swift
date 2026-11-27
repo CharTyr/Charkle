@@ -52,8 +52,10 @@ public struct SettingsOverlayView: View {
             CharkleModalBackdrop(onTap: onClose)
 
             GeometryReader { geo in
-                let modalWidth = min(max(680, geo.size.width - 72), 880)
-                let modalHeight = min(max(500, geo.size.height - 68), 640)
+                let maxAvailableWidth = max(360, geo.size.width - 24)
+                let maxAvailableHeight = max(320, geo.size.height - 24)
+                let modalWidth = min(max(560, geo.size.width - 72), min(880, maxAvailableWidth))
+                let modalHeight = min(max(440, geo.size.height - 68), min(640, maxAvailableHeight))
 
                 let cardShape = RoundedRectangle(cornerRadius: CharkleTheme.Radius.settingsOuter, style: .continuous)
                 SettingsContentShell(
@@ -110,6 +112,7 @@ public struct SettingsContentShell: View {
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     @State private var hoveredTab: CharkleSettingsTab? = nil
+    @State private var fallbackLibrary: LibraryStore? = nil
     @Namespace private var navSelectionNamespace
 
     public let coordinator: AppCoordinatorStore
@@ -367,14 +370,15 @@ public struct SettingsContentShell: View {
         case .extensions:
             ExtensionsSettingsPane(coordinator: coordinator, syncAndAI: syncAndAI)
         case .advancedAbout:
-            if let library {
-                AdvancedAboutSettingsPane(library: library, syncAndAI: syncAndAI, appUpdater: appUpdater)
+            if let resolvedLibrary = library ?? fallbackLibrary {
+                AdvancedAboutSettingsPane(library: resolvedLibrary, syncAndAI: syncAndAI, appUpdater: appUpdater)
             } else {
-                AdvancedAboutSettingsPane(
-                    library: LibraryStore(engine: syncAndAI.engine),
-                    syncAndAI: syncAndAI,
-                    appUpdater: appUpdater
-                )
+                Color.clear
+                    .onAppear {
+                        if fallbackLibrary == nil {
+                            fallbackLibrary = LibraryStore(engine: syncAndAI.engine)
+                        }
+                    }
             }
         }
     }

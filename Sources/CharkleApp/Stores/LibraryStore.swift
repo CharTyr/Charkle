@@ -2,6 +2,8 @@ import AppKit
 import CharkleCanvas
 import CharkleCore
 import Foundation
+import ImageIO
+import UniformTypeIdentifiers
 import os
 
 private let libraryStoreLogger = Logger(subsystem: "com.charkle.app", category: "LibraryStore")
@@ -76,7 +78,7 @@ public final class LibraryStore {
     public var selectedAssetIDs: Set<UUID> = []
     public var cutAssetIDs: Set<UUID> = []
     public var copiedAssetIDs: [UUID] = []
-    private var lastInternalPasteboardChangeCount: Int?
+    @ObservationIgnored private var lastInternalPasteboardChangeCount: Int?
 
     public var similarAssets: [ScoredAsset] = []
     public var isLoadingSimilarAssets: Bool = false
@@ -102,19 +104,20 @@ public final class LibraryStore {
     public var isEnrichingTags: Bool { !enrichingAssetIDs.isEmpty }
     public var lastError: String?
 
-    private var inspectorContextTask: Task<Void, Never>?
+    @ObservationIgnored private var inspectorContextTask: Task<Void, Never>?
     @ObservationIgnored private var inspectorContextAssetID: UUID?
     @ObservationIgnored private var inspectorContextLoaded: Bool = false
     @ObservationIgnored private var metadataHydrationAttemptedIDs: Set<UUID> = []
     @ObservationIgnored private var imageMetadataCache: [UUID: ExtractedImageMetadata] = [:]
-    private var retagTask: Task<RetagBatchOutcome, Never>?
+    @ObservationIgnored private var retagTask: Task<RetagBatchOutcome, Never>?
     @ObservationIgnored private var activeRetagBatchID: UUID?
     @ObservationIgnored private var assetsRequestGeneration: UInt64 = 0
     @ObservationIgnored private var fullRefreshGeneration: UInt64 = 0
     @ObservationIgnored private var minimalRefreshGeneration: UInt64 = 0
     @ObservationIgnored private var semanticSearchGeneration: UInt64 = 0
     @ObservationIgnored private var semanticEnhancementDelayTask: Task<Void, Never>?
-    private var semanticSearchTask: Task<SemanticSearchReport?, Never>?
+    @ObservationIgnored private var semanticSearchTask: Task<SemanticSearchReport?, Never>?
+    @ObservationIgnored private var hasBootstrapped: Bool = false
     @ObservationIgnored private var activeRefreshAllTask: Task<Void, Never>?
     @ObservationIgnored private var activeRefreshAssetsTask: Task<Void, Never>?
     @ObservationIgnored private var enrichmentDebounceTask: Task<Void, Never>?
@@ -205,18 +208,21 @@ public final class LibraryStore {
             await refreshMinimalMetadataOnly()
             return
         }
+        if hasBootstrapped && !allAssetsByID.isEmpty {
+            await refreshAll()
+            return
+        }
         isLoading = true
         defer { isLoading = false }
         do {
             _ = try await engine.seedSampleLibraryIfEmpty()
             await refreshAll()
+            hasBootstrapped = true
             Task { [weak self] in
                 guard let self else { return }
                 let upgradedIDs = await self.engine.upgradeLegacyXiaohongshuCoversIfNeeded()
                 guard !upgradedIDs.isEmpty else { return }
-                for id in upgradedIDs {
-                    self.thumbnailLoader.invalidate(assetID: id)
-                }
+                self.thumbnailLoader.invalidate(assetIDs: upgradedIDs)
                 await self.refreshAll()
             }
         } catch {
@@ -349,44 +355,55 @@ public final class LibraryStore {
         semanticSearchReport = nil
         isRunningSemanticSearch = false
 
-        filter.folderID = nil
-        filter.includeSubfolders = false
-        filter.onlyInbox = false
-        filter.onlyUntagged = false
-        filter.onlyRecentDays = nil
-        filter.onlyTrashed = false
-        filter.includeTrashed = false
-        filter.tags.removeAll()
-        activeSmartFolderID = nil
+        var nextFilter = filter
+        nextFilter.folderID = nil
+        nextFilter.includeSubfolders = false
+        nextFilter.onlyInbox = false
+        nextFilter.onlyUntagged = false
+        nextFilter.onlyRecentDays = nil
+        nextFilter.onlyTrashed = false
+        nextFilter.includeTrashed = false
+        nextFilter.tags.removeAll()
+        if activeSmartFolderID != nil {
+            activeSmartFolderID = nil
+        }
 
         switch destination {
         case .allItems:
             break
         case .inbox:
-            filter.onlyInbox = true
+            nextFilter.onlyInbox = true
         case .untagged:
-            filter.onlyUntagged = true
+            nextFilter.onlyUntagged = true
         case .recent:
-            filter.onlyRecentDays = 14
-            filter.sortBy = .newest
+            nextFilter.onlyRecentDays = 14
+            nextFilter.sortBy = .newest
         case .trash:
-            filter.onlyTrashed = true
-            filter.includeTrashed = true
+            nextFilter.onlyTrashed = true
+            nextFilter.includeTrashed = true
         case .folder(let folderID):
-            filter.folderID = folderID
-            filter.includeSubfolders = true
+            nextFilter.folderID = folderID
+            nextFilter.includeSubfolders = true
         case .smartFolder(let smartFolderID):
             activeSmartFolderID = smartFolderID
         case .tag(let tagName):
-            filter.tags = [tagName]
+            nextFilter.tags = [tagName]
             recordRecentlyTouchedTags([tagName])
             tagCounts = sortTagCounts(tagCounts)
         case .moodboardsHome, .moodboard, .pinterest:
+            if filter != nextFilter {
+                filter = nextFilter
+            }
             assetsRequestGeneration &+= 1
             return
         }
 
-        selectedAssetIDs.removeAll()
+        if filter != nextFilter {
+            filter = nextFilter
+        }
+        if !selectedAssetIDs.isEmpty {
+            selectedAssetIDs.removeAll()
+        }
         await refreshAssets()
     }
 
@@ -520,7 +537,7 @@ public final class LibraryStore {
 
                     self.isBatchUpdating = true
                     if self.smartFolders != smartList { self.smartFolders = smartList }
-                    self.allAssetsByID = nextAllByID
+                    if self.allAssetsByID != nextAllByID { self.allAssetsByID = nextAllByID }
                     if self.folders != folderList { self.folders = folderList }
                     let sortedTags = self.sortTagCounts(tags)
                     if self.tagCounts != sortedTags { self.tagCounts = sortedTags }
@@ -734,6 +751,7 @@ public final class LibraryStore {
     public func refreshRichAsset(_ id: UUID) async -> AssetRecord? {
         do {
             let updated = try await engine.refreshRichAsset(id: id)
+            thumbnailLoader.invalidate(assetID: updated.id)
             allAssetsByID[updated.id] = updated
             if let idx = visibleAssetIndexByID[updated.id], idx < assets.count, assets[idx].id == updated.id {
                 isUpdatingAssetsInPlace = true
@@ -741,7 +759,6 @@ public final class LibraryStore {
                 isUpdatingAssetsInPlace = false
             }
             rebuildRecentActivityCache()
-            thumbnailLoader.invalidate(assetID: updated.id)
             return updated
         } catch {
             lastError = error.localizedDescription
@@ -753,6 +770,9 @@ public final class LibraryStore {
     public func updateAssetCoverImage(assetID: UUID, imageData: Data) async -> AssetRecord? {
         do {
             let updated = try await engine.updateAssetCoverImage(id: assetID, imageData: imageData)
+            // Invalidate targeted thumbnail caches BEFORE publishing the updated AssetRecord so Masonry,
+            // Filmstrip, Ring, Inspector, and Quick Look never decode or retain stale cover images.
+            thumbnailLoader.invalidate(assetID: updated.id)
             allAssetsByID[updated.id] = updated
             if let idx = visibleAssetIndexByID[updated.id], idx < assets.count, assets[idx].id == updated.id {
                 isUpdatingAssetsInPlace = true
@@ -760,7 +780,6 @@ public final class LibraryStore {
                 isUpdatingAssetsInPlace = false
             }
             rebuildRecentActivityCache()
-            thumbnailLoader.invalidate(assetID: updated.id)
             return updated
         } catch {
             lastError = error.localizedDescription
@@ -1213,8 +1232,12 @@ public final class LibraryStore {
     /// Resolves the best local file URL to reveal in Finder: prefers the human-readable file in the user's
     /// configured local library folder if present, falling back to the cached original file.
     public func resolveFinderFileURL(for assetID: UUID) async -> URL? {
+        let syncCfg = await engine.syncConfig()
+        return await resolveFinderFileURL(for: assetID, syncCfg: syncCfg)
+    }
+
+    private func resolveFinderFileURL(for assetID: UUID, syncCfg: DriveSyncConfig) async -> URL? {
         if let asset = allAssetsByID[assetID] {
-            let syncCfg = await engine.syncConfig()
             if syncCfg.mode == .iCloudDrive {
                 let custom = syncCfg.iCloudCustomFolderPath.trimmingCharacters(in: .whitespacesAndNewlines)
                 let baseDir: URL? = if !custom.isEmpty {
@@ -1303,7 +1326,7 @@ public final class LibraryStore {
         guard !ids.isEmpty else { return 0 }
         let urls = await resolveURLs(for: ids)
         guard !urls.isEmpty else { return 0 }
-        writeFilesToGeneralPasteboard(urls)
+        await writeFilesToGeneralPasteboard(urls)
         copiedAssetIDs = ids
         cutAssetIDs.removeAll()
         lastInternalPasteboardChangeCount = NSPasteboard.general.changeCount
@@ -1315,7 +1338,7 @@ public final class LibraryStore {
         guard !ids.isEmpty else { return 0 }
         let urls = await resolveURLs(for: ids)
         if !urls.isEmpty {
-            writeFilesToGeneralPasteboard(urls)
+            await writeFilesToGeneralPasteboard(urls)
         }
         cutAssetIDs = Set(ids)
         copiedAssetIDs.removeAll()
@@ -1360,37 +1383,66 @@ public final class LibraryStore {
     }
 
     private func resolveURLs(for ids: [UUID]) async -> [URL] {
+        guard !ids.isEmpty else { return [] }
+        let syncCfg = await engine.syncConfig()
         var urls: [URL] = []
+        urls.reserveCapacity(ids.count)
         for id in ids {
-            if let url = await resolveFinderFileURL(for: id) {
+            if let url = await resolveFinderFileURL(for: id, syncCfg: syncCfg) {
                 urls.append(url)
             }
         }
         return urls
     }
 
-    private func writeFilesToGeneralPasteboard(_ urls: [URL]) {
+    private func writeFilesToGeneralPasteboard(_ urls: [URL]) async {
         guard !urls.isEmpty else { return }
-        let pb = NSPasteboard.general
-        pb.clearContents()
         if urls.count == 1, let single = urls.first {
+            // Decode/encode single-image representation off the main actor so copying large assets never stalls UI.
+            let preparedImage = await Self.prepareSinglePasteboardImagePayload(for: single)
+            let pb = NSPasteboard.general
+            pb.clearContents()
             // Keep fileURL and image pixels on a SINGLE NSPasteboardItem so apps that read
             // pasteboardItems (such as PureRef) never paste duplicate copies of one image,
             // while chat/document apps that read TIFF/PNG data still paste cleanly.
             let item = NSPasteboardItem()
             item.setString(single.absoluteString, forType: .fileURL)
-            if let image = NSImage(contentsOf: single) {
-                if single.pathExtension.lowercased() == "png",
-                   let rawPNG = try? Data(contentsOf: single) {
-                    item.setData(rawPNG, forType: .png)
-                } else if let tiff = image.tiffRepresentation {
-                    item.setData(tiff, forType: .tiff)
-                }
+            if let preparedImage {
+                item.setData(preparedImage.data, forType: preparedImage.isPNG ? .png : .tiff)
             }
             pb.writeObjects([item])
         } else {
+            let pb = NSPasteboard.general
+            pb.clearContents()
             pb.writeObjects(urls.map { $0 as NSURL })
         }
+    }
+
+    @concurrent
+    private static func prepareSinglePasteboardImagePayload(for url: URL) async -> (data: Data, isPNG: Bool)? {
+        let ext = url.pathExtension.lowercased()
+        if ext == "png" {
+            if let rawPNG = try? Data(contentsOf: url), !rawPNG.isEmpty {
+                return (rawPNG, true)
+            }
+            return nil
+        }
+        let imageExtensions: Set<String> = ["jpg", "jpeg", "webp", "heic", "heif", "tiff", "tif", "bmp", "gif", "avif", "jxl", "icns"]
+        guard imageExtensions.contains(ext) else { return nil }
+        let sourceOptions: [CFString: Any] = [kCGImageSourceShouldCache: false]
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, sourceOptions as CFDictionary),
+              let cgImage = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+            return nil
+        }
+        let outData = NSMutableData()
+        guard let dest = CGImageDestinationCreateWithData(outData, UTType.tiff.identifier as CFString, 1, nil) else {
+            return nil
+        }
+        CGImageDestinationAddImage(dest, cgImage, nil)
+        guard CGImageDestinationFinalize(dest), outData.length > 0 else {
+            return nil
+        }
+        return (outData as Data, false)
     }
 
     public func folder(byID folderID: UUID) -> FolderRecord? {
@@ -1649,9 +1701,11 @@ public final class LibraryStore {
                 inboxCount = (try? await engine.inboxCount()) ?? inboxCount
                 return created
             }
+            suppressDerivedAssetRebuild = true
             for item in created {
                 allAssetsByID[item.id] = item
             }
+            suppressDerivedAssetRebuild = false
             await refreshAll()
             return created
         } catch {
@@ -1683,9 +1737,11 @@ public final class LibraryStore {
                 results.append(result)
                 anyImported = anyImported || !result.importedAssets.isEmpty || result.createdFolderCount > 0
                 if !isMinimalCaptureMode {
+                    suppressDerivedAssetRebuild = true
                     for item in result.importedAssets {
                         allAssetsByID[item.id] = item
                     }
+                    suppressDerivedAssetRebuild = false
                 }
             } catch {
                 lastError = error.localizedDescription
@@ -1727,9 +1783,11 @@ public final class LibraryStore {
                 results.append(result)
                 anyImported = anyImported || !result.importedAssets.isEmpty || result.createdBoardID != nil
                 if !isMinimalCaptureMode {
+                    suppressDerivedAssetRebuild = true
                     for item in result.importedAssets {
                         allAssetsByID[item.id] = item
                     }
+                    suppressDerivedAssetRebuild = false
                 }
             } catch {
                 lastError = error.localizedDescription
@@ -2032,10 +2090,12 @@ public final class LibraryStore {
         do {
             try await engine.permanentlyDeleteAssets(ids: ids)
             let idSet = Set(ids)
+            suppressDerivedAssetRebuild = true
             for id in idSet {
                 allAssetsByID.removeValue(forKey: id)
-                thumbnailLoader.invalidate(assetID: id)
             }
+            suppressDerivedAssetRebuild = false
+            thumbnailLoader.invalidate(assetIDs: Array(idSet))
             selectedAssetIDs.subtract(idSet)
             cutAssetIDs.subtract(idSet)
             copiedAssetIDs.removeAll { idSet.contains($0) }
@@ -2134,7 +2194,10 @@ public final class LibraryStore {
                 photoExif: updated.richMetadata?.photoExif,
                 aiGeneration: updated.richMetadata?.aiGeneration
             )
+            // EXIF/AI prompt hydration never alters folder counts, tags, or smart-folder rules.
+            suppressDerivedAssetRebuild = true
             allAssetsByID[updated.id] = updated
+            suppressDerivedAssetRebuild = false
         }
     }
 
@@ -2142,7 +2205,9 @@ public final class LibraryStore {
         guard !ids.isEmpty else { return }
         do {
             let updated = try await engine.analyzeAssetsLocally(ids: ids)
+            suppressDerivedAssetRebuild = true
             for item in updated { allAssetsByID[item.id] = item }
+            suppressDerivedAssetRebuild = false
             await refreshAll()
         } catch {
             lastError = error.localizedDescription

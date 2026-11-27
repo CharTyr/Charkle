@@ -66,6 +66,7 @@ public struct BoardPaletteHeaderStrip: View {
     public let onSearchColor: (String) -> Void
 
     @State private var copiedHex: String?
+    @State private var copyResetTask: Task<Void, Never>?
 
     public init(
         colors: [LabColor],
@@ -93,8 +94,10 @@ public struct BoardPaletteHeaderStrip: View {
                         withAnimation(CanvasMotion.accessible(CanvasMotion.microOvershoot, reduced: reduceMotion)) {
                             copiedHex = hex
                         }
-                        Task {
+                        copyResetTask?.cancel()
+                        copyResetTask = Task {
                             try? await Task.sleep(for: .seconds(1.2))
+                            guard !Task.isCancelled else { return }
                             if copiedHex == hex {
                                 withAnimation(CanvasMotion.accessible(CanvasMotion.exitSm, reduced: reduceMotion)) {
                                     copiedHex = nil
@@ -136,6 +139,10 @@ public struct BoardPaletteHeaderStrip: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
             .canvasLiquidGlass(in: Capsule(style: .continuous))
+            .onDisappear {
+                copyResetTask?.cancel()
+                copyResetTask = nil
+            }
         }
     }
 }
@@ -443,6 +450,8 @@ struct BoardNoteNodeView: View {
 
     @State private var draftTitle: String = ""
     @State private var draftText: String = ""
+    @State private var lastCommittedTitle: String? = nil
+    @State private var lastCommittedText: String? = nil
     @State private var isHovered: Bool = false
     @State private var commitTask: Task<Void, Never>?
     @FocusState private var focusedField: FocusField?
@@ -461,6 +470,8 @@ struct BoardNoteNodeView: View {
         commitTask = nil
         let normalizedTitle = draftTitle.isEmpty ? nil : draftTitle
         if normalizedTitle != title || draftText != text {
+            lastCommittedTitle = normalizedTitle
+            lastCommittedText = draftText
             onUpdate(normalizedTitle, draftText, style, fontSize)
         }
     }
@@ -468,7 +479,10 @@ struct BoardNoteNodeView: View {
     private func commitStyleChange(style nextStyle: NoteStyle, fontSize nextSize: Double) {
         commitTask?.cancel()
         commitTask = nil
-        onUpdate(draftTitle.isEmpty ? nil : draftTitle, draftText, nextStyle, nextSize)
+        let normalizedTitle = draftTitle.isEmpty ? nil : draftTitle
+        lastCommittedTitle = normalizedTitle
+        lastCommittedText = draftText
+        onUpdate(normalizedTitle, draftText, nextStyle, nextSize)
     }
 
     var body: some View {
@@ -544,6 +558,8 @@ struct BoardNoteNodeView: View {
         .onAppear {
             draftTitle = title ?? ""
             draftText = text
+            lastCommittedTitle = title
+            lastCommittedText = text
         }
         .onDisappear {
             flushDraftIfDirty()
@@ -555,10 +571,26 @@ struct BoardNoteNodeView: View {
         }
         .onChange(of: title) { _, newVal in
             let target = newVal ?? ""
-            if commitTask == nil && draftTitle != target { draftTitle = target }
+            if newVal != lastCommittedTitle {
+                // External mutation (Undo/Redo/reload): cancel any pending stale debounce commit
+                commitTask?.cancel()
+                commitTask = nil
+                lastCommittedTitle = newVal
+                if draftTitle != target { draftTitle = target }
+            } else if commitTask == nil && draftTitle != target {
+                draftTitle = target
+            }
         }
         .onChange(of: text) { _, newVal in
-            if commitTask == nil && draftText != newVal { draftText = newVal }
+            if newVal != lastCommittedText {
+                // External mutation (Undo/Redo/reload): cancel any pending stale debounce commit
+                commitTask?.cancel()
+                commitTask = nil
+                lastCommittedText = newVal
+                if draftText != newVal { draftText = newVal }
+            } else if commitTask == nil && draftText != newVal {
+                draftText = newVal
+            }
         }
         .onHover { hovering in
             withAnimation(CanvasMotion.accessible(CanvasMotion.hoverPress, reduced: reduceMotion)) {
@@ -605,6 +637,7 @@ struct BoardGroupFrameView: View {
     let onDelete: () -> Void
 
     @State private var draftTitle: String = ""
+    @State private var lastCommittedTitle: String? = nil
     @State private var isHovered: Bool = false
     @State private var commitTask: Task<Void, Never>?
     @FocusState private var isEditingTitle: Bool
@@ -622,6 +655,7 @@ struct BoardGroupFrameView: View {
         commitTask?.cancel()
         commitTask = nil
         if draftTitle != title {
+            lastCommittedTitle = draftTitle
             onUpdate(draftTitle, tint)
         }
     }
@@ -629,6 +663,7 @@ struct BoardGroupFrameView: View {
     private func commitTintChange(_ nextTint: GroupTint) {
         commitTask?.cancel()
         commitTask = nil
+        lastCommittedTitle = draftTitle
         onUpdate(draftTitle, nextTint)
     }
 
@@ -715,13 +750,23 @@ struct BoardGroupFrameView: View {
                 lineWidth: isSelected ? 1.8 : 1.15
             )
         )
-        .onAppear { draftTitle = title }
+        .onAppear {
+            draftTitle = title
+            lastCommittedTitle = title
+        }
         .onDisappear { flushTitleIfDirty() }
         .onChange(of: isEditingTitle) { _, editing in
             if !editing { flushTitleIfDirty() }
         }
         .onChange(of: title) { _, newVal in
-            if commitTask == nil && draftTitle != newVal { draftTitle = newVal }
+            if newVal != lastCommittedTitle {
+                commitTask?.cancel()
+                commitTask = nil
+                lastCommittedTitle = newVal
+                if draftTitle != newVal { draftTitle = newVal }
+            } else if commitTask == nil && draftTitle != newVal {
+                draftTitle = newVal
+            }
         }
         .onHover { hovering in
             withAnimation(CanvasMotion.accessible(CanvasMotion.hoverPress, reduced: reduceMotion)) {

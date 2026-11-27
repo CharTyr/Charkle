@@ -68,6 +68,8 @@ public final class AppCoordinatorStore {
 
     public var quickLookAssetID: UUID?
     public var quickLookPlaylist: [UUID] = []
+    public private(set) var quickLookDismissRequestToken: UInt64 = 0
+    @ObservationIgnored public var focusedStageAssetID: UUID? = nil
     public var pendingGalleryReveal: MasonryRevealRequest?
 
     public var isJumpAnywherePresented: Bool = false
@@ -80,6 +82,7 @@ public final class AppCoordinatorStore {
     public var editingSmartFolder: SmartFolderRecord?
     public var isSmartDeduplicationPresented: Bool = false
     public var deduplicationInitialFolderID: UUID? = nil
+    public var isPinterestDetailImageExpanded: Bool = false
 
     /// Centered Settings overlay state & deep-link tab routing.
     public var isSettingsPresented: Bool = false
@@ -340,6 +343,7 @@ public final class AppCoordinatorStore {
             selectedSettingsTab = tab
         }
         closeQuickLook()
+        closeSmartDeduplication()
         if isJumpAnywherePresented { isJumpAnywherePresented = false }
         if isOnboardingPresented { isOnboardingPresented = false }
         if !isSettingsPresented { isSettingsPresented = true }
@@ -386,6 +390,11 @@ public final class AppCoordinatorStore {
     public func openQuickLook(assetID: UUID, playlist: [UUID]) {
         quickLookPlaylist = playlist
         quickLookAssetID = assetID
+    }
+
+    public func requestQuickLookDismiss() {
+        guard quickLookAssetID != nil else { return }
+        quickLookDismissRequestToken &+= 1
     }
 
     public func closeQuickLook() {

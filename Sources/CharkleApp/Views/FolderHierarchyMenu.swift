@@ -167,7 +167,7 @@ public struct CharkleHierarchicalFolderScopeTree: View {
     }
 
     private var visibleNodes: [FolderHierarchyNode] {
-        let roots = FolderHierarchyNode.buildTree(from: folders)
+        let roots = FolderHierarchyMenuTreeCache.roots(for: folders)
         var result: [FolderHierarchyNode] = []
         func walk(_ nodes: [FolderHierarchyNode]) {
             for node in nodes {

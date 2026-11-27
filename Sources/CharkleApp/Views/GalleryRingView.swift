@@ -28,6 +28,7 @@ public struct GalleryRingView: View {
     public let onTogglePinOffline: ([UUID], Bool) -> Void
     public let onTrashAssets: ([UUID]) -> Void
     public let onRestoreAssets: ([UUID]) -> Void
+    public let onFocusedAssetChanged: ((UUID?) -> Void)?
 
     @State private var params: RingGalleryParameters = .default
     @State private var isTuningPanelExpanded: Bool = false
@@ -38,7 +39,7 @@ public struct GalleryRingView: View {
 
     private func resolveActiveSelection() -> (asset: AssetRecord, index: Int)? {
         if let frontAsset, let idx = assets.firstIndex(where: { $0.id == frontAsset.id }) {
-            return (frontAsset, idx)
+            return (assets[idx], idx)
         }
         if let selectedID = selectedAssetIDs.first,
            let idx = assets.firstIndex(where: { $0.id == selectedID }) {
@@ -73,7 +74,8 @@ public struct GalleryRingView: View {
         onMoveToFolder: @escaping ([UUID], UUID?) -> Void,
         onTogglePinOffline: @escaping ([UUID], Bool) -> Void,
         onTrashAssets: @escaping ([UUID]) -> Void,
-        onRestoreAssets: @escaping ([UUID]) -> Void
+        onRestoreAssets: @escaping ([UUID]) -> Void,
+        onFocusedAssetChanged: ((UUID?) -> Void)? = nil
     ) {
         self.assets = assets
         self.folders = folders
@@ -92,6 +94,7 @@ public struct GalleryRingView: View {
         self.onTogglePinOffline = onTogglePinOffline
         self.onTrashAssets = onTrashAssets
         self.onRestoreAssets = onRestoreAssets
+        self.onFocusedAssetChanged = onFocusedAssetChanged
     }
 
     public var body: some View {
@@ -115,6 +118,7 @@ public struct GalleryRingView: View {
                 callbacks: RingGalleryInteractionCallbacks(
                     onFrontAssetChanged: { asset in
                         frontAsset = asset
+                        onFocusedAssetChanged?(asset?.id)
                         if let asset {
                             if selectedAssetIDs != [asset.id] {
                                 selectedAssetIDs = [asset.id]
@@ -142,9 +146,13 @@ public struct GalleryRingView: View {
                 )
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .onAppear {
+                onFocusedAssetChanged?(resolveActiveSelection()?.asset.id)
+            }
             .onDisappear {
                 markOpenedTask?.cancel()
                 markOpenedTask = nil
+                onFocusedAssetChanged?(nil)
             }
 
             // Bottom Navigation Capsule & Collapsible Tuning Control
@@ -210,6 +218,24 @@ public struct GalleryRingView: View {
                 ),
                 value: isTuningPanelExpanded
             )
+        }
+        .overlay {
+            if isTuningPanelExpanded {
+                WindowKeyEventBridge { event, hostWindow in
+                    let primaryModifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
+                    guard event.keyCode == 53,
+                          primaryModifiers.isEmpty,
+                          event.window === hostWindow,
+                          !isOverlayPresented else {
+                        return event
+                    }
+                    withAnimation(CharkleMotion.accessible(CharkleMotion.popoverExit, reduced: reduceMotion)) {
+                        isTuningPanelExpanded = false
+                    }
+                    return nil
+                }
+                .allowsHitTesting(false)
+            }
         }
         .onKeyPress(.escape) {
             guard isTuningPanelExpanded else { return .ignored }

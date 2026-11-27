@@ -193,12 +193,12 @@ public nonisolated enum EditorialLayoutSolver {
             }
         }
 
-        // Choose the row count (1 ... min(n, 8)) that maximizes area fill inside (innerW x innerH) without overflowing
+        // Choose the row count (1 ... min(n, 16)) that maximizes area fill inside (innerW x innerH) without overflowing
         let n = ordered.count
         var bestFrames: [UUID: BoardRect] = [:]
         var bestScore: Double = -Double.greatestFiniteMagnitude
 
-        for rowCount in 1...min(n, 8) {
+        for rowCount in 1...min(n, 16) {
             let totalGapsY = spacing * Double(rowCount - 1)
             let availH = max(32, innerH - totalGapsY)
             // Partition items greedily by balanced aspect-ratio sum per row
@@ -266,6 +266,29 @@ public nonisolated enum EditorialLayoutSolver {
             if score > bestScore {
                 bestScore = score
                 bestFrames = candidate
+            }
+        }
+
+        // Guarantee every child stays strictly inside the resized group bounds even when a large
+        // group is shrunk small, preventing children from overflowing and being permanently ejected.
+        if !bestFrames.isEmpty {
+            let maxChildX = bestFrames.values.map(\.maxX).max() ?? (innerX + innerW)
+            let maxChildY = bestFrames.values.map(\.maxY).max() ?? (innerY + innerH)
+            let usedW = max(1, maxChildX - innerX)
+            let usedH = max(1, maxChildY - innerY)
+            let fitScale = min(1.0, min(innerW / usedW, innerH / usedH))
+            if fitScale < 0.999 {
+                var fitted: [UUID: BoardRect] = [:]
+                fitted.reserveCapacity(bestFrames.count)
+                for (id, rect) in bestFrames {
+                    fitted[id] = BoardRect(
+                        x: innerX + (rect.x - innerX) * fitScale,
+                        y: innerY + (rect.y - innerY) * fitScale,
+                        width: max(8, rect.width * fitScale),
+                        height: max(8, rect.height * fitScale)
+                    )
+                }
+                return fitted
             }
         }
 

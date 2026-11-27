@@ -29,7 +29,7 @@ public final class MoodboardStore {
     public var isSaving: Bool = false
     public var lastError: String?
 
-    private var saveDebounceTask: Task<Void, Never>?
+    @ObservationIgnored private var saveDebounceTask: Task<Void, Never>?
     @ObservationIgnored private var pendingSaveDocument: MoodboardDocument?
     @ObservationIgnored private var viewportSaveTask: Task<Void, Never>?
     @ObservationIgnored private var latestViewportOverride: (boardID: UUID, center: BoardPoint, zoom: Double)?
@@ -41,6 +41,12 @@ public final class MoodboardStore {
 
     public init(engine: any CharkleEngineProtocol) {
         self.engine = engine
+    }
+
+    isolated deinit {
+        saveDebounceTask?.cancel()
+        viewportSaveTask?.cancel()
+        candidateRefreshTask?.cancel()
     }
 
     public var canUndo: Bool { !undoStack.isEmpty }
@@ -316,13 +322,42 @@ public final class MoodboardStore {
         }
     }
 
+    /// Persists a moodboard title/subtitle edit safely whether `id` is still active or the user
+    /// has already switched to another board (avoiding cross-board overwrites via `commitMutation`).
+    public func updateBoardHeader(id: UUID, title: String, subtitle: String) async {
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        if var active = activeBoard, active.id == id {
+            let nextTitle = trimmed.isEmpty ? active.title : trimmed
+            guard nextTitle != active.title || subtitle != active.subtitle else { return }
+            active.title = nextTitle
+            active.subtitle = subtitle
+            commitMutation(active)
+            return
+        }
+        do {
+            guard var doc = try await engine.fetchBoard(id: id) else { return }
+            let nextTitle = trimmed.isEmpty ? doc.title : trimmed
+            guard nextTitle != doc.title || subtitle != doc.subtitle else { return }
+            doc.title = nextTitle
+            doc.subtitle = subtitle
+            doc.updatedAt = Date()
+            let saved = try await engine.saveBoard(doc)
+            await syncSavedBoardSummaryIfNeeded(for: saved)
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
     // MARK: - Value-Type Undo / Redo & Debounced Save
 
     public func commitMutation(_ nextDoc: MoodboardDocument, recordUndo: Bool = true) {
+        // Guard against stale async flushes (e.g. debounced note/group edits firing onDisappear
+        // after switching to another board) overwriting the newly active moodboard.
+        guard let currentActive = activeBoard, currentActive.id == nextDoc.id else { return }
         viewportSaveTask?.cancel()
         viewportSaveTask = nil
-        if recordUndo, let previous = activeBoard, previous.id == nextDoc.id, previous != nextDoc {
-            undoStack.append(previous)
+        if recordUndo, currentActive != nextDoc {
+            undoStack.append(currentActive)
             if undoStack.count > maxUndoDepth {
                 undoStack.removeFirst(undoStack.count - maxUndoDepth)
             }
@@ -331,10 +366,8 @@ public final class MoodboardStore {
         var stamped = nextDoc
         if let override = latestViewportOverride,
            override.boardID == nextDoc.id,
-           let previous = activeBoard,
-           previous.id == nextDoc.id,
-           nextDoc.viewportCenter == previous.viewportCenter,
-           nextDoc.viewportZoom == previous.viewportZoom {
+           nextDoc.viewportCenter == currentActive.viewportCenter,
+           nextDoc.viewportZoom == currentActive.viewportZoom {
             stamped.viewportCenter = override.center
             stamped.viewportZoom = override.zoom
         } else {
@@ -421,12 +454,43 @@ public final class MoodboardStore {
             defer { self.isSaving = false }
             do {
                 _ = try await self.engine.saveBoard(toSave)
-                await self.refreshBoards()
+                await self.syncSavedBoardSummaryIfNeeded(for: toSave)
             } catch {
                 self.lastError = error.localizedDescription
                 boardStoreLogger.error("saveBoard failed: \(error.localizedDescription, privacy: .public)")
             }
         }
+    }
+
+    /// Updates the matching `MoodboardSummary` in-place when visible summary fields changed,
+    /// avoiding a full `refreshBoards()` SQLite query & Sidebar invalidation on every 220ms node drag.
+    private func syncSavedBoardSummaryIfNeeded(for doc: MoodboardDocument) async {
+        guard let idx = boards.firstIndex(where: { $0.id == doc.id }) else {
+            await refreshBoards()
+            return
+        }
+        let existing = boards[idx]
+        let previewIDs = Array(doc.referencedAssetIDs.prefix(4))
+        let paletteHexes = Array(doc.extractedPalette.prefix(6).map(\.hex))
+        let itemCount = doc.nodes.count
+        let visibleChanged = existing.title != doc.title
+            || existing.subtitle != doc.subtitle
+            || existing.mode != doc.mode
+            || existing.itemCount != itemCount
+            || existing.previewAssetIDs != previewIDs
+            || existing.paletteHexes != paletteHexes
+            || existing.pinnedOffline != doc.pinnedOffline
+        guard visibleChanged else { return }
+        var updated = existing
+        updated.title = doc.title
+        updated.subtitle = doc.subtitle
+        updated.mode = doc.mode
+        updated.itemCount = itemCount
+        updated.previewAssetIDs = previewIDs
+        updated.paletteHexes = paletteHexes
+        updated.pinnedOffline = doc.pinnedOffline
+        updated.updatedAt = doc.updatedAt
+        boards[idx] = updated
     }
 
     // MARK: - Candidate Swap Pool & Board Composition
@@ -587,6 +651,9 @@ public final class MoodboardStore {
         let baseZ = doc.nodes.map(\.zIndex).max() ?? 0
         for (idx, asset) in assets.enumerated() {
             let n = doc.nodes.count
+            let ratio = max(0.65, min(1.85, asset.aspectRatio))
+            let width = 240.0
+            let height = width / ratio
             let node = BoardNode(
                 kind: .assetRef(
                     assetID: asset.id,
@@ -594,7 +661,7 @@ public final class MoodboardStore {
                     weight: 1,
                     autoplayLoop: asset.mediaKind == .animatedImage || asset.mediaKind == .video
                 ),
-                frame: BoardRect(x: Double((n % 4) * 260) + 40, y: Double((n / 4) * 240) + 40, width: 240, height: 210),
+                frame: BoardRect(x: Double((n % 4) * 260) + 40, y: Double((n / 4) * 260) + 40, width: width, height: height),
                 zIndex: baseZ + idx + 1,
                 editorialOrder: n
             )

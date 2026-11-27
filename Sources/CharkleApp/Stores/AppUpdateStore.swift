@@ -56,8 +56,11 @@ public final class AppUpdateStore {
     @ObservationIgnored private let updater: GitHubReleaseUpdater
     @ObservationIgnored private let preferences: AppUpdatePreferencesStore
     @ObservationIgnored private var hasScheduledLaunchCheck: Bool = false
+    @ObservationIgnored private var launchCheckTask: Task<Void, Never>?
     @ObservationIgnored private var activeCheckTask: Task<Void, Never>?
     @ObservationIgnored private var activeDownloadTask: Task<Void, Never>?
+    @ObservationIgnored private var lastDownloadProgressEmitTime: TimeInterval = 0
+    @ObservationIgnored private var lastDownloadProgressFraction: Double = -1
     @ObservationIgnored private var stagedWorkingDirectoryURL: URL?
     @ObservationIgnored private var lastDiscoveredUpdate: AppReleaseUpdate?
 
@@ -121,7 +124,8 @@ public final class AppUpdateStore {
         guard !hasScheduledLaunchCheck else { return }
         hasScheduledLaunchCheck = true
 
-        Task { @MainActor [weak self] in
+        launchCheckTask = Task { @MainActor [weak self] in
+            defer { self?.launchCheckTask = nil }
             try? await Task.sleep(for: .seconds(4))
             guard !Task.isCancelled, let self else { return }
             guard AppUpdateCheckPolicy.shouldRunAutomaticCheck(
@@ -233,6 +237,8 @@ public final class AppUpdateStore {
         activeDownloadTask?.cancel()
         cleanupStagedDirectory()
         manualInstallReason = nil
+        lastDownloadProgressEmitTime = 0
+        lastDownloadProgressFraction = -1
 
         state = .downloading(
             update,
@@ -261,6 +267,13 @@ public final class AppUpdateStore {
                     Task { @MainActor [weak self] in
                         guard let self else { return }
                         if case .downloading(let current, _, _, _) = self.state, current.id == update.id {
+                            let now = Date.timeIntervalSinceReferenceDate
+                            let delta = abs(progress.fraction - self.lastDownloadProgressFraction)
+                            guard progress.fraction >= 1.0 || delta >= 0.005 || (now - self.lastDownloadProgressEmitTime) >= 0.06 else {
+                                return
+                            }
+                            self.lastDownloadProgressEmitTime = now
+                            self.lastDownloadProgressFraction = progress.fraction
                             self.state = .downloading(
                                 current,
                                 progress: progress.fraction,
@@ -293,7 +306,14 @@ public final class AppUpdateStore {
                 if self.stagedWorkingDirectoryURL == workDir {
                     self.stagedWorkingDirectoryURL = nil
                 }
-                self.state = .available(update)
+                // Preserve `.idle` if the user explicitly skipped this version while downloading.
+                switch self.state {
+                case .downloading(let current, _, _, _) where current.id == update.id,
+                     .verifying(let current) where current.id == update.id:
+                    self.state = .available(update)
+                default:
+                    break
+                }
             } catch {
                 if let workDir {
                     try? FileManager.default.removeItem(at: workDir)
@@ -397,6 +417,8 @@ public final class AppUpdateStore {
     }
 
     public func cancelBackgroundWorkForTermination() {
+        launchCheckTask?.cancel()
+        launchCheckTask = nil
         activeCheckTask?.cancel()
         activeCheckTask = nil
         if case .installing = state {

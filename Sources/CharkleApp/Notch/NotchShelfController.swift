@@ -11,17 +11,19 @@ private nonisolated final class NotchPromiseBatchTracker: @unchecked Sendable {
     private let lock = NSLock()
     private var remaining: Int
     private var succeededCount: Int = 0
+    private var createdCount: Int = 0
 
     init(total: Int) {
         self.remaining = total
     }
 
-    func record(succeeded: Bool) -> (done: Bool, totalSucceeded: Int) {
+    func record(succeeded: Bool, created: Int = 0) -> (done: Bool, totalSucceeded: Int, totalCreated: Int) {
         lock.lock()
         defer { lock.unlock() }
         if succeeded { succeededCount += 1 }
+        createdCount += max(0, created)
         remaining -= 1
-        return (remaining <= 0, succeededCount)
+        return (remaining <= 0, succeededCount, createdCount)
     }
 }
 
@@ -329,6 +331,9 @@ public final class NotchShelfController {
     private var lastObservedNotchEnabled: Bool = true
     private var screenObserver: (any NSObjectProtocol)?
     private var activeSpaceObserver: (any NSObjectProtocol)?
+    private var menuBeginObserver: (any NSObjectProtocol)?
+    private var menuEndObserver: (any NSObjectProtocol)?
+    private var isMenuTracking: Bool = false
     private var keyMonitor: Any?
     private var globalMouseMonitor: Any?
     private var localMouseMonitor: Any?
@@ -393,6 +398,32 @@ public final class NotchShelfController {
             }
         }
 
+        menuBeginObserver = NotificationCenter.default.addObserver(
+            forName: NSMenu.didBeginTrackingNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.isMenuTracking = true
+                self.cancelAutoCollapse()
+            }
+        }
+
+        menuEndObserver = NotificationCenter.default.addObserver(
+            forName: NSMenu.didEndTrackingNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.isMenuTracking = false
+                if self.shelfState.isExpanded && !self.shelfState.isPinnedOpen {
+                    self.pollCursorAndDragState()
+                }
+            }
+        }
+
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self, self.shelfState.isExpanded else {
                 return event
@@ -416,7 +447,22 @@ public final class NotchShelfController {
                     self.panel?.makeFirstResponder(nil)
                     return nil
                 }
-                if isPanelKey || NSApp.isActive {
+                if isPanelKey {
+                    self.collapse(force: true)
+                    return nil
+                }
+                // Only collapse from another Charkle window when no higher-priority modal, sheet,
+                // alert, or active text editor owns Escape first.
+                let keyWindow = NSApp.keyWindow
+                let isEditingInKeyWindow: Bool = {
+                    guard let resp = keyWindow?.firstResponder else { return false }
+                    return resp is NSTextView || resp is NSTextField || resp is NSText
+                }()
+                let hasHigherPriorityModal = self.coordinator.isModalOverlayPresented
+                    || NSApp.modalWindow != nil
+                    || keyWindow?.attachedSheet != nil
+                    || isEditingInKeyWindow
+                if NSApp.isActive && !hasHigherPriorityModal {
                     self.collapse(force: true)
                     return nil
                 }
@@ -463,12 +509,17 @@ public final class NotchShelfController {
             shelfState.isPinnedOpen = true
         }
         shelfState.isExpanded = true
-        ensurePollTimerRunning(fastForDrag: forDrag || NSEvent.pressedMouseButtons != 0)
+        let isDraggingNow = forDrag || NSEvent.pressedMouseButtons != 0
+        if shelfState.isPinnedOpen && !isDraggingNow && !isHiddenForMissionControl {
+            stopPollTimer()
+        } else {
+            ensurePollTimerRunning(fastForDrag: isDraggingNow)
+        }
     }
 
     public func collapse(force: Bool = false) {
         guard shelfState.isExpanded else { return }
-        if !force && (shelfState.isDropTargeted || shelfState.processingMessage != nil) { return }
+        if !force && (shelfState.isDropTargeted || shelfState.processingMessage != nil || isMenuTracking) { return }
         cancelAutoCollapse()
         cancelHoverExpand()
         shelfState.isExpanded = false
@@ -548,6 +599,9 @@ public final class NotchShelfController {
         shelfState.isFullGalleryExpanded = expanded
         if expanded {
             shelfState.isPinnedOpen = true
+            if NSEvent.pressedMouseButtons == 0 && !isHiddenForMissionControl && !isSensorDragging && !isPanelDragging {
+                stopPollTimer()
+            }
         }
     }
 
@@ -1048,6 +1102,8 @@ public final class NotchShelfController {
             if !shelfState.isExpanded && pollTimer == nil {
                 baselineDragChangeCount = NSPasteboard(name: .drag).changeCount
                 lastBaselineSyncTime = now
+            } else if shelfState.isExpanded {
+                refreshClipboardHint()
             }
         case .leftMouseDragged:
             ensurePollTimerRunning(fastForDrag: true)
@@ -1066,7 +1122,11 @@ public final class NotchShelfController {
                     stopPollTimer()
                 }
             } else {
-                pollCursorAndDragState()
+                // Re-evaluate after SwiftUI button actions settle (e.g. unpinning the shelf) so
+                // hover auto-collapse resumes immediately without leaving the timer stopped.
+                DispatchQueue.main.async { [weak self] in
+                    self?.pollCursorAndDragState()
+                }
             }
         default:
             break
@@ -1191,6 +1251,16 @@ public final class NotchShelfController {
             return
         }
 
+        // Also drop to 0Hz idle CPU when explicitly pinned open with no active drag or Mission Control yield.
+        // Event-driven mouse/drag monitors and activeSpaceDidChange wake the shelf immediately when needed.
+        if shelfState.isExpanded && shelfState.isPinnedOpen && !isMouseButtonDown
+            && !isHiddenForMissionControl && !isSensorDragging && !isPanelDragging {
+            refreshClipboardHint()
+            cancelAutoCollapse()
+            stopPollTimer()
+            return
+        }
+
         // Relax fast drag cadence back to 10Hz once the button is released while the shelf stays open.
         if shelfState.isExpanded && !isMouseButtonDown {
             ensurePollTimerRunning(fastForDrag: false)
@@ -1293,7 +1363,7 @@ public final class NotchShelfController {
             }
         }
 
-        if shelfState.statusBanner != nil || shelfState.processingMessage != nil || isSensorDragging || shelfState.isPinnedOpen {
+        if shelfState.statusBanner != nil || shelfState.processingMessage != nil || isSensorDragging || shelfState.isPinnedOpen || isMenuTracking {
             cancelAutoCollapse()
             return
         }
@@ -1334,8 +1404,8 @@ public final class NotchShelfController {
         case .inbox:
             return (nil, nil, "收件箱")
         case .folder:
-            let folderID = shelfState.selectedFolderID ?? library.folders.first?.id
-            let name = library.folders.first(where: { $0.id == folderID })?.name ?? "收件箱"
+            let folderID = shelfState.selectedFolderID ?? library.folderHierarchyRoots.first?.folder.id ?? library.folders.first?.id
+            let name = folderID.flatMap { library.folder(byID: $0)?.name } ?? "收件箱"
             return (folderID, nil, name)
         case .activeMoodboard:
             let boardID = coordinator.activeMoodboardID ?? moodboards.boards.first?.id
@@ -1379,11 +1449,15 @@ public final class NotchShelfController {
                     targetFolderID: targetFolderID,
                     targetBoardID: targetBoardID
                 )
-                if let boardID = targetBoardID {
+                if let boardID = targetBoardID, !created.isEmpty {
                     await moodboards.reloadActiveBoardIfNeeded(id: boardID)
                     await moodboards.refreshBoards()
                 }
-                let count = max(created.count, directInputs.count)
+                guard !created.isEmpty else {
+                    flashConfirmation(library.lastError ?? "未能收入内容或素材已存在")
+                    return
+                }
+                let count = created.count
                 let message: String
                 if hasSocialPost {
                     message = "已保存推文及媒体至「\(destLabel)」(\(count) 项)"
@@ -1419,33 +1493,49 @@ public final class NotchShelfController {
                         let status = tracker.record(succeeded: false)
                         if status.done {
                             try? FileManager.default.removeItem(at: tempDir)
-                            if status.totalSucceeded == 0 {
-                                Task { @MainActor [weak self] in
-                                    self?.flashConfirmation("拖入文件接收失败，请重试")
+                            Task { @MainActor [weak self] in
+                                guard let self else { return }
+                                if status.totalCreated > 0 {
+                                    if let boardID = targetBoardID {
+                                        await self.moodboards.reloadActiveBoardIfNeeded(id: boardID)
+                                        await self.moodboards.refreshBoards()
+                                    }
+                                    self.flashConfirmation("已收入「\(destLabel)」(\(status.totalCreated) 项)")
+                                } else {
+                                    self.flashConfirmation("拖入文件接收失败，请重试")
                                 }
                             }
                         }
                         return
                     }
                     Task { @MainActor [weak self] in
+                        var ingestedCount = 0
                         defer {
                             try? FileManager.default.removeItem(at: fileURL)
-                            let status = tracker.record(succeeded: true)
+                            let status = tracker.record(succeeded: ingestedCount > 0, created: ingestedCount)
                             if status.done {
                                 try? FileManager.default.removeItem(at: tempDir)
+                                Task { @MainActor [weak self] in
+                                    guard let self else { return }
+                                    if status.totalCreated > 0 {
+                                        if let boardID = targetBoardID {
+                                            await self.moodboards.reloadActiveBoardIfNeeded(id: boardID)
+                                            await self.moodboards.refreshBoards()
+                                        }
+                                        self.flashConfirmation("已收入「\(destLabel)」(\(status.totalCreated) 项)")
+                                    } else {
+                                        self.flashConfirmation(self.library.lastError ?? "拖入文件未能收入，请重试")
+                                    }
+                                }
                             }
                         }
                         guard let self else { return }
-                        _ = await self.library.ingest(
+                        let created = await self.library.ingest(
                             [.fileURL(fileURL)],
                             targetFolderID: targetFolderID,
                             targetBoardID: targetBoardID
                         )
-                        if let boardID = targetBoardID {
-                            await self.moodboards.reloadActiveBoardIfNeeded(id: boardID)
-                            await self.moodboards.refreshBoards()
-                        }
-                        self.flashConfirmation("已收入「\(destLabel)」")
+                        ingestedCount = created.count
                     }
                 }
             }
@@ -1461,6 +1551,12 @@ public final class NotchShelfController {
         }
         if let activeSpaceObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(activeSpaceObserver)
+        }
+        if let menuBeginObserver {
+            NotificationCenter.default.removeObserver(menuBeginObserver)
+        }
+        if let menuEndObserver {
+            NotificationCenter.default.removeObserver(menuEndObserver)
         }
         if let keyMonitor {
             NSEvent.removeMonitor(keyMonitor)

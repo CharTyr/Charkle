@@ -16,6 +16,7 @@ public enum CharkleEmptyStateKind: Sendable {
 /// at most one Studio Cobalt accent pointing to the next action, zero generic clipart or text).
 public struct CharkleEmptyStateVignette: View {
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.charkleAccentSource) private var accentSource
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     public let kind: CharkleEmptyStateKind
@@ -73,7 +74,7 @@ public struct CharkleEmptyStateVignette: View {
     }
 
     private var accentColor: Color {
-        colorScheme == .dark ? Color(charkleHex: "#5B8DEF") : Color(charkleHex: "#2A60E0")
+        CharkleTheme.accent(for: colorScheme, source: accentSource)
     }
 
     private var positiveColor: Color {

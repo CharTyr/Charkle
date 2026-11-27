@@ -35,6 +35,7 @@ public struct MoodboardGeneratorSheet: View {
     @State private var showColorPicker: Bool = false
     @State private var showTraceExpanded: Bool = true
     @State private var hoveredAssetID: UUID?
+    @State private var curationTask: Task<Void, Never>? = nil
 
     private static let presetPrompts: [String] = [
         "夏日清凉插画与通透蓝天阳光",
@@ -158,6 +159,10 @@ public struct MoodboardGeneratorSheet: View {
             if let existingProp = moodboards.proposal, boardTitle.isEmpty {
                 boardTitle = existingProp.draftDocument.title
             }
+        }
+        .onDisappear {
+            curationTask?.cancel()
+            curationTask = nil
         }
     }
 
@@ -454,7 +459,7 @@ public struct MoodboardGeneratorSheet: View {
                 Button {
                     excludedAssetIDs.removeAll()
                     lockedAssetIDs = selectedSeedIDs
-                    Task { await runCuration(refinement: nil) }
+                    startCuration(refinement: nil)
                 } label: {
                     HStack(spacing: 7) {
                         if moodboards.isGeneratingProposal {
@@ -532,7 +537,7 @@ public struct MoodboardGeneratorSheet: View {
                 VStack(spacing: 0) {
                     Divider()
                     HStack(spacing: 8) {
-                        Image(systemName: "bubble.left.and.sparkles")
+                        Image(systemName: "sparkles")
                             .font(.system(size: 12))
                             .foregroundStyle(Color.accentColor)
                         TextField("继续微调初稿… 如：去掉暗色界面、换更通透的色调、按光影与角色分组", text: $refinementInput)
@@ -802,7 +807,7 @@ public struct MoodboardGeneratorSheet: View {
                                 lockedAssetIDs.remove(scored.id)
                                 selectedSeedIDs.remove(scored.id)
                                 excludedAssetIDs.insert(scored.id)
-                                Task { await runCuration(refinement: "已剔除刚才排除的素材，请保持整体和谐并按需补位") }
+                                startCuration(refinement: "已剔除刚才排除的素材，请保持整体和谐并按需补位")
                             } label: {
                                 Image(systemName: "xmark")
                                     .font(.system(size: 9.5, weight: .bold))
@@ -849,7 +854,7 @@ public struct MoodboardGeneratorSheet: View {
                 .foregroundStyle(.secondary)
             Text("输入灵感方向，点击左侧「\(isCloudAIReady ? "开始 AI 视觉策展" : "生成离线策展初稿")」")
                 .font(.system(size: 13.5, weight: .semibold))
-            Text("Agent 会把候选素材拼成编号视觉联系表直接“肉眼看图”，只挑选真正契合氛围的作品，自动划分逻辑分区、标注主视觉并提炼全板色卡；初稿生成后还可继续对话微调。")
+            Text("系统会把候选素材拼成编号视觉联系表直接看图筛选，只挑选真正契合氛围的作品，自动划分逻辑分区、标注主视觉并提炼全板色卡；初稿生成后还可继续对话微调。")
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -888,6 +893,8 @@ public struct MoodboardGeneratorSheet: View {
             Spacer()
 
             Button("取消") {
+                curationTask?.cancel()
+                curationTask = nil
                 moodboards.proposal = nil
                 moodboards.agentTrace = []
                 dismiss()
@@ -895,10 +902,12 @@ public struct MoodboardGeneratorSheet: View {
             .keyboardShortcut(.cancelAction)
 
             Button("创建并打开情绪板") {
-                Task {
+                curationTask?.cancel()
+                curationTask = Task {
                     if moodboards.proposal == nil {
                         await runCuration(refinement: nil)
                     }
+                    guard !Task.isCancelled else { return }
                     let finalTitle = boardTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                         ? (moodboards.proposal?.draftDocument.title ?? "新情绪板")
                         : boardTitle
@@ -906,6 +915,7 @@ public struct MoodboardGeneratorSheet: View {
                         ? (moodboards.proposal?.draftDocument.subtitle ?? promptText)
                         : promptText
                     if let created = await moodboards.confirmProposal(title: finalTitle, subtitle: subtitle) {
+                        guard !Task.isCancelled else { return }
                         coordinator.openMoodboard(created.id)
                         coordinator.showToast("已创建情绪板「\(created.title)」", icon: "sparkles.rectangle.stack")
                         dismiss()
@@ -922,11 +932,18 @@ public struct MoodboardGeneratorSheet: View {
 
     // MARK: - Actions
 
+    private func startCuration(refinement: String?) {
+        curationTask?.cancel()
+        curationTask = Task {
+            await runCuration(refinement: refinement)
+        }
+    }
+
     private func triggerRefinement() {
         let instruction = refinementInput.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !instruction.isEmpty, !moodboards.isGeneratingProposal else { return }
         refinementInput = ""
-        Task { await runCuration(refinement: instruction) }
+        startCuration(refinement: instruction)
     }
 
     private func runCuration(refinement: String?) async {
@@ -949,6 +966,7 @@ public struct MoodboardGeneratorSheet: View {
             autoFocusDetailCrop: autoFocusDetailCrop && isTypeSafeReady
         )
         await moodboards.curateProposal(req)
+        guard !Task.isCancelled else { return }
         if let prop = moodboards.proposal {
             if boardTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || refinement == nil {
                 boardTitle = prop.draftDocument.title

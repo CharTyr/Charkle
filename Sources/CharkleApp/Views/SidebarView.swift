@@ -23,6 +23,7 @@ public struct SidebarView: View {
     public let library: LibraryStore
     public let moodboards: MoodboardStore
     public let expandedWidth: CGFloat
+    public let isDraggingDivider: Bool
     public let onImportMaterialPackage: (() -> Void)?
     public let onExportFolderToPureRef: ((FolderRecord, Bool) -> Void)?
     public let onOpenSmartDeduplication: ((UUID?) -> Void)?
@@ -96,6 +97,7 @@ public struct SidebarView: View {
         library: LibraryStore,
         moodboards: MoodboardStore,
         expandedWidth: CGFloat = AppCoordinatorStore.defaultSidebarWidth,
+        isDraggingDivider: Bool = false,
         onImportMaterialPackage: (() -> Void)? = nil,
         onExportFolderToPureRef: ((FolderRecord, Bool) -> Void)? = nil,
         onOpenSmartDeduplication: ((UUID?) -> Void)? = nil,
@@ -109,6 +111,7 @@ public struct SidebarView: View {
         self.library = library
         self.moodboards = moodboards
         self.expandedWidth = expandedWidth
+        self.isDraggingDivider = isDraggingDivider
         self.onImportMaterialPackage = onImportMaterialPackage
         self.onExportFolderToPureRef = onExportFolderToPureRef
         self.onOpenSmartDeduplication = onOpenSmartDeduplication
@@ -120,26 +123,15 @@ public struct SidebarView: View {
     }
 
     private var visibleFolderTree: [FolderTreeNode] {
-        let byParent = Dictionary(grouping: library.folders) { $0.parentID }
-        let knownIDs = Set(library.folders.map(\.id))
-
-        func sortedChildren(of parentID: UUID?) -> [FolderRecord] {
-            (byParent[parentID] ?? []).sorted { lhs, rhs in
-                if lhs.sortOrder != rhs.sortOrder { return lhs.sortOrder < rhs.sortOrder }
-                let cmp = lhs.name.localizedCaseInsensitiveCompare(rhs.name)
-                if cmp != .orderedSame { return cmp == .orderedAscending }
-                return lhs.id.uuidString < rhs.id.uuidString
-            }
-        }
-
         var nodes: [FolderTreeNode] = []
+        nodes.reserveCapacity(library.folders.count)
         var visited = Set<UUID>()
+        visited.reserveCapacity(library.folders.count)
 
         func visit(parentID: UUID?, depth: Int) {
-            let childrenList = sortedChildren(of: parentID)
+            let childrenList = library.childFolders(of: parentID)
             for (idx, folder) in childrenList.enumerated() where visited.insert(folder.id).inserted {
-                let sub = byParent[folder.id] ?? []
-                let hasChildren = !sub.isEmpty
+                let hasChildren = !library.childFolders(of: folder.id).isEmpty
                 let isExpanded = expandedFolderIDs.contains(folder.id) || creationTarget == .subfolder(folder.id)
                 nodes.append(
                     FolderTreeNode(
@@ -159,7 +151,7 @@ public struct SidebarView: View {
 
         visit(parentID: nil, depth: 0)
 
-        for folder in library.folders where !visited.contains(folder.id) && (folder.parentID == nil || !knownIDs.contains(folder.parentID!)) {
+        for folder in library.folders where !visited.contains(folder.id) && (folder.parentID == nil || library.folder(byID: folder.parentID!) == nil) {
             nodes.append(
                 FolderTreeNode(
                     folder: folder,
@@ -184,7 +176,10 @@ public struct SidebarView: View {
                     .frame(width: expandedWidth)
             }
         }
-        .animation(CharkleMotion.accessible(CharkleMotion.drawerEase, reduced: reduceMotion), value: coordinator.isSidebarCollapsed)
+        .animation(
+            isDraggingDivider ? nil : CharkleMotion.accessible(CharkleMotion.drawerEase, reduced: reduceMotion),
+            value: coordinator.isSidebarCollapsed
+        )
         .onAppear {
             seedInitialExpansionIfNeeded()
         }
@@ -813,6 +808,7 @@ public struct SidebarView: View {
                             }
                             .menuStyle(.borderlessButton)
                             .menuIndicator(.hidden)
+                            .fixedSize()
                             .frame(width: 20)
                             .help("排序文件夹")
                         }

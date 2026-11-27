@@ -41,19 +41,48 @@ public nonisolated struct MoodboardExportOptions: Sendable {
 /// connectors, and vector ink strokes) to PNG/JPG on disk or directly onto `NSPasteboard`
 /// for instant `⌘V` into Figma / Keynote.
 public enum MoodboardExporter {
-    /// Preloads all referenced board asset thumbnails into `loader` so off-screen or freshly opened
-    /// cards export with crisp pixels instead of fallback color placeholders.
+    /// Preloads all referenced board asset thumbnails concurrently (bounded to 6 parallel decodes)
+    /// into `loader` so off-screen or freshly opened cards export with crisp pixels without serial stalls.
     public static func preloadImages(
         for document: MoodboardDocument,
         loader: ThumbnailImageLoader
     ) async {
-        let uniqueIDs = Array(Set(document.referencedAssetIDs))
-        for assetID in uniqueIDs {
-            if loader.cachedImage(for: assetID, tier: .preview1400) != nil { continue }
-            let preview = await loader.loadImage(for: assetID, tier: .preview1400)
-            if preview == nil && loader.cachedImage(for: assetID, tier: .grid520) == nil {
-                _ = await loader.loadImage(for: assetID, tier: .grid520)
+        var uniqueIDs: [UUID] = []
+        var seen = Set<UUID>()
+        for id in document.referencedAssetIDs where seen.insert(id).inserted {
+            if loader.cachedCGImage(for: id, tier: .preview1400) == nil {
+                uniqueIDs.append(id)
             }
+        }
+        guard !uniqueIDs.isEmpty else { return }
+
+        let maxConcurrent = 6
+        await withTaskGroup(of: Void.self) { group in
+            var nextIndex = 0
+            let initialBatch = min(maxConcurrent, uniqueIDs.count)
+            while nextIndex < initialBatch {
+                let assetID = uniqueIDs[nextIndex]
+                nextIndex += 1
+                group.addTask {
+                    await Self.preloadSingleAsset(assetID, loader: loader)
+                }
+            }
+            for await _ in group {
+                if nextIndex < uniqueIDs.count {
+                    let assetID = uniqueIDs[nextIndex]
+                    nextIndex += 1
+                    group.addTask {
+                        await Self.preloadSingleAsset(assetID, loader: loader)
+                    }
+                }
+            }
+        }
+    }
+
+    private static func preloadSingleAsset(_ assetID: UUID, loader: ThumbnailImageLoader) async {
+        let preview = await loader.loadCGImage(for: assetID, tier: .preview1400)
+        if preview == nil && loader.cachedCGImage(for: assetID, tier: .grid520) == nil {
+            _ = await loader.loadCGImage(for: assetID, tier: .grid520)
         }
     }
 
@@ -279,6 +308,7 @@ public enum MoodboardExporter {
                 ctx: ctx,
                 node: node,
                 rect: drawRect,
+                extractedPalette: document.extractedPalette,
                 assetsByID: assetsByID,
                 loader: loader,
                 darkAppearance: options.darkAppearance,
@@ -336,7 +366,8 @@ public enum MoodboardExporter {
         let pb = NSPasteboard.general
         pb.clearContents()
         pb.setData(png, forType: .png)
-        if let tiff = rep.tiffRepresentation {
+        // Skip expensive 100MB+ uncompressed TIFF serialization on huge canvases; PNG covers Figma/Keynote/macOS apps.
+        if rep.pixelsWide * rep.pixelsHigh <= 4_000_000, let tiff = rep.tiffRepresentation {
             pb.setData(tiff, forType: .tiff)
         }
         return true
@@ -433,6 +464,7 @@ public enum MoodboardExporter {
         ctx: CGContext,
         node: BoardNode,
         rect: CGRect,
+        extractedPalette: [LabColor],
         assetsByID: [UUID: AssetRecord],
         loader: ThumbnailImageLoader,
         darkAppearance: Bool,
@@ -454,9 +486,11 @@ public enum MoodboardExporter {
 
             let resolvedBaseCG: CGImage? = {
                 if let direct = resolveImage?(assetID) { return direct }
-                if let nsImg = loader.cachedImage(for: assetID, tier: .preview1400)
-                    ?? loader.cachedImage(for: assetID, tier: .grid520)
-                    ?? loader.cachedOriginalImage(for: assetID),
+                if let cachedCG = loader.cachedCGImage(for: assetID, tier: .preview1400)
+                    ?? loader.cachedCGImage(for: assetID, tier: .grid520) {
+                    return cachedCG
+                }
+                if let nsImg = loader.cachedOriginalImage(for: assetID),
                    let cg = nsImg.cgImage(forProposedRect: nil, context: nil, hints: nil) {
                     return cg
                 }
@@ -568,11 +602,12 @@ public enum MoodboardExporter {
                 withAttributes: attr
             )
 
-        case .paletteStrip(let colors, _):
+        case .paletteStrip(let colors, let autoSync):
             let path = CGPath(roundedRect: rect, cornerWidth: 12, cornerHeight: 12, transform: nil)
             ctx.addPath(path)
             ctx.clip()
-            let list = colors.isEmpty ? [LabColor.fromHex("#808080")] : colors
+            let activeColors = (autoSync && !extractedPalette.isEmpty) ? extractedPalette : colors
+            let list = activeColors.isEmpty ? [LabColor.fromHex("#808080")] : activeColors
             let segW = rect.width / CGFloat(list.count)
             for (idx, color) in list.enumerated() {
                 let r = CGRect(x: rect.minX + CGFloat(idx) * segW, y: rect.minY, width: segW + 0.5, height: rect.height)
@@ -733,22 +768,22 @@ public enum MoodboardExporter {
 
     private static func noteColors(for style: NoteStyle) -> (NSColor, NSColor) {
         switch style {
-        case .paper: (NSColor.charkleHex("#FFFFFF"), NSColor.charkleHex("#1E2024"))
-        case .ink: (NSColor.charkleHex("#1E2025"), NSColor.charkleHex("#F2F3F5"))
-        case .warm: (NSColor.charkleHex("#F6EFE2"), NSColor.charkleHex("#3B3124"))
-        case .sage: (NSColor.charkleHex("#E7EFE9"), NSColor.charkleHex("#233329"))
-        case .slate: (NSColor.charkleHex("#E8EDF2"), NSColor.charkleHex("#212D38"))
+        case .paper: (NSColor.charkleHex("#FFFFFF"), NSColor.charkleHex("#1D1F23"))
+        case .ink: (NSColor.charkleHex("#1D1F24"), NSColor.charkleHex("#F1F2F4"))
+        case .warm: (NSColor.charkleHex("#F7F0E4"), NSColor.charkleHex("#392F22"))
+        case .sage: (NSColor.charkleHex("#E8F0EA"), NSColor.charkleHex("#203227"))
+        case .slate: (NSColor.charkleHex("#E9EEF3"), NSColor.charkleHex("#1F2B36"))
         }
     }
 
     private static func groupTintNSColor(_ tint: GroupTint) -> NSColor {
         switch tint {
-        case .neutral: NSColor.charkleHex("#7E848C")
-        case .sand: NSColor.charkleHex("#B6976E")
-        case .sage: NSColor.charkleHex("#6D8F78")
-        case .slate: NSColor.charkleHex("#667C94")
+        case .neutral: NSColor.charkleHex("#7D838B")
+        case .sand: NSColor.charkleHex("#B5956B")
+        case .sage: NSColor.charkleHex("#6B8E76")
+        case .slate: NSColor.charkleHex("#627A94")
         case .terracotta: NSColor.charkleHex("#BA6B55")
-        case .ocean: NSColor.charkleHex("#4E7D96")
+        case .ocean: NSColor.charkleHex("#4D7E97")
         }
     }
 }

@@ -8,16 +8,22 @@ import SwiftUI
 /// prioritizes the most recently scrolled-into-view cards within each lane, and immediately drops
 /// cancelled waiters when cards scroll offscreen during fast trackpad flings.
 private actor ThumbnailDecodeScheduler {
+    private struct Waiter {
+        let id: UUID
+        let key: ThumbnailKeyValue
+        let continuation: CheckedContinuation<Bool, Never>
+    }
+
     private let maxConcurrent: Int
     private var running: Int = 0
-    private var highPriorityWaiters: [(id: UUID, continuation: CheckedContinuation<Bool, Never>)] = []
-    private var lowPriorityWaiters: [(id: UUID, continuation: CheckedContinuation<Bool, Never>)] = []
+    private var highPriorityWaiters: [Waiter] = []
+    private var lowPriorityWaiters: [Waiter] = []
 
     init(maxConcurrent: Int = 6) {
         self.maxConcurrent = max(1, maxConcurrent)
     }
 
-    func acquire(highPriority: Bool = true) async -> Bool {
+    func acquire(key: ThumbnailKeyValue, highPriority: Bool = true) async -> Bool {
         if Task.isCancelled { return false }
         if running < maxConcurrent {
             running += 1
@@ -33,15 +39,26 @@ private actor ThumbnailDecodeScheduler {
                 if running < maxConcurrent {
                     running += 1
                     continuation.resume(returning: true)
-                } else if highPriority {
-                    highPriorityWaiters.append((token, continuation))
                 } else {
-                    lowPriorityWaiters.append((token, continuation))
+                    let waiter = Waiter(id: token, key: key, continuation: continuation)
+                    if highPriority {
+                        highPriorityWaiters.append(waiter)
+                    } else {
+                        lowPriorityWaiters.append(waiter)
+                    }
                 }
             }
         } onCancel: {
             Task { await self.cancelWaiter(id: token) }
         }
+    }
+
+    /// Promotes a queued low-priority prefetch waiter into the high-priority visible lane
+    /// when its card scrolls on-screen, eliminating priority inversion during fast flings.
+    func promote(key: ThumbnailKeyValue) {
+        guard let idx = lowPriorityWaiters.firstIndex(where: { $0.key == key }) else { return }
+        let promoted = lowPriorityWaiters.remove(at: idx)
+        highPriorityWaiters.append(promoted)
     }
 
     func release() {
@@ -101,21 +118,27 @@ private nonisolated final class ThumbnailCacheKey: NSObject, @unchecked Sendable
 }
 
 private nonisolated final class CroppedImageCacheKey: NSObject, @unchecked Sendable {
-    let sourceID: ObjectIdentifier
+    let assetID: UUID
+    let tier: ThumbnailTier
+    let invalidationVersion: Int
     let cropX: Int
     let cropY: Int
     let cropW: Int
     let cropH: Int
     private let cachedHash: Int
 
-    init(sourceID: ObjectIdentifier, crop: NormalizedCropRect) {
-        self.sourceID = sourceID
+    init(assetID: UUID, tier: ThumbnailTier, invalidationVersion: Int, crop: NormalizedCropRect) {
+        self.assetID = assetID
+        self.tier = tier
+        self.invalidationVersion = invalidationVersion
         self.cropX = Int((crop.x * 10_000).rounded())
         self.cropY = Int((crop.y * 10_000).rounded())
         self.cropW = Int((crop.width * 10_000).rounded())
         self.cropH = Int((crop.height * 10_000).rounded())
         var hasher = Hasher()
-        hasher.combine(sourceID)
+        hasher.combine(assetID)
+        hasher.combine(tier)
+        hasher.combine(invalidationVersion)
         hasher.combine(self.cropX)
         hasher.combine(self.cropY)
         hasher.combine(self.cropW)
@@ -127,7 +150,9 @@ private nonisolated final class CroppedImageCacheKey: NSObject, @unchecked Senda
 
     override func isEqual(_ object: Any?) -> Bool {
         guard let other = object as? CroppedImageCacheKey else { return false }
-        return sourceID == other.sourceID
+        return assetID == other.assetID
+            && tier == other.tier
+            && invalidationVersion == other.invalidationVersion
             && cropX == other.cropX
             && cropY == other.cropY
             && cropW == other.cropW
@@ -194,10 +219,12 @@ public final class ThumbnailImageLoader {
 
     private final class InFlightEntry {
         let task: Task<CachedImageBox?, Never>
+        var isHighPriority: Bool
         var activeWaiters: Set<UUID> = []
 
-        init(task: Task<CachedImageBox?, Never>) {
+        init(task: Task<CachedImageBox?, Never>, isHighPriority: Bool) {
             self.task = task
+            self.isHighPriority = isHighPriority
         }
     }
 
@@ -215,6 +242,12 @@ public final class ThumbnailImageLoader {
         let task: Task<Void, Never>
     }
 
+    private struct InvalidationEvent {
+        let version: Int
+        /// `nil` represents a full cache purge; non-nil represents targeted asset IDs.
+        let assetIDs: Set<UUID>?
+    }
+
     @ObservationIgnored private let engine: any CharkleEngineProtocol
     @ObservationIgnored private let cache = NSCache<ThumbnailCacheKey, CachedImageBox>()
     @ObservationIgnored private let originalCache = NSCache<NSUUID, CachedImageBox>()
@@ -223,11 +256,40 @@ public final class ThumbnailImageLoader {
     @ObservationIgnored private let scheduler = ThumbnailDecodeScheduler(maxConcurrent: 6)
     @ObservationIgnored private var prefetchTasks: [ThumbnailKeyValue: PrefetchEntry] = [:]
     @ObservationIgnored private var memoryPressureSource: (any DispatchSourceMemoryPressure)?
+    @ObservationIgnored private var invalidationHistory: [InvalidationEvent] = []
+    @ObservationIgnored private var assetInvalidationVersions: [UUID: Int] = [:]
 
     /// Increments ONLY on explicit invalidation / memory cache clear — never during normal image loads,
     /// so scrolling through thousands of cards triggers zero `@Observable` cascade invalidations.
     public private(set) var invalidationVersion: Int = 0
     public private(set) var isLowResourceMode: Bool = false
+
+    /// Returns the exact set of asset IDs invalidated strictly after `previousVersion`,
+    /// an empty set if nothing changed, or `nil` if a full cache clear occurred (or history rolled over).
+    public func invalidatedAssetIDs(since previousVersion: Int) -> Set<UUID>? {
+        if previousVersion == invalidationVersion {
+            return []
+        }
+        guard previousVersion >= 0,
+              let oldest = invalidationHistory.first,
+              previousVersion >= oldest.version - 1 else {
+            return nil
+        }
+        var union = Set<UUID>()
+        var matchedAny = false
+        for event in invalidationHistory where event.version > previousVersion {
+            matchedAny = true
+            guard let ids = event.assetIDs else {
+                return nil
+            }
+            union.formUnion(ids)
+        }
+        return matchedAny ? union : nil
+    }
+
+    internal func assetInvalidationVersion(for assetID: UUID) -> Int {
+        assetInvalidationVersions[assetID] ?? 0
+    }
 
     public var currentCacheCountLimit: Int { cache.countLimit }
     public var currentCacheCostLimit: Int { cache.totalCostLimit }
@@ -456,6 +518,14 @@ public final class ThumbnailImageLoader {
         let entry: InFlightEntry
         if let existing = inFlight[key] {
             entry = existing
+            // Promote an in-flight low-priority prefetch when its card scrolls on-screen so visible tiles never starve.
+            if !isPrefetch && !existing.isHighPriority {
+                existing.isHighPriority = true
+                let scheduler = self.scheduler
+                Task {
+                    await scheduler.promote(key: key)
+                }
+            }
         } else {
             let engine = self.engine
             let scheduler = self.scheduler
@@ -464,8 +534,7 @@ public final class ThumbnailImageLoader {
             let task = Task<CachedImageBox?, Never> {
                 guard let cg = await Self.resolveAndDecodeCGImage(
                     engine: engine,
-                    assetID: assetID,
-                    tier: tier,
+                    key: key,
                     maxPixelSize: maxPixel,
                     scheduler: scheduler,
                     highPriority: highPriority
@@ -474,7 +543,7 @@ public final class ThumbnailImageLoader {
                 }
                 return CachedImageBox(cgImage: cg)
             }
-            entry = InFlightEntry(task: task)
+            entry = InFlightEntry(task: task, isHighPriority: highPriority)
             inFlight[key] = entry
         }
 
@@ -517,7 +586,8 @@ public final class ThumbnailImageLoader {
     /// unrelated cached images.
     public func invalidate(assetIDs: [UUID]) {
         guard !assetIDs.isEmpty else { return }
-        for assetID in assetIDs {
+        let idSet = Set(assetIDs)
+        for assetID in idSet {
             originalCache.removeObject(forKey: assetID as NSUUID)
             originalInFlight[assetID]?.task.cancel()
             originalInFlight.removeValue(forKey: assetID)
@@ -530,8 +600,15 @@ public final class ThumbnailImageLoader {
                 prefetchTasks.removeValue(forKey: key)
             }
         }
-        CroppedThumbnailCache.clear()
         invalidationVersion &+= 1
+        let nextVer = invalidationVersion
+        for assetID in idSet {
+            assetInvalidationVersions[assetID] = nextVer
+        }
+        if assetInvalidationVersions.count > 2_048 {
+            assetInvalidationVersions.removeAll(keepingCapacity: true)
+        }
+        recordInvalidationEvent(version: nextVer, assetIDs: idSet)
     }
 
     public func clearMemoryCache() {
@@ -544,7 +621,16 @@ public final class ThumbnailImageLoader {
         originalInFlight.removeAll()
         for entry in prefetchTasks.values { entry.task.cancel() }
         prefetchTasks.removeAll()
+        assetInvalidationVersions.removeAll(keepingCapacity: true)
         invalidationVersion &+= 1
+        recordInvalidationEvent(version: invalidationVersion, assetIDs: nil)
+    }
+
+    private func recordInvalidationEvent(version: Int, assetIDs: Set<UUID>?) {
+        invalidationHistory.append(InvalidationEvent(version: version, assetIDs: assetIDs))
+        if invalidationHistory.count > 64 {
+            invalidationHistory.removeFirst(invalidationHistory.count - 64)
+        }
     }
 
     /// Switches between full workspace cache budget (1,500 thumbnails / 320 MB + 180 MB originals)
@@ -571,20 +657,19 @@ public final class ThumbnailImageLoader {
     @concurrent
     private static func resolveAndDecodeCGImage(
         engine: any CharkleEngineProtocol,
-        assetID: UUID,
-        tier: ThumbnailTier,
+        key: ThumbnailKeyValue,
         maxPixelSize: Int,
         scheduler: ThumbnailDecodeScheduler,
         highPriority: Bool
     ) async -> CGImage? {
-        guard await scheduler.acquire(highPriority: highPriority) else { return nil }
+        guard await scheduler.acquire(key: key, highPriority: highPriority) else { return nil }
         let decoded: CGImage?
         if !Task.isCancelled {
             let url: URL?
-            if let direct = engine.cachedThumbnailURL(for: assetID, tier: tier) {
+            if let direct = engine.cachedThumbnailURL(for: key.assetID, tier: key.tier) {
                 url = direct
             } else {
-                url = await engine.thumbnailURL(for: assetID, tier: tier)
+                url = await engine.thumbnailURL(for: key.assetID, tier: key.tier)
             }
             if let url, !Task.isCancelled {
                 decoded = decodeCGImageSync(from: url, maxPixelSize: maxPixelSize)
@@ -773,7 +858,13 @@ public struct AssetThumbnailSurface: View {
     private func croppedImageView(_ image: NSImage) -> some View {
         let quality: Image.Interpolation = tier == .grid520 ? .medium : .high
         if let crop, crop != .full, crop.width > 0.04, crop.height > 0.04,
-           let croppedNS = Self.cachedCroppedImage(image, normalized: crop) {
+           let croppedNS = Self.cachedCroppedImage(
+               image,
+               assetID: asset.id,
+               tier: tier,
+               invalidationVersion: loader.invalidationVersion,
+               normalized: crop
+           ) {
             Image(nsImage: croppedNS)
                 .resizable()
                 .interpolation(quality)
@@ -791,9 +882,20 @@ public struct AssetThumbnailSurface: View {
         }
     }
 
-    private static func cachedCroppedImage(_ image: NSImage, normalized crop: NormalizedCropRect) -> NSImage? {
+    internal static func cachedCroppedImage(
+        _ image: NSImage,
+        assetID: UUID,
+        tier: ThumbnailTier,
+        invalidationVersion: Int,
+        normalized crop: NormalizedCropRect
+    ) -> NSImage? {
         let clamped = crop.clamped()
-        let key = CroppedImageCacheKey(sourceID: ObjectIdentifier(image), crop: clamped)
+        let key = CroppedImageCacheKey(
+            assetID: assetID,
+            tier: tier,
+            invalidationVersion: invalidationVersion,
+            crop: clamped
+        )
         if let hit = CroppedThumbnailCache.cache.object(forKey: key) {
             return hit
         }

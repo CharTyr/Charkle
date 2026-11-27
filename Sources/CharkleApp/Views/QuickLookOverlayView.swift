@@ -554,6 +554,14 @@ public struct QuickLookOverlayView: View {
                 }
             }
         }
+        .onChange(of: coordinator.quickLookDismissRequestToken) { _, _ in
+            guard coordinator.quickLookAssetID != nil else { return }
+            if confirmPermanentDelete {
+                confirmPermanentDelete = false
+                return
+            }
+            performDismiss()
+        }
         .onDisappear {
             dismissTask?.cancel()
             dismissTask = nil
@@ -613,7 +621,13 @@ public struct QuickLookOverlayView: View {
                 },
                 onSetCoverFrame: { jpegData, timestampSeconds in
                     await applyCapturedCoverFrame(jpegData: jpegData, timestampSeconds: timestampSeconds)
-                }
+                },
+                onCaptureCoverFailed: {
+                    coordinator.showToast("视频尚未就绪，请稍后再截取封面", icon: "exclamationmark.triangle", tone: .warning)
+                },
+                fallbackCoverImage: highResImage
+                    ?? library.thumbnailLoader.cachedImage(for: asset.id, tier: .preview1400)
+                    ?? library.thumbnailLoader.cachedImage(for: asset.id, tier: .grid520)
             )
             .id(asset.id)
         } else {
@@ -806,12 +820,17 @@ public struct QuickLookOverlayView: View {
                 QuickLookStreamingVideoView(
                     playbackKey: "web:\(asset.id.uuidString):\(asset.sourceURL ?? "")",
                     coverURL: thumbURL,
-                    fallbackCoverImage: highResImage ?? library.thumbnailLoader.cachedImage(for: asset.id, tier: .grid520),
+                    fallbackCoverImage: highResImage
+                        ?? library.thumbnailLoader.cachedImage(for: asset.id, tier: .preview1400)
+                        ?? library.thumbnailLoader.cachedImage(for: asset.id, tier: .grid520),
                     durationText: formattedDur,
                     watchURL: externalURL,
                     openActionLabel: "在默认浏览器中打开",
                     onSetCoverFrame: { jpegData, timestampSeconds in
                         await applyCapturedCoverFrame(jpegData: jpegData, timestampSeconds: timestampSeconds)
+                    },
+                    onCaptureCoverFailed: {
+                        coordinator.showToast("视频尚未就绪，请稍后再截取封面", icon: "exclamationmark.triangle", tone: .warning)
                     },
                     resolvePlan: {
                         if let webMeta {
@@ -1057,7 +1076,7 @@ public struct QuickLookOverlayView: View {
                         isCapturingCoverFrame = true
                         Task { @MainActor in
                             defer { isCapturingCoverFrame = false }
-                            if let captured = await localVideoCaptureBridge.captureCurrentFrame?() {
+                            if let captured = await localVideoCaptureBridge.captureCurrentFrame() {
                                 await applyCapturedCoverFrame(
                                     jpegData: captured.jpegData,
                                     timestampSeconds: captured.timestampSeconds
@@ -1372,8 +1391,11 @@ public struct QuickLookOverlayView: View {
 
     @MainActor
     private func applyCapturedCoverFrame(jpegData: Data, timestampSeconds: Double?) async {
-        if await library.updateAssetCoverImage(assetID: asset.id, imageData: jpegData) != nil {
-            if let fresh = NSImage(data: jpegData) {
+        let targetAssetID = asset.id
+        if await library.updateAssetCoverImage(assetID: targetAssetID, imageData: jpegData) != nil {
+            if coordinator.quickLookAssetID == targetAssetID,
+               asset.id == targetAssetID,
+               let fresh = NSImage(data: jpegData) {
                 highResImage = fresh
             }
             if let ts = timestampSeconds, ts > 0 {
@@ -1468,6 +1490,7 @@ struct QuickLookVideoPlayerView: NSViewRepresentable {
 
     @MainActor
     final class Coordinator {
+        let bridgeOwnerID = UUID()
         var currentURL: URL?
         var wasSuspended: Bool = false
         var videoOutput: AVPlayerItemVideoOutput?
@@ -1486,7 +1509,7 @@ struct QuickLookVideoPlayerView: NSViewRepresentable {
 
             let player = AVPlayer(playerItem: item)
             view.player = player
-            self.captureBridge?.captureCurrentFrame = { [weak player, weak output] in
+            self.captureBridge?.register(ownerID: bridgeOwnerID) { [weak player, weak output] in
                 guard let player,
                       let result = await VideoFrameCapture.captureCurrentFrameJPEG(from: player, videoOutput: output) else {
                     return nil
@@ -1499,7 +1522,7 @@ struct QuickLookVideoPlayerView: NSViewRepresentable {
         }
 
         func teardown(_ view: AVPlayerView) {
-            captureBridge?.captureCurrentFrame = nil
+            captureBridge?.unregister(ownerID: bridgeOwnerID)
             videoOutput = nil
             view.player?.pause()
             view.player?.replaceCurrentItem(with: nil)

@@ -666,7 +666,7 @@ public struct HorizontalWheelScrollRedirector: NSViewRepresentable {
             guard let hostWindow = self.window,
                   event.window === hostWindow,
                   hostWindow.attachedSheet == nil,
-                  NSApp.modalWindow == nil,
+                  NSApp?.modalWindow == nil,
                   !isHiddenOrHasHiddenAncestor else {
                 return event
             }
@@ -804,7 +804,11 @@ public struct StageInteractiveBridge: NSViewRepresentable {
             }
             if keyMonitor == nil {
                 keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-                    guard let self, let hostWindow = self.window else {
+                    guard let self,
+                          let hostWindow = self.window,
+                          !self.isHiddenOrHasHiddenAncestor,
+                          hostWindow.attachedSheet == nil,
+                          NSApp?.modalWindow == nil else {
                         return event
                     }
                     let sameWindow = (event.window === hostWindow) || (event.window?.parent === hostWindow)
@@ -840,6 +844,7 @@ public struct StageInteractiveBridge: NSViewRepresentable {
                   let hostWindow = self.window,
                   event.window === hostWindow,
                   hostWindow.attachedSheet == nil,
+                  NSApp?.modalWindow == nil,
                   !isHiddenOrHasHiddenAncestor else {
                 return event
             }
@@ -851,7 +856,9 @@ public struct StageInteractiveBridge: NSViewRepresentable {
                 return event
             }
             let dy = event.scrollingDeltaY
-            guard abs(dy) > 0.01 else { return event }
+            let dx = event.scrollingDeltaX
+            // Let horizontal trackpad swipes pass through instead of accidentally zooming on slight vertical wobble
+            guard abs(dy) > 0.01, abs(dy) >= abs(dx) else { return event }
             // Ignore trailing trackpad momentum deceleration so zooming stops crisply where the user lifts fingers
             if !event.momentumPhase.isEmpty {
                 return nil

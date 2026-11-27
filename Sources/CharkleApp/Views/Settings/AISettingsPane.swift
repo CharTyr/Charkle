@@ -797,6 +797,8 @@ public struct AISettingsPane: View {
                                     .font(.system(size: 10.5, weight: .semibold))
                             }
                             .menuStyle(.borderlessButton)
+                            .menuIndicator(.hidden)
+                            .fixedSize()
                             .frame(width: 24)
                         }
                     }

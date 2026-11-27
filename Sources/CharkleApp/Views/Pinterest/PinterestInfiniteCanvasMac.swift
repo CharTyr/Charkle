@@ -75,7 +75,17 @@ final class PinterestSpatialNSView: NSView {
             }
         }
     }
-    var isInteractionSuspended: Bool = false
+    var isInteractionSuspended: Bool = false {
+        didSet {
+            if isInteractionSuspended {
+                resetDragCursorIfNeeded()
+                dragStartPoint = nil
+                lastDragPoint = nil
+                isDraggingCanvas = false
+                stopAnimationLoop()
+            }
+        }
+    }
     var excludedCanvasRects: [CGRect] = []
 
     private var cards: [PinterestSpatialCard] = []
@@ -99,6 +109,7 @@ final class PinterestSpatialNSView: NSView {
     private var lastDragPoint: CGPoint?
     private var lastDragTimestamp: TimeInterval = 0
     private var isDraggingCanvas: Bool = false
+    private var didPushClosedHandCursor: Bool = false
     private var velocity: CGPoint = .zero
     private nonisolated(unsafe) var inertiaDisplayLink: CADisplayLink?
     private var lastInertiaTimestamp: CFTimeInterval = 0
@@ -145,8 +156,19 @@ final class PinterestSpatialNSView: NSView {
     override func viewWillMove(toWindow newWindow: NSWindow?) {
         super.viewWillMove(toWindow: newWindow)
         if newWindow == nil {
+            resetDragCursorIfNeeded()
+            dragStartPoint = nil
+            lastDragPoint = nil
+            isDraggingCanvas = false
             inertiaDisplayLink?.invalidate()
             inertiaDisplayLink = nil
+        }
+    }
+
+    private func resetDragCursorIfNeeded() {
+        if didPushClosedHandCursor {
+            NSCursor.pop()
+            didPushClosedHandCursor = false
         }
     }
 
@@ -416,7 +438,10 @@ final class PinterestSpatialNSView: NSView {
                 return
             }
             isDraggingCanvas = true
-            NSCursor.closedHand.push()
+            if !didPushClosedHandCursor {
+                NSCursor.closedHand.push()
+                didPushClosedHandCursor = true
+            }
         }
 
         let dx = pt.x - last.x
@@ -437,17 +462,16 @@ final class PinterestSpatialNSView: NSView {
     }
 
     override func mouseUp(with event: NSEvent) {
-        guard !isInteractionSuspended else { return }
+        let wasDragging = isDraggingCanvas
         defer {
-            if isDraggingCanvas {
-                NSCursor.pop()
-            }
+            resetDragCursorIfNeeded()
             dragStartPoint = nil
             lastDragPoint = nil
             isDraggingCanvas = false
         }
+        guard !isInteractionSuspended else { return }
 
-        if isDraggingCanvas {
+        if wasDragging {
             let speed = hypot(velocity.x, velocity.y)
             if speed > 90 {
                 // Clamp max flick velocity for graceful atlas-like deceleration
@@ -578,7 +602,9 @@ private final class PinterestSpatialTileView: NSView {
     private let videoBadgeLayer = CALayer()
 
     private var loadedURL: URL?
+    private var loadingURL: URL?
     private var imageLoadTask: Task<Void, Never>?
+    private var lastCartBadgeKey: String?
     private var isDark: Bool = false
     private var accentColor: NSColor = NSColor(srgbRed: 0.165, green: 0.376, blue: 0.878, alpha: 1)
     private var isInTray: Bool = false
@@ -630,9 +656,7 @@ private final class PinterestSpatialTileView: NSView {
         videoBadgeLayer.backgroundColor = NSColor.black.withAlphaComponent(0.56).cgColor
         videoBadgeLayer.zPosition = 8
         videoBadgeLayer.isHidden = true
-        if let playImg = NSImage(systemSymbolName: "play.fill", accessibilityDescription: nil)?
-            .withSymbolConfiguration(.init(pointSize: 9, weight: .bold)) {
-            let tinted = Self.tintedSymbolCGImage(playImg, color: .white)
+        if let tinted = Self.cachedWhiteSymbolCGImage(name: "play.fill", pointSize: 9, weight: .bold) {
             videoBadgeLayer.contents = tinted
             videoBadgeLayer.contentsGravity = .center
         }
@@ -655,6 +679,8 @@ private final class PinterestSpatialTileView: NSView {
         imageLoadTask = nil
         pin = nil
         loadedURL = nil
+        loadingURL = nil
+        lastCartBadgeKey = nil
         imageLayer.contents = nil
         imageLayer.opacity = 0
         isInTray = false
@@ -665,6 +691,7 @@ private final class PinterestSpatialTileView: NSView {
     func configure(pin: PinterestPin) {
         self.pin = pin
         self.loadedURL = nil
+        self.loadingURL = nil
         self.imageLoadTask?.cancel()
         self.imageLoadTask = nil
 
@@ -719,22 +746,21 @@ private final class PinterestSpatialTileView: NSView {
             cartBadgeLayer.cornerRadius = dim * 0.5
             cartSymbolLayer.frame = cartBadgeLayer.bounds
 
+            let symbolName = inTray ? "checkmark" : "plus"
+            let pointSize = dim * (inTray ? 0.44 : 0.46)
+            let badgeKey = "\(symbolName)-\(Int(pointSize.rounded()))"
             if inTray {
                 cartBadgeLayer.backgroundColor = accentColor.cgColor
                 cartBadgeLayer.borderColor = NSColor.white.withAlphaComponent(0.45).cgColor
                 cartBadgeLayer.borderWidth = 1.0
-                if let img = NSImage(systemSymbolName: "checkmark", accessibilityDescription: nil)?
-                    .withSymbolConfiguration(.init(pointSize: dim * 0.44, weight: .bold)) {
-                    cartSymbolLayer.contents = Self.tintedSymbolCGImage(img, color: .white)
-                }
             } else {
                 cartBadgeLayer.backgroundColor = NSColor.black.withAlphaComponent(fastPickMode ? 0.52 : 0.62).cgColor
                 cartBadgeLayer.borderColor = NSColor.white.withAlphaComponent(0.35).cgColor
                 cartBadgeLayer.borderWidth = 0.8
-                if let img = NSImage(systemSymbolName: "plus", accessibilityDescription: nil)?
-                    .withSymbolConfiguration(.init(pointSize: dim * 0.46, weight: .bold)) {
-                    cartSymbolLayer.contents = Self.tintedSymbolCGImage(img, color: .white)
-                }
+            }
+            if lastCartBadgeKey != badgeKey {
+                lastCartBadgeKey = badgeKey
+                cartSymbolLayer.contents = Self.cachedWhiteSymbolCGImage(name: symbolName, pointSize: pointSize, weight: .bold)
             }
         }
 
@@ -752,9 +778,10 @@ private final class PinterestSpatialTileView: NSView {
             videoBadgeLayer.isHidden = true
         }
 
-        // Adaptive image resolution tier based on rendered screen width
+        // Adaptive image resolution tier based on rendered screen width; avoid cancelling an
+        // already in-flight download for the same URL on every 120Hz pan/zoom frame.
         let desiredURL = pin.imageURL(forRenderedWidth: renderedWidth)
-        if desiredURL != loadedURL {
+        if desiredURL != loadedURL && desiredURL != loadingURL {
             loadImageIfNeeded(url: desiredURL, pinID: pin.id, maxPixels: renderedWidth > 420 ? 1440 : 760)
         }
     }
@@ -776,6 +803,9 @@ private final class PinterestSpatialTileView: NSView {
 
     private func loadImageIfNeeded(url: URL, pinID: String, maxPixels: Int) {
         if let hit = PinterestImageCache.shared.cachedImage(for: url) {
+            imageLoadTask?.cancel()
+            imageLoadTask = nil
+            loadingURL = nil
             loadedURL = url
             imageLayer.contents = hit
             imageLayer.opacity = 1
@@ -784,12 +814,14 @@ private final class PinterestSpatialTileView: NSView {
 
         // Keep showing any already-loaded lower-res tier while upgrading seamlessly
         imageLoadTask?.cancel()
+        loadingURL = url
         imageLoadTask = Task { @MainActor [weak self] in
-            guard let image = await PinterestImageCache.shared.image(for: url, maxPixelSize: maxPixels),
-                  let self,
-                  self.pin?.id == pinID else {
+            let image = await PinterestImageCache.shared.image(for: url, maxPixelSize: maxPixels)
+            guard let self, !Task.isCancelled, self.pin?.id == pinID, self.loadingURL == url else {
                 return
             }
+            self.loadingURL = nil
+            guard let image else { return }
             self.loadedURL = url
             let wasHidden = self.imageLayer.opacity < 0.5
             self.imageLayer.contents = image
@@ -804,17 +836,44 @@ private final class PinterestSpatialTileView: NSView {
         }
     }
 
-    private static func tintedSymbolCGImage(_ image: NSImage, color: NSColor) -> CGImage? {
-        let size = image.size
-        guard size.width > 0, size.height > 0 else { return nil }
-        let out = NSImage(size: size)
-        out.lockFocus()
-        color.set()
+    private static var whiteSymbolCache: [String: CGImage] = [:]
+
+    private static func cachedWhiteSymbolCGImage(name: String, pointSize: CGFloat, weight: NSFont.Weight) -> CGImage? {
+        let roundedSize = Int(pointSize.rounded())
+        let key = "\(name)-\(roundedSize)-\(weight.rawValue)"
+        if let cached = whiteSymbolCache[key] {
+            return cached
+        }
+        guard let img = NSImage(systemSymbolName: name, accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: CGFloat(roundedSize), weight: weight)) else {
+            return nil
+        }
+        let size = img.size
+        let scale: CGFloat = 2.0
+        let pixelW = max(1, Int((size.width * scale).rounded(.up)))
+        let pixelH = max(1, Int((size.height * scale).rounded(.up)))
+        guard let ctx = CGContext(
+            data: nil,
+            width: pixelW,
+            height: pixelH,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else {
+            return nil
+        }
+        ctx.scaleBy(x: scale, y: scale)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(cgContext: ctx, flipped: false)
         let rect = NSRect(origin: .zero, size: size)
-        image.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1.0)
+        img.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1.0)
+        NSColor.white.set()
         rect.fill(using: .sourceAtop)
-        out.unlockFocus()
-        return out.cgImage(forProposedRect: nil, context: nil, hints: nil)
+        NSGraphicsContext.restoreGraphicsState()
+        guard let cgImage = ctx.makeImage() else { return nil }
+        whiteSymbolCache[key] = cgImage
+        return cgImage
     }
 
     private static func nsColor(fromHex raw: String) -> NSColor? {

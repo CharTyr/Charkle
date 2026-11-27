@@ -49,6 +49,10 @@ public final class HoverMediaPreviewLayerController {
     private var currentFillMode: Bool = true
     private var currentScale: CGFloat = 2.0
 
+    internal var isActiveForTesting: Bool { activeAssetID != nil }
+    internal var activeAssetIDForTesting: UUID? { activeAssetID }
+    internal var currentFillModeForTesting: Bool { currentFillMode }
+
     private var previewTask: Task<Void, Never>?
     private var queuePlayer: AVQueuePlayer?
     private var playerLooper: AVPlayerLooper?
@@ -109,11 +113,19 @@ public final class HoverMediaPreviewLayerController {
             return
         }
 
+        let fillModeChanged = (currentFillMode != fillMode)
         currentCornerRadius = cornerRadius
         currentFillMode = fillMode
         currentScale = max(1.0, scale)
 
         if activeAssetID == asset.id {
+            if fillModeChanged {
+                CATransaction.begin()
+                CATransaction.setDisableActions(true)
+                playerLayer?.videoGravity = fillMode ? .resizeAspectFill : .resizeAspect
+                gifFrameLayer?.contentsGravity = fillMode ? .resizeAspectFill : .resizeAspect
+                CATransaction.commit()
+            }
             updateGeometry(frame: frame, cornerRadius: cornerRadius, scale: currentScale)
             return
         }
@@ -192,10 +204,12 @@ public final class HoverMediaPreviewLayerController {
         readyObservation?.invalidate()
         readyObservation = nil
 
-        queuePlayer?.pause()
-        queuePlayer?.removeAllItems()
+        // Always disable AVPlayerLooper BEFORE pausing / clearing AVQueuePlayer so
+        // the looper never re-inserts a replacement item during teardown.
         playerLooper?.disableLooping()
         playerLooper = nil
+        queuePlayer?.pause()
+        queuePlayer?.removeAllItems()
         queuePlayer = nil
 
         CATransaction.begin()
@@ -493,6 +507,7 @@ public struct HoverMediaPreviewOverlay: NSViewRepresentable {
         private var currentLoader: ThumbnailImageLoader?
         private var currentCornerRadius: CGFloat = 12
         private var currentFillMode: Bool = true
+        private nonisolated(unsafe) var lifecycleObservers: [NSObjectProtocol] = []
 
         public override nonisolated var isFlipped: Bool { true }
 
@@ -512,12 +527,22 @@ public struct HoverMediaPreviewOverlay: NSViewRepresentable {
             nil
         }
 
+        private var canHostActivePlayback: Bool {
+            guard let hostWindow = window else { return false }
+            guard !isHiddenOrHasHiddenAncestor, bounds.width >= 32, bounds.height >= 32 else { return false }
+            guard NSApp?.isHidden != true, hostWindow.occlusionState.contains(.visible) else { return false }
+            if let panel = hostWindow as? NSPanel, panel.isFloatingPanel {
+                return true
+            }
+            return NSApp?.isActive == true && hostWindow.isKeyWindow
+        }
+
         func configure(asset: AssetRecord, loader: ThumbnailImageLoader, cornerRadius: CGFloat, fillMode: Bool) {
             currentAsset = asset
             currentLoader = loader
             currentCornerRadius = cornerRadius
             currentFillMode = fillMode
-            if bounds.width >= 32, bounds.height >= 32, window != nil {
+            if canHostActivePlayback {
                 controller.schedulePreview(
                     for: asset,
                     in: bounds,
@@ -526,12 +551,15 @@ public struct HoverMediaPreviewOverlay: NSViewRepresentable {
                     scale: window?.backingScaleFactor ?? 2.0,
                     loader: loader
                 )
+            } else {
+                controller.stop()
             }
         }
 
         public override func layout() {
             super.layout()
-            guard let asset = currentAsset, let loader = currentLoader, bounds.width >= 32, bounds.height >= 32, window != nil else {
+            guard canHostActivePlayback, let asset = currentAsset, let loader = currentLoader else {
+                controller.stop()
                 return
             }
             controller.schedulePreview(
@@ -546,25 +574,89 @@ public struct HoverMediaPreviewOverlay: NSViewRepresentable {
 
         public override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
-            if window == nil {
+            removeLifecycleObservers()
+            guard let hostWindow = window else {
                 controller.stop()
-            } else if let asset = currentAsset, let loader = currentLoader, bounds.width >= 32, bounds.height >= 32 {
+                return
+            }
+            installLifecycleObservers(for: hostWindow)
+            if canHostActivePlayback, let asset = currentAsset, let loader = currentLoader {
                 controller.schedulePreview(
                     for: asset,
                     in: bounds,
                     cornerRadius: currentCornerRadius,
                     fillMode: currentFillMode,
-                    scale: window?.backingScaleFactor ?? 2.0,
+                    scale: hostWindow.backingScaleFactor,
                     loader: loader
                 )
+            } else {
+                controller.stop()
             }
         }
 
+        private func installLifecycleObservers(for hostWindow: NSWindow) {
+            let nc = NotificationCenter.default
+            lifecycleObservers.append(nc.addObserver(
+                forName: NSWindow.didResignKeyNotification,
+                object: hostWindow,
+                queue: nil
+            ) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    if !self.canHostActivePlayback {
+                        self.controller.stop()
+                    }
+                }
+            })
+            lifecycleObservers.append(nc.addObserver(
+                forName: NSWindow.didChangeOcclusionStateNotification,
+                object: hostWindow,
+                queue: nil
+            ) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    if !self.canHostActivePlayback {
+                        self.controller.stop()
+                    }
+                }
+            })
+            lifecycleObservers.append(nc.addObserver(
+                forName: NSApplication.didHideNotification,
+                object: NSApp,
+                queue: nil
+            ) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    self?.controller.stop()
+                }
+            })
+            lifecycleObservers.append(nc.addObserver(
+                forName: NSApplication.didResignActiveNotification,
+                object: NSApp,
+                queue: nil
+            ) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    if !self.canHostActivePlayback {
+                        self.controller.stop()
+                    }
+                }
+            })
+        }
+
+        private func removeLifecycleObservers() {
+            for token in lifecycleObservers {
+                NotificationCenter.default.removeObserver(token)
+            }
+            lifecycleObservers.removeAll()
+        }
+
         func stopPreview() {
+            removeLifecycleObservers()
             controller.stop()
         }
 
         isolated deinit {
+            removeLifecycleObservers()
             controller.stop()
         }
     }

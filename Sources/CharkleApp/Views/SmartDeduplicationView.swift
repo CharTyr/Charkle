@@ -2,6 +2,7 @@ import AppKit
 import CharkleCanvas
 import CharkleCore
 import SwiftUI
+import os
 
 /// Centered native macOS Smart Deduplication workspace (100% local classical algorithms, zero AI).
 /// Supports all 8 Charkle media kinds, side-by-side quality comparison, manual keeper override,
@@ -77,6 +78,7 @@ public struct SmartDeduplicationView: View {
     @State private var isCleaning: Bool = false
     @State private var pendingPermanentCleanupPlans: [DeduplicationResolutionPlan]? = nil
     @State private var scanTask: Task<Void, Never>? = nil
+    @State private var cleanupTask: Task<Void, Never>? = nil
 
     public init(
         coordinator: AppCoordinatorStore,
@@ -141,8 +143,10 @@ public struct SmartDeduplicationView: View {
             CharkleModalBackdrop(onTap: onClose)
 
             GeometryReader { geo in
-                let modalWidth = min(max(780, geo.size.width - 72), 1040)
-                let modalHeight = min(max(540, geo.size.height - 64), 740)
+                let maxAvailableWidth = max(360, geo.size.width - 24)
+                let maxAvailableHeight = max(320, geo.size.height - 24)
+                let modalWidth = min(max(640, geo.size.width - 72), min(1040, maxAvailableWidth))
+                let modalHeight = min(max(460, geo.size.height - 64), min(740, maxAvailableHeight))
                 let cardShape = RoundedRectangle(cornerRadius: CharkleTheme.Radius.settingsOuter, style: .continuous)
 
                 VStack(spacing: 0) {
@@ -201,6 +205,8 @@ public struct SmartDeduplicationView: View {
         .onDisappear {
             scanTask?.cancel()
             scanTask = nil
+            cleanupTask?.cancel()
+            cleanupTask = nil
         }
         .onKeyPress(.escape) {
             guard coordinator.quickLookAssetID == nil else { return .ignored }
@@ -406,7 +412,7 @@ public struct SmartDeduplicationView: View {
                 .font(.system(size: 13.5, weight: .medium))
                 .foregroundStyle(.primary)
 
-            Text("纯本地计算 SHA-256、2D-DCT 感知哈希、音频波形包络与规范化链接，不消耗 AI 额度且不上传任何文件")
+            Text("纯本地比对文件内容、画面相似度、音频波形与来源链接，不消耗 AI 额度且不上传任何文件")
                 .font(.system(size: 11.5))
                 .foregroundStyle(.secondary)
             Spacer()
@@ -856,12 +862,22 @@ public struct SmartDeduplicationView: View {
         let currentSensitivity = sensitivity
         let kindFilter = selectedKindFilter.kinds
 
+        let lastProgressPublish = OSAllocatedUnfairLock<CFAbsoluteTime>(initialState: 0)
         scanTask = Task {
             let scanned = await library.scanDuplicateAssets(
                 scope: scope,
                 sensitivity: currentSensitivity,
                 mediaKinds: kindFilter
             ) { progress in
+                let now = CFAbsoluteTimeGetCurrent()
+                let shouldPublish = progress.completed >= progress.total || lastProgressPublish.withLock { last in
+                    if now - last >= 0.06 {
+                        last = now
+                        return true
+                    }
+                    return false
+                }
+                guard shouldPublish else { return }
                 await MainActor.run {
                     scanProgress = progress
                 }
@@ -891,7 +907,8 @@ public struct SmartDeduplicationView: View {
         guard !isCleaning else { return }
         isCleaning = true
         let shouldMerge = mergeMetadata
-        Task {
+        cleanupTask?.cancel()
+        cleanupTask = Task {
             let result = await library.resolveDuplicateGroups(
                 plans,
                 disposal: disposal,
@@ -915,6 +932,10 @@ public struct SmartDeduplicationView: View {
             } else if let err = library.lastError {
                 coordinator.showToast(err, icon: "exclamationmark.triangle", tone: .warning)
             }
+            guard !Task.isCancelled else {
+                await MainActor.run { isCleaning = false }
+                return
+            }
             await MainActor.run {
                 isCleaning = false
                 startScan()
@@ -930,10 +951,11 @@ private struct DedupThumbnailPreview: View {
     let size: CGSize
 
     @State private var image: NSImage? = nil
+    @State private var loadedAssetID: UUID? = nil
 
     var body: some View {
         Group {
-            if let image {
+            if let image, loadedAssetID == asset.id {
                 Image(nsImage: image)
                     .resizable()
                     .aspectRatio(contentMode: size.width > 80 ? .fit : .fill)
@@ -950,14 +972,19 @@ private struct DedupThumbnailPreview: View {
             }
         }
         .task(id: asset.id) {
-            let tier: ThumbnailTier = size.width > 80 ? .grid520 : .grid520
-            if let cached = loader.cachedImage(for: asset.id, tier: tier) {
+            let targetID = asset.id
+            let tier: ThumbnailTier = .grid520
+            if let cached = loader.cachedImage(for: targetID, tier: tier) {
                 image = cached
+                loadedAssetID = targetID
                 return
             }
-            let loaded = await loader.loadImage(for: asset.id, tier: tier)
+            image = nil
+            loadedAssetID = nil
+            let loaded = await loader.loadImage(for: targetID, tier: tier)
             if !Task.isCancelled {
                 image = loaded
+                loadedAssetID = loaded != nil ? targetID : nil
             }
         }
     }

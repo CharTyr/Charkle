@@ -587,12 +587,22 @@ public struct AppUpdateSheetView: View {
         }
     }
 
-    private static func formatBytes(_ bytes: Int64) -> String {
+    private static let byteFormatter: ByteCountFormatter = {
         let formatter = ByteCountFormatter()
         formatter.allowedUnits = [.useMB, .useKB]
         formatter.countStyle = .file
         formatter.includesUnit = true
-        return formatter.string(fromByteCount: max(0, bytes))
+        return formatter
+    }()
+
+    private static let releaseDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter
+    }()
+
+    private static func formatBytes(_ bytes: Int64) -> String {
+        byteFormatter.string(fromByteCount: max(0, bytes))
     }
 
     private static func downloadCounterText(downloaded: Int64, total: Int64, progress: Double) -> String {
@@ -605,8 +615,6 @@ public struct AppUpdateSheetView: View {
     }
 
     private static func formatReleaseDate(_ date: Date) -> String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd"
-        return formatter.string(from: date)
+        releaseDateFormatter.string(from: date)
     }
 }

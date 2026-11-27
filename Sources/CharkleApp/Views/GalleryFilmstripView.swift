@@ -39,9 +39,11 @@ public struct GalleryFilmstripView: View {
     public let onExtractSocialMedia: (AssetRecord, SocialMediaAttachment, Int) -> Void
     public let onExtractAllSocialMedia: (AssetRecord) -> Void
     public let onRefreshRichAsset: (UUID) -> Void
+    public let onFocusedAssetChanged: ((UUID?) -> Void)?
 
     @State private var focusedAssetID: UUID?
     @State private var previewImage: NSImage?
+    @State private var previewImageAssetID: UUID?
     @State private var activeOriginalURL: URL?
     @State private var previewLoadTask: Task<Void, Never>?
 
@@ -80,7 +82,8 @@ public struct GalleryFilmstripView: View {
         onPermanentlyDeleteAssets: @escaping ([UUID]) -> Void = { _ in },
         onExtractSocialMedia: @escaping (AssetRecord, SocialMediaAttachment, Int) -> Void = { _, _, _ in },
         onExtractAllSocialMedia: @escaping (AssetRecord) -> Void = { _ in },
-        onRefreshRichAsset: @escaping (UUID) -> Void = { _ in }
+        onRefreshRichAsset: @escaping (UUID) -> Void = { _ in },
+        onFocusedAssetChanged: ((UUID?) -> Void)? = nil
     ) {
         self.assets = assets
         self.folders = folders
@@ -107,6 +110,7 @@ public struct GalleryFilmstripView: View {
         self.onExtractSocialMedia = onExtractSocialMedia
         self.onExtractAllSocialMedia = onExtractAllSocialMedia
         self.onRefreshRichAsset = onRefreshRichAsset
+        self.onFocusedAssetChanged = onFocusedAssetChanged
     }
 
     private func resolveActiveSelection() -> (asset: AssetRecord, index: Int)? {
@@ -294,6 +298,7 @@ public struct GalleryFilmstripView: View {
             }
             .onChange(of: currentAssetID) { _, newID in
                 resetViewTransform(animated: false)
+                onFocusedAssetChanged?(newID)
                 if let newID {
                     loadPreview(for: newID)
                     onMarkOpened(newID)
@@ -301,12 +306,14 @@ public struct GalleryFilmstripView: View {
                     previewLoadTask?.cancel()
                     previewLoadTask = nil
                     previewImage = nil
+                    previewImageAssetID = nil
                     activeOriginalURL = nil
                 }
             }
             .onAppear {
                 if let first = currentAsset {
                     focusedAssetID = first.id
+                    onFocusedAssetChanged?(first.id)
                     if selectedAssetIDs.isEmpty {
                         selectedAssetIDs = [first.id]
                     }
@@ -317,7 +324,9 @@ public struct GalleryFilmstripView: View {
                 previewLoadTask?.cancel()
                 previewLoadTask = nil
                 previewImage = nil
+                previewImageAssetID = nil
                 activeOriginalURL = nil
+                onFocusedAssetChanged?(nil)
             }
         }
         .background(CanvasSurface.ground(for: colorScheme))
@@ -347,6 +356,9 @@ public struct GalleryFilmstripView: View {
                 onRetryFetch: {
                     onRefreshRichAsset(asset.id)
                 },
+                fallbackCoverImage: (previewImageAssetID == asset.id ? previewImage : nil)
+                    ?? loader.cachedImage(for: asset.id, tier: .preview1400)
+                    ?? loader.cachedImage(for: asset.id, tier: .grid520),
                 isPlaybackSuspended: isQuickLookPresented
             )
             .id(asset.id)
@@ -416,9 +428,10 @@ public struct GalleryFilmstripView: View {
 
     @ViewBuilder
     private func zoomableVisualStage(for asset: AssetRecord) -> some View {
+        let activePreview = (previewImageAssetID == asset.id) ? previewImage : nil
         interactiveTransformContainer(for: asset) {
             Group {
-                if let img = previewImage {
+                if let img = activePreview {
                     Image(nsImage: img)
                         .resizable()
                         .interpolation(.high)
@@ -499,43 +512,94 @@ public struct GalleryFilmstripView: View {
     }
 
     private func webBookmarkStageCard(for asset: AssetRecord) -> some View {
-        VStack(spacing: 0) {
-            ZStack(alignment: .bottomTrailing) {
-                Group {
-                    if let img = previewImage {
-                        Image(nsImage: img)
-                            .resizable()
-                            .interpolation(.high)
-                            .aspectRatio(contentMode: .fit)
-                    } else {
-                        AssetThumbnailSurface(
-                            asset: asset,
-                            loader: loader,
-                            tier: .preview1400,
-                            cornerRadius: 0,
-                            contentMode: .fit,
-                            enableHoverPlayback: false
-                        )
-                    }
+        let activePreview = (previewImageAssetID == asset.id) ? previewImage : nil
+        let webMeta = asset.richMetadata?.webPage
+        let externalURL = asset.externalWebURL
+        let hasStreamableVideo: Bool = {
+            if let webMeta {
+                if webMeta.hasVideo || webMeta.attachments.contains(where: { $0.kind == .video }) {
+                    return true
                 }
-                .frame(maxWidth: 780, maxHeight: 440)
-                .background(CharkleTheme.surfaceElevated(for: colorScheme))
-                .contentShape(Rectangle())
-                .onTapGesture {
-                    onOpenQuickLook(asset)
-                }
+            }
+            if let externalURL, VideoPlatformResolver.embedPlayer(for: externalURL) != nil {
+                return true
+            }
+            return false
+        }()
 
-                if asset.externalWebURL != nil {
-                    Button {
-                        onOpenQuickLook(asset)
-                    } label: {
-                        Label("在默认浏览器中打开", systemImage: "safari")
-                            .font(.system(size: 12, weight: .semibold))
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 6)
+        return VStack(spacing: 0) {
+            if hasStreamableVideo {
+                let thumbURL = webMeta?.attachments.first(where: { $0.kind == .video })?.thumbnailURL.flatMap(URL.init(string:))
+                    ?? webMeta?.attachments.first(where: { $0.kind == .photo }).flatMap { URL(string: $0.url) }
+                let formattedDur: String? = {
+                    guard let secs = webMeta?.durationSeconds ?? asset.durationSeconds, secs > 0 else { return nil }
+                    let total = Int(secs.rounded())
+                    let h = total / 3600
+                    let m = (total % 3600) / 60
+                    let s = total % 60
+                    return h > 0 ? String(format: "%d:%02d:%02d", h, m, s) : String(format: "%d:%02d", m, s)
+                }()
+                QuickLookStreamingVideoView(
+                    playbackKey: "filmstrip-web:\(asset.id.uuidString):\(asset.sourceURL ?? "")",
+                    coverURL: thumbURL,
+                    fallbackCoverImage: activePreview
+                        ?? loader.cachedImage(for: asset.id, tier: .preview1400)
+                        ?? loader.cachedImage(for: asset.id, tier: .grid520),
+                    durationText: formattedDur,
+                    watchURL: externalURL,
+                    openActionLabel: "在默认浏览器中打开",
+                    isPlaybackSuspended: isQuickLookPresented,
+                    resolvePlan: {
+                        if let webMeta {
+                            return await VideoPlatformResolver.resolveWebPagePlaybackPlan(
+                                for: webMeta,
+                                fallbackURL: externalURL
+                            )
+                        }
+                        let embed = externalURL.flatMap { VideoPlatformResolver.embedPlayer(for: $0) }
+                        return VideoStreamPlaybackPlan(directStreams: [], embedPlayer: embed, watchURL: externalURL)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .padding(14)
+                )
+                .aspectRatio(16.0 / 9.0, contentMode: .fit)
+                .frame(maxWidth: 780)
+            } else {
+                ZStack(alignment: .bottomTrailing) {
+                    Group {
+                        if let img = activePreview {
+                            Image(nsImage: img)
+                                .resizable()
+                                .interpolation(.high)
+                                .aspectRatio(contentMode: .fit)
+                        } else {
+                            AssetThumbnailSurface(
+                                asset: asset,
+                                loader: loader,
+                                tier: .preview1400,
+                                cornerRadius: 0,
+                                contentMode: .fit,
+                                enableHoverPlayback: false
+                            )
+                        }
+                    }
+                    .frame(maxWidth: 780, maxHeight: 440)
+                    .background(CharkleTheme.surfaceElevated(for: colorScheme))
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        onOpenQuickLook(asset)
+                    }
+
+                    if externalURL != nil {
+                        Button {
+                            onOpenQuickLook(asset)
+                        } label: {
+                            Label("在默认浏览器中打开", systemImage: "safari")
+                                .font(.system(size: 12, weight: .semibold))
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 6)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .padding(14)
+                    }
                 }
             }
 
@@ -848,7 +912,7 @@ public struct GalleryFilmstripView: View {
                 Button {
                     onAddToMoodboard(targetIDs, activeID)
                 } label: {
-                    Label("加入活跃情绪板\(countSuffix)", systemImage: "rectangle.3.group.badge.plus")
+                    Label("加入活跃情绪板\(countSuffix)", systemImage: "rectangle.stack.badge.plus")
                 }
             }
 
@@ -1086,10 +1150,13 @@ public struct GalleryFilmstripView: View {
         previewLoadTask?.cancel()
         activeOriginalURL = nil
         if let cachedOrig = loader.cachedOriginalImage(for: id) {
+            previewImageAssetID = id
             previewImage = cachedOrig
         } else if let cached = loader.cachedImage(for: id, tier: .preview1400) ?? loader.cachedImage(for: id, tier: .grid520) {
+            previewImageAssetID = id
             previewImage = cached
         } else {
+            previewImageAssetID = nil
             previewImage = nil
         }
         let targetIdx = assets.firstIndex(where: { $0.id == id })
@@ -1119,12 +1186,14 @@ public struct GalleryFilmstripView: View {
             if wantsOriginalRaster, let orig,
                let fullImage = await loader.loadOriginalImage(for: id, url: orig) {
                 guard !Task.isCancelled else { return }
+                previewImageAssetID = id
                 previewImage = fullImage
                 return
             }
 
             if let img = await loader.loadImage(for: id, tier: .preview1400) {
                 guard !Task.isCancelled else { return }
+                previewImageAssetID = id
                 previewImage = img
             }
         }

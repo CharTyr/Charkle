@@ -34,6 +34,7 @@ public struct CharkleSkeletonShape: View {
 /// Structural moodboard canvas skeleton replacing bare centered spinners during board load.
 public struct CharkleBoardLoadingSkeleton: View {
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var showSkeleton: Bool = false
 
     public init() {}
@@ -66,7 +67,7 @@ public struct CharkleBoardLoadingSkeleton: View {
             // Wait 300ms before showing skeleton so fast local board loads never flash (DESIGN.md §7.6).
             try? await Task.sleep(for: .milliseconds(300))
             guard !Task.isCancelled else { return }
-            withAnimation(CharkleMotion.enterSm) {
+            withAnimation(CharkleMotion.accessible(CharkleMotion.enterSm, reduced: reduceMotion)) {
                 showSkeleton = true
             }
         }
@@ -147,6 +148,7 @@ public struct CharkleDelayedSpinner: View {
 
 /// Structural delayed media placeholder replacing bare centered spinners in remote image frames.
 public struct CharkleMediaPlaceholderSkeleton: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     public let height: CGFloat
     public let cornerRadius: CGFloat
 
@@ -170,7 +172,7 @@ public struct CharkleMediaPlaceholderSkeleton: View {
         .task {
             try? await Task.sleep(for: .milliseconds(300))
             guard !Task.isCancelled else { return }
-            withAnimation(CharkleMotion.enterSm) {
+            withAnimation(CharkleMotion.accessible(CharkleMotion.enterSm, reduced: reduceMotion)) {
                 showSkeleton = true
             }
         }
@@ -179,6 +181,7 @@ public struct CharkleMediaPlaceholderSkeleton: View {
 
 /// Structural 2-column skeleton mirroring Inspector Similar Assets cards during visual lookup.
 public struct CharkleSimilarGridSkeleton: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var showSkeleton: Bool = false
 
     public init() {}
@@ -204,7 +207,7 @@ public struct CharkleSimilarGridSkeleton: View {
         .task {
             try? await Task.sleep(for: .milliseconds(300))
             guard !Task.isCancelled else { return }
-            withAnimation(CharkleMotion.enterSm) {
+            withAnimation(CharkleMotion.accessible(CharkleMotion.enterSm, reduced: reduceMotion)) {
                 showSkeleton = true
             }
         }

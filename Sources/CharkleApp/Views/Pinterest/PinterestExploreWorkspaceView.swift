@@ -73,7 +73,12 @@ public struct PinterestExploreWorkspaceView: View {
                     pin: activePin,
                     isSingleImporting: isSingleImporting,
                     accent: activeAccent,
+                    isImageExpanded: Binding(
+                        get: { coordinator.isPinterestDetailImageExpanded },
+                        set: { coordinator.isPinterestDetailImageExpanded = $0 }
+                    ),
                     onClose: {
+                        coordinator.isPinterestDetailImageExpanded = false
                         withAnimation(CharkleMotion.accessible(CharkleMotion.exitSm, reduced: reduceMotion)) {
                             controller.closePinDetail()
                         }
@@ -130,7 +135,9 @@ public struct PinterestExploreWorkspaceView: View {
             )
         }
         .onExitCommand {
-            if controller.activeDetailPin != nil {
+            if coordinator.isPinterestDetailImageExpanded {
+                coordinator.isPinterestDetailImageExpanded = false
+            } else if controller.activeDetailPin != nil {
                 controller.closePinDetail()
             } else if controller.isTrayExpanded {
                 controller.isTrayExpanded = false
@@ -1059,6 +1066,7 @@ private struct PinterestPinDetailOverlayMac: View {
     let pin: PinterestPin
     let isSingleImporting: Bool
     let accent: Color
+    @Binding var isImageExpanded: Bool
     let onClose: () -> Void
     let onToggleTray: (PinterestPin) -> Void
     let onImportSingle: (PinterestPin) -> Void
@@ -1071,7 +1079,6 @@ private struct PinterestPinDetailOverlayMac: View {
     private var isImported: Bool {
         controller.importedPinIDs.contains(pin.id)
     }
-    @State private var isImageExpanded: Bool = false
 
     var body: some View {
         GeometryReader { geo in
@@ -1212,6 +1219,12 @@ private struct PinterestPinDetailOverlayMac: View {
                 .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
                 .shadow(color: Color.black.opacity(colorScheme == .dark ? 0.50 : 0.22), radius: 36, y: 14)
             }
+        }
+        .onChange(of: pin.id) { _, _ in
+            isImageExpanded = false
+        }
+        .onDisappear {
+            isImageExpanded = false
         }
     }
 
@@ -1903,11 +1916,12 @@ private struct PinterestRemoteThumbMac: View {
     var contentMode: ContentMode = .fill
 
     @State private var image: NSImage?
+    @State private var loadedURL: URL?
 
     var body: some View {
         ZStack {
             placeholderColor
-            if let image {
+            if let image, loadedURL == url || (fallbackURL != nil && loadedURL == fallbackURL) {
                 Image(nsImage: image)
                     .resizable()
                     .aspectRatio(contentMode: contentMode)
@@ -1917,19 +1931,28 @@ private struct PinterestRemoteThumbMac: View {
         .task(id: url) {
             if let cached = PinterestImageCache.shared.cachedImage(for: url) {
                 image = cached
+                loadedURL = url
                 return
             }
             if let fallbackURL, let cachedFallback = PinterestImageCache.shared.cachedImage(for: fallbackURL) {
                 image = cachedFallback
+                loadedURL = fallbackURL
+            } else {
+                image = nil
+                loadedURL = nil
             }
             if let fetched = await PinterestImageCache.shared.image(for: url, maxPixelSize: maxPixels) {
+                guard !Task.isCancelled else { return }
                 withAnimation(.easeOut(duration: 0.16)) {
                     image = fetched
+                    loadedURL = url
                 }
             } else if let fallbackURL,
                       let fetchedFallback = await PinterestImageCache.shared.image(for: fallbackURL, maxPixelSize: maxPixels) {
+                guard !Task.isCancelled else { return }
                 withAnimation(.easeOut(duration: 0.16)) {
                     image = fetchedFallback
+                    loadedURL = fallbackURL
                 }
             }
         }

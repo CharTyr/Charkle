@@ -6,10 +6,15 @@ import SwiftUI
 /// categorized SF Symbol gallery, and Emoji badge switcher.
 public struct FolderCustomizationPopover: View {
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.charkleAccentSource) private var accentSource
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     public let folder: FolderRecord
     public let onUpdate: (_ colorHex: String?, _ customSymbol: String?) -> Void
+
+    private var accentColor: Color {
+        CharkleTheme.accent(for: colorScheme, source: accentSource)
+    }
 
     @State private var selectedColorHex: String?
     @State private var selectedSymbol: String?
@@ -132,7 +137,7 @@ public struct FolderCustomizationPopover: View {
                     }
                     .overlay(
                         Circle()
-                            .strokeBorder(selectedColorHex == nil ? Color.accentColor : Color.clear, lineWidth: 2)
+                            .strokeBorder(selectedColorHex == nil ? accentColor : Color.clear, lineWidth: 2)
                     )
                 }
                 .buttonStyle(.plain)
@@ -154,7 +159,7 @@ public struct FolderCustomizationPopover: View {
                             )
                             .overlay(
                                 Circle()
-                                    .strokeBorder(active ? Color.accentColor : Color.black.opacity(0.1), lineWidth: active ? 2 : 0.75)
+                                    .strokeBorder(active ? accentColor : Color.black.opacity(0.1), lineWidth: active ? 2 : 0.75)
                             )
                     }
                     .buttonStyle(.plain)
@@ -204,7 +209,7 @@ public struct FolderCustomizationPopover: View {
                                         .font(.system(size: 18))
                                         .frame(width: 30, height: 30)
                                         .background(
-                                            active ? Color.accentColor.opacity(0.20) : Color.clear,
+                                            active ? accentColor.opacity(0.20) : Color.clear,
                                             in: RoundedRectangle(cornerRadius: 7, style: .continuous)
                                         )
                                 }
@@ -230,10 +235,10 @@ public struct FolderCustomizationPopover: View {
                                         } label: {
                                             Image(systemName: sf)
                                                 .font(.system(size: 15, weight: .medium))
-                                                .foregroundStyle(active ? Color.accentColor : Color.primary.opacity(0.76))
+                                                .foregroundStyle(active ? accentColor : Color.primary.opacity(0.76))
                                                 .frame(width: 34, height: 30)
                                                 .background(
-                                                    active ? Color.accentColor.opacity(0.16) : Color.primary.opacity(0.03),
+                                                    active ? accentColor.opacity(0.16) : Color.primary.opacity(0.03),
                                                     in: RoundedRectangle(cornerRadius: 7, style: .continuous)
                                                 )
                                         }

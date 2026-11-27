@@ -156,7 +156,7 @@ public struct LibrarySettingsPane: View {
                     if let onOpenSmartDeduplication {
                         SettingsRow(
                             title: "全媒体智能去重（纯本地算法 · 无需 AI）",
-                            subtitle: "基于 SHA-256、经典感知指纹、音频波形与规范化链接检出图片/动图/视频/音频/设计稿/书签/文档/3D 重复项，自动保留最高质量版本并合并标签与情绪板引用"
+                            subtitle: "基于内容校验、画面相似度、音频波形与来源链接检出图片/动图/视频/音频/设计稿/书签/文档/3D 重复项，自动保留最高质量版本并合并标签与情绪板引用"
                         ) {
                             Button("扫描重复素材…") {
                                 onOpenSmartDeduplication()
@@ -181,25 +181,34 @@ public struct LibrarySettingsPane: View {
                     }
 
                     GeometryReader { geo in
-                        let w = max(10, geo.size.width)
-                        let thumbW = stats.thumbnailBytes > 0 ? max(8, w * CGFloat(Double(stats.thumbnailBytes) / Double(barScale))) : 0
-                        let origW = stats.originalCacheBytes > 0 ? max(8, w * CGFloat(Double(stats.originalCacheBytes) / Double(barScale))) : 0
-                        let pinW = stats.pinnedOfflineBytes > 0 ? max(8, w * CGFloat(Double(stats.pinnedOfflineBytes) / Double(barScale))) : 0
+                        let innerW = max(10, geo.size.width - 6)
+                        let activeSegments = (stats.thumbnailBytes > 0 ? 1 : 0)
+                            + (stats.originalCacheBytes > 0 ? 1 : 0)
+                            + (stats.pinnedOfflineBytes > 0 ? 1 : 0)
+                        let availableW = max(8, innerW - CGFloat(max(0, activeSegments - 1)) * 2)
+                        let rawThumb = stats.thumbnailBytes > 0 ? max(8, availableW * CGFloat(Double(stats.thumbnailBytes) / Double(barScale))) : 0
+                        let rawOrig = stats.originalCacheBytes > 0 ? max(8, availableW * CGFloat(Double(stats.originalCacheBytes) / Double(barScale))) : 0
+                        let rawPin = stats.pinnedOfflineBytes > 0 ? max(8, availableW * CGFloat(Double(stats.pinnedOfflineBytes) / Double(barScale))) : 0
+                        let rawSum = rawThumb + rawOrig + rawPin
+                        let fitScale = rawSum > availableW ? (availableW / rawSum) : 1.0
+                        let thumbW = rawThumb * fitScale
+                        let origW = rawOrig * fitScale
+                        let pinW = rawPin * fitScale
                         HStack(spacing: 2) {
                             if thumbW > 0 {
                                 RoundedRectangle(cornerRadius: 4, style: .continuous)
                                     .fill(Color(charkleHex: "#4E7D96"))
-                                    .frame(width: min(w * 0.45, thumbW))
+                                    .frame(width: thumbW)
                             }
                             if origW > 0 {
                                 RoundedRectangle(cornerRadius: 4, style: .continuous)
                                     .fill(Color(charkleHex: "#D4A373"))
-                                    .frame(width: min(w * 0.45, origW))
+                                    .frame(width: origW)
                             }
                             if pinW > 0 {
                                 RoundedRectangle(cornerRadius: 4, style: .continuous)
                                     .fill(Color(charkleHex: "#6B8E76"))
-                                    .frame(width: min(w * 0.45, pinW))
+                                    .frame(width: pinW)
                             }
                             Spacer(minLength: 0)
                         }

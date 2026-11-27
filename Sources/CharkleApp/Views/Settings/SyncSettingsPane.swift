@@ -68,7 +68,14 @@ public struct SyncSettingsPane: View {
             didLoadDraft = true
         }
         .onChange(of: syncAndAI.syncConfig) { _, latest in
-            draftConfig = latest
+            var merged = latest
+            if isRootFolderFieldFocused {
+                merged.rootFolderName = draftConfig.rootFolderName
+            }
+            if isSharedFolderFieldFocused {
+                merged.sharedFolderURLOrID = draftConfig.sharedFolderURLOrID
+            }
+            draftConfig = merged
         }
         .sheet(isPresented: $showOAuthSetupSheet) {
             GoogleOAuthSetupSheet(syncAndAI: syncAndAI, autoSignInAfterSave: true)
@@ -721,6 +728,7 @@ public struct SyncSettingsPane: View {
                             }
                         }
                         .menuStyle(.borderlessButton)
+                        .menuIndicator(.hidden)
                         .padding(.horizontal, 11)
                         .frame(minHeight: 28)
                         .background(

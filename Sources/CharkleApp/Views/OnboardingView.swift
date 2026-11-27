@@ -178,8 +178,10 @@ public struct OnboardingView: View {
             CharkleModalBackdrop()
 
             GeometryReader { geo in
-                let modalWidth = min(max(720, geo.size.width - 72), 840)
-                let modalHeight = min(max(540, geo.size.height - 64), 636)
+                let maxAvailableWidth = max(360, geo.size.width - 24)
+                let maxAvailableHeight = max(320, geo.size.height - 24)
+                let modalWidth = min(max(620, geo.size.width - 72), min(840, maxAvailableWidth))
+                let modalHeight = min(max(460, geo.size.height - 64), min(636, maxAvailableHeight))
 
                 VStack(spacing: 0) {
                     headerBar
@@ -253,7 +255,14 @@ public struct OnboardingView: View {
             draftAIConfig = syncAndAI.aiConfig
         }
         .onChange(of: syncAndAI.syncConfig) { _, latest in
-            draftSyncConfig = latest
+            var merged = latest
+            if !draftSyncConfig.webDAVServerURL.isEmpty && latest.webDAVServerURL.isEmpty {
+                merged.webDAVServerURL = draftSyncConfig.webDAVServerURL
+            }
+            if !draftSyncConfig.webDAVUsername.isEmpty && latest.webDAVUsername.isEmpty {
+                merged.webDAVUsername = draftSyncConfig.webDAVUsername
+            }
+            draftSyncConfig = merged
         }
         .onChange(of: syncAndAI.aiConfig) { _, latest in
             draftAIConfig = latest
@@ -843,7 +852,7 @@ public struct OnboardingView: View {
                     } label: {
                         HStack(spacing: 6) {
                             CharkleIcon("notch", style: .duotone, size: 15)
-                            Text("预览顶部真刘海 (⌥⇧S)")
+                            Text("预览顶部真刘海 (\(GlobalHotkeyManager.displayString(for: .toggleNotchShelf, fallback: "⌥⇧S")))")
                                 .font(.system(size: 12, weight: .semibold))
                         }
                         .frame(maxWidth: .infinity)
@@ -881,10 +890,11 @@ public struct OnboardingView: View {
                                         : SettingsPalette.warningInk(for: colorScheme)
                                 )
                             }
+                            let captureKey = GlobalHotkeyManager.displayString(for: .captureArea, fallback: "⌥⇧A")
                             Text(
                                 hasScreenCapturePermission
-                                    ? "已就绪 · 可随时按 ⌥⇧A 在任意应用中框选截图入库"
-                                    : "仅在使用 ⌥⇧A 区域截图时需要；纯拖图或收藏剪贴板可直接跳过"
+                                    ? "已就绪 · 可随时按 \(captureKey) 在任意应用中框选截图入库"
+                                    : "仅在使用 \(captureKey) 区域截图时需要；纯拖图或收藏剪贴板可直接跳过"
                             )
                             .font(.system(size: 11.5))
                             .foregroundStyle(.secondary)
@@ -978,9 +988,12 @@ public struct OnboardingView: View {
                     .opacity(coordinator.notchShelfEnabled ? 1.0 : 0.55)
 
                     SettingsCardDivider()
+                    let captureKey = GlobalHotkeyManager.displayString(for: .captureArea, fallback: "⌥⇧A")
+                    let clipboardKey = GlobalHotkeyManager.displayString(for: .collectClipboard, fallback: "⌥⇧V")
+                    let notchKey = GlobalHotkeyManager.displayString(for: .toggleNotchShelf, fallback: "⌥⇧S")
                     instantSwitchRow(
                         title: "启用系统全局快捷键",
-                        subtitle: "任意应用中随时按 ⌥⇧A 截图、⌥⇧V 收藏剪贴板与推文、⌥⇧S 呼出刘海",
+                        subtitle: "任意应用中随时按 \(captureKey) 截图、\(clipboardKey) 收藏剪贴板与推文、\(notchKey) 呼出刘海",
                         isOn: Binding(
                             get: { coordinator.globalHotkeysEnabled },
                             set: { newVal in
@@ -1140,7 +1153,7 @@ public struct OnboardingView: View {
                             .font(.system(size: 10.5))
                             .foregroundStyle(.secondary)
                             .padding(.bottom, 2)
-                        offlineFeatureBullet("自动配色提取（CIELAB）")
+                        offlineFeatureBullet("自动配色提取与相近色筛选")
                         offlineFeatureBullet("视觉相似推荐（Apple Vision）")
                         offlineFeatureBullet("图内文字 OCR 识别")
                         offlineFeatureBullet("中文与拼音首字母快搜")

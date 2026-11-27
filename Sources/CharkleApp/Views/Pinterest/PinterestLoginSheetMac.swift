@@ -21,6 +21,7 @@ struct PinterestLoginSheetMac: View {
     @State private var isVerifying: Bool = false
     @State private var statusHint: String? = nil
     @State private var webCommand = WebNavigationCommand()
+    @State private var verifyTask: Task<Void, Never>? = nil
 
     struct WebNavigationCommand: Equatable {
         enum Action { case none, reload, goBack, closePopup }
@@ -101,6 +102,10 @@ struct PinterestLoginSheetMac: View {
         }
         .frame(width: 560, height: 700)
         .background(CharkleTheme.surfaceElevated(for: colorScheme))
+        .onDisappear {
+            verifyTask?.cancel()
+            verifyTask = nil
+        }
     }
 
     private var headerBar: some View {
@@ -182,17 +187,20 @@ struct PinterestLoginSheetMac: View {
     }
 
     private func schedulePostPopupVerify() {
-        Task {
+        verifyTask?.cancel()
+        verifyTask = Task {
             for delayMs in [600, 1400, 2600] {
                 try? await Task.sleep(for: .milliseconds(delayMs))
-                guard !isVerifying else { return }
+                guard !Task.isCancelled, !isVerifying else { return }
                 let cookies = await WKWebsiteDataStore.default().httpCookieStore.allCookies()
+                guard !Task.isCancelled else { return }
                 let hasAuth = cookies.contains {
                     $0.domain.lowercased().contains("pinterest") && $0.name == "_auth" && $0.value == "1"
                 }
                 if hasAuth {
                     isVerifying = true
                     let ok = await onVerifySession()
+                    guard !Task.isCancelled else { return }
                     isVerifying = false
                     if ok { return }
                 }
@@ -202,14 +210,17 @@ struct PinterestLoginSheetMac: View {
 
     private func triggerAutoVerifyFromCookies() {
         guard !isVerifying else { return }
-        Task {
+        verifyTask?.cancel()
+        verifyTask = Task {
             let cookies = await WKWebsiteDataStore.default().httpCookieStore.allCookies()
+            guard !Task.isCancelled else { return }
             let hasAuth = cookies.contains {
                 $0.domain.lowercased().contains("pinterest") && $0.name == "_auth" && $0.value == "1"
             }
             guard hasAuth else { return }
             isVerifying = true
             let ok = await onVerifySession()
+            guard !Task.isCancelled else { return }
             isVerifying = false
             if !ok {
                 statusHint = "若页面已完成登录，可点击右上角「已完成登录」手动同步状态。"
@@ -221,8 +232,10 @@ struct PinterestLoginSheetMac: View {
         guard !isVerifying else { return }
         isVerifying = true
         statusHint = nil
-        Task {
+        verifyTask?.cancel()
+        verifyTask = Task {
             let ok = await onVerifySession()
+            guard !Task.isCancelled else { return }
             isVerifying = false
             if !ok {
                 statusHint = "暂未检测到已登录的 Pinterest 会话，请先在下方网页完成登录后再点击验证。"
@@ -280,8 +293,7 @@ private struct PinterestLoginWebViewMac: NSViewRepresentable {
     }
 
     static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
-        coordinator.stopObservingCookies()
-        coordinator.closeAllPopups()
+        coordinator.teardown()
     }
 
     final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKHTTPCookieStoreObserver {
@@ -318,6 +330,20 @@ private struct PinterestLoginWebViewMac: NSViewRepresentable {
 
         func stopObservingCookies() {
             WKWebsiteDataStore.default().httpCookieStore.remove(self)
+        }
+
+        func teardown() {
+            stopObservingCookies()
+            closeAllPopups()
+            if let primary = primaryWebView {
+                primary.stopLoading()
+                primary.navigationDelegate = nil
+                primary.uiDelegate = nil
+                primary.loadHTMLString("", baseURL: nil)
+                primary.removeFromSuperview()
+            }
+            primaryWebView = nil
+            containerView = nil
         }
 
         func cookiesDidChange(in cookieStore: WKHTTPCookieStore) {

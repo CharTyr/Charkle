@@ -144,7 +144,7 @@ public struct MoodboardCanvasView: View {
     @State private var camera = FreeformCameraState()
     @State private var hoverState = FreeformHoverState()
     @State private var interaction = FreeformInteractionState()
-    @State private var gestureLastMagnification: CGFloat = 1.0
+    @State private var liveDocRef = LiveMoodboardDocumentRef()
     @State private var panStartCenter: CGPoint?
     @State private var isSpaceKeyPanning: Bool = false
 
@@ -209,9 +209,14 @@ public struct MoodboardCanvasView: View {
     }
 
     public var body: some View {
+        buildCanvasRoot()
+    }
+
+    private func buildCanvasRoot() -> some View {
+        liveDocRef.update(document)
         // Use an infinitely flexible Color.clear base so fixed-size inner canvas stages
         // can NEVER inflate the root HStack height or clip the bottom of the app window.
-        Color.clear
+        return Color.clear
             .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
             .onGeometryChange(for: CGSize.self) { proxy in
                 CGSize(width: floor(max(1, proxy.size.width)), height: floor(max(1, proxy.size.height)))
@@ -288,11 +293,13 @@ public struct MoodboardCanvasView: View {
                 .clipped()
             }
             .onAppear {
+                liveDocRef.update(document)
                 syncCameraFromDocument()
                 ensureFreeformModeIfLegacy()
                 prefetchBoardThumbnails()
             }
             .onChange(of: document.id) { _, _ in
+                liveDocRef.update(document)
                 selectedNodeIDs.removeAll()
                 selectedConnectorID = nil
                 editingConnectorLabelID = nil
@@ -301,6 +308,11 @@ public struct MoodboardCanvasView: View {
                 syncCameraFromDocument()
                 ensureFreeformModeIfLegacy()
                 prefetchBoardThumbnails()
+            }
+            .onChange(of: document.mode.isAutoEditorial) { _, isAuto in
+                if isAuto {
+                    ensureFreeformModeIfLegacy()
+                }
             }
             .onDrop(of: [.fileURL, .url, .image, .plainText], isTargeted: $isDropTargeted) { providers, location in
                 handleCanvasDrop(providers: providers, screenLocation: location)
@@ -540,8 +552,9 @@ public struct MoodboardCanvasView: View {
                 activeTool: activeTool,
                 isSpaceKeyPanning: isSpaceKeyPanning
             ) { node, worldRect, screenCenter, screenW, screenH, currentRotation, isSelected, isHovered in
+                let isActiveConnectorSource = (interaction.pendingConnectorSource?.nodeID == node.id)
                 ZStack {
-                    if (activeTool == .connector || isHovered || isSelected) && activeTool != .pen && activeTool != .eraser && !isSpaceKeyPanning {
+                    if (activeTool == .connector || isHovered || isSelected || isActiveConnectorSource) && activeTool != .pen && activeTool != .eraser && !isSpaceKeyPanning {
                         connectorPortsOverlay(
                             node: node,
                             worldRect: worldRect,
@@ -585,24 +598,6 @@ public struct MoodboardCanvasView: View {
         }
         .coordinateSpace(name: "charkle-freeform-stage")
         .clipped()
-        .simultaneousGesture(
-            MagnifyGesture()
-                .onChanged { value in
-                    hoverState.markPanningActivity()
-                    let prev = gestureLastMagnification > 0 ? gestureLastMagnification : 1.0
-                    let current = max(0.01, value.magnification)
-                    let stepFactor = current / prev
-                    gestureLastMagnification = current
-                    let anchor = (value.startLocation.x.isFinite && value.startLocation.y.isFinite)
-                        ? value.startLocation
-                        : CGPoint(x: viewportSize.width * 0.5, y: viewportSize.height * 0.5)
-                    camera.applyZoom(factor: stepFactor, anchorScreenPoint: anchor, viewportSize: viewportSize)
-                }
-                .onEnded { _ in
-                    gestureLastMagnification = 1.0
-                    persistCameraViewport()
-                }
-        )
     }
 
     // MARK: - Selection Transform Helpers & Interactive Rotation Handle
@@ -647,6 +642,13 @@ public struct MoodboardCanvasView: View {
     private func handleEscapeKey() -> Bool {
         if interaction.pendingConnectorSource != nil {
             interaction.pendingConnectorSource = nil
+            interaction.pendingConnectorHoverTargetID = nil
+            return true
+        }
+        if interaction.freeformMarqueeStart != nil {
+            interaction.freeformMarqueeStart = nil
+            interaction.freeformMarqueeCurrent = nil
+            interaction.freeformMarqueeBaseSelection = []
             return true
         }
         if editingConnectorLabelID != nil {
@@ -1100,7 +1102,13 @@ public struct MoodboardCanvasView: View {
                         }
                     } else {
                         guard distance >= 4 else { return }
-                        if interaction.freeformMarqueeStart == nil { interaction.freeformMarqueeStart = value.startLocation }
+                        if interaction.freeformMarqueeStart == nil {
+                            interaction.freeformMarqueeStart = value.startLocation
+                            let mods = NSEvent.modifierFlags
+                            interaction.freeformMarqueeBaseSelection = (mods.contains(.shift) || mods.contains(.command))
+                                ? selectedNodeIDs
+                                : []
+                        }
                         interaction.freeformMarqueeCurrent = value.location
                         if let s = interaction.freeformMarqueeStart {
                             let w1 = screenToWorld(s)
@@ -1111,7 +1119,10 @@ public struct MoodboardCanvasView: View {
                                 width: abs(w2.x - w1.x),
                                 height: abs(w2.y - w1.y)
                             )
-                            let nextSelection = Set(document.nodes.filter { $0.frame.intersects(worldBox) }.map(\.id))
+                            var nextSelection = interaction.freeformMarqueeBaseSelection
+                            for node in document.nodes where Self.nodeIntersectsWorldBox(node, worldBox: worldBox) {
+                                nextSelection.insert(node.id)
+                            }
                             if nextSelection != selectedNodeIDs {
                                 selectedNodeIDs = nextSelection
                             }
@@ -1141,6 +1152,7 @@ public struct MoodboardCanvasView: View {
                 }
                 interaction.freeformMarqueeStart = nil
                 interaction.freeformMarqueeCurrent = nil
+                interaction.freeformMarqueeBaseSelection = []
                 if activeTool == .pen && interaction.activeInkPoints.count >= 2 {
                     var nextDoc = document
                     let stroke = InkStroke(
@@ -1179,6 +1191,96 @@ public struct MoodboardCanvasView: View {
             }
     }
 
+    internal nonisolated static func nodeIntersectsWorldBox(_ node: BoardNode, worldBox: BoardRect) -> Bool {
+        let rot = node.rotationDegrees
+        guard rot.isFinite, abs(rot) > 0.1 else {
+            return node.frame.intersects(worldBox)
+        }
+        let rect = node.frame.cgRect
+        let center = CGPoint(x: rect.midX, y: rect.midY)
+        let corners = [
+            CGPoint(x: rect.minX, y: rect.minY),
+            CGPoint(x: rect.maxX, y: rect.minY),
+            CGPoint(x: rect.minX, y: rect.maxY),
+            CGPoint(x: rect.maxX, y: rect.maxY)
+        ].map { ConnectorGeometry.rotatedPoint($0, around: center, degrees: rot) }
+        guard let minX = corners.map(\.x).min(),
+              let maxX = corners.map(\.x).max(),
+              let minY = corners.map(\.y).min(),
+              let maxY = corners.map(\.y).max() else {
+            return node.frame.intersects(worldBox)
+        }
+        let rotatedAABB = BoardRect(x: Double(minX), y: Double(minY), width: Double(maxX - minX), height: Double(maxY - minY))
+        return rotatedAABB.intersects(worldBox)
+    }
+
+    internal nonisolated static func resolveBestSnapDelta(
+        movingRect: BoardRect,
+        rawDX: Double,
+        rawDY: Double,
+        otherRects: [BoardRect],
+        threshold: Double
+    ) -> (dx: Double, dy: Double, guidesX: [CGFloat], guidesY: [CGFloat]) {
+        guard threshold > 0, !otherRects.isEmpty else {
+            return (rawDX, rawDY, [], [])
+        }
+        let candMinX = movingRect.minX + rawDX
+        let candMidX = movingRect.midX + rawDX
+        let candMaxX = movingRect.maxX + rawDX
+        let candMinY = movingRect.minY + rawDY
+        let candMidY = movingRect.midY + rawDY
+        let candMaxY = movingRect.maxY + rawDY
+
+        var bestDX = rawDX
+        var bestXDist = threshold
+        var bestGuideX: CGFloat?
+
+        var bestDY = rawDY
+        var bestYDist = threshold
+        var bestGuideY: CGFloat?
+
+        for other in otherRects {
+            let xPairs: [(cand: Double, target: Double, origin: Double)] = [
+                (candMinX, other.minX, movingRect.minX),
+                (candMidX, other.midX, movingRect.midX),
+                (candMaxX, other.maxX, movingRect.maxX),
+                (candMinX, other.maxX, movingRect.minX),
+                (candMaxX, other.minX, movingRect.maxX)
+            ]
+            for pair in xPairs {
+                let d = abs(pair.cand - pair.target)
+                if d < bestXDist {
+                    bestXDist = d
+                    bestDX = pair.target - pair.origin
+                    bestGuideX = CGFloat(pair.target)
+                }
+            }
+
+            let yPairs: [(cand: Double, target: Double, origin: Double)] = [
+                (candMinY, other.minY, movingRect.minY),
+                (candMidY, other.midY, movingRect.midY),
+                (candMaxY, other.maxY, movingRect.maxY),
+                (candMinY, other.maxY, movingRect.minY),
+                (candMaxY, other.minY, movingRect.maxY)
+            ]
+            for pair in yPairs {
+                let d = abs(pair.cand - pair.target)
+                if d < bestYDist {
+                    bestYDist = d
+                    bestDY = pair.target - pair.origin
+                    bestGuideY = CGFloat(pair.target)
+                }
+            }
+        }
+
+        return (
+            bestDX,
+            bestDY,
+            bestGuideX.map { [$0] } ?? [],
+            bestGuideY.map { [$0] } ?? []
+        )
+    }
+
     private func nodeDragGesture(for node: BoardNode) -> some Gesture {
         DragGesture(minimumDistance: 3, coordinateSpace: .named("charkle-freeform-stage"))
             .onChanged { value in
@@ -1188,14 +1290,26 @@ public struct MoodboardCanvasView: View {
                     if !selectedNodeIDs.contains(node.id) {
                         selectedNodeIDs = [node.id]
                     }
-                    // If dragging a groupFrame, capture all enclosed child nodes so they move together!
-                    if case .groupFrame = node.kind {
-                        let enclosed = document.nodes.filter { other in
-                            guard other.id != node.id else { return false }
-                            let center = BoardPoint(x: other.frame.midX, y: other.frame.midY)
-                            return node.frame.contains(center)
-                        }.map(\.id)
-                        interaction.activeGroupChildIDs = Set(enclosed)
+                    // Capture enclosed unlocked children of ALL selected/dragged groupFrames (rotation-aware)
+                    let movingGroups = document.nodes.filter { candidate in
+                        guard !candidate.isLocked,
+                              (candidate.id == node.id || selectedNodeIDs.contains(candidate.id)) else { return false }
+                        if case .groupFrame = candidate.kind { return true }
+                        return false
+                    }
+                    if !movingGroups.isEmpty {
+                        var enclosed = Set<UUID>()
+                        for other in document.nodes where !other.isLocked {
+                            if case .groupFrame = other.kind { continue }
+                            let center = CGPoint(x: other.frame.midX, y: other.frame.midY)
+                            if movingGroups.contains(where: { group in
+                                other.id != group.id
+                                    && ConnectorGeometry.containsPoint(center, in: group.frame.cgRect, rotationDegrees: group.rotationDegrees)
+                            }) {
+                                enclosed.insert(other.id)
+                            }
+                        }
+                        interaction.activeGroupChildIDs = enclosed
                     } else {
                         interaction.activeGroupChildIDs = []
                     }
@@ -1203,39 +1317,35 @@ public struct MoodboardCanvasView: View {
                 var dx = value.translation.width / camera.zoom
                 var dy = value.translation.height / camera.zoom
 
-                // Smart alignment snap guides (6pt threshold)
-                let snapThreshold = 6.0 / Double(camera.zoom)
-                let candidateMinX = node.frame.minX + Double(dx)
-                let candidateMidX = node.frame.midX + Double(dx)
-                let candidateMinY = node.frame.minY + Double(dy)
-                let candidateMidY = node.frame.midY + Double(dy)
-                var guidesX: [CGFloat] = []
-                var guidesY: [CGFloat] = []
-
-                for other in document.nodes {
-                    if other.id == node.id || selectedNodeIDs.contains(other.id) || interaction.activeGroupChildIDs.contains(other.id) {
-                        continue
+                // Smart alignment snap guides (6pt screen threshold, nearest-match across min/mid/max edges; hold ⌘ to bypass)
+                if !NSEvent.modifierFlags.contains(.command) {
+                    let snapThreshold = 6.0 / Double(camera.zoom)
+                    let otherRects = document.nodes.compactMap { other -> BoardRect? in
+                        if other.id == node.id
+                            || selectedNodeIDs.contains(other.id)
+                            || interaction.activeGroupChildIDs.contains(other.id) {
+                            return nil
+                        }
+                        return other.frame
                     }
-                    if abs(candidateMinX - other.frame.minX) < snapThreshold {
-                        dx = CGFloat(other.frame.minX - node.frame.minX)
-                        guidesX = [CGFloat(other.frame.minX)]
-                    } else if abs(candidateMidX - other.frame.midX) < snapThreshold {
-                        dx = CGFloat(other.frame.midX - node.frame.midX)
-                        guidesX = [CGFloat(other.frame.midX)]
+                    let snapped = Self.resolveBestSnapDelta(
+                        movingRect: node.frame,
+                        rawDX: Double(dx),
+                        rawDY: Double(dy),
+                        otherRects: otherRects,
+                        threshold: snapThreshold
+                    )
+                    dx = CGFloat(snapped.dx)
+                    dy = CGFloat(snapped.dy)
+                    if interaction.snapGuidesX != snapped.guidesX {
+                        interaction.snapGuidesX = snapped.guidesX
                     }
-                    if abs(candidateMinY - other.frame.minY) < snapThreshold {
-                        dy = CGFloat(other.frame.minY - node.frame.minY)
-                        guidesY = [CGFloat(other.frame.minY)]
-                    } else if abs(candidateMidY - other.frame.midY) < snapThreshold {
-                        dy = CGFloat(other.frame.midY - node.frame.midY)
-                        guidesY = [CGFloat(other.frame.midY)]
+                    if interaction.snapGuidesY != snapped.guidesY {
+                        interaction.snapGuidesY = snapped.guidesY
                     }
-                }
-                if interaction.snapGuidesX != guidesX {
-                    interaction.snapGuidesX = guidesX
-                }
-                if interaction.snapGuidesY != guidesY {
-                    interaction.snapGuidesY = guidesY
+                } else {
+                    if !interaction.snapGuidesX.isEmpty { interaction.snapGuidesX = [] }
+                    if !interaction.snapGuidesY.isEmpty { interaction.snapGuidesY = [] }
                 }
                 interaction.activeNodeDragDelta = CGSize(width: dx, height: dy)
             }
@@ -1302,7 +1412,7 @@ public struct MoodboardCanvasView: View {
                                     interaction.resizingNodeID = node.id
                                     interaction.resizingSideEdge = side
                                     interaction.resizeStartFrame = node.frame
-                                    interaction.liveGroupReflowChildIDs = enclosedChildIDs(in: node)
+                                    interaction.liveGroupReflowChildIDs = Set(enclosedChildIDs(in: node))
                                 }
                                 guard let start = interaction.resizeStartFrame else { return }
                                 let stageDX = Double(value.translation.width / camera.zoom)
@@ -1375,7 +1485,7 @@ public struct MoodboardCanvasView: View {
                                 interaction.resizingCorner = corner
                                 interaction.resizeStartFrame = node.frame
                                 if case .groupFrame = node.kind {
-                                    interaction.liveGroupReflowChildIDs = enclosedChildIDs(in: node)
+                                    interaction.liveGroupReflowChildIDs = Set(enclosedChildIDs(in: node))
                                 } else {
                                     interaction.liveGroupReflowChildIDs = []
                                 }
@@ -1448,6 +1558,18 @@ public struct MoodboardCanvasView: View {
         }
     }
 
+    private func findConnectorTargetNode(at worldPoint: CGPoint, excluding sourceNodeID: UUID, sortedNodes: [BoardNode]) -> BoardNode? {
+        let reversed = sortedNodes.reversed()
+        return reversed.first(where: { other in
+            guard other.id != sourceNodeID else { return false }
+            if case .groupFrame = other.kind { return false }
+            return ConnectorGeometry.containsPoint(worldPoint, in: other.frame.cgRect, rotationDegrees: other.rotationDegrees)
+        }) ?? reversed.first(where: { other in
+            other.id != sourceNodeID
+                && ConnectorGeometry.containsPoint(worldPoint, in: other.frame.cgRect, rotationDegrees: other.rotationDegrees)
+        })
+    }
+
     private func connectorPortsOverlay(
         node: BoardNode,
         worldRect: BoardRect,
@@ -1483,24 +1605,30 @@ public struct MoodboardCanvasView: View {
                             if interaction.pendingConnectorSource == nil {
                                 interaction.pendingConnectorSource = (node.id, anchor, startWorld)
                             }
-                            interaction.pendingConnectorCursorWorld = screenToWorld(value.location)
+                            let cursorWorld = screenToWorld(value.location)
+                            interaction.pendingConnectorCursorWorld = cursorWorld
+                            let hoverTargetID = findConnectorTargetNode(
+                                at: cursorWorld,
+                                excluding: node.id,
+                                sortedNodes: sortedNodes
+                            )?.id
+                            if interaction.pendingConnectorHoverTargetID != hoverTargetID {
+                                interaction.pendingConnectorHoverTargetID = hoverTargetID
+                            }
                         }
                         .onEnded { _ in
-                            defer { interaction.pendingConnectorSource = nil }
+                            defer {
+                                interaction.pendingConnectorSource = nil
+                                interaction.pendingConnectorHoverTargetID = nil
+                            }
                             guard let pending = interaction.pendingConnectorSource else { return }
                             let dropCG = interaction.pendingConnectorCursorWorld
-                            // Match topmost node in reverse z-order, preferring non-group cards over background groupFrames
-                            let reversed = sortedNodes.reversed()
-                            let targetNode = reversed.first(where: { other in
-                                guard other.id != pending.nodeID else { return false }
-                                if case .groupFrame = other.kind { return false }
-                                return ConnectorGeometry.containsPoint(dropCG, in: other.frame.cgRect, rotationDegrees: other.rotationDegrees)
-                            }) ?? reversed.first(where: { other in
-                                other.id != pending.nodeID
-                                    && ConnectorGeometry.containsPoint(dropCG, in: other.frame.cgRect, rotationDegrees: other.rotationDegrees)
-                            })
-                            if let targetNode {
-                                var nextDoc = document
+                            if let targetNode = findConnectorTargetNode(
+                                at: dropCG,
+                                excluding: pending.nodeID,
+                                sortedNodes: sortedNodes
+                            ) {
+                                var nextDoc = liveDocRef.document ?? document
                                 let conn = BoardConnector(
                                     fromNodeID: pending.nodeID,
                                     fromAnchor: pending.anchor,
@@ -1633,8 +1761,8 @@ public struct MoodboardCanvasView: View {
         counts.reserveCapacity(groups.count)
         for other in nodes where !other.isLocked {
             if case .groupFrame = other.kind { continue }
-            let center = BoardPoint(x: other.frame.midX, y: other.frame.midY)
-            for group in groups where group.frame.contains(center) {
+            let center = CGPoint(x: other.frame.midX, y: other.frame.midY)
+            for group in groups where ConnectorGeometry.containsPoint(center, in: group.frame.cgRect, rotationDegrees: group.rotationDegrees) {
                 counts[group.id, default: 0] += 1
             }
         }
@@ -1707,6 +1835,7 @@ public struct MoodboardCanvasView: View {
                 onDelete: { removeNode(id: node.id) }
             )
         case .note(let title, let text, let style, let fontSize):
+            let expectedBoardID = document.id
             BoardNoteNodeView(
                 node: node,
                 title: title,
@@ -1715,19 +1844,20 @@ public struct MoodboardCanvasView: View {
                 fontSize: fontSize,
                 isSelected: isSelected,
                 onUpdate: { newTitle, newText, newStyle, newFontSize in
-                    updateNote(nodeID: node.id, title: newTitle, text: newText, style: newStyle, fontSize: newFontSize)
+                    updateNote(boardID: expectedBoardID, nodeID: node.id, title: newTitle, text: newText, style: newStyle, fontSize: newFontSize)
                 },
                 onDelete: { removeNode(id: node.id) }
             )
         case .groupFrame(let title, let tint):
             let enclosedCount = groupChildCounts[node.id] ?? 0
+            let expectedBoardID = document.id
             BoardGroupFrameView(
                 title: title,
                 tint: tint,
                 itemCount: enclosedCount,
                 isSelected: isSelected,
                 onUpdate: { newTitle, newTint in
-                    updateGroupFrame(nodeID: node.id, title: newTitle, tint: newTint)
+                    updateGroupFrame(boardID: expectedBoardID, nodeID: node.id, title: newTitle, tint: newTint)
                 },
                 onReflowInside: {
                     reflowGroupFrameNow(nodeID: node.id)
@@ -2041,6 +2171,7 @@ public struct MoodboardCanvasView: View {
                     .background(Color.primary.opacity(0.08), in: RoundedRectangle(cornerRadius: compact ? 8 : 10, style: .continuous))
                 }
                 .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
                 .fixedSize()
                 .help("导出情绪板或复制到 Figma")
             }
@@ -2146,8 +2277,8 @@ public struct MoodboardCanvasView: View {
         document.nodes.filter { other in
             guard other.id != groupNode.id, !other.isLocked else { return false }
             if case .groupFrame = other.kind { return false }
-            let center = BoardPoint(x: other.frame.midX, y: other.frame.midY)
-            return groupNode.frame.contains(center)
+            let center = CGPoint(x: other.frame.midX, y: other.frame.midY)
+            return ConnectorGeometry.containsPoint(center, in: groupNode.frame.cgRect, rotationDegrees: groupNode.rotationDegrees)
         }.map(\.id)
     }
 
@@ -2156,7 +2287,7 @@ public struct MoodboardCanvasView: View {
             interaction.liveGroupReflowFrames = [:]
             return
         }
-        let idSet = Set(interaction.liveGroupReflowChildIDs)
+        let idSet = interaction.liveGroupReflowChildIDs
         let children = document.nodes.filter { idSet.contains($0.id) }
         interaction.liveGroupReflowFrames = EditorialLayoutSolver.reflowNodesInsideGroupFrame(
             groupRect: groupRect,
@@ -2374,12 +2505,28 @@ public struct MoodboardCanvasView: View {
                 candidates.append(asset)
             }
         }
-        for asset in assetsByID.values.sorted(by: { $0.updatedAt > $1.updatedAt }) where candidates.count < 24 {
-            guard asset.id != targetAssetID,
-                  !asset.isTrashed,
-                  asset.mediaKind == .image || asset.mediaKind == .webBookmark,
-                  seen.insert(asset.id).inserted else { continue }
-            candidates.append(asset)
+        let remainingSlots = max(0, 24 - candidates.count)
+        if remainingSlots > 0 {
+            // Single-pass O(N) top-K selection avoids an O(N log N) full-library sort inside SwiftUI `body`
+            var topRecent: [AssetRecord] = []
+            topRecent.reserveCapacity(remainingSlots)
+            for asset in assetsByID.values {
+                guard asset.id != targetAssetID,
+                      !asset.isTrashed,
+                      asset.mediaKind == .image || asset.mediaKind == .webBookmark,
+                      !seen.contains(asset.id) else { continue }
+                if topRecent.count < remainingSlots {
+                    let insertIdx = topRecent.firstIndex(where: { asset.updatedAt > $0.updatedAt }) ?? topRecent.endIndex
+                    topRecent.insert(asset, at: insertIdx)
+                } else if let oldest = topRecent.last, asset.updatedAt > oldest.updatedAt {
+                    let insertIdx = topRecent.firstIndex(where: { asset.updatedAt > $0.updatedAt }) ?? topRecent.endIndex
+                    topRecent.insert(asset, at: insertIdx)
+                    topRecent.removeLast()
+                }
+            }
+            for asset in topRecent where seen.insert(asset.id).inserted {
+                candidates.append(asset)
+            }
         }
 
         return VStack(alignment: .leading, spacing: 14) {
@@ -2556,16 +2703,18 @@ public struct MoodboardCanvasView: View {
         callbacks.onCommitDocument(nextDoc)
     }
 
-    private func updateNote(nodeID: UUID, title: String?, text: String, style: NoteStyle, fontSize: Double) {
-        var nextDoc = document
+    private func updateNote(boardID: UUID, nodeID: UUID, title: String?, text: String, style: NoteStyle, fontSize: Double) {
+        // Always read the latest live document from `liveDocRef` and verify board identity so
+        // 450ms debounced note flushes never overwrite concurrent drags/Undos or a newly switched board.
+        guard var nextDoc = liveDocRef.document, nextDoc.id == boardID else { return }
         guard let idx = nextDoc.nodes.firstIndex(where: { $0.id == nodeID }) else { return }
         nextDoc.nodes[idx].kind = .note(title: title, text: text, style: style, fontSize: fontSize)
         nextDoc.nodes[idx].updatedAt = Date()
         callbacks.onCommitDocument(nextDoc)
     }
 
-    private func updateGroupFrame(nodeID: UUID, title: String, tint: GroupTint) {
-        var nextDoc = document
+    private func updateGroupFrame(boardID: UUID, nodeID: UUID, title: String, tint: GroupTint) {
+        guard var nextDoc = liveDocRef.document, nextDoc.id == boardID else { return }
         guard let idx = nextDoc.nodes.firstIndex(where: { $0.id == nodeID }) else { return }
         nextDoc.nodes[idx].kind = .groupFrame(title: title, tint: tint)
         nextDoc.nodes[idx].updatedAt = Date()
@@ -2789,6 +2938,10 @@ private struct FreeformInputBridge: NSViewRepresentable {
         nsView.onSpaceQuickTap = onSpaceQuickTap
         nsView.onKeyCommand = onKeyCommand
     }
+
+    static func dismantleNSView(_ nsView: CanvasInputCatcherView, coordinator: ()) {
+        nsView.teardownMonitors()
+    }
 }
 
 private final class CanvasInputCatcherView: NSView {
@@ -2813,6 +2966,7 @@ private final class CanvasInputCatcherView: NSView {
     private var isSpaceHeld = false
     private var isSpaceLeftDragging = false
     private var didDragDuringSpace = false
+    private var isWheelZoomMomentumSuppressed = false
     private var spaceDownTimestamp: TimeInterval = 0
     private var lastWindowPoint: NSPoint = .zero
 
@@ -2833,6 +2987,7 @@ private final class CanvasInputCatcherView: NSView {
 
         let mask: NSEvent.EventTypeMask = [
             .scrollWheel,
+            .magnify,
             .otherMouseDown,
             .otherMouseDragged,
             .otherMouseUp,
@@ -2857,6 +3012,21 @@ private final class CanvasInputCatcherView: NSView {
         return false
     }
 
+    /// Avoids hijacking Backspace/Cmd+A/C/X/V when keyboard focus is inside a Sidebar outline/table
+    /// or Inspector list rather than the Moodboard canvas.
+    private func isResponderInExternalListControl(in window: NSWindow) -> Bool {
+        guard let view = window.firstResponder as? NSView else { return false }
+        var cursor: NSView? = view
+        while let cur = cursor {
+            if cur === self { return false }
+            if cur is NSOutlineView || cur is NSTableView || cur is NSCollectionView {
+                return true
+            }
+            cursor = cur.superview
+        }
+        return false
+    }
+
     private func isPointInsideActiveTextView(_ windowPoint: NSPoint, in window: NSWindow) -> Bool {
         guard let textView = window.firstResponder as? NSView,
               textView is NSTextView || textView is NSTextField || textView is NSText else {
@@ -2867,6 +3037,24 @@ private final class CanvasInputCatcherView: NSView {
         return targetFrame.contains(windowPoint)
     }
 
+    private func isPointInsideEmbeddedScrollView(_ windowPoint: NSPoint, in window: NSWindow) -> Bool {
+        guard let hitView = window.contentView?.hitTest(windowPoint) else { return false }
+        var cursor: NSView? = hitView
+        while let cur = cursor {
+            if cur === self { return false }
+            if let sv = cur as? NSScrollView, sv.documentView != nil {
+                // Allow embedded UI scroll views (e.g. compact bottom dock horizontal strip) to scroll natively
+                let svRect = sv.convert(sv.bounds, to: nil)
+                let selfRect = convert(bounds, to: nil)
+                if svRect.height < selfRect.height * 0.45 {
+                    return true
+                }
+            }
+            cursor = cur.superview
+        }
+        return false
+    }
+
     private func isPointInsideCanvas(_ windowPoint: NSPoint) -> Bool {
         let local = convert(windowPoint, from: nil)
         return bounds.contains(local)
@@ -2875,22 +3063,57 @@ private final class CanvasInputCatcherView: NSView {
     private func handleLocalEvent(_ event: NSEvent, in window: NSWindow) -> NSEvent? {
         guard !isSuspended else { return event }
         switch event.type {
-        case .scrollWheel:
-            guard window.attachedSheet == nil && NSApp.modalWindow == nil else { return event }
+        case .magnify:
+            guard window.attachedSheet == nil && NSApp?.modalWindow == nil else { return event }
             let locInView = convert(event.locationInWindow, from: nil)
             guard bounds.contains(locInView) else { return event }
-            // Let scroll wheel scroll inside an actively edited Sticky Note TextEditor instead of panning canvas
-            if isPointInsideActiveTextView(event.locationInWindow, in: window)
-                && !event.modifierFlags.contains(.option)
-                && !event.modifierFlags.contains(.command) {
+            let swiftUIPoint = CGPoint(x: locInView.x, y: bounds.height - locInView.y)
+            if event.phase.contains(.ended) || event.phase.contains(.cancelled) {
+                onPanEnded?()
+                return nil
+            }
+            let factor = max(0.75, min(1.35, 1.0 + event.magnification))
+            if abs(factor - 1.0) > 0.0002 {
+                onZoomDelta?(factor, swiftUIPoint)
+            }
+            return nil
+
+        case .scrollWheel:
+            guard window.attachedSheet == nil && NSApp?.modalWindow == nil else { return event }
+            let locInView = convert(event.locationInWindow, from: nil)
+            guard bounds.contains(locInView) else { return event }
+            // Let scroll wheel scroll inside an actively edited Sticky Note TextEditor or compact HUD strip
+            if !event.modifierFlags.contains(.option)
+                && !event.modifierFlags.contains(.command)
+                && (isPointInsideActiveTextView(event.locationInWindow, in: window)
+                    || isPointInsideEmbeddedScrollView(event.locationInWindow, in: window)) {
                 return event
             }
             let swiftUIPoint = CGPoint(x: locInView.x, y: bounds.height - locInView.y)
             if event.modifierFlags.contains(.option) || event.modifierFlags.contains(.command) {
+                // Ignore trailing trackpad momentum during wheel zoom so zoom halts crisply on finger lift
+                if !event.momentumPhase.isEmpty {
+                    isWheelZoomMomentumSuppressed = (event.momentumPhase != .ended && event.momentumPhase != .cancelled)
+                    if !isWheelZoomMomentumSuppressed {
+                        onPanEnded?()
+                    }
+                    return nil
+                }
+                isWheelZoomMomentumSuppressed = !(event.phase.isEmpty || event.phase == .ended || event.phase == .cancelled)
                 let sensitivity: CGFloat = event.hasPreciseScrollingDeltas ? 0.008 : 0.08
                 let factor = max(0.82, min(1.22, 1.0 + event.scrollingDeltaY * sensitivity))
                 onZoomDelta?(factor, swiftUIPoint)
             } else {
+                // If user released Cmd/Option mid-inertia after wheel zoom, swallow leftover zoom momentum
+                // instead of abruptly flinging the canvas into a wild pan.
+                if !event.momentumPhase.isEmpty && isWheelZoomMomentumSuppressed {
+                    if event.momentumPhase == .ended || event.momentumPhase == .cancelled {
+                        isWheelZoomMomentumSuppressed = false
+                        onPanEnded?()
+                    }
+                    return nil
+                }
+                isWheelZoomMomentumSuppressed = false
                 let scale: CGFloat = event.hasPreciseScrollingDeltas ? 1.0 : 12.0
                 onPanDelta?(event.scrollingDeltaX * scale, event.scrollingDeltaY * scale)
             }
@@ -2902,7 +3125,7 @@ private final class CanvasInputCatcherView: NSView {
 
         case .otherMouseDown:
             // Middle mouse button (buttonNumber == 2) pans from anywhere over the canvas
-            guard window.attachedSheet == nil && NSApp.modalWindow == nil else { return event }
+            guard window.attachedSheet == nil && NSApp?.modalWindow == nil else { return event }
             guard event.buttonNumber == 2, isPointInsideCanvas(event.locationInWindow) else { return event }
             isMiddleDragging = true
             lastWindowPoint = event.locationInWindow
@@ -2926,8 +3149,8 @@ private final class CanvasInputCatcherView: NSView {
             return nil
 
         case .keyDown:
-            guard window.attachedSheet == nil && NSApp.modalWindow == nil else { return event }
-            guard !isEditingText(in: window) else { return event }
+            guard window.attachedSheet == nil && NSApp?.modalWindow == nil else { return event }
+            guard !isEditingText(in: window), !isResponderInExternalListControl(in: window) else { return event }
             if event.keyCode == 49 { // Spacebar
                 guard event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty else { return event }
                 if !isSpaceHeld {
@@ -2939,7 +3162,20 @@ private final class CanvasInputCatcherView: NSView {
                 }
                 return nil
             }
-            if !event.isARepeat, onKeyCommand?(event) == true {
+            if event.isARepeat {
+                let mods = event.modifierFlags.intersection([.command, .option, .control, .shift])
+                if event.keyCode == 51 || event.keyCode == 117 || event.keyCode == 53 {
+                    return nil
+                }
+                if let lower = event.charactersIgnoringModifiers?.lowercased(),
+                   lower.count == 1,
+                   "acxvhper".contains(lower),
+                   mods.isEmpty || mods == [.command] || mods == [.shift] {
+                    return nil
+                }
+                return event
+            }
+            if onKeyCommand?(event) == true {
                 return nil
             }
             return event
@@ -3008,7 +3244,7 @@ private final class CanvasInputCatcherView: NSView {
         }
     }
 
-    private func teardownMonitors() {
+    func teardownMonitors() {
         if let eventMonitor {
             NSEvent.removeMonitor(eventMonitor)
             self.eventMonitor = nil
@@ -3017,6 +3253,7 @@ private final class CanvasInputCatcherView: NSView {
             NotificationCenter.default.removeObserver(resignObserver)
             self.resignObserver = nil
         }
+        isWheelZoomMomentumSuppressed = false
         resetActivePanState()
     }
 
@@ -3026,6 +3263,17 @@ private final class CanvasInputCatcherView: NSView {
 }
 
 // MARK: - Isolated 120fps Freeform Camera, Interaction, Hover State & GPU-Accelerated Leaf Views
+
+/// Non-observable reference box keeping the latest `MoodboardDocument` available to debounced child
+/// callbacks (e.g. Sticky Note / Group Frame text flushes) so delayed commits never mutate a stale
+/// document snapshot or overwrite a newly switched board.
+internal final class LiveMoodboardDocumentRef {
+    var document: MoodboardDocument?
+
+    func update(_ doc: MoodboardDocument) {
+        document = doc
+    }
+}
 
 internal enum MoodboardResizeCorner: CaseIterable {
     case topLeading
@@ -3063,7 +3311,7 @@ internal final class FreeformInteractionState {
     var resizingCorner: MoodboardResizeCorner?
     var resizeStartFrame: BoardRect?
     var liveResizeFrame: BoardRect?
-    var liveGroupReflowChildIDs: [UUID] = []
+    var liveGroupReflowChildIDs: Set<UUID> = []
     var liveGroupReflowFrames: [UUID: BoardRect] = [:]
     var resizingSideEdge: Int = 0 // -1 leading, +1 trailing, 0 corner
 
@@ -3074,6 +3322,7 @@ internal final class FreeformInteractionState {
 
     var pendingConnectorSource: (nodeID: UUID, anchor: ConnectorAnchor, startWorld: CGPoint)?
     var pendingConnectorCursorWorld: CGPoint = .zero
+    var pendingConnectorHoverTargetID: UUID?
 
     var activeInkPoints: [InkStrokePoint] = []
     var pendingErasedStrokeIDs: Set<UUID> = []
@@ -3081,13 +3330,19 @@ internal final class FreeformInteractionState {
 
     var freeformMarqueeStart: CGPoint?
     var freeformMarqueeCurrent: CGPoint?
+    var freeformMarqueeBaseSelection: Set<UUID> = []
 
     func effectiveFrame(for node: BoardNode, selectedNodeIDs: Set<UUID>) -> BoardRect {
-        if resizingNodeID == node.id, let live = liveResizeFrame {
-            return live
-        }
-        if !liveGroupReflowFrames.isEmpty, let reflowed = liveGroupReflowFrames[node.id] {
-            return reflowed
+        // Gate `liveResizeFrame` and `liveGroupReflowFrames` behind `resizingNodeID != nil` and
+        // `liveGroupReflowChildIDs.contains(node.id)` so 120Hz group resizing ONLY invalidates
+        // the resizing group and its enclosed children (zero invalidations for stationary nodes).
+        if let resizeID = resizingNodeID {
+            if resizeID == node.id, let live = liveResizeFrame {
+                return live
+            }
+            if liveGroupReflowChildIDs.contains(node.id), let reflowed = liveGroupReflowFrames[node.id] {
+                return reflowed
+            }
         }
         if let dragID = activeNodeDragID,
            !node.isLocked,
@@ -3129,11 +3384,13 @@ internal final class FreeformInteractionState {
         liveRotationDegrees = nil
         pendingConnectorSource = nil
         pendingConnectorCursorWorld = .zero
+        pendingConnectorHoverTargetID = nil
         activeInkPoints = []
         pendingErasedStrokeIDs = []
         pendingErasedConnectorIDs = []
         freeformMarqueeStart = nil
         freeformMarqueeCurrent = nil
+        freeformMarqueeBaseSelection = []
     }
 }
 
@@ -3307,7 +3564,7 @@ private final class DotGridTileCache {
     static let shared = DotGridTileCache()
     private let cache: NSCache<NSNumber, TileBox> = {
         let c = NSCache<NSNumber, TileBox>()
-        c.countLimit = 48
+        c.countLimit = 64
         c.totalCostLimit = 4 * 1024 * 1024
         return c
     }()
@@ -3374,9 +3631,10 @@ private struct FreeformDotGridLayer: View {
             var worldStep: CGFloat = 28
             while worldStep * zoom < 16 { worldStep *= 2 }
             while worldStep * zoom > 56 { worldStep *= 0.5 }
-            return max(16, min(64, (worldStep * zoom * 2).rounded() / 2))
+            // Quantize to 2pt buckets so smooth zoom gestures maintain ~100% DotGridTileCache hit rate
+            return max(16, min(64, ((worldStep * zoom) / 2).rounded() * 2))
         }()
-        let dotRadius: CGFloat = max(0.8, min(1.5, zoom))
+        let dotRadius: CGFloat = zoom < 0.7 ? 0.9 : (zoom < 1.3 ? 1.15 : 1.4)
 
         let originX = -camera.center.x * zoom + viewportSize.width * 0.5
         let originY = -camera.center.y * zoom + viewportSize.height * 0.5
@@ -3528,18 +3786,35 @@ private struct FreeformSelectionHandlesLayer<HandleContent: View>: View {
             EmptyView()
         } else {
             let hovered = hoverState.effectiveHoveredNodeID
+            let activeConnectorNodeID = interaction.pendingConnectorSource?.nodeID
+            let activeResizeNodeID = interaction.resizingNodeID
+            let activeRotateNodeID = interaction.rotatingNodeID
             let activeNodes: [BoardNode] = {
                 if activeTool == .connector {
                     let visibleWorld = camera.bucketedVisibleWorldRect(viewportSize: viewportSize, overscan: 240)
                     return sortedNodes.filter { node in
                         let rect = interaction.effectiveFrame(for: node, selectedNodeIDs: selectedNodeIDs)
-                        return rect.cgRect.intersects(visibleWorld) || selectedNodeIDs.contains(node.id)
+                        return rect.cgRect.intersects(visibleWorld)
+                            || selectedNodeIDs.contains(node.id)
+                            || node.id == activeConnectorNodeID
                     }
                 }
-                if selectedNodeIDs.isEmpty && hovered == nil {
+                if selectedNodeIDs.isEmpty
+                    && hovered == nil
+                    && activeConnectorNodeID == nil
+                    && activeResizeNodeID == nil
+                    && activeRotateNodeID == nil {
                     return []
                 }
-                return sortedNodes.filter { selectedNodeIDs.contains($0.id) || $0.id == hovered }
+                // Always keep an actively dragged connector-source / resizing / rotating node mounted
+                // so leaving hover bounds mid-drag NEVER destroys the gesture host and strands a ghost line.
+                return sortedNodes.filter { node in
+                    selectedNodeIDs.contains(node.id)
+                        || node.id == hovered
+                        || node.id == activeConnectorNodeID
+                        || node.id == activeResizeNodeID
+                        || node.id == activeRotateNodeID
+                }
             }()
 
             if !activeNodes.isEmpty {
@@ -3582,6 +3857,7 @@ private struct FreeformVectorOverlay: View {
         let activeInkPoints = interaction.activeInkPoints
         let pendingConnectorSource = interaction.pendingConnectorSource
         let pendingConnectorCursorWorld = interaction.pendingConnectorCursorWorld
+        let pendingConnectorHoverTargetID = interaction.pendingConnectorHoverTargetID
         let snapGuidesX = interaction.snapGuidesX
         let snapGuidesY = interaction.snapGuidesY
         let erasedStrokes = interaction.pendingErasedStrokeIDs
@@ -3720,16 +3996,36 @@ private struct FreeformVectorOverlay: View {
                 }
 
                 if let pending = pendingConnectorSource {
+                    if let targetID = pendingConnectorHoverTargetID, let targetNode = nodesByID[targetID] {
+                        let targetFrame = interaction.effectiveFrame(for: targetNode, selectedNodeIDs: selectedNodeIDs)
+                        let topLeft = toScreen(CGPoint(x: targetFrame.minX, y: targetFrame.minY))
+                        let targetScreenRect = CGRect(
+                            x: topLeft.x,
+                            y: topLeft.y,
+                            width: CGFloat(targetFrame.width) * zoom,
+                            height: CGFloat(targetFrame.height) * zoom
+                        ).insetBy(dx: -3, dy: -3)
+                        let highlightPath = Path(roundedRect: targetScreenRect, cornerRadius: max(8, 14 * zoom), style: .continuous)
+                        context.stroke(
+                            highlightPath,
+                            with: .color(Color.accentColor.opacity(0.85)),
+                            style: StrokeStyle(lineWidth: 2.2)
+                        )
+                    }
                     let s = toScreen(pending.startWorld)
                     let e = toScreen(pendingConnectorCursorWorld)
-                    let dist = max(36, hypot(e.x - s.x, e.y - s.y) * 0.35)
+                    let dist = max(36, hypot(e.x - s.x, e.y - s.y) * 0.42)
+                    let c1: CGPoint = switch pending.anchor {
+                    case .top: CGPoint(x: s.x, y: s.y - dist)
+                    case .bottom: CGPoint(x: s.x, y: s.y + dist)
+                    case .leading: CGPoint(x: s.x - dist, y: s.y)
+                    case .trailing: CGPoint(x: s.x + dist, y: s.y)
+                    case .auto: CGPoint(x: s.x + (e.x - s.x) * 0.35, y: s.y)
+                    }
+                    let c2 = CGPoint(x: e.x - (e.x - c1.x) * 0.35, y: e.y - (e.y - c1.y) * 0.35)
                     var p = Path()
                     p.move(to: s)
-                    p.addCurve(
-                        to: e,
-                        control1: CGPoint(x: s.x + dist * 0.5, y: s.y),
-                        control2: CGPoint(x: e.x - dist * 0.5, y: e.y)
-                    )
+                    p.addCurve(to: e, control1: c1, control2: c2)
                     context.stroke(
                         p,
                         with: .color(Color.accentColor.opacity(0.85)),

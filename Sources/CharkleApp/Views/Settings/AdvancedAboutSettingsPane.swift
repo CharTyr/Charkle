@@ -481,11 +481,16 @@ public struct AdvancedAboutSettingsPane: View {
         }
     }
 
-    private func inlineDownloadBytesText(downloaded: Int64, total: Int64, progress: Double) -> String {
+    private static let downloadByteFormatter: ByteCountFormatter = {
         let fmt = ByteCountFormatter()
         fmt.allowedUnits = [.useMB, .useKB]
         fmt.countStyle = .file
         fmt.includesUnit = true
+        return fmt
+    }()
+
+    private func inlineDownloadBytesText(downloaded: Int64, total: Int64, progress: Double) -> String {
+        let fmt = Self.downloadByteFormatter
         let pct = Int((min(1.0, max(0.0, progress)) * 100).rounded())
         let down = fmt.string(fromByteCount: max(0, downloaded))
         if total > 0 {

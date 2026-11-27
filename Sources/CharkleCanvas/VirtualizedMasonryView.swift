@@ -304,7 +304,7 @@ public nonisolated enum MasonryLayoutEngine {
         viewportHeight: CGFloat
     ) -> CGFloat {
         let maxScrollY = max(0, totalHeight - viewportHeight)
-        if oldScrollY <= 2 && oldAnchorRect.minY <= topInset + 4 {
+        if oldScrollY <= 2 && oldAnchorRect.minY <= topInset + 4 && newAnchorRect.minY <= topInset + 4 {
             return 0
         }
         let newAnchorPointY = newAnchorRect.minY + anchorNormV * newAnchorRect.height
@@ -389,6 +389,72 @@ public nonisolated enum MasonryLayoutEngine {
         let usableHeight = max(80, viewportHeight - topInset - min(bottomInset, viewportHeight * 0.25))
         let targetCenterY = topInset + usableHeight * 0.5
         return max(0, min(maxScrollY, itemRect.midY - targetCenterY))
+    }
+
+    public enum NavigationDirection: Sendable {
+        case left
+        case right
+        case up
+        case down
+    }
+
+    /// 2D spatial keyboard navigation across both Vertical Masonry and Horizontal Justified layouts.
+    public static func nextAssetIndex(
+        from currentIndex: Int,
+        direction: NavigationDirection,
+        in snapshot: MasonryLayoutSnapshot
+    ) -> Int? {
+        let count = snapshot.items.count
+        guard count > 0 else { return nil }
+        guard currentIndex >= 0, currentIndex < count else { return 0 }
+
+        let current = snapshot.items[currentIndex]
+        let curRect = current.rect
+
+        switch direction {
+        case .left, .right:
+            let goingRight = (direction == .right)
+            let searchPadY = max(curRect.height * 1.4, 260)
+            var bestIndex: Int?
+            var bestScore = CGFloat.greatestFiniteMagnitude
+            snapshot.forEachVisibleItem(minY: max(0, curRect.minY - searchPadY), maxY: curRect.maxY + searchPadY) { cand in
+                guard cand.index != currentIndex else { return }
+                let dx = cand.rect.midX - curRect.midX
+                if goingRight ? (dx <= 4) : (dx >= -4) { return }
+                let dy = abs(cand.rect.midY - curRect.midY)
+                let rowTolerance = max(curRect.height, cand.rect.height) * 0.65
+                guard dy <= rowTolerance else { return }
+                let score = abs(dx) + dy * 1.5
+                if score < bestScore {
+                    bestScore = score
+                    bestIndex = cand.index
+                }
+            }
+            if let bestIndex { return bestIndex }
+            let linear = goingRight ? (currentIndex + 1) : (currentIndex - 1)
+            return (linear >= 0 && linear < count) ? linear : currentIndex
+
+        case .up, .down:
+            let goingDown = (direction == .down)
+            let searchSpanY = max(curRect.height * 4.0, 960)
+            let minY = goingDown ? curRect.minY : max(0, curRect.minY - searchSpanY)
+            let maxY = goingDown ? (curRect.maxY + searchSpanY) : curRect.maxY
+            var bestIndex: Int?
+            var bestScore = CGFloat.greatestFiniteMagnitude
+            snapshot.forEachVisibleItem(minY: minY, maxY: maxY) { cand in
+                guard cand.index != currentIndex else { return }
+                let dy = cand.rect.midY - curRect.midY
+                let minStep = min(curRect.height, cand.rect.height) * 0.30
+                if goingDown ? (dy <= max(6, minStep)) : (dy >= -max(6, minStep)) { return }
+                let dx = abs(cand.rect.midX - curRect.midX)
+                let score = dx * 2.4 + abs(dy)
+                if score < bestScore {
+                    bestScore = score
+                    bestIndex = cand.index
+                }
+            }
+            return bestIndex ?? currentIndex
+        }
     }
 
     public static func compute(
@@ -698,6 +764,7 @@ public struct VirtualizedMasonryView: View {
     public let isLivePaneResizing: Bool
     public let heroNamespace: Namespace.ID
     public let activeQuickLookID: UUID?
+    public let isOverlayPresented: Bool
     public let revealRequest: MasonryRevealRequest?
     public let backgroundOverride: Color?
     public let callbacks: MasonryCallbacks
@@ -719,6 +786,7 @@ public struct VirtualizedMasonryView: View {
         isLivePaneResizing: Bool = false,
         heroNamespace: Namespace.ID,
         activeQuickLookID: UUID? = nil,
+        isOverlayPresented: Bool = false,
         revealRequest: MasonryRevealRequest? = nil,
         backgroundOverride: Color? = nil,
         callbacks: MasonryCallbacks = MasonryCallbacks()
@@ -737,6 +805,7 @@ public struct VirtualizedMasonryView: View {
         self.isLivePaneResizing = isLivePaneResizing
         self.heroNamespace = heroNamespace
         self.activeQuickLookID = activeQuickLookID
+        self.isOverlayPresented = isOverlayPresented
         self.revealRequest = revealRequest
         self.backgroundOverride = backgroundOverride
         self.callbacks = callbacks
@@ -768,6 +837,7 @@ public struct VirtualizedMasonryView: View {
                 sideChromeWidth: sideChromeWidth,
                 isLivePaneResizing: isLivePaneResizing,
                 activeQuickLookID: activeQuickLookID,
+                isOverlayPresented: isOverlayPresented,
                 revealRequest: revealRequest,
                 isDarkMode: colorScheme == .dark,
                 reduceMotion: reduceMotion,
@@ -801,6 +871,7 @@ private struct AppKitMasonryRepresentable: NSViewRepresentable {
     let sideChromeWidth: CGFloat?
     let isLivePaneResizing: Bool
     let activeQuickLookID: UUID?
+    let isOverlayPresented: Bool
     let revealRequest: MasonryRevealRequest?
     let isDarkMode: Bool
     let reduceMotion: Bool
@@ -831,6 +902,7 @@ private struct AppKitMasonryRepresentable: NSViewRepresentable {
             sideChromeWidth: sideChromeWidth,
             isLivePaneResizing: isLivePaneResizing,
             activeQuickLookID: activeQuickLookID,
+            isOverlayPresented: isOverlayPresented,
             revealRequest: revealRequest,
             isDarkMode: isDarkMode,
             reduceMotion: reduceMotion,
@@ -862,6 +934,7 @@ private struct AppKitMasonryRepresentable: NSViewRepresentable {
             sideChromeWidth: sideChromeWidth,
             isLivePaneResizing: isLivePaneResizing,
             activeQuickLookID: activeQuickLookID,
+            isOverlayPresented: isOverlayPresented,
             revealRequest: revealRequest,
             isDarkMode: isDarkMode,
             reduceMotion: reduceMotion,
@@ -965,7 +1038,8 @@ internal final class MasonryScrollView: NSScrollView {
             masonryDocument.handleCommandScrollZoom(
                 delta: rawDelta,
                 isDiscreteWheel: isDiscreteWheel,
-                anchorDocPoint: cursorInDoc
+                anchorDocPoint: cursorInDoc,
+                cursorWindowPoint: event.locationInWindow
             )
             return
         }
@@ -989,51 +1063,69 @@ internal final class MasonryScrollView: NSScrollView {
         contentView = clipView
         documentView = masonryDocument
 
+        // Observe AppKit scroll/frame notifications synchronously (`queue: nil`) so tiles mount in the
+        // exact display-link commit frame (zero 1-frame fling lag, zero per-tick NSBlockOperation overhead,
+        // and deterministic `isProgrammaticZoomScroll` gating).
         let nc = NotificationCenter.default
         observers.append(nc.addObserver(
             forName: NSView.boundsDidChangeNotification,
             object: contentView,
-            queue: .main
+            queue: nil
         ) { [weak self] _ in
-            MainActor.assumeIsolated {
-                self?.masonryDocument.handleScrollBoundsChanged()
+            if Thread.isMainThread {
+                MainActor.assumeIsolated { self?.masonryDocument.handleScrollBoundsChanged() }
+            } else {
+                Task { @MainActor [weak self] in self?.masonryDocument.handleScrollBoundsChanged() }
             }
         })
         observers.append(nc.addObserver(
             forName: NSView.frameDidChangeNotification,
             object: contentView,
-            queue: .main
+            queue: nil
         ) { [weak self] _ in
-            MainActor.assumeIsolated {
-                self?.masonryDocument.handleViewportFrameChanged()
+            if Thread.isMainThread {
+                MainActor.assumeIsolated { self?.masonryDocument.handleViewportFrameChanged() }
+            } else {
+                Task { @MainActor [weak self] in self?.masonryDocument.handleViewportFrameChanged() }
             }
         })
         observers.append(nc.addObserver(
             forName: NSScroller.preferredScrollerStyleDidChangeNotification,
             object: nil,
-            queue: .main
+            queue: nil
         ) { [weak self] _ in
-            MainActor.assumeIsolated {
-                self?.scrollerStyle = .overlay
-                self?.autohidesScrollers = true
+            if Thread.isMainThread {
+                MainActor.assumeIsolated {
+                    self?.scrollerStyle = .overlay
+                    self?.autohidesScrollers = true
+                }
+            } else {
+                Task { @MainActor [weak self] in
+                    self?.scrollerStyle = .overlay
+                    self?.autohidesScrollers = true
+                }
             }
         })
         observers.append(nc.addObserver(
             forName: NSScrollView.willStartLiveScrollNotification,
             object: self,
-            queue: .main
+            queue: nil
         ) { [weak self] _ in
-            MainActor.assumeIsolated {
-                self?.masonryDocument.setLiveScrolling(true)
+            if Thread.isMainThread {
+                MainActor.assumeIsolated { self?.masonryDocument.setLiveScrolling(true) }
+            } else {
+                Task { @MainActor [weak self] in self?.masonryDocument.setLiveScrolling(true) }
             }
         })
         observers.append(nc.addObserver(
             forName: NSScrollView.didEndLiveScrollNotification,
             object: self,
-            queue: .main
+            queue: nil
         ) { [weak self] _ in
-            MainActor.assumeIsolated {
-                self?.masonryDocument.setLiveScrolling(false)
+            if Thread.isMainThread {
+                MainActor.assumeIsolated { self?.masonryDocument.setLiveScrolling(false) }
+            } else {
+                Task { @MainActor [weak self] in self?.masonryDocument.setLiveScrolling(false) }
             }
         })
     }
@@ -1210,6 +1302,13 @@ private enum MasonryStaticLayerAssets {
         }) else { return nil }
         badgeCache.setObject(MasonryCGImageBox(cg, size: pillSize), forKey: key, cost: imageByteCost(cg))
         return (cg, pillSize)
+    }
+
+    static func cachedProceduralCardImage(for asset: AssetRecord, size: CGSize, isDark: Bool, scale: CGFloat) -> CGImage? {
+        let wBucket = max(40, Int((size.width / 8).rounded()) * 8)
+        let hBucket = max(40, Int((size.height / 8).rounded()) * 8)
+        let key = "\(asset.id.uuidString)-\(asset.title.hashValue)-\(isDark ? 1 : 0)-\(wBucket)x\(hBucket)-\(Int(scale))" as NSString
+        return proceduralCache.object(forKey: key)?.image
     }
 
     static func proceduralCardImage(for asset: AssetRecord, size: CGSize, isDark: Bool, scale: CGFloat) -> CGImage? {
@@ -1393,6 +1492,7 @@ private final class MasonryTileLayer {
     private var lastBadgeText: String?
     private var lastBadgeScale: CGFloat = 0
     private var isShowingProceduralImage: Bool = false
+    var needsDeferredProceduralRender: Bool = false
     private var lastProceduralKey: String?
 
     private var hasVisualState: Bool = false
@@ -1531,6 +1631,7 @@ private final class MasonryTileLayer {
 
         lastBadgeText = nil
         isShowingProceduralImage = false
+        needsDeferredProceduralRender = false
         lastProceduralKey = nil
         hasVisualState = false
     }
@@ -1551,6 +1652,7 @@ private final class MasonryTileLayer {
         pinBadgeLayer?.removeAnimation(forKey: "charkle.pos")
         cutDashLayer?.removeAnimation(forKey: "charkle.pos")
         cutDashLayer?.removeAnimation(forKey: "charkle.bounds")
+        cutDashLayer?.removeAnimation(forKey: "charkle.path")
     }
 
     /// GPU-composited Photos-style transition from a scroll/transform-compensated `fromRect` to `newRect`.
@@ -1603,6 +1705,16 @@ private final class MasonryTileLayer {
             shadowAnim.duration = duration
             shadowAnim.timingFunction = timing
             layer.add(shadowAnim, forKey: "charkle.shadowPath")
+
+            if let cutLayer = cutDashLayer, !cutLayer.isHidden {
+                addPair(on: cutLayer, fromP: fromLocalCenter, toP: toLocalCenter, fromB: fromBounds, toB: toBounds)
+                let pathAnim = CABasicAnimation(keyPath: "path")
+                pathAnim.fromValue = CGPath(roundedRect: fromBounds.insetBy(dx: 0.75, dy: 0.75), cornerWidth: Self.cornerRad, cornerHeight: Self.cornerRad, transform: nil)
+                pathAnim.toValue = CGPath(roundedRect: toBounds.insetBy(dx: 0.75, dy: 0.75), cornerWidth: Self.cornerRad, cornerHeight: Self.cornerRad, transform: nil)
+                pathAnim.duration = duration
+                pathAnim.timingFunction = timing
+                cutLayer.add(pathAnim, forKey: "charkle.path")
+            }
 
             // Keep top-right badges anchored to the card edge during bounds resize
             let deltaW = toBounds.width - fromBounds.width
@@ -1710,7 +1822,8 @@ private final class MasonryTileLayer {
         isDark: Bool,
         scale: CGFloat,
         loader: ThumbnailImageLoader?,
-        forceReloadImage: Bool
+        forceReloadImage: Bool,
+        isLiveScrolling: Bool = false
     ) {
         let sameAsset = (boundAssetID == asset.id)
         boundAssetID = asset.id
@@ -1799,6 +1912,12 @@ private final class MasonryTileLayer {
         }
         guard !sameAsset || forceReloadImage || imageLayer.contents == nil || proceduralNeedsRefresh else { return }
 
+        // Keep a valid in-flight thumbnail decode running on non-forced reconfigures (e.g. scroll settle)
+        // unless this tile still needs its deferred procedural fallback rendered.
+        if sameAsset && !forceReloadImage && !proceduralNeedsRefresh && !needsDeferredProceduralRender && loadTask != nil && imageLayer.contents == nil {
+            return
+        }
+
         if proceduralNeedsRefresh && sameAsset && !forceReloadImage {
             if let cached = loader?.cachedCGImage(for: asset.id, tier: .grid520) {
                 imageLayer.backgroundColor = cardSurfaceCG
@@ -1833,10 +1952,31 @@ private final class MasonryTileLayer {
             || asset.mediaKind == .model3D
 
         if isProceduralKind {
-            imageLayer.contents = MasonryStaticLayerAssets.proceduralCardImage(for: asset, size: rect.size, isDark: isDark, scale: scale)
-            isShowingProceduralImage = true
-            lastProceduralKey = computedProceduralKey ?? makeProceduralKey()
+            if let cachedProc = MasonryStaticLayerAssets.cachedProceduralCardImage(for: asset, size: rect.size, isDark: isDark, scale: scale) {
+                imageLayer.contents = cachedProc
+                isShowingProceduralImage = true
+                needsDeferredProceduralRender = false
+                lastProceduralKey = computedProceduralKey ?? makeProceduralKey()
+            } else if isLiveScrolling {
+                // During 120Hz live flings, avoid main-thread CoreText procedural rasterization on cache miss;
+                // show tint immediately and render fallback once live scroll settles if no thumbnail exists.
+                if let tintHex = asset.dominantColors.first?.hex {
+                    imageLayer.backgroundColor = NSColor.charkleHex(tintHex).withAlphaComponent(0.35).cgColor
+                } else {
+                    imageLayer.backgroundColor = isDark ? MasonryStaticLayerAssets.defaultTintDarkCG : MasonryStaticLayerAssets.defaultTintLightCG
+                }
+                imageLayer.contents = nil
+                isShowingProceduralImage = false
+                needsDeferredProceduralRender = true
+                lastProceduralKey = nil
+            } else {
+                imageLayer.contents = MasonryStaticLayerAssets.proceduralCardImage(for: asset, size: rect.size, isDark: isDark, scale: scale)
+                isShowingProceduralImage = true
+                needsDeferredProceduralRender = false
+                lastProceduralKey = computedProceduralKey ?? makeProceduralKey()
+            }
         } else {
+            needsDeferredProceduralRender = false
             if let tintHex = asset.dominantColors.first?.hex {
                 imageLayer.backgroundColor = NSColor.charkleHex(tintHex).withAlphaComponent(0.35).cgColor
             } else {
@@ -1859,6 +1999,7 @@ private final class MasonryTileLayer {
                 self.imageLayer.contents = cg
                 self.imageLayer.backgroundColor = cardSurfaceCG
                 self.isShowingProceduralImage = false
+                self.needsDeferredProceduralRender = false
                 self.lastProceduralKey = nil
             } else if self.imageLayer.contents == nil {
                 self.imageLayer.contents = MasonryStaticLayerAssets.proceduralCardImage(
@@ -1868,6 +2009,7 @@ private final class MasonryTileLayer {
                     scale: scale
                 )
                 self.isShowingProceduralImage = true
+                self.needsDeferredProceduralRender = false
                 self.lastProceduralKey = makeProceduralKey()
             }
             CATransaction.commit()
@@ -2054,17 +2196,62 @@ private final class MasonryHoverOverlayLayer {
 
 /// Read-only registry reporting the current visible window-space frame (top-left origin,
 /// matching SwiftUI full-bleed window coordinates) of a gallery card for Quick Look transitions.
+/// Tracks all mounted `MasonryDocumentView`s weakly so secondary panels (e.g. Notch Shelf)
+/// never clobber the primary workspace window's geometry lookup.
 public final class MasonryCardGeometryRegistry {
     public static let shared = MasonryCardGeometryRegistry()
 
-    fileprivate weak var activeDocumentView: MasonryDocumentView?
+    private let mountedViews = NSHashTable<MasonryDocumentView>.weakObjects()
 
     private init() {}
 
+    fileprivate func register(_ view: MasonryDocumentView) {
+        mountedViews.add(view)
+    }
+
+    fileprivate func unregister(_ view: MasonryDocumentView) {
+        mountedViews.remove(view)
+    }
+
+    internal var registeredCountForTesting: Int {
+        mountedViews.allObjects.count
+    }
+
     /// Returns the card's frame in top-left window content coordinates when the card intersects
-    /// the active gallery viewport; returns `nil` when off-screen or outside masonry modes.
+    /// the active gallery viewport; prefers the main non-panel workspace window over auxiliary panels.
     public func visibleCardRectInWindow(for assetID: UUID) -> CGRect? {
-        activeDocumentView?.visibleCardRectInWindow(for: assetID)
+        let views = mountedViews.allObjects
+        guard !views.isEmpty else { return nil }
+
+        // 1. Prefer the active main workspace window (never an NSPanel like Notch Shelf)
+        if let mainWin = NSApp?.mainWindow, !(mainWin is NSPanel) {
+            for view in views where view.window === mainWin {
+                if let rect = view.visibleCardRectInWindow(for: assetID) {
+                    return rect
+                }
+            }
+        }
+        // 2. Prefer key non-panel window
+        if let keyWin = NSApp?.keyWindow, !(keyWin is NSPanel) {
+            for view in views where view.window === keyWin {
+                if let rect = view.visibleCardRectInWindow(for: assetID) {
+                    return rect
+                }
+            }
+        }
+        // 3. Any mounted non-panel window
+        for view in views where view.window != nil && !(view.window is NSPanel) {
+            if let rect = view.visibleCardRectInWindow(for: assetID) {
+                return rect
+            }
+        }
+        // 4. Fallback to any mounted view (e.g., standalone panel or test window)
+        for view in views {
+            if let rect = view.visibleCardRectInWindow(for: assetID) {
+                return rect
+            }
+        }
+        return nil
     }
 }
 
@@ -2104,6 +2291,7 @@ internal final class MasonryDocumentView: NSView, NSDraggingSource {
     private var topInset: CGFloat = 76
     private var bottomInset: CGFloat = 96
     private var activeQuickLookID: UUID?
+    private var isOverlayPresented: Bool = false
     private var isDarkMode: Bool = false
     private var reduceMotion: Bool = false
     private var callbacks = MasonryCallbacks()
@@ -2119,6 +2307,7 @@ internal final class MasonryDocumentView: NSView, NSDraggingSource {
         var screenY: CGFloat
     }
     private var sessionZoomAnchor: ZoomAssetAnchor?
+    private var lastZoomCursorWindowPoint: NSPoint?
     private var isProgrammaticZoomScroll: Bool = false
     private var isPinching: Bool = false
     private var pinchOpticalScale: CGFloat = 1.0
@@ -2170,6 +2359,12 @@ internal final class MasonryDocumentView: NSView, NSDraggingSource {
         reusePool.reduce(0) { $0 + ($1.hasImageContentsForTesting ? 1 : 0) }
     }
     internal var currentLayoutTotalHeightForTesting: CGFloat { layout.totalHeight }
+    internal var isOverlayPresentedForTesting: Bool { isOverlayPresented }
+    internal var isHoverPreviewActiveForTesting: Bool { hoverMediaPreview.isActiveForTesting }
+    internal var isMarqueeHiddenForTesting: Bool { marqueeLayer.isHidden }
+    internal var activeTileHasImageContentsForTesting: [UUID: Bool] {
+        activeTiles.mapValues(\.hasImageContentsForTesting)
+    }
     private let tilesContainerLayer = CALayer()
     private let hoverMediaPreview = HoverMediaPreviewLayerController()
     private let hoverOverlayLayer = MasonryHoverOverlayLayer()
@@ -2181,6 +2376,9 @@ internal final class MasonryDocumentView: NSView, NSDraggingSource {
     private var scrollingDown: Bool = true
     private var lastClickedID: UUID?
     private var trackingAreaRef: NSTrackingArea?
+    private nonisolated(unsafe) var lifecycleObservers: [NSObjectProtocol] = []
+    private var marqueeAutoscrollTimer: Timer?
+    private var lastMarqueeEvent: NSEvent?
 
     // Mouse / drag / marquee state
     private enum PointerMode {
@@ -2246,18 +2444,97 @@ internal final class MasonryDocumentView: NSView, NSDraggingSource {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        if window == nil {
-            releaseOffscreenResources()
-        } else {
-            MasonryCardGeometryRegistry.shared.activeDocumentView = self
+        removeLifecycleObservers()
+        if let hostWindow = window {
+            MasonryCardGeometryRegistry.shared.register(self)
+            installLifecycleObservers(for: hostWindow)
             handleViewportFrameChanged()
+        } else {
+            releaseOffscreenResources()
+        }
+    }
+
+    isolated deinit {
+        stopMarqueeAutoscrollTimer()
+        removeLifecycleObservers()
+        MasonryCardGeometryRegistry.shared.unregister(self)
+    }
+
+    private func installLifecycleObservers(for hostWindow: NSWindow) {
+        let nc = NotificationCenter.default
+        lifecycleObservers.append(nc.addObserver(
+            forName: NSWindow.didResignKeyNotification,
+            object: hostWindow,
+            queue: nil
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.suspendHoverAndTransientInteractions()
+            }
+        })
+        lifecycleObservers.append(nc.addObserver(
+            forName: NSWindow.didChangeOcclusionStateNotification,
+            object: hostWindow,
+            queue: nil
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, let win = self.window else { return }
+                if !win.occlusionState.contains(.visible) {
+                    self.suspendHoverAndTransientInteractions()
+                }
+            }
+        })
+        lifecycleObservers.append(nc.addObserver(
+            forName: NSApplication.didHideNotification,
+            object: NSApp,
+            queue: nil
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.suspendHoverAndTransientInteractions()
+            }
+        })
+        lifecycleObservers.append(nc.addObserver(
+            forName: NSApplication.didResignActiveNotification,
+            object: NSApp,
+            queue: nil
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.suspendHoverAndTransientInteractions()
+            }
+        })
+    }
+
+    private func removeLifecycleObservers() {
+        for token in lifecycleObservers {
+            NotificationCenter.default.removeObserver(token)
+        }
+        lifecycleObservers.removeAll()
+    }
+
+    private func stopMarqueeAutoscrollTimer() {
+        marqueeAutoscrollTimer?.invalidate()
+        marqueeAutoscrollTimer = nil
+        lastMarqueeEvent = nil
+    }
+
+    private func suspendHoverAndTransientInteractions() {
+        hoveredAssetID = nil
+        hoverOverlayLayer.hide()
+        hoverMediaPreview.stop()
+        stopMarqueeAutoscrollTimer()
+        if case .marquee = pointerMode {
+            pointerMode = .none
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            marqueeLayer.isHidden = true
+            CATransaction.commit()
         }
     }
 
     internal func releaseOffscreenResources() {
-        if MasonryCardGeometryRegistry.shared.activeDocumentView === self {
-            MasonryCardGeometryRegistry.shared.activeDocumentView = nil
-        }
+        MasonryCardGeometryRegistry.shared.unregister(self)
+        removeLifecycleObservers()
+        stopMarqueeAutoscrollTimer()
+        pointerMode = .none
         hoveredAssetID = nil
         hoverMediaPreview.stop()
         hoverOverlayLayer.releaseContents()
@@ -2271,6 +2548,7 @@ internal final class MasonryDocumentView: NSView, NSDraggingSource {
 
         CATransaction.begin()
         CATransaction.setDisableActions(true)
+        marqueeLayer.isHidden = true
         for tile in activeTiles.values {
             tile.prepareForReuse()
             tile.layer.removeFromSuperlayer()
@@ -2332,6 +2610,7 @@ internal final class MasonryDocumentView: NSView, NSDraggingSource {
         sideChromeWidth: CGFloat?,
         isLivePaneResizing: Bool = false,
         activeQuickLookID: UUID?,
+        isOverlayPresented: Bool = false,
         revealRequest: MasonryRevealRequest?,
         isDarkMode: Bool,
         reduceMotion: Bool,
@@ -2350,19 +2629,38 @@ internal final class MasonryDocumentView: NSView, NSDraggingSource {
             guard let prev = previousSideChrome, let next = sideChromeWidth else { return false }
             return abs(prev - next) >= 1
         }()
-        let invalidationChanged = (self.loaderInvalidationVersion != loaderInvalidationVersion)
+        let previousInvalidationVersion = self.loaderInvalidationVersion
+        let invalidationChanged = (previousInvalidationVersion != loaderInvalidationVersion)
         let appearanceChanged = (self.isDarkMode != isDarkMode)
         let selectionChanged = (self.selectedAssetIDs != selectedIDs)
+        let overlayChanged = (self.isOverlayPresented != isOverlayPresented)
         let visualFlagsChanged = selectionChanged
             || (self.cutAssetIDs != cutIDs)
             || (self.activeQuickLookID != activeQuickLookID)
 
         if assetsChanged || selectionChanged {
             sessionZoomAnchor = nil
+            lastZoomCursorWindowPoint = nil
         }
-        if invalidationChanged && self.loaderInvalidationVersion != -1 {
-            MasonryStaticLayerAssets.clearTransientCaches()
-            lastPrefetchIDs.removeAll()
+
+        let targetedInvalidatedIDs: Set<UUID>?
+        let needsFullImageReload: Bool
+        if invalidationChanged && previousInvalidationVersion != -1 {
+            if let targeted = loader?.invalidatedAssetIDs(since: previousInvalidationVersion) {
+                targetedInvalidatedIDs = targeted.isEmpty ? nil : targeted
+                needsFullImageReload = false
+                if !targeted.isEmpty {
+                    lastPrefetchIDs.removeAll { targeted.contains($0) }
+                }
+            } else {
+                targetedInvalidatedIDs = nil
+                needsFullImageReload = true
+                MasonryStaticLayerAssets.clearTransientCaches()
+                lastPrefetchIDs.removeAll()
+            }
+        } else {
+            targetedInvalidatedIDs = nil
+            needsFullImageReload = false
         }
 
         self.assets = assets
@@ -2377,8 +2675,11 @@ internal final class MasonryDocumentView: NSView, NSDraggingSource {
         self.bottomInset = bottomInset
         self.lastSideChromeWidth = sideChromeWidth
         self.activeQuickLookID = activeQuickLookID
-        if activeQuickLookID != nil {
-            hoverMediaPreview.stop()
+        self.isOverlayPresented = isOverlayPresented
+        if activeQuickLookID != nil || isOverlayPresented {
+            suspendHoverAndTransientInteractions()
+        } else if overlayChanged {
+            refreshHoverForCurrentMouseLocation()
         }
         self.isDarkMode = isDarkMode
         self.reduceMotion = reduceMotion
@@ -2447,6 +2748,7 @@ internal final class MasonryDocumentView: NSView, NSDraggingSource {
 
             if !assetsChanged && !layoutModeChanged && !insetsChanged && !columnWidthChanged && layout.items.count == assets.count {
                 sessionZoomAnchor = nil
+                lastZoomCursorWindowPoint = nil
                 cancelOpticalTransformImmediate()
                 hoveredAssetID = nil
                 hoverOverlayLayer.hide()
@@ -2457,12 +2759,14 @@ internal final class MasonryDocumentView: NSView, NSDraggingSource {
                     animate: !reduceMotion && hadAssetsBefore,
                     animationDuration: drawerDuration,
                     timingFunction: CAMediaTimingFunction(controlPoints: 0.32, 0.72, 0, 1),
-                    forceReconfigureExisting: invalidationChanged || appearanceChanged,
-                    forceReloadImages: invalidationChanged,
+                    forceReconfigureExisting: needsFullImageReload || appearanceChanged,
+                    forceReloadImages: needsFullImageReload,
+                    targetedReloadIDs: targetedInvalidatedIDs,
                     isPaneTransition: true
                 )
                 sessionZoomAnchor = nil
-                if visualFlagsChanged && !(invalidationChanged || appearanceChanged) {
+                lastZoomCursorWindowPoint = nil
+                if visualFlagsChanged && !(needsFullImageReload || appearanceChanged) {
                     updateVisibleTileStatesOnly()
                 }
                 fulfillPendingRevealIfPossible()
@@ -2471,10 +2775,15 @@ internal final class MasonryDocumentView: NSView, NSDraggingSource {
         }
 
         if isSelfZoomEcho {
-            if invalidationChanged || appearanceChanged {
-                syncVisibleTiles(forceReconfigure: true, forceReloadImages: invalidationChanged)
-            } else if visualFlagsChanged {
-                updateVisibleTileStatesOnly()
+            if needsFullImageReload || appearanceChanged {
+                syncVisibleTiles(forceReconfigure: true, forceReloadImages: needsFullImageReload, targetedReloadIDs: targetedInvalidatedIDs)
+            } else {
+                if let targetedInvalidatedIDs {
+                    reloadTargetedActiveTiles(targetedInvalidatedIDs)
+                }
+                if visualFlagsChanged {
+                    updateVisibleTileStatesOnly()
+                }
             }
             fulfillPendingRevealIfPossible()
             return
@@ -2493,10 +2802,15 @@ internal final class MasonryDocumentView: NSView, NSDraggingSource {
             layout = layout.withAdjustedBottomInset(oldBottomInset: oldBottomInset, newBottomInset: bottomInset)
             let clipHeight = enclosingScrollView?.contentView.bounds.height ?? bounds.height
             updateDocumentHeight(clipHeight: clipHeight)
-            if invalidationChanged || appearanceChanged {
-                syncVisibleTiles(forceReconfigure: true, forceReloadImages: invalidationChanged)
-            } else if visualFlagsChanged {
-                updateVisibleTileStatesOnly()
+            if needsFullImageReload || appearanceChanged {
+                syncVisibleTiles(forceReconfigure: true, forceReloadImages: needsFullImageReload, targetedReloadIDs: targetedInvalidatedIDs)
+            } else {
+                if let targetedInvalidatedIDs {
+                    reloadTargetedActiveTiles(targetedInvalidatedIDs)
+                }
+                if visualFlagsChanged {
+                    updateVisibleTileStatesOnly()
+                }
             }
             fulfillPendingRevealIfPossible()
             return
@@ -2509,10 +2823,17 @@ internal final class MasonryDocumentView: NSView, NSDraggingSource {
                     anchorDocPoint: nil,
                     forceCursorLookup: false,
                     animate: shouldAnimate,
-                    animationDuration: 0.28
+                    animationDuration: 0.28,
+                    forceReloadImages: needsFullImageReload,
+                    targetedReloadIDs: targetedInvalidatedIDs
                 )
             } else {
-                recomputeLayout(animate: shouldAnimate, animateNewTiles: shouldAnimate && assetsChanged)
+                recomputeLayout(
+                    animate: shouldAnimate,
+                    animateNewTiles: shouldAnimate && assetsChanged,
+                    forceReloadImages: needsFullImageReload,
+                    targetedReloadIDs: targetedInvalidatedIDs
+                )
             }
         } else if columnWidthChanged {
             // Only reflow when the discrete column count (Vertical) or quantized row-height stop (Justified)
@@ -2535,20 +2856,58 @@ internal final class MasonryDocumentView: NSView, NSDraggingSource {
                     anchorDocPoint: nil,
                     forceCursorLookup: false,
                     animate: !reduceMotion && hadAssetsBefore,
-                    animationDuration: 0.28
+                    animationDuration: 0.28,
+                    forceReloadImages: needsFullImageReload,
+                    targetedReloadIDs: targetedInvalidatedIDs
                 )
-            } else if invalidationChanged || appearanceChanged {
-                syncVisibleTiles(forceReconfigure: true, forceReloadImages: invalidationChanged)
-            } else if visualFlagsChanged {
+            } else if needsFullImageReload || appearanceChanged {
+                syncVisibleTiles(forceReconfigure: true, forceReloadImages: needsFullImageReload, targetedReloadIDs: targetedInvalidatedIDs)
+            } else {
+                if let targetedInvalidatedIDs {
+                    reloadTargetedActiveTiles(targetedInvalidatedIDs)
+                }
+                if visualFlagsChanged {
+                    updateVisibleTileStatesOnly()
+                }
+            }
+        } else if needsFullImageReload || appearanceChanged {
+            syncVisibleTiles(forceReconfigure: true, forceReloadImages: needsFullImageReload, targetedReloadIDs: targetedInvalidatedIDs)
+        } else {
+            if let targetedInvalidatedIDs {
+                reloadTargetedActiveTiles(targetedInvalidatedIDs)
+            }
+            if visualFlagsChanged {
                 updateVisibleTileStatesOnly()
             }
-        } else if invalidationChanged || appearanceChanged {
-            syncVisibleTiles(forceReconfigure: true, forceReloadImages: invalidationChanged)
-        } else if visualFlagsChanged {
-            updateVisibleTileStatesOnly()
         }
 
         fulfillPendingRevealIfPossible()
+    }
+
+    private func reloadTargetedActiveTiles(_ invalidatedIDs: Set<UUID>) {
+        guard !invalidatedIDs.isEmpty, !activeTiles.isEmpty else { return }
+        let scale = currentScale
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        for id in invalidatedIDs {
+            guard let tile = activeTiles[id],
+                  let idx = assetIndexByID[id],
+                  idx < assets.count else { continue }
+            let asset = assets[idx]
+            tile.configure(
+                asset: asset,
+                frame: tile.frame,
+                isSelected: selectedAssetIDs.contains(id),
+                isCut: cutAssetIDs.contains(id),
+                isHiddenForHero: activeQuickLookID == id,
+                isDark: isDarkMode,
+                scale: scale,
+                loader: loader,
+                forceReloadImage: true,
+                isLiveScrolling: isLiveScrolling
+            )
+        }
+        CATransaction.commit()
     }
 
     private func schedulePaneTransitionSettle(after delay: TimeInterval) {
@@ -2807,24 +3166,41 @@ internal final class MasonryDocumentView: NSView, NSDraggingSource {
             isPinching = true
             // Fresh pinch gesture re-measures exact live (u, v, screenY) on the card under cursor
             sessionZoomAnchor = nil
-            // Pick up live visual scale if interrupting an in-flight settle spring
-            let liveScale = tilesContainerLayer.presentation()?.transform.m11 ?? 1.0
-            pinchOpticalScale = max(0.84, min(1.18, liveScale))
+            lastZoomCursorWindowPoint = nil
+            // Pick up live visual scale & transform if interrupting an in-flight settle spring
+            let livePresentation = tilesContainerLayer.presentation()?.transform ?? tilesContainerLayer.transform
+            let liveScale = max(0.84, min(1.18, livePresentation.m11))
+            let interruptingSettle = abs(liveScale - 1.0) > 0.005
+            pinchOpticalScale = liveScale
             tilesContainerLayer.removeAnimation(forKey: "charkle.pinchSettle")
+
+            let unscaledLookupDoc: CGPoint
+            let lookupOpticalAnchor: CGPoint
+            if interruptingSettle {
+                let affine = CATransform3DGetAffineTransform(livePresentation)
+                unscaledLookupDoc = cursorInDoc.applying(affine.inverted())
+                lookupOpticalAnchor = pinchAnchorScreenPoint
+            } else {
+                unscaledLookupDoc = cursorInDoc
+                lookupOpticalAnchor = cursorScreen
+            }
 
             // Lock to the EXACT card under the cursor (or visible selected / center card) and pivot optical zoom on it
             if let resolved = resolveSessionZoomAnchor(
-                near: cursorInDoc,
+                near: unscaledLookupDoc,
                 forceCursorLookup: true,
                 oldScrollY: scrollY,
-                oldOpticalScale: 1.0,
-                oldOpticalAnchorScreen: cursorScreen
+                oldOpticalScale: interruptingSettle ? liveScale : 1.0,
+                oldOpticalAnchorScreen: lookupOpticalAnchor
             ) {
                 let item = resolved.item
                 let pivotX = item.rect.minX + resolved.anchor.normU * item.rect.width
                 pinchAnchorScreenPoint = CGPoint(x: pivotX, y: resolved.anchor.screenY)
             } else {
                 pinchAnchorScreenPoint = cursorScreen
+            }
+            if interruptingSettle {
+                applyOpticalTransformImmediate(scale: liveScale, anchorScreen: pinchAnchorScreenPoint)
             }
 
             hoveredAssetID = nil
@@ -2985,7 +3361,8 @@ internal final class MasonryDocumentView: NSView, NSDraggingSource {
     func handleCommandScrollZoom(
         delta: CGFloat,
         isDiscreteWheel: Bool,
-        anchorDocPoint: NSPoint
+        anchorDocPoint: NSPoint,
+        cursorWindowPoint: NSPoint? = nil
     ) {
         guard !assets.isEmpty else { return }
         let now = CFAbsoluteTimeGetCurrent()
@@ -2993,7 +3370,7 @@ internal final class MasonryDocumentView: NSView, NSDraggingSource {
         if isDiscreteWheel {
             guard (now - lastScrollZoomStepAt) >= 0.12 else { return }
             let direction = delta > 0 ? 1 : -1
-            commitSteppedZoom(direction: direction, anchorDocPoint: anchorDocPoint)
+            commitSteppedZoom(direction: direction, anchorDocPoint: anchorDocPoint, cursorWindowPoint: cursorWindowPoint)
             lastScrollZoomStepAt = now
             scrollZoomAccumulator = 0
             return
@@ -3009,10 +3386,10 @@ internal final class MasonryDocumentView: NSView, NSDraggingSource {
         let direction = scrollZoomAccumulator > 0 ? 1 : -1
         scrollZoomAccumulator = 0
         lastScrollZoomStepAt = now
-        commitSteppedZoom(direction: direction, anchorDocPoint: anchorDocPoint)
+        commitSteppedZoom(direction: direction, anchorDocPoint: anchorDocPoint, cursorWindowPoint: cursorWindowPoint)
     }
 
-    private func commitSteppedZoom(direction: Int, anchorDocPoint: NSPoint) {
+    private func commitSteppedZoom(direction: Int, anchorDocPoint: NSPoint, cursorWindowPoint: NSPoint?) {
         cancelOpticalTransformImmediate()
         let width = activeContainerWidth()
         let nextWidth = MasonryLayoutEngine.steppedColumnWidth(
@@ -3025,13 +3402,26 @@ internal final class MasonryDocumentView: NSView, NSDraggingSource {
         )
         guard abs(nextWidth - targetColumnWidth) >= 0.5 else { return }
 
+        // Reuse the existing exact-asset zoom anchor across consecutive ⌘+scroll notches while
+        // the pointer stays stationary (otherwise a reflowed card shifting columns causes anchor jumps).
+        let cursorMoved: Bool = {
+            guard let cur = cursorWindowPoint, let prev = lastZoomCursorWindowPoint else {
+                return sessionZoomAnchor == nil
+            }
+            return hypot(cur.x - prev.x, cur.y - prev.y) > 8.0
+        }()
+        let shouldLookupCursor = (sessionZoomAnchor == nil) || cursorMoved
+        if let cursorWindowPoint {
+            lastZoomCursorWindowPoint = cursorWindowPoint
+        }
+
         lastInteractiveZoomAt = CFAbsoluteTimeGetCurrent()
         lastPublishedZoomWidth = nextWidth
         targetColumnWidth = nextWidth
 
         _ = recomputeLayoutAnchored(
             anchorDocPoint: anchorDocPoint,
-            forceCursorLookup: true,
+            forceCursorLookup: shouldLookupCursor,
             animate: !reduceMotion,
             animationDuration: 0.28
         )
@@ -3090,9 +3480,14 @@ internal final class MasonryDocumentView: NSView, NSDraggingSource {
 
     func handleScrollBoundsChanged() {
         let visY = visibleRect.minY
+        if isProgrammaticZoomScroll {
+            lastScrollY = visY
+            return
+        }
         if abs(visY - lastScrollY) > 1 {
-            if !isProgrammaticZoomScroll && !isPinching && abs(visY - lastScrollY) > 3 {
+            if !isPinching && abs(visY - lastScrollY) > 3 {
                 sessionZoomAnchor = nil
+                lastZoomCursorWindowPoint = nil
             }
             scrollingDown = visY >= lastScrollY
             lastScrollY = visY
@@ -3104,6 +3499,7 @@ internal final class MasonryDocumentView: NSView, NSDraggingSource {
         isLiveScrolling = scrolling
         if scrolling {
             sessionZoomAnchor = nil
+            lastZoomCursorWindowPoint = nil
             cancelOpticalTransformImmediate()
             hoveredAssetID = nil
             hoverOverlayLayer.hide()
@@ -3112,6 +3508,8 @@ internal final class MasonryDocumentView: NSView, NSDraggingSource {
                 tile.stripLayoutAnimations()
             }
         } else {
+            // Re-sync after live scroll settles so any procedural cards deferred during 120Hz fling render cleanly.
+            syncVisibleTiles()
             refreshHoverForCurrentMouseLocation()
         }
     }
@@ -3128,6 +3526,7 @@ internal final class MasonryDocumentView: NSView, NSDraggingSource {
         timingFunction: CAMediaTimingFunction = CAMediaTimingFunction(controlPoints: 0.19, 1.0, 0.22, 1.0),
         forceReconfigureExisting: Bool = true,
         forceReloadImages: Bool = false,
+        targetedReloadIDs: Set<UUID>? = nil,
         isPaneTransition: Bool = false,
         oldOpticalScale: CGFloat = 1.0,
         newOpticalScale: CGFloat = 1.0,
@@ -3258,6 +3657,7 @@ internal final class MasonryDocumentView: NSView, NSDraggingSource {
         syncVisibleTiles(
             forceReconfigure: forceReconfigureExisting,
             forceReloadImages: forceReloadImages,
+            targetedReloadIDs: targetedReloadIDs,
             animateMoves: animate && !isLiveScrolling,
             animateNewTiles: animate && !isLiveScrolling,
             animationDuration: animationDuration,
@@ -3273,7 +3673,9 @@ internal final class MasonryDocumentView: NSView, NSDraggingSource {
         animate: Bool,
         animateNewTiles: Bool = false,
         animationDuration: CFTimeInterval = 0.26,
-        reconfigureExisting: Bool = true
+        reconfigureExisting: Bool = true,
+        forceReloadImages: Bool = false,
+        targetedReloadIDs: Set<UUID>? = nil
     ) {
         let clipBounds = enclosingScrollView?.contentView.bounds ?? bounds
         let width = activeContainerWidth()
@@ -3309,6 +3711,8 @@ internal final class MasonryDocumentView: NSView, NSDraggingSource {
         updateDocumentHeight(clipHeight: clipBounds.height)
         syncVisibleTiles(
             forceReconfigure: reconfigureExisting,
+            forceReloadImages: forceReloadImages,
+            targetedReloadIDs: targetedReloadIDs,
             animateMoves: animate && !isLiveScrolling,
             animateNewTiles: animateNewTiles && !isLiveScrolling,
             animationDuration: animationDuration,
@@ -3339,6 +3743,7 @@ internal final class MasonryDocumentView: NSView, NSDraggingSource {
     private func syncVisibleTiles(
         forceReconfigure: Bool = false,
         forceReloadImages: Bool = false,
+        targetedReloadIDs: Set<UUID>? = nil,
         animateMoves: Bool = false,
         animateNewTiles: Bool = false,
         animationDuration: CFTimeInterval = 0.26,
@@ -3406,7 +3811,8 @@ internal final class MasonryDocumentView: NSView, NSDraggingSource {
                 if existing.layer.zPosition != targetZ {
                     existing.layer.zPosition = targetZ
                 }
-                if forceReconfigure {
+                let shouldReloadThisTile = forceReloadImages || (targetedReloadIDs?.contains(asset.id) == true)
+                if forceReconfigure || shouldReloadThisTile || (!isLiveScrolling && existing.needsDeferredProceduralRender) {
                     existing.configure(
                         asset: asset,
                         frame: itemFrame.rect,
@@ -3416,7 +3822,8 @@ internal final class MasonryDocumentView: NSView, NSDraggingSource {
                         isDark: isDarkMode,
                         scale: scale,
                         loader: loader,
-                        forceReloadImage: forceReloadImages
+                        forceReloadImage: shouldReloadThisTile,
+                        isLiveScrolling: isLiveScrolling
                     )
                     if animateMoves && fromRect != itemFrame.rect {
                         let dist = hypot(itemFrame.rect.midX - fromRect.midX, itemFrame.rect.midY - fromRect.midY)
@@ -3459,6 +3866,7 @@ internal final class MasonryDocumentView: NSView, NSDraggingSource {
                 }
             } else {
                 let tile = reusePool.popLast() ?? MasonryTileLayer()
+                let shouldReloadThisTile = forceReloadImages || (targetedReloadIDs?.contains(asset.id) == true)
                 tile.layer.zPosition = (animateMoves && isAnchorTile) ? 40 : 0
                 tile.configure(
                     asset: asset,
@@ -3469,7 +3877,8 @@ internal final class MasonryDocumentView: NSView, NSDraggingSource {
                     isDark: isDarkMode,
                     scale: scale,
                     loader: loader,
-                    forceReloadImage: forceReloadImages
+                    forceReloadImage: shouldReloadThisTile,
+                    isLiveScrolling: isLiveScrolling
                 )
                 tilesContainerLayer.addSublayer(tile.layer)
                 if animateNewTiles {
@@ -3484,8 +3893,8 @@ internal final class MasonryDocumentView: NSView, NSDraggingSource {
             }
         }
 
-        // Keep hover overlay & muted hover media preview aligned if still visible and not live-scrolling/pinching/reflowing
-        if !isLiveScrolling, !isPinching, !isInPaneTransition, let hoveredID = hoveredAssetID, let tile = activeTiles[hoveredID], let asset = tile.boundAsset {
+        // Keep hover overlay & muted hover media preview aligned if still visible and not live-scrolling/pinching/reflowing/covered
+        if !isOverlayPresented, !isLiveScrolling, !isPinching, !isInPaneTransition, let hoveredID = hoveredAssetID, let tile = activeTiles[hoveredID], let asset = tile.boundAsset {
             hoverOverlayLayer.show(
                 for: asset,
                 in: tile.frame,
@@ -3533,7 +3942,7 @@ internal final class MasonryDocumentView: NSView, NSDraggingSource {
                 scale: scale
             )
         }
-        if !isLiveScrolling, !isInPaneTransition, let hoveredID = hoveredAssetID, let tile = activeTiles[hoveredID], let asset = tile.boundAsset {
+        if !isOverlayPresented, !isLiveScrolling, !isInPaneTransition, let hoveredID = hoveredAssetID, let tile = activeTiles[hoveredID], let asset = tile.boundAsset {
             hoverOverlayLayer.show(
                 for: asset,
                 in: tile.frame,
@@ -3560,8 +3969,11 @@ internal final class MasonryDocumentView: NSView, NSDraggingSource {
     }
 
     private func syncHoverMediaPreview(for asset: AssetRecord?, in frame: CGRect?, scale: CGFloat) {
-        guard !isLiveScrolling,
+        guard !isOverlayPresented,
+              !isLiveScrolling,
               activeQuickLookID == nil,
+              window?.occlusionState.contains(.visible) != false,
+              NSApp?.isHidden != true,
               let asset,
               let frame,
               let loader,
@@ -3580,7 +3992,13 @@ internal final class MasonryDocumentView: NSView, NSDraggingSource {
     }
 
     private func refreshHoverForCurrentMouseLocation() {
-        guard !isLiveScrolling, !isPinching, !isInPaneTransition, let window else {
+        guard !isOverlayPresented, !isLiveScrolling, !isPinching, !isInPaneTransition, let window else {
+            hoveredAssetID = nil
+            hoverOverlayLayer.hide()
+            hoverMediaPreview.stop()
+            return
+        }
+        guard window.occlusionState.contains(.visible), NSApp?.isHidden != true else {
             hoveredAssetID = nil
             hoverOverlayLayer.hide()
             hoverMediaPreview.stop()
@@ -3606,7 +4024,7 @@ internal final class MasonryDocumentView: NSView, NSDraggingSource {
     }
 
     override func mouseMoved(with event: NSEvent) {
-        guard !isLiveScrolling, !isPinching, !isInPaneTransition else { return }
+        guard !isOverlayPresented, !isLiveScrolling, !isPinching, !isInPaneTransition else { return }
         let point = convert(event.locationInWindow, from: nil)
         guard let hit = hitTestCard(at: point) else {
             if hoveredAssetID != nil {
@@ -3754,28 +4172,62 @@ internal final class MasonryDocumentView: NSView, NSDraggingSource {
             startCardDragSession(asset: asset, cardFrame: cardFrame, event: downEvent)
 
         case .marquee(let startPoint, let baseSelection):
+            lastMarqueeEvent = event
             autoscroll(with: event)
-            let rect = CGRect(
-                x: min(startPoint.x, point.x),
-                y: min(startPoint.y, point.y),
-                width: abs(point.x - startPoint.x),
-                height: abs(point.y - startPoint.y)
-            )
-            CATransaction.begin()
-            CATransaction.setDisableActions(true)
-            marqueeLayer.frame = rect
-            marqueeLayer.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.11).cgColor
-            marqueeLayer.borderColor = NSColor.controlAccentColor.withAlphaComponent(0.68).cgColor
-            marqueeLayer.isHidden = (rect.width <= 3 && rect.height <= 3)
-            CATransaction.commit()
+            updateMarqueeSelection(startPoint: startPoint, currentPoint: point, baseSelection: baseSelection)
+            if !visibleRect.contains(point) {
+                startMarqueeAutoscrollTimerIfNeeded()
+            } else {
+                marqueeAutoscrollTimer?.invalidate()
+                marqueeAutoscrollTimer = nil
+            }
+        }
+    }
 
-            var next = baseSelection
-            next.formUnion(layout.intersectingIDs(in: rect))
-            commitSelection(next)
+    private func updateMarqueeSelection(startPoint: CGPoint, currentPoint: CGPoint, baseSelection: Set<UUID>) {
+        let rect = CGRect(
+            x: min(startPoint.x, currentPoint.x),
+            y: min(startPoint.y, currentPoint.y),
+            width: abs(currentPoint.x - startPoint.x),
+            height: abs(currentPoint.y - startPoint.y)
+        )
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        marqueeLayer.frame = rect
+        marqueeLayer.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.11).cgColor
+        marqueeLayer.borderColor = NSColor.controlAccentColor.withAlphaComponent(0.68).cgColor
+        marqueeLayer.isHidden = (rect.width <= 3 && rect.height <= 3)
+        CATransaction.commit()
+
+        var next = baseSelection
+        next.formUnion(layout.intersectingIDs(in: rect))
+        commitSelection(next)
+    }
+
+    private func startMarqueeAutoscrollTimerIfNeeded() {
+        guard marqueeAutoscrollTimer == nil else { return }
+        marqueeAutoscrollTimer = Timer.scheduledTimer(withTimeInterval: 0.032, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self,
+                      case .marquee(let startPoint, let baseSelection) = self.pointerMode,
+                      let event = self.lastMarqueeEvent,
+                      let window = self.window else {
+                    self?.stopMarqueeAutoscrollTimer()
+                    return
+                }
+                let liveWindowPt = window.mouseLocationOutsideOfEventStream
+                let docPt = self.convert(liveWindowPt, from: nil)
+                if !self.visibleRect.contains(docPt) {
+                    _ = self.autoscroll(with: event)
+                    let updatedDocPt = self.convert(window.mouseLocationOutsideOfEventStream, from: nil)
+                    self.updateMarqueeSelection(startPoint: startPoint, currentPoint: updatedDocPt, baseSelection: baseSelection)
+                }
+            }
         }
     }
 
     override func mouseUp(with event: NSEvent) {
+        stopMarqueeAutoscrollTimer()
         switch pointerMode {
         case .none:
             break
@@ -4123,6 +4575,20 @@ internal final class MasonryDocumentView: NSView, NSDraggingSource {
 
     override func keyDown(with event: NSEvent) {
         let primaryModifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
+
+        // 2D spatial arrow-key navigation (with optional Shift range extension)
+        let navDirection: MasonryLayoutEngine.NavigationDirection? = switch event.keyCode {
+        case 123: .left
+        case 124: .right
+        case 125: .down
+        case 126: .up
+        default: nil
+        }
+        if let navDirection, (primaryModifiers.isEmpty || primaryModifiers == [.shift]), !assets.isEmpty {
+            navigateSelection(direction: navDirection, extendSelection: primaryModifiers.contains(.shift))
+            return
+        }
+
         guard primaryModifiers.isEmpty else {
             super.keyDown(with: event)
             return
@@ -4133,8 +4599,19 @@ internal final class MasonryDocumentView: NSView, NSDraggingSource {
                 commitSelection([])
                 return
             }
+        case 36, 76: // Return / Enter -> Open Quick Look for selected item
+            guard activeQuickLookID == nil, !isOverlayPresented else { return }
+            if event.isARepeat { return }
+            if let anchor = lastClickedID, let idx = assetIndexByID[anchor], idx < assets.count, selectedAssetIDs.contains(anchor) {
+                callbacks.onOpenQuickLook(assets[idx])
+                return
+            }
+            if let firstIdx = selectedAssetIDs.compactMap({ assetIndexByID[$0] }).min(), firstIdx < assets.count {
+                callbacks.onOpenQuickLook(assets[firstIdx])
+                return
+            }
         case 49: // Space (fallback when used standalone outside MainWindowView)
-            guard activeQuickLookID == nil else { return }
+            guard activeQuickLookID == nil, !isOverlayPresented else { return }
             if event.isARepeat { return }
             if let firstIdx = selectedAssetIDs.compactMap({ assetIndexByID[$0] }).min(), firstIdx < assets.count {
                 callbacks.onOpenQuickLook(assets[firstIdx])
@@ -4144,5 +4621,59 @@ internal final class MasonryDocumentView: NSView, NSDraggingSource {
             break
         }
         super.keyDown(with: event)
+    }
+
+    private func navigateSelection(direction: MasonryLayoutEngine.NavigationDirection, extendSelection: Bool) {
+        guard !assets.isEmpty, !layout.items.isEmpty else { return }
+
+        let currentIndex: Int? = {
+            if let lastID = lastClickedID, selectedAssetIDs.contains(lastID), let idx = assetIndexByID[lastID] {
+                return idx
+            }
+            return selectedAssetIDs.compactMap { assetIndexByID[$0] }.min()
+        }()
+
+        let targetIndex: Int
+        if let currentIndex,
+           let nextIdx = MasonryLayoutEngine.nextAssetIndex(from: currentIndex, direction: direction, in: layout) {
+            targetIndex = nextIdx
+        } else {
+            targetIndex = 0
+        }
+        guard targetIndex >= 0, targetIndex < assets.count else { return }
+        let targetAsset = assets[targetIndex]
+
+        if extendSelection {
+            var next = selectedAssetIDs
+            next.insert(targetAsset.id)
+            commitSelection(next)
+        } else {
+            commitSelection([targetAsset.id])
+        }
+        lastClickedID = targetAsset.id
+        scrollItemIntoVisibleArea(at: targetIndex)
+    }
+
+    private func scrollItemIntoVisibleArea(at index: Int) {
+        guard index < layout.items.count, let clipView = enclosingScrollView?.contentView else { return }
+        let itemRect = layout.items[index].rect
+        let clipBounds = clipView.bounds
+        let safeTop = clipBounds.minY + topInset + 8
+        let safeBottom = clipBounds.maxY - min(bottomInset, clipBounds.height * 0.25) - 8
+        var nextScrollY = clipBounds.origin.y
+        if itemRect.minY < safeTop {
+            nextScrollY = max(0, itemRect.minY - topInset - 12)
+        } else if itemRect.maxY > safeBottom {
+            let maxScrollY = max(0, layout.totalHeight - clipBounds.height)
+            let usableBottom = max(80, clipBounds.height - min(bottomInset, clipBounds.height * 0.25) - 12)
+            nextScrollY = min(maxScrollY, max(0, itemRect.maxY - usableBottom))
+        } else {
+            return
+        }
+        guard abs(nextScrollY - clipBounds.origin.y) >= 1 else { return }
+        clipView.scroll(to: NSPoint(x: 0, y: nextScrollY))
+        enclosingScrollView?.reflectScrolledClipView(clipView)
+        lastScrollY = nextScrollY
+        syncVisibleTiles()
     }
 }

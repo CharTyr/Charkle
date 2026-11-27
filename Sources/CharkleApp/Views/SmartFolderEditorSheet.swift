@@ -26,7 +26,7 @@ public struct SmartFolderEditorSheet: View {
 
     private let quickPalette: [String] = [
         "#E11D48", "#F97316", "#F59E0B", "#10B981",
-        "#06B6D4", "#3B82F6", "#6366F1", "#EC4899",
+        "#06B6D4", "#3B82F6", "#4E7D96", "#EC4899",
         "#18181B", "#71717A", "#E4E4E7", "#FFFFFF"
     ]
 
@@ -183,7 +183,7 @@ public struct SmartFolderEditorSheet: View {
                     }
 
                     // Condition 3: Specific Colors
-                    ruleCard(title: "特定颜色", subtitle: "匹配任意已选色值的相近主色素材（CIELAB 色差）") {
+                    ruleCard(title: "特定颜色", subtitle: "匹配任意已选色值的相近主色素材（支持色彩匹配范围调节）") {
                         VStack(alignment: .leading, spacing: 10) {
                             HStack(spacing: 7) {
                                 ForEach(quickPalette, id: \.self) { hex in
@@ -229,7 +229,7 @@ public struct SmartFolderEditorSheet: View {
                             }
 
                             if !selectedColorHexes.isEmpty {
-                                HStack(spacing: 8) {
+                                SmartFolderFlowLayout(spacing: 6) {
                                     ForEach(selectedColorHexes, id: \.self) { hex in
                                         HStack(spacing: 5) {
                                             Circle()
