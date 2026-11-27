@@ -265,16 +265,17 @@ nonisolated enum MediaArtwork {
         return palette[Int(hash % UInt64(palette.count))]
     }
 
-    /// Clean social post card (X / Threads / Bluesky / Xiaohongshu).
-    /// Xiaohongshu notes render as native 3:4 cover posters (`900x1200`) matching the platform's default cover ratio;
+    /// Clean social post card (X / Threads / Bluesky / Xiaohongshu / Douyin).
+    /// Xiaohongshu and Douyin posts render as native 3:4 vertical feed cards (`900x1440`);
+    /// YouTube and Bilibili render as 16:9 horizontal video cards (`960x760`);
     /// X / Threads / Bluesky keep the text-first card layout.
     static func socialPostCard(
         _ post: SocialPostMetadata,
         embeddedMedia: CGImage? = nil,
         authorAvatar: CGImage? = nil
     ) -> CGImage? {
-        if post.platform == .xiaohongshu {
-            return xiaohongshuPostCard(post, embeddedMedia: embeddedMedia, authorAvatar: authorAvatar)
+        if post.platform.isVerticalFeedPlatform {
+            return verticalFeedPostCard(post, embeddedMedia: embeddedMedia, authorAvatar: authorAvatar)
         }
         if post.platform.isVideoPlatform {
             return videoPlatformCard(post, embeddedMedia: embeddedMedia, authorAvatar: authorAvatar)
@@ -501,11 +502,11 @@ nonisolated enum MediaArtwork {
         return ctx.makeImage()
     }
 
-    /// Native Xiaohongshu feed card (`900x1440`):
-    /// - Top: strict vertical 3:4 (`900x1200`) full-bleed cover image with multi-image / video indicators.
-    /// - Bottom (`240px`): crisp paper-white footer preserving the bold note title (up to 2 lines),
+    /// Native vertical feed card (`900x1440`) shared by Xiaohongshu and Douyin:
+    /// - Top: strict vertical 3:4 (`900x1200`) full-bleed cover image with multi-image `N 图` pill or video play badge + `MM:SS` duration pill.
+    /// - Bottom (`240px`): crisp paper-white footer preserving the bold title (up to 2 lines),
     ///   author circular avatar + name, and right-aligned like count.
-    private static func xiaohongshuPostCard(
+    private static func verticalFeedPostCard(
         _ post: SocialPostMetadata,
         embeddedMedia: CGImage?,
         authorAvatar: CGImage?
@@ -515,6 +516,12 @@ nonisolated enum MediaArtwork {
         let footerHeight = 240
         let height = coverHeight + footerHeight // 900 x 1440 (ratio 0.625, unclipped in masonry)
         guard let ctx = context(width: width, height: height) else { return nil }
+
+        let isDouyin = post.platform == .douyin
+        let ribbonHex: UInt32 = isDouyin ? 0x161823 : 0xFF2442
+        let accentInkHex: UInt32 = isDouyin ? 0xFE2C55 : 0xFF2442
+        let fallbackInitial = isDouyin ? "抖" : "小"
+        let authorName = post.displayAuthorName
 
         let canvasRect = CGRect(x: 0, y: 0, width: width, height: height)
         ctx.setFillColor(color(0xFFFFFF))
@@ -550,16 +557,31 @@ nonisolated enum MediaArtwork {
                 ctx.addLine(to: CGPoint(x: coverRect.midX + 22, y: coverRect.midY))
                 ctx.closePath()
                 ctx.fillPath()
+
+                // Bottom-right duration pill on cover (matches Windows Douyin/vertical feed card)
+                if let durText = post.formattedVideoDuration {
+                    let pillW = max(92.0, Double(durText.count) * 14.0 + 30.0)
+                    let pillRect = CGRect(
+                        x: Double(width) - pillW - 24,
+                        y: Double(footerHeight) + 22,
+                        width: pillW,
+                        height: 44
+                    )
+                    ctx.setFillColor(color(0x111827, alpha: 0.72))
+                    fillRoundedRect(pillRect, radius: 22, in: ctx)
+                    draw(durText, in: ctx, at: CGPoint(x: pillRect.minX + 16, y: pillRect.minY + 13), size: 20, ink: 0xFFFFFF, width: pillW - 24, bold: true)
+                }
             }
 
             // Hairline divider separating light cover photos from the white title footer
             ctx.setFillColor(color(0xEFEFEF))
             ctx.fill(CGRect(x: 0, y: Double(footerHeight) - 1.5, width: Double(width), height: 1.5))
 
-            // 2. Bottom Xiaohongshu title + author + likes footer (y = 0 ... 240)
+            // 2. Bottom title + author + likes footer (y = 0 ... 240)
             let rawTitle = (post.articleTitle?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 }
                 ?? post.bodyText.trimmingCharacters(in: .whitespacesAndNewlines)
-            let displayTitle = rawTitle.isEmpty ? "\(post.authorName) 的小红书笔记" : rawTitle
+            let fallbackTitle = isDouyin ? "\(authorName) 的抖音作品" : "\(authorName) 的小红书笔记"
+            let displayTitle = rawTitle.isEmpty ? fallbackTitle : rawTitle
             let titleLines = wrapText(displayTitle, maxCharsPerLine: 25, maxLines: 2)
             var titleY = titleLines.count > 1 ? 182.0 : 158.0
             for line in titleLines {
@@ -579,20 +601,21 @@ nonisolated enum MediaArtwork {
                 ctx.setLineWidth(1.2)
                 ctx.strokeEllipse(in: avatarRect.insetBy(dx: 0.6, dy: 0.6))
             } else {
-                ctx.setFillColor(color(0xFF2442, alpha: 0.14))
+                ctx.setFillColor(color(ribbonHex, alpha: 0.14))
                 ctx.fillEllipse(in: avatarRect)
-                let initial = String((post.authorName.first ?? "小")).uppercased()
-                draw(initial, in: ctx, at: CGPoint(x: 46, y: 46), size: 20, ink: 0xFF2442, width: 24, bold: true)
+                let initial = String(authorName.first.map(String.init) ?? fallbackInitial).uppercased()
+                draw(initial, in: ctx, at: CGPoint(x: 46, y: 46), size: 20, ink: ribbonHex, width: 24, bold: true)
             }
 
             var rightLabelWidth = 0.0
             if let likes = post.likeCount {
                 let likesText = "♥ \(formatMetric(likes))"
-                rightLabelWidth = drawRightAligned(likesText, in: ctx, rightX: Double(width - 34), baselineY: 46, size: 22, ink: 0x6B7280, maxWidth: 180)
+                let likesInk: UInt32 = isDouyin ? accentInkHex : 0x6B7280
+                rightLabelWidth = drawRightAligned(likesText, in: ctx, rightX: Double(width - 34), baselineY: 46, size: 22, ink: likesInk, maxWidth: 180)
             }
 
             let authorMaxW = max(240, Double(width - 34) - 90 - (rightLabelWidth > 0 ? rightLabelWidth + 20 : 0))
-            draw(post.authorName, in: ctx, at: CGPoint(x: 90, y: 46), size: 23, ink: 0x5C6069, width: authorMaxW)
+            draw(authorName, in: ctx, at: CGPoint(x: 90, y: 46), size: 23, ink: 0x5C6069, width: authorMaxW)
 
             // Crisp outer hairline border so white footer edges stay distinct on light canvas
             ctx.setStrokeColor(color(0xE5E7EB))
@@ -603,7 +626,7 @@ nonisolated enum MediaArtwork {
         }
 
         // Clean 900x1440 editorial fallback card when cover media is unavailable
-        ctx.setFillColor(color(0xFF2442))
+        ctx.setFillColor(color(ribbonHex))
         ctx.fill(CGRect(x: 0, y: Double(height - 12), width: Double(width), height: 12))
 
         ctx.setStrokeColor(color(0xE5E7EB))
@@ -622,13 +645,13 @@ nonisolated enum MediaArtwork {
             ctx.setLineWidth(1.5)
             ctx.strokeEllipse(in: avatarRect.insetBy(dx: 0.75, dy: 0.75))
         } else {
-            ctx.setFillColor(color(0xFF2442))
+            ctx.setFillColor(color(ribbonHex))
             ctx.fillEllipse(in: avatarRect)
-            let initial = String((post.authorName.first ?? "小")).uppercased()
+            let initial = String(authorName.first.map(String.init) ?? fallbackInitial).uppercased()
             draw(initial, in: ctx, at: CGPoint(x: 68, y: headerY + 18), size: 26, ink: 0xFFFFFF, width: 36, bold: true)
         }
 
-        draw(post.authorName, in: ctx, at: CGPoint(x: 128, y: headerY + 30), size: 27, ink: 0x111827, width: 590, bold: true)
+        draw(authorName, in: ctx, at: CGPoint(x: 128, y: headerY + 30), size: 27, ink: 0x111827, width: 590, bold: true)
         var subParts: [String] = []
         if let handleLine = post.displayHandleLine {
             subParts.append(handleLine)

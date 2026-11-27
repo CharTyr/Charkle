@@ -615,6 +615,10 @@ public nonisolated enum XPostResolver {
             request.setValue(browserUA, forHTTPHeaderField: "User-Agent")
             request.setValue("https://www.xiaohongshu.com/", forHTTPHeaderField: "Referer")
             request.setValue("image/webp,image/avif,image/png,image/jpeg,*/*", forHTTPHeaderField: "Accept")
+        } else if DouyinURLParser.isDouyinMediaHost(url.host()) {
+            request.setValue(browserUA, forHTTPHeaderField: "User-Agent")
+            request.setValue(DouyinURLParser.referer, forHTTPHeaderField: "Referer")
+            request.setValue("image/avif,image/webp,image/png,image/jpeg,video/mp4,*/*", forHTTPHeaderField: "Accept")
         } else if VideoPlatformURLParser.isBilibiliMediaHost(url.host()) {
             request.setValue(browserUA, forHTTPHeaderField: "User-Agent")
             request.setValue("https://www.bilibili.com/", forHTTPHeaderField: "Referer")
@@ -651,7 +655,17 @@ public nonisolated enum XPostResolver {
         let size = Int64((try? tempURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
         guard size > 0, size <= maxBytes else { return nil }
 
-        let ext = resolvedExtension(for: finalURL, mimeType: http.mimeType, kind: kind)
+        let headerBytes: Data = {
+            guard let handle = try? FileHandle(forReadingFrom: tempURL) else { return Data() }
+            defer { try? handle.close() }
+            return (try? handle.read(upToCount: 64)) ?? Data()
+        }()
+        if let asciiHead = String(data: headerBytes, encoding: .utf8)?.lowercased(),
+           asciiHead.contains("<html") || asciiHead.contains("<!doctype") {
+            return nil
+        }
+
+        let ext = resolvedExtension(for: finalURL, mimeType: http.mimeType, kind: kind, headerBytes: headerBytes)
         let safeBase = sanitizedBaseName(baseName)
         let destination = directory.appending(path: "\(safeBase).\(ext)")
         try? FileManager.default.removeItem(at: destination)
@@ -678,23 +692,33 @@ public nonisolated enum XPostResolver {
         return components.url
     }
 
-    private static func resolvedExtension(for url: URL, mimeType: String?, kind: XPostMedia.Kind) -> String {
-        if let mime = mimeType?.lowercased() {
+    private static func resolvedExtension(
+        for url: URL,
+        mimeType: String?,
+        kind: XPostMedia.Kind,
+        headerBytes: Data = Data()
+    ) -> String {
+        if let mime = mimeType?.lowercased(), !mime.contains("octet-stream") {
             if mime.contains("mp4") { return "mp4" }
             if mime.contains("quicktime") { return "mov" }
             if mime.contains("webm") { return "webm" }
             if mime.contains("gif") { return "gif" }
             if mime.contains("png") { return "png" }
             if mime.contains("webp") { return "webp" }
+            if mime.contains("avif") { return "avif" }
+            if mime.contains("heic") || mime.contains("heif") { return "heic" }
             if mime.contains("jpeg") || mime.contains("jpg") { return "jpg" }
         }
+        if let sniffed = DouyinURLParser.sniffMediaExtension(from: headerBytes) {
+            return sniffed
+        }
         let pathExt = url.pathExtension.lowercased()
-        if ["jpg", "jpeg", "png", "webp", "gif", "mp4", "mov", "webm"].contains(pathExt) {
+        if ["jpg", "jpeg", "png", "webp", "avif", "heic", "gif", "mp4", "mov", "webm"].contains(pathExt) {
             return pathExt == "jpeg" ? "jpg" : pathExt
         }
         if let format = URLComponents(url: url, resolvingAgainstBaseURL: false)?
             .queryItems?.first(where: { $0.name == "format" })?.value?.lowercased(),
-           ["jpg", "jpeg", "png", "webp"].contains(format) {
+           ["jpg", "jpeg", "png", "webp", "avif", "heic"].contains(format) {
             return format == "jpeg" ? "jpg" : format
         }
         return kind == .photo ? "jpg" : "mp4"

@@ -485,7 +485,7 @@ struct AssetDetailView: View {
                     Task { await store.retagAssets([currentAsset.id]) }
                 }
 
-                if let post = currentAsset.richMetadata?.socialPost, !post.effectiveAttachments.isEmpty {
+                if let post = currentAsset.richMetadata?.socialPost, (!post.effectiveAttachments.isEmpty || post.isZeroDownloadVideoBookmark) {
                     let attachments = post.effectiveAttachments
                     Divider()
                     Button {
@@ -493,15 +493,15 @@ struct AssetDetailView: View {
                         Task { _ = await store.extractAllMediaFromSocialPost(postAsset: target) }
                     } label: {
                         Label(
-                            post.platform.isVideoPlatform
+                            post.isZeroDownloadVideoBookmark
                                 ? "保存视频为独立素材"
                                 : "全部提取为独立素材（\(attachments.count) 项）",
-                            systemImage: post.platform.isVideoPlatform ? "film.stack" : "square.and.arrow.down.on.square"
+                            systemImage: post.isZeroDownloadVideoBookmark ? "film.stack" : "square.and.arrow.down.on.square"
                         )
                     }
                     .disabled(store.isExtractingSocialMedia)
 
-                    if !post.platform.isVideoPlatform && attachments.count > 1 {
+                    if !post.isZeroDownloadVideoBookmark && attachments.count > 1 {
                         Menu("逐项提取帖子媒体", systemImage: "photo.on.rectangle") {
                             ForEach(Array(attachments.enumerated()), id: \.offset) { idx, attachment in
                                 Button {
@@ -1279,22 +1279,25 @@ private struct AssetStageContentView: View {
     private func socialBadgeColor(for platform: SocialPlatform) -> Color {
         switch platform {
         case .xiaohongshu: Color(charkleHex: "#FF2442")
+        case .douyin: Color(charkleHex: "#161823")
         case .youtube: Color(charkleHex: "#FF0000")
         case .bilibili: Color(charkleHex: "#FB7299")
         case .pixiv: Color(charkleHex: "#0096FA")
         case .instagram: Color(charkleHex: "#D93B58")
+        case .unknown: Color(charkleHex: "#52525B")
         default: MobileTheme.accent(for: colorScheme)
         }
     }
 
     private func socialPostStage(_ post: SocialPostMetadata, coverImage: UIImage?) -> some View {
         let attachments = post.effectiveAttachments
-        let hasInlineStreamVideo = post.platform.isVideoPlatform
+        let hasInlineStreamVideo = post.isZeroDownloadVideoBookmark
             || (post.hasVideo && attachments.contains(where: { $0.kind == .video || $0.kind == .gif }))
+        let canExtractPrimary = !attachments.isEmpty || post.isZeroDownloadVideoBookmark
         return ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 if hasInlineStreamVideo {
-                    MobileStreamingVideoPlayerView(
+                    let playerView = MobileStreamingVideoPlayerView(
                         playbackKey: "\(asset.id.uuidString):\(post.originalURL)",
                         coverImage: coverImage,
                         durationText: post.formattedVideoDuration,
@@ -1316,8 +1319,17 @@ private struct AssetStageContentView: View {
                             await VideoPlatformResolver.resolvePlaybackPlan(for: post)
                         }
                     )
-                    .aspectRatio(16.0 / 9.0, contentMode: .fit)
-                    .frame(maxWidth: 680)
+                    Group {
+                        if post.platform == .douyin {
+                            playerView
+                                .aspectRatio(3.0 / 4.0, contentMode: .fit)
+                                .frame(maxWidth: 460, maxHeight: 520)
+                        } else {
+                            playerView
+                                .aspectRatio(16.0 / 9.0, contentMode: .fit)
+                                .frame(maxWidth: 680)
+                        }
+                    }
                     .clipShape(RoundedRectangle(cornerRadius: MobileTheme.Radius.cardOuter, style: .continuous))
                     .frame(maxWidth: .infinity)
                 } else if let coverImage {
@@ -1337,7 +1349,7 @@ private struct AssetStageContentView: View {
                             .padding(.horizontal, 8)
                             .padding(.vertical, 3)
                             .background(socialBadgeColor(for: post.platform), in: Capsule())
-                        Text(post.authorName)
+                        Text(post.displayAuthorName)
                             .font(.system(size: 14, weight: .semibold))
                             .lineLimit(1)
                         if let handleLine = post.displayHandleLine {
@@ -1406,7 +1418,7 @@ private struct AssetStageContentView: View {
                     }
 
                     HStack(spacing: 10) {
-                        if !attachments.isEmpty {
+                        if canExtractPrimary {
                             Button {
                                 MobileHaptics.light()
                                 let target = asset
@@ -1418,12 +1430,12 @@ private struct AssetStageContentView: View {
                                             .controlSize(.mini)
                                             .tint(.white)
                                     } else {
-                                        Image(systemName: post.platform.isVideoPlatform ? "film.stack" : "square.and.arrow.down.on.square")
+                                        Image(systemName: post.isZeroDownloadVideoBookmark ? "film.stack" : "square.and.arrow.down.on.square")
                                     }
                                     Text(
                                         store.isExtractingSocialMedia
-                                            ? (post.platform.isVideoPlatform ? "正在保存视频…" : "正在提取…")
-                                            : (post.platform.isVideoPlatform
+                                            ? (post.isZeroDownloadVideoBookmark ? "正在保存视频…" : "正在提取…")
+                                            : (post.isZeroDownloadVideoBookmark
                                                 ? "保存视频为独立素材"
                                                 : "全部提取为独立素材（\(attachments.count)）")
                                     )
@@ -1444,11 +1456,11 @@ private struct AssetStageContentView: View {
                             } label: {
                                 Label(post.platform.openActionLabel, systemImage: "arrow.up.right.square")
                                     .font(.system(size: 13, weight: .semibold))
-                                    .foregroundStyle(attachments.isEmpty ? .white : .primary)
+                                    .foregroundStyle(!canExtractPrimary ? .white : .primary)
                                     .padding(.horizontal, 13)
                                     .padding(.vertical, 9)
                                     .background(
-                                        attachments.isEmpty
+                                        !canExtractPrimary
                                             ? MobileTheme.accentButtonFill(for: colorScheme)
                                             : MobileTheme.surfaceSubtle(for: colorScheme),
                                         in: Capsule()
@@ -1464,11 +1476,11 @@ private struct AssetStageContentView: View {
                     in: RoundedRectangle(cornerRadius: MobileTheme.Radius.settingsOuter, style: .continuous)
                 )
 
-                // Individual Social Post Media Attachments (for non-video-platform multi-media posts)
-                if !post.platform.isVideoPlatform && !attachments.isEmpty {
+                // Individual Social Post Media Attachments (for photo-notes & non-video multi-media posts)
+                if !post.isZeroDownloadVideoBookmark && !attachments.isEmpty {
                     VStack(alignment: .leading, spacing: 10) {
                         HStack {
-                            Text("帖子内媒体（\(attachments.count) 项）")
+                            Text("\(post.platform.postNoun)内媒体（\(attachments.count) 项）")
                                 .font(.system(size: 13, weight: .semibold))
                                 .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
                             Spacer()
@@ -1477,85 +1489,130 @@ private struct AssetStageContentView: View {
                                 .foregroundStyle(MobileTheme.tertiaryInk(for: colorScheme))
                         }
 
-                        ForEach(Array(attachments.enumerated()), id: \.offset) { idx, attachment in
-                            let previewURLString = attachment.thumbnailURL ?? attachment.url
-                            HStack(spacing: 12) {
-                                ZStack(alignment: .bottomLeading) {
-                                    if let previewURL = URL(string: previewURLString) {
-                                        AsyncImage(url: previewURL) { phase in
-                                            switch phase {
-                                            case .success(let img):
-                                                img.resizable().scaledToFill()
-                                            default:
-                                                MobileTheme.surfaceSubtle(for: colorScheme)
-                                                    .overlay {
-                                                        Image(systemName: attachment.kind == .photo ? "photo" : "film")
-                                                            .foregroundStyle(MobileTheme.tertiaryInk(for: colorScheme))
-                                                    }
+                        if post.platform.isVerticalFeedPlatform && attachments.count > 1 {
+                            LazyVGrid(
+                                columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)],
+                                spacing: 10
+                            ) {
+                                ForEach(Array(attachments.enumerated()), id: \.offset) { idx, attachment in
+                                    let previewURLString = attachment.kind == .photo ? attachment.url : (attachment.thumbnailURL ?? attachment.url)
+                                    ZStack(alignment: .bottomTrailing) {
+                                        Color.clear
+                                            .aspectRatio(3.0 / 4.0, contentMode: .fit)
+                                            .overlay {
+                                                if let previewURL = URL(string: previewURLString) {
+                                                    MobileSocialRemoteImageView(
+                                                        url: previewURL,
+                                                        fallbackSymbol: attachment.kind == .photo ? "photo" : "film"
+                                                    )
+                                                } else {
+                                                    MobileTheme.surfaceSubtle(for: colorScheme)
+                                                }
                                             }
-                                        }
-                                    } else {
-                                        MobileTheme.surfaceSubtle(for: colorScheme)
-                                    }
+                                            .clipped()
+                                            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                                            .overlay(
+                                                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                                    .strokeBorder(MobileTheme.hairline(for: colorScheme), lineWidth: 0.75)
+                                            )
 
-                                    if attachment.kind != .photo {
-                                        Text(attachment.kind == .gif ? "GIF" : "视频")
-                                            .font(.system(size: 9.5, weight: .bold))
-                                            .foregroundStyle(.white)
-                                            .padding(.horizontal, 5)
-                                            .padding(.vertical, 2)
-                                            .background(.black.opacity(0.68), in: Capsule())
-                                            .padding(4)
+                                        Button {
+                                            MobileHaptics.light()
+                                            let target = asset
+                                            Task {
+                                                _ = await store.extractMediaFromSocialPost(
+                                                    postAsset: target,
+                                                    attachment: attachment,
+                                                    index: idx
+                                                )
+                                            }
+                                        } label: {
+                                            Label("提取 #\(idx + 1)", systemImage: "photo.badge.plus")
+                                                .font(.system(size: 11, weight: .semibold))
+                                                .foregroundStyle(.white)
+                                                .padding(.horizontal, 9)
+                                                .padding(.vertical, 5)
+                                                .background(.black.opacity(0.72), in: Capsule())
+                                        }
+                                        .buttonStyle(.plain)
+                                        .disabled(store.isExtractingSocialMedia)
+                                        .padding(8)
                                     }
                                 }
-                                .frame(width: 68, height: 68)
-                                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                            }
+                        } else {
+                            ForEach(Array(attachments.enumerated()), id: \.offset) { idx, attachment in
+                                let previewURLString = attachment.thumbnailURL ?? attachment.url
+                                HStack(spacing: 12) {
+                                    ZStack(alignment: .bottomLeading) {
+                                        if let previewURL = URL(string: previewURLString) {
+                                            MobileSocialRemoteImageView(
+                                                url: previewURL,
+                                                fallbackSymbol: attachment.kind == .photo ? "photo" : "film"
+                                            )
+                                        } else {
+                                            MobileTheme.surfaceSubtle(for: colorScheme)
+                                        }
+
+                                        if attachment.kind != .photo {
+                                            Text(attachment.kind == .gif ? "GIF" : "视频")
+                                                .font(.system(size: 9.5, weight: .bold))
+                                                .foregroundStyle(.white)
+                                                .padding(.horizontal, 5)
+                                                .padding(.vertical, 2)
+                                                .background(.black.opacity(0.68), in: Capsule())
+                                                .padding(4)
+                                        }
+                                    }
+                                    .frame(width: 68, height: 68)
+                                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                            .strokeBorder(MobileTheme.hairline(for: colorScheme), lineWidth: 0.75)
+                                    )
+
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        Text("第 \(idx + 1) 项 · \(attachment.kind.localizedLabel)")
+                                            .font(.system(size: 13.5, weight: .semibold))
+                                            .foregroundStyle(.primary)
+                                        Text("转为独立素材存入当前目录")
+                                            .font(.system(size: 11.5))
+                                            .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
+                                    }
+
+                                    Spacer(minLength: 4)
+
+                                    Button {
+                                        MobileHaptics.light()
+                                        let target = asset
+                                        Task {
+                                            _ = await store.extractMediaFromSocialPost(
+                                                postAsset: target,
+                                                attachment: attachment,
+                                                index: idx
+                                            )
+                                        }
+                                    } label: {
+                                        Label("转为独立素材", systemImage: "square.and.arrow.down")
+                                            .font(.system(size: 12, weight: .semibold))
+                                            .foregroundStyle(MobileTheme.accent(for: colorScheme))
+                                            .padding(.horizontal, 10)
+                                            .padding(.vertical, 7)
+                                            .background(MobileTheme.accentSoft(for: colorScheme), in: Capsule())
+                                    }
+                                    .buttonStyle(MobileTactileButtonStyle())
+                                    .disabled(store.isExtractingSocialMedia)
+                                }
+                                .padding(10)
+                                .background(
+                                    MobileTheme.surfaceElevated(for: colorScheme),
+                                    in: RoundedRectangle(cornerRadius: MobileTheme.Radius.cardOuter, style: .continuous)
+                                )
                                 .overlay(
-                                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                    RoundedRectangle(cornerRadius: MobileTheme.Radius.cardOuter, style: .continuous)
                                         .strokeBorder(MobileTheme.hairline(for: colorScheme), lineWidth: 0.75)
                                 )
-
-                                VStack(alignment: .leading, spacing: 3) {
-                                    Text("第 \(idx + 1) 项 · \(attachment.kind.localizedLabel)")
-                                        .font(.system(size: 13.5, weight: .semibold))
-                                        .foregroundStyle(.primary)
-                                    Text("转为独立素材存入当前目录")
-                                        .font(.system(size: 11.5))
-                                        .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
-                                }
-
-                                Spacer(minLength: 4)
-
-                                Button {
-                                    MobileHaptics.light()
-                                    let target = asset
-                                    Task {
-                                        _ = await store.extractMediaFromSocialPost(
-                                            postAsset: target,
-                                            attachment: attachment,
-                                            index: idx
-                                        )
-                                    }
-                                } label: {
-                                    Label("转为独立素材", systemImage: "square.and.arrow.down")
-                                        .font(.system(size: 12, weight: .semibold))
-                                        .foregroundStyle(MobileTheme.accent(for: colorScheme))
-                                        .padding(.horizontal, 10)
-                                        .padding(.vertical, 7)
-                                        .background(MobileTheme.accentSoft(for: colorScheme), in: Capsule())
-                                }
-                                .buttonStyle(MobileTactileButtonStyle())
-                                .disabled(store.isExtractingSocialMedia)
                             }
-                            .padding(10)
-                            .background(
-                                MobileTheme.surfaceElevated(for: colorScheme),
-                                in: RoundedRectangle(cornerRadius: MobileTheme.Radius.cardOuter, style: .continuous)
-                            )
-                            .overlay(
-                                RoundedRectangle(cornerRadius: MobileTheme.Radius.cardOuter, style: .continuous)
-                                    .strokeBorder(MobileTheme.hairline(for: colorScheme), lineWidth: 0.75)
-                            )
                         }
                     }
                 }
@@ -2165,10 +2222,14 @@ private struct MobileDirectStreamPlayerController: UIViewControllerRepresentable
                 try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
                 try? AVAudioSession.sharedInstance().setActive(true)
 
-                let options: [String: Any]? = stream.httpHeaders.isEmpty
-                    ? nil
-                    : ["AVURLAssetHTTPHeaderFieldsKey": stream.httpHeaders]
-                let asset = AVURLAsset(url: stream.url, options: options)
+                var assetOptions: [String: Any] = [:]
+                if !stream.httpHeaders.isEmpty {
+                    assetOptions["AVURLAssetHTTPHeaderFieldsKey"] = stream.httpHeaders
+                }
+                if let overrideMIME = stream.overrideMIMEType, !overrideMIME.isEmpty {
+                    assetOptions[AVURLAssetOverrideMIMETypeKey] = overrideMIME
+                }
+                let asset = AVURLAsset(url: stream.url, options: assetOptions.isEmpty ? nil : assetOptions)
                 let playable = (try? await asset.load(.isPlayable)) ?? false
                 guard !Task.isCancelled else { return }
                 guard playable else {
@@ -3048,9 +3109,9 @@ private struct DetailInspectorPanel: View {
                     .font(.system(size: 13))
                 }
 
-                if let post = asset.richMetadata?.socialPost, !post.effectiveAttachments.isEmpty {
+                if let post = asset.richMetadata?.socialPost, (!post.effectiveAttachments.isEmpty || post.isZeroDownloadVideoBookmark) {
                     let attachments = post.effectiveAttachments
-                    inspectorCard("帖子内媒体（\(attachments.count) 项）") {
+                    inspectorCard(post.isZeroDownloadVideoBookmark ? "视频保存" : "帖子内媒体（\(attachments.count) 项）") {
                         Button {
                             MobileHaptics.light()
                             let target = asset
@@ -3060,12 +3121,14 @@ private struct DetailInspectorPanel: View {
                                 if store.isExtractingSocialMedia {
                                     ProgressView().controlSize(.mini).tint(.white)
                                 } else {
-                                    Image(systemName: "square.and.arrow.down.on.square")
+                                    Image(systemName: post.isZeroDownloadVideoBookmark ? "film.stack" : "square.and.arrow.down.on.square")
                                 }
                                 Text(
                                     store.isExtractingSocialMedia
-                                        ? "正在提取…"
-                                        : "全部提取为独立素材（\(attachments.count) 项）"
+                                        ? (post.isZeroDownloadVideoBookmark ? "正在保存视频…" : "正在提取…")
+                                        : (post.isZeroDownloadVideoBookmark
+                                            ? "保存视频为独立素材"
+                                            : "全部提取为独立素材（\(attachments.count) 项）")
                                 )
                                 .font(.system(size: 13, weight: .semibold))
                             }
@@ -3077,36 +3140,38 @@ private struct DetailInspectorPanel: View {
                         .buttonStyle(MobileTactileButtonStyle())
                         .disabled(store.isExtractingSocialMedia)
 
-                        ForEach(Array(attachments.enumerated()), id: \.offset) { idx, attachment in
-                            Button {
-                                MobileHaptics.light()
-                                let target = asset
-                                Task {
-                                    _ = await store.extractMediaFromSocialPost(
-                                        postAsset: target,
-                                        attachment: attachment,
-                                        index: idx
-                                    )
+                        if !post.isZeroDownloadVideoBookmark {
+                            ForEach(Array(attachments.enumerated()), id: \.offset) { idx, attachment in
+                                Button {
+                                    MobileHaptics.light()
+                                    let target = asset
+                                    Task {
+                                        _ = await store.extractMediaFromSocialPost(
+                                            postAsset: target,
+                                            attachment: attachment,
+                                            index: idx
+                                        )
+                                    }
+                                } label: {
+                                    HStack(spacing: 8) {
+                                        Image(systemName: attachment.kind == .photo ? "photo" : "film")
+                                            .font(.system(size: 12.5, weight: .medium))
+                                            .foregroundStyle(MobileTheme.accent(for: colorScheme))
+                                        Text("提取第 \(idx + 1) 个\(attachment.kind.localizedLabel)为独立素材")
+                                            .font(.system(size: 12.5, weight: .medium))
+                                            .foregroundStyle(.primary)
+                                            .lineLimit(1)
+                                        Spacer()
+                                        Image(systemName: "square.and.arrow.down")
+                                            .font(.system(size: 12, weight: .semibold))
+                                            .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
+                                    }
+                                    .padding(.vertical, 4)
+                                    .contentShape(Rectangle())
                                 }
-                            } label: {
-                                HStack(spacing: 8) {
-                                    Image(systemName: attachment.kind == .photo ? "photo" : "film")
-                                        .font(.system(size: 12.5, weight: .medium))
-                                        .foregroundStyle(MobileTheme.accent(for: colorScheme))
-                                    Text("提取第 \(idx + 1) 个\(attachment.kind.localizedLabel)为独立素材")
-                                        .font(.system(size: 12.5, weight: .medium))
-                                        .foregroundStyle(.primary)
-                                        .lineLimit(1)
-                                    Spacer()
-                                    Image(systemName: "square.and.arrow.down")
-                                        .font(.system(size: 12, weight: .semibold))
-                                        .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
-                                }
-                                .padding(.vertical, 4)
-                                .contentShape(Rectangle())
+                                .buttonStyle(.plain)
+                                .disabled(store.isExtractingSocialMedia)
                             }
-                            .buttonStyle(.plain)
-                            .disabled(store.isExtractingSocialMedia)
                         }
                     }
                 }
@@ -3559,4 +3624,69 @@ struct ActivityShareSheet: UIViewControllerRepresentable {
     }
 
     func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
+}
+
+/// Referer-aware remote image loader for social post attachments (Douyin, Xiaohongshu, Bilibili CDNs).
+private struct MobileSocialRemoteImageView: View {
+    let url: URL
+    let fallbackSymbol: String
+
+    @Environment(\.colorScheme) private var colorScheme
+    @State private var loadedImage: UIImage?
+    @State private var loadedURL: URL?
+
+    var body: some View {
+        Group {
+            if let img = (loadedURL == url ? loadedImage : nil) {
+                Image(uiImage: img)
+                    .resizable()
+                    .scaledToFill()
+            } else {
+                MobileTheme.surfaceSubtle(for: colorScheme)
+                    .overlay {
+                        Image(systemName: fallbackSymbol)
+                            .foregroundStyle(MobileTheme.tertiaryInk(for: colorScheme))
+                    }
+            }
+        }
+        .task(id: url) {
+            if loadedURL == url, loadedImage != nil { return }
+            let target = url
+            if let data = await Self.fetchImageDataOffMain(url: target),
+               !Task.isCancelled,
+               let image = UIImage(data: data) {
+                loadedImage = image
+                loadedURL = target
+            }
+        }
+    }
+
+    @concurrent
+    private static func fetchImageDataOffMain(url targetURL: URL) async -> Data? {
+        guard !Task.isCancelled, WebBookmark.isSafeRemoteFetchURL(targetURL) else { return nil }
+        var req = URLRequest(url: targetURL, timeoutInterval: 10)
+        let ua = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1"
+        if DouyinURLParser.isDouyinMediaHost(targetURL.host()) {
+            req.setValue(ua, forHTTPHeaderField: "User-Agent")
+            req.setValue(DouyinURLParser.referer, forHTTPHeaderField: "Referer")
+        } else if XiaohongshuURLParser.isXiaohongshuMediaHost(targetURL.host()) {
+            req.setValue(ua, forHTTPHeaderField: "User-Agent")
+            req.setValue("https://www.xiaohongshu.com/", forHTTPHeaderField: "Referer")
+        } else if VideoPlatformURLParser.isBilibiliMediaHost(targetURL.host()) {
+            req.setValue(ua, forHTTPHeaderField: "User-Agent")
+            req.setValue("https://www.bilibili.com/", forHTTPHeaderField: "Referer")
+        } else {
+            req.setValue("Charkle/1.0 (+https://charkle.app)", forHTTPHeaderField: "User-Agent")
+        }
+        req.setValue("image/avif,image/webp,image/png,image/jpeg,image/*", forHTTPHeaderField: "Accept")
+        guard let (data, resp) = try? await URLSession.shared.data(for: req),
+              !Task.isCancelled,
+              let http = resp as? HTTPURLResponse,
+              (200..<300).contains(http.statusCode),
+              !data.isEmpty,
+              data.count <= 20 * 1024 * 1024 else {
+            return nil
+        }
+        return data
+    }
 }

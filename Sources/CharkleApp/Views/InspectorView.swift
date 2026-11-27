@@ -1265,13 +1265,13 @@ public struct InspectorView: View {
                 }
 
                 Text(
-                    post.platform.isVideoPlatform
-                        ? "默认仅保存封面、链接与视频摘要；点击下方按钮即可按需下载视频并存为独立素材。"
+                    post.isZeroDownloadVideoBookmark
+                        ? "默认仅保存封面、链接与摘要；点击下方按钮即可按需下载视频并存为独立素材。"
                         : "可将帖子里的图片或视频单独存为素材，并自动保留原作者、正文与链接。"
                 )
                     .font(.system(size: 11.5))
                     .foregroundStyle(.secondary)
-                if attachments.count > 1 {
+                if attachments.count > 1 && !post.isZeroDownloadVideoBookmark {
                     Button {
                         Task {
                             let extracted = await library.extractAllMediaFromSocialPost(postAsset: asset)
@@ -1302,14 +1302,14 @@ public struct InspectorView: View {
                         }
                     } label: {
                         Label(
-                            post.platform.isVideoPlatform
+                            post.isZeroDownloadVideoBookmark
                                 ? "保存视频为独立素材"
                                 : "提取第 \(idx + 1) 个\(attachment.kind.localizedLabel)为独立素材",
                             systemImage: isVideoLike ? "film" : "photo.badge.plus"
                         )
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    .buttonStyle(.charkle(post.platform.isVideoPlatform ? .accent : .standard, size: .xs, fullWidth: true))
+                    .buttonStyle(.charkle(post.isZeroDownloadVideoBookmark ? .accent : .standard, size: .xs, fullWidth: true))
                 }
             }
         }

@@ -499,7 +499,7 @@ public nonisolated enum MasonryLayoutEngine {
             if asset.isSocialPost {
                 asset.pixelWidth > 0 && asset.pixelHeight > 0
                     ? CGFloat(asset.aspectRatio)
-                    : (asset.richMetadata?.socialPost?.platform == .xiaohongshu
+                    : (asset.richMetadata?.socialPost?.platform.isVerticalFeedPlatform == true
                         ? 0.625
                         : (asset.richMetadata?.socialPost?.platform.isVideoPlatform == true ? 1.26 : 1.12))
             } else if asset.isGitHubRepo {

@@ -167,15 +167,20 @@ public actor PlaceholderCharkleEngine: CharkleEngineProtocol {
                     dominantColors: [LabColor.fromHex(hex)]
                 )
             case .socialBookmark(let post, _, let tags):
+                var mergedTags = Set(tags)
+                mergedTags.insert(post.platform.displayName)
+                if post.platform == .douyin {
+                    mergedTags.insert(DouyinURLParser.classificationTag(hasVideo: post.hasVideo))
+                }
                 record = AssetRecord(
-                    title: post.articleTitle ?? post.authorName,
+                    title: post.articleTitle ?? post.displayAuthorName,
                     fileName: "\(post.platform.rawValue)-bookmark.md",
                     folderID: targetFolderID,
                     mediaKind: .webBookmark,
                     sourceURL: post.originalURL,
                     sourceDomain: URL(string: post.originalURL)?.host,
                     notes: post.bodyText,
-                    tags: Array(Set(tags + [post.platform.displayName])).sorted(),
+                    tags: mergedTags.sorted(),
                     richMetadata: AssetRichMetadata(socialPost: post)
                 )
             }

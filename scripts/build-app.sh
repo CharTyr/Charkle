@@ -74,7 +74,7 @@ fi
 if [[ -f "$ROOT_DIR/Resources/BrowserExtension/manifest.json" ]]; then
   mkdir -p "$STAGE_BUNDLE/Contents/Resources/BrowserExtension/icons" \
            "$STAGE_BUNDLE/Contents/Resources/BrowserExtension/lib"
-  for f in manifest.json background.js content.js popup.html popup.css popup.js options.html options.css options.js README.md; do
+  for f in manifest.json background.js content.js page-bridge.js x-bridge-loader.js popup.html popup.css popup.js options.html options.css options.js README.md; do
     if [[ -f "$ROOT_DIR/Resources/BrowserExtension/$f" ]]; then
       cp -X "$ROOT_DIR/Resources/BrowserExtension/$f" "$STAGE_BUNDLE/Contents/Resources/BrowserExtension/$f"
     fi

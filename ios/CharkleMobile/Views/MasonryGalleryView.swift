@@ -2393,16 +2393,16 @@ struct GalleryCardView: View {
                 }
             }
 
-            if let post = asset.richMetadata?.socialPost, !post.effectiveAttachments.isEmpty {
+            if let post = asset.richMetadata?.socialPost, (!post.effectiveAttachments.isEmpty || post.isZeroDownloadVideoBookmark) {
                 Button {
                     let target = asset
                     Task { _ = await store.extractAllMediaFromSocialPost(postAsset: target) }
                 } label: {
                     Label(
-                        post.platform.isVideoPlatform
+                        post.isZeroDownloadVideoBookmark
                             ? "保存视频为独立素材"
                             : "提取帖子内媒体为独立素材（\(post.effectiveAttachments.count) 项）",
-                        systemImage: post.platform.isVideoPlatform ? "film.stack" : "square.and.arrow.down.on.square"
+                        systemImage: post.isZeroDownloadVideoBookmark ? "film.stack" : "square.and.arrow.down.on.square"
                     )
                 }
             } else if let web = asset.richMetadata?.webPage, !web.attachments.isEmpty {

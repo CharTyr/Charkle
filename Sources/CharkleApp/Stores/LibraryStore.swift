@@ -810,7 +810,7 @@ public final class LibraryStore {
             let baseName = "\(post.platform.displayName)-\(post.authorHandle)-\(kindTag)\(index + 1)"
 
             let created: [AssetRecord]
-            if post.platform.isVideoPlatform {
+            if post.isZeroDownloadVideoBookmark {
                 let videoFile = try await VideoPlatformResolver.downloadVideo(
                     for: post,
                     to: tempDir,
@@ -870,9 +870,9 @@ public final class LibraryStore {
 
             let authorAttribution: String = {
                 if let handleLine = post.displayHandleLine {
-                    return "\(post.authorName) (\(handleLine))"
+                    return "\(post.displayAuthorName) (\(handleLine))"
                 }
-                return post.authorName
+                return post.displayAuthorName
             }()
             var noteParts: [String] = [
                 "来源\(post.platform.postNoun)：\(authorAttribution) · \(post.platform.displayName)"
@@ -891,23 +891,27 @@ public final class LibraryStore {
             let attributionNotes = noteParts.joined(separator: "\n\n")
 
             let extractedTitle: String = {
-                if post.platform.isVideoPlatform,
+                if post.isZeroDownloadVideoBookmark,
                    let article = post.articleTitle?.trimmingCharacters(in: .whitespacesAndNewlines),
                    !article.isEmpty {
                     return article
                 }
-                let titleAuthor = (post.platform == .xiaohongshu || post.platform.isVideoPlatform)
-                    ? post.authorName
+                let titleAuthor = (post.platform.isVerticalFeedPlatform || post.platform.isVideoPlatform)
+                    ? post.displayAuthorName
                     : "@\(post.authorHandle)"
                 return "\(titleAuthor) \(attachment.kind.localizedLabel) #\(index + 1)"
             }()
+            var extractedTags = [post.platform.displayName]
+            if post.platform == .douyin {
+                extractedTags.append(DouyinURLParser.classificationTag(hasVideo: post.hasVideo))
+            }
             let patched = try await engine.updateAssets(
                 AssetBatchPatch(
                     assetIDs: [standalone.id],
                     title: extractedTitle,
                     notes: attributionNotes,
                     sourceURL: post.originalURL,
-                    addTags: [post.platform.displayName]
+                    addTags: extractedTags
                 )
             )
             let finalAsset = patched.first ?? standalone
@@ -924,7 +928,14 @@ public final class LibraryStore {
     @discardableResult
     public func extractAllMediaFromSocialPost(postAsset: AssetRecord) async -> [AssetRecord] {
         guard let post = postAsset.richMetadata?.socialPost else { return [] }
-        let items = post.effectiveAttachments
+        let items: [SocialMediaAttachment] = {
+            let existing = post.effectiveAttachments
+            if !existing.isEmpty { return existing }
+            if post.isZeroDownloadVideoBookmark {
+                return [SocialMediaAttachment(kind: .video, url: post.videoURL ?? post.originalURL, thumbnailURL: post.mediaThumbnailURLs.first)]
+            }
+            return []
+        }()
         guard !items.isEmpty else { return [] }
         var extracted: [AssetRecord] = []
         for (idx, attachment) in items.enumerated() {

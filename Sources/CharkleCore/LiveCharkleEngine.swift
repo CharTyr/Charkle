@@ -1819,8 +1819,11 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
 
         async let avatarTask = SocialPostResolver.fetchAvatarImage(from: resolved.metadata.authorAvatarURL)
 
-        let primaryMediaURL = resolved.primaryMediaDownloadURL
-        let primaryKind = resolved.primaryMediaKind
+        let skipEagerVideoDownload = resolved.metadata.isZeroDownloadVideoBookmark
+        let primaryMediaURL = (skipEagerVideoDownload && (resolved.primaryMediaKind == .video || resolved.primaryMediaKind == .gif))
+            ? nil
+            : resolved.primaryMediaDownloadURL
+        let primaryKind = primaryMediaURL == nil ? nil : resolved.primaryMediaKind
         let primaryThumbURL = resolved.primaryThumbnailURL
         let handleTag = resolved.metadata.authorHandle
 
@@ -1942,10 +1945,16 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         prepared.asset.sourceDomain = ref.canonicalURL.host() ?? defaultSocialDomain(for: meta.platform)
         prepared.asset.richMetadata = AssetRichMetadata(socialPost: meta)
 
-        let platformTag = meta.platform.displayName
-        if !prepared.asset.tags.contains(platformTag) {
-            prepared.asset.tags.append(platformTag)
+        var mergedTags = Set(prepared.asset.tags)
+        mergedTags.insert(meta.platform.displayName)
+        if meta.platform == .douyin {
+            mergedTags.insert(DouyinURLParser.classificationTag(hasVideo: meta.hasVideo))
         }
+        for tag in resolved.extractedTags {
+            let clean = tag.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !clean.isEmpty { mergedTags.insert(clean) }
+        }
+        prepared.asset.tags = mergedTags.sorted()
 
         if let card = MediaArtwork.socialPostCard(meta, embeddedMedia: embeddedPoster, authorAvatar: authorAvatar) {
             try? media.writeCustomPoster(card, for: &prepared.asset)
@@ -1956,18 +1965,22 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
 
     private func defaultSocialDomain(for platform: SocialPlatform) -> String {
         switch platform {
-        case .x: "x.com"
-        case .bluesky: "bsky.app"
-        case .threads: "threads.net"
-        case .xiaohongshu: "xiaohongshu.com"
-        case .pixiv: "pixiv.net"
-        case .instagram: "instagram.com"
-        case .youtube: "youtube.com"
-        case .bilibili: "bilibili.com"
+        case .x: return "x.com"
+        case .bluesky: return "bsky.app"
+        case .threads: return "threads.net"
+        case .xiaohongshu: return "xiaohongshu.com"
+        case .douyin: return "douyin.com"
+        case .pixiv: return "pixiv.net"
+        case .instagram: return "instagram.com"
+        case .youtube: return "youtube.com"
+        case .bilibili: return "bilibili.com"
+        case .unknown(let raw):
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? "social.link" : trimmed
         }
     }
 
-    /// Saves a rich social bookmark pre-extracted by the browser extension (X / Xiaohongshu batch sync),
+    /// Saves a rich social bookmark pre-extracted by the browser extension (X / Xiaohongshu / Douyin batch sync),
     /// optionally enriching with live resolver data while never degrading if the remote site throttles.
     private func preparePreExtractedSocialBookmark(
         _ supplied: SocialPostMetadata,
@@ -1977,7 +1990,7 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
     ) async throws -> PreparedAsset {
         var meta = supplied
 
-        // Opportunistically enrich X posts (for full video MP4 / quoted tweets / articles) or sparse XHS cards.
+        // Opportunistically enrich X posts (for full video MP4 / quoted tweets / articles) or sparse XHS/Douyin cards.
         let needsLiveEnrich: Bool = {
             if supplied.platform == .x {
                 return supplied.effectiveAttachments.isEmpty || supplied.hasVideo || supplied.bodyText.isEmpty
@@ -1986,6 +1999,9 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
                 let bodyMatchesTitle = supplied.bodyText.trimmingCharacters(in: .whitespacesAndNewlines)
                     == (supplied.articleTitle?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "")
                 return supplied.effectiveAttachments.count <= 1 && (supplied.bodyText.isEmpty || bodyMatchesTitle)
+            }
+            if supplied.platform == .douyin {
+                return supplied.effectiveAttachments.isEmpty && supplied.bodyText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             }
             return false
         }()
@@ -1996,7 +2012,8 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
            let ref = SocialPostURLParser.parse(url),
            let live = await SocialPostResolver.resolve(ref) {
             meta = Self.mergeSocialPostMetadata(preferredLive: live.metadata, fallbackSupplied: supplied)
-            if live.primaryMediaKind == .video || live.primaryMediaKind == .gif {
+            if !meta.platform.prefersZeroDownloadVideoBookmark,
+               (live.primaryMediaKind == .video || live.primaryMediaKind == .gif) {
                 resolvedVideoDownloadURL = live.primaryMediaDownloadURL
             }
         }
@@ -2018,7 +2035,8 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         }
 
         let effectiveAttachments = meta.effectiveAttachments
-        if let videoURL = resolvedVideoDownloadURL ?? meta.videoURL.flatMap(URL.init(string:)) {
+        if !meta.platform.prefersZeroDownloadVideoBookmark,
+           let videoURL = resolvedVideoDownloadURL ?? meta.videoURL.flatMap(URL.init(string:)) {
             let videoItem = XPostMedia(
                 kind: .video,
                 url: videoURL,
@@ -2072,6 +2090,9 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
 
         prepared.asset.mediaKind = .webBookmark
         prepared.asset.title = resolved.shortTitle
+        if let dur = meta.videoDurationSeconds, dur > 0 {
+            prepared.asset.durationSeconds = dur
+        }
         prepared.asset.notes = meta.bodyText
         prepared.asset.ocrText = meta.bodyText.isEmpty ? prepared.asset.ocrText : meta.bodyText
         prepared.asset.sourceURL = meta.originalURL
@@ -2080,6 +2101,9 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
 
         var mergedTags = Set(prepared.asset.tags)
         mergedTags.insert(meta.platform.displayName)
+        if meta.platform == .douyin {
+            mergedTags.insert(DouyinURLParser.classificationTag(hasVideo: meta.hasVideo))
+        }
         for tag in extraTags {
             let clean = tag.trimmingCharacters(in: .whitespacesAndNewlines)
             if !clean.isEmpty { mergedTags.insert(clean) }
@@ -2105,7 +2129,10 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         let bestBody = liveBody.count >= suppliedBody.count ? live.bodyText : supplied.bodyText
 
         let liveName = live.authorName.trimmingCharacters(in: .whitespacesAndNewlines)
-        let useLiveAuthor = !liveName.isEmpty && liveName != "小红书笔记" && liveName != "小红书用户"
+        let useLiveAuthor = !liveName.isEmpty
+            && liveName != "小红书笔记"
+            && liveName != "小红书用户"
+            && liveName != "抖音用户"
         return SocialPostMetadata(
             platform: supplied.platform,
             authorName: useLiveAuthor ? live.authorName : supplied.authorName,

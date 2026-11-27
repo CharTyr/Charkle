@@ -296,7 +296,9 @@ public enum RingGalleryMath {
             if asset.pixelWidth > 0 && asset.pixelHeight > 0 {
                 asset.aspectRatio
             } else if asset.isSocialPost {
-                1.12
+                asset.richMetadata?.socialPost?.platform.isVerticalFeedPlatform == true
+                    ? 0.625
+                    : (asset.richMetadata?.socialPost?.platform.isVideoPlatform == true ? 1.26 : 1.12)
             } else if asset.isGitHubRepo {
                 1.32
             } else {

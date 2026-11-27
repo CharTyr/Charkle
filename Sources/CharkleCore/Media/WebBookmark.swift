@@ -49,6 +49,10 @@ public nonisolated enum WebURLParser {
             return direct
         }
 
+        if let douyinURL = DouyinURLParser.extractPostURL(from: trimmed) {
+            return douyinURL
+        }
+
         guard allowEmbeddedInShortText else { return nil }
         let lineCount = trimmed.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline).count
         guard trimmed.count <= 320, lineCount <= 5 else { return nil }

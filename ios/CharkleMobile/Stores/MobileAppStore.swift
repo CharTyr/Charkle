@@ -912,9 +912,9 @@ final class MobileAppStore {
                 guard let post = asset.richMetadata?.socialPost else { return false }
                 return !post.effectiveAttachments.isEmpty
             }
-            // Never auto-download YouTube/Bilibili videos on default bookmark (strictly on-demand when user taps save video)
+            // Never auto-download YouTube/Bilibili/Douyin videos on default bookmark (strictly on-demand when user taps save video)
             let autoExtractablePosts = socialPostsWithMedia.filter {
-                !($0.richMetadata?.socialPost?.platform.isVideoPlatform ?? false)
+                !($0.richMetadata?.socialPost?.isZeroDownloadVideoBookmark ?? false)
             }
 
             if autoExtractSocialMedia && !autoExtractablePosts.isEmpty {
@@ -934,9 +934,10 @@ final class MobileAppStore {
                 await reloadAll()
                 MobileHaptics.success()
                 if imported.count == 1,
-                   let firstSocial = socialPostsWithMedia.first,
-                   let post = firstSocial.richMetadata?.socialPost {
-                    if post.platform.isVideoPlatform {
+                   let firstSocial = imported.first,
+                   let post = firstSocial.richMetadata?.socialPost,
+                   (!post.effectiveAttachments.isEmpty || post.isZeroDownloadVideoBookmark) {
+                    if post.isZeroDownloadVideoBookmark {
                         let summarySuffix = post.hasVideoSummaryContent ? "与摘要" : ""
                         showToast(
                             "已收藏\(post.platform.displayName)视频（含封面\(summarySuffix)）",
@@ -1030,7 +1031,7 @@ final class MobileAppStore {
     ) async -> Bool {
         let trimmed = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
-            showToast("请先输入网页、小红书、X 或 GitHub 链接", tone: .warning)
+            showToast("请先输入网页、小红书、抖音、X 或 GitHub 链接", tone: .warning)
             return false
         }
         let cleanedNotes = notes.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1079,7 +1080,7 @@ final class MobileAppStore {
         }
 
         if !quiet {
-            if post.platform.isVideoPlatform {
+            if post.isZeroDownloadVideoBookmark {
                 showToast("正在从\(post.platform.displayName)保存视频原文件…", tone: .info)
             } else {
                 showToast("正在提取第 \(index + 1) 项\(attachment.kind.localizedLabel)…", tone: .info)
@@ -1101,7 +1102,7 @@ final class MobileAppStore {
             let baseName = "\(post.platform.displayName)-\(safeHandle)-\(kindTag)\(index + 1)"
 
             let created: [AssetRecord]
-            if post.platform.isVideoPlatform {
+            if post.isZeroDownloadVideoBookmark {
                 let videoFile = try await VideoPlatformResolver.downloadVideo(
                     for: post,
                     to: tempDir,
@@ -1167,9 +1168,9 @@ final class MobileAppStore {
 
             let authorAttribution: String = {
                 if let handleLine = post.displayHandleLine {
-                    return "\(post.authorName) (\(handleLine))"
+                    return "\(post.displayAuthorName) (\(handleLine))"
                 }
-                return post.authorName
+                return post.displayAuthorName
             }()
             var noteParts: [String] = [
                 "来源\(post.platform.postNoun)：\(authorAttribution) · \(post.platform.displayName)"
@@ -1188,24 +1189,28 @@ final class MobileAppStore {
             let attributionNotes = noteParts.joined(separator: "\n\n")
 
             let extractedTitle: String = {
-                if post.platform.isVideoPlatform,
+                if post.isZeroDownloadVideoBookmark,
                    let article = post.articleTitle?.trimmingCharacters(in: .whitespacesAndNewlines),
                    !article.isEmpty {
                     return article
                 }
-                let titleAuthor = (post.platform == .xiaohongshu || post.platform.isVideoPlatform)
-                    ? post.authorName
+                let titleAuthor = (post.platform.isVerticalFeedPlatform || post.platform.isVideoPlatform)
+                    ? post.displayAuthorName
                     : (post.authorHandle.hasPrefix("@") ? post.authorHandle : "@\(post.authorHandle)")
                 return "\(titleAuthor) \(attachment.kind.localizedLabel) #\(index + 1)"
             }()
 
+            var extractedTags = [post.platform.displayName]
+            if post.platform == .douyin {
+                extractedTags.append(DouyinURLParser.classificationTag(hasVideo: post.hasVideo))
+            }
             let patched = try await engine.updateAssets(
                 AssetBatchPatch(
                     assetIDs: [standalone.id],
                     title: extractedTitle,
                     notes: attributionNotes,
                     sourceURL: post.originalURL,
-                    addTags: [post.platform.displayName]
+                    addTags: extractedTags
                 )
             )
             let finalAsset = patched.first ?? standalone
@@ -1424,7 +1429,14 @@ final class MobileAppStore {
     @discardableResult
     func extractAllMediaFromSocialPost(postAsset: AssetRecord, quiet: Bool = false) async -> [AssetRecord] {
         guard let post = postAsset.richMetadata?.socialPost else { return [] }
-        let items = post.effectiveAttachments
+        let items: [SocialMediaAttachment] = {
+            let existing = post.effectiveAttachments
+            if !existing.isEmpty { return existing }
+            if post.isZeroDownloadVideoBookmark {
+                return [SocialMediaAttachment(kind: .video, url: post.videoURL ?? post.originalURL, thumbnailURL: post.mediaThumbnailURLs.first)]
+            }
+            return []
+        }()
         guard !items.isEmpty else {
             if !quiet {
                 showToast("该社媒帖子没有可提取的图片或视频", tone: .warning)
@@ -1436,7 +1448,11 @@ final class MobileAppStore {
         defer { isExtractingSocialMedia = false }
 
         if !quiet {
-            showToast("正在提取 \(items.count) 项帖子媒体…", tone: .info)
+            if post.isZeroDownloadVideoBookmark {
+                showToast("正在从\(post.platform.displayName)保存视频原文件…", tone: .info)
+            } else {
+                showToast("正在提取 \(items.count) 项帖子媒体…", tone: .info)
+            }
         }
 
         var extracted: [AssetRecord] = []
@@ -1455,7 +1471,12 @@ final class MobileAppStore {
             await reloadAll()
             if !extracted.isEmpty {
                 MobileHaptics.success()
-                showToast("已提取 \(extracted.count) 项帖子媒体为独立素材", tone: .success)
+                showToast(
+                    post.isZeroDownloadVideoBookmark
+                        ? "已保存视频为独立素材"
+                        : "已提取 \(extracted.count) 项帖子媒体为独立素材",
+                    tone: .success
+                )
                 if hasConnectedCloudBackend {
                     Task { await self.syncNow(quiet: true) }
                 }

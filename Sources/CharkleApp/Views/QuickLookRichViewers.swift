@@ -295,7 +295,7 @@ struct QuickLookSocialPostCard: View {
 
                     VStack(alignment: .leading, spacing: 2) {
                         HStack(spacing: 6) {
-                            Text(post.authorName)
+                            Text(post.displayAuthorName)
                                 .font(.system(size: 14.5, weight: .bold))
                             if let handleLine = post.displayHandleLine {
                                 Text(handleLine)
@@ -412,10 +412,17 @@ struct QuickLookSocialPostCard: View {
                 }
 
                 // Embedded Media Attachments (Playable Videos/GIFs + High-Res Photos + Independent Extraction)
-                if !attachments.isEmpty {
-                    if attachments.count > 1, let onExtractAllMedia {
+                let effectiveItems: [SocialMediaAttachment] = {
+                    if !attachments.isEmpty { return attachments }
+                    if post.isZeroDownloadVideoBookmark && !isLocalVideoFile {
+                        return [SocialMediaAttachment(kind: .video, url: post.videoURL ?? post.originalURL, thumbnailURL: post.mediaThumbnailURLs.first)]
+                    }
+                    return []
+                }()
+                if !effectiveItems.isEmpty {
+                    if effectiveItems.count > 1, !post.isZeroDownloadVideoBookmark, let onExtractAllMedia {
                         HStack(spacing: 8) {
-                            Text("\(post.platform.postNoun)内含 \(attachments.count) 个媒体")
+                            Text("\(post.platform.postNoun)内含 \(effectiveItems.count) 个媒体")
                                 .font(.system(size: 11.5, weight: .medium))
                                 .foregroundStyle(.secondary)
                             Spacer()
@@ -446,13 +453,13 @@ struct QuickLookSocialPostCard: View {
                         }
                     }
 
-                    let useSingleColumn = attachments.count == 1 || attachments.contains(where: { $0.kind == .video || $0.kind == .gif })
+                    let useSingleColumn = effectiveItems.count == 1 || effectiveItems.contains(where: { $0.kind == .video || $0.kind == .gif })
                     let cols = useSingleColumn
                         ? [GridItem(.flexible())]
                         : [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)]
 
                     LazyVGrid(columns: cols, spacing: 10) {
-                        ForEach(Array(attachments.enumerated()), id: \.offset) { idx, attachment in
+                        ForEach(Array(effectiveItems.enumerated()), id: \.offset) { idx, attachment in
                             socialAttachmentView(attachment: attachment, index: idx)
                         }
                     }
@@ -548,12 +555,12 @@ struct QuickLookSocialPostCard: View {
     private func socialAttachmentView(attachment: SocialMediaAttachment, index: Int) -> some View {
         let isVideoLike = attachment.kind == .video || attachment.kind == .gif
         VStack(alignment: .trailing, spacing: 6) {
-            if post.platform.isVideoPlatform && !isLocalVideoFile {
-                // YouTube / Bilibili bookmark: zero-download inline streaming playback directly inside Quick Look
+            if post.isZeroDownloadVideoBookmark && !isLocalVideoFile {
+                // YouTube / Bilibili / Douyin video bookmark: zero-download inline streaming playback directly inside Quick Look
                 // (Tier 1 native AVPlayer HTTP Range/HLS stream with required Referer/UA -> Tier 2 official WKWebView embed).
                 // Video file is saved to disk ONLY when the user explicitly clicks "保存视频为独立素材".
                 let thumbURL = (attachment.thumbnailURL ?? post.mediaThumbnailURLs.first).flatMap(URL.init(string:))
-                QuickLookStreamingVideoView(
+                let streamView = QuickLookStreamingVideoView(
                     playbackKey: "\(asset.id.uuidString):\(post.originalURL)",
                     coverURL: thumbURL,
                     fallbackCoverImage: fallbackCoverImage,
@@ -567,8 +574,17 @@ struct QuickLookSocialPostCard: View {
                         await VideoPlatformResolver.resolvePlaybackPlan(for: post)
                     }
                 )
-                .aspectRatio(16.0 / 9.0, contentMode: .fit)
-                .frame(maxWidth: .infinity)
+                Group {
+                    if post.platform == .douyin {
+                        streamView
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 440)
+                    } else {
+                        streamView
+                            .aspectRatio(16.0 / 9.0, contentMode: .fit)
+                            .frame(maxWidth: .infinity)
+                    }
+                }
                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                 .overlay(
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
@@ -612,10 +628,10 @@ struct QuickLookSocialPostCard: View {
                 }
             } else {
                 let previewStr = attachment.kind == .photo ? attachment.url : (attachment.thumbnailURL ?? attachment.url)
-                let isXiaohongshuMultiGrid = post.platform == .xiaohongshu && attachments.count > 1
+                let isVerticalMultiGrid = post.platform.isVerticalFeedPlatform && attachments.count > 1
                 ZStack(alignment: .bottomTrailing) {
                     if let imgURL = URL(string: previewStr) {
-                        if isXiaohongshuMultiGrid {
+                        if isVerticalMultiGrid {
                             Color.primary.opacity(0.05)
                                 .aspectRatio(3.0 / 4.0, contentMode: .fit)
                                 .overlay {
@@ -634,7 +650,7 @@ struct QuickLookSocialPostCard: View {
                             RemoteCachedImageView(
                                 url: imgURL,
                                 contentMode: .fit,
-                                maxHeight: attachments.count == 1 ? (post.platform == .xiaohongshu ? 520 : 420) : 240
+                                maxHeight: attachments.count == 1 ? (post.platform.isVerticalFeedPlatform ? 520 : 420) : 240
                             ) {
                                 CharkleMediaPlaceholderSkeleton(height: 180, cornerRadius: 12)
                             } failurePlaceholder: {
@@ -658,7 +674,7 @@ struct QuickLookSocialPostCard: View {
     private func extractMediaButton(attachment: SocialMediaAttachment, index: Int, pillStyle: Bool) -> some View {
         let iconName = (attachment.kind == .video || attachment.kind == .gif) ? "film.stack" : "photo.badge.plus"
         let title: String = {
-            if post.platform.isVideoPlatform { return "保存视频为独立素材" }
+            if post.isZeroDownloadVideoBookmark { return "保存视频为独立素材" }
             switch attachment.kind {
             case .photo: return "提取为单独图片"
             case .video: return "提取为单独视频"
@@ -698,7 +714,7 @@ struct QuickLookSocialPostCard: View {
     private var authorFallbackAvatar: some View {
         ZStack {
             Circle().fill(platformBadgeColor.opacity(0.85))
-            Text(String((post.authorName.first ?? post.authorHandle.first ?? "X")).uppercased())
+            Text(String((post.displayAuthorName.first ?? post.authorHandle.first ?? "X")).uppercased())
                 .font(.system(size: 15, weight: .bold))
                 .foregroundStyle(.white)
         }
@@ -723,10 +739,12 @@ struct QuickLookSocialPostCard: View {
         case .threads: Color(charkleHex: "#27272A")
         case .bluesky: Color(charkleHex: "#0284C7")
         case .xiaohongshu: Color(charkleHex: "#FF2442")
+        case .douyin: Color(charkleHex: "#161823")
         case .pixiv: Color(charkleHex: "#0096FA")
         case .instagram: Color(charkleHex: "#D93B58")
         case .youtube: Color(charkleHex: "#FF0000")
         case .bilibili: Color(charkleHex: "#FB7299")
+        case .unknown: Color(charkleHex: "#52525B")
         }
     }
 
@@ -1171,10 +1189,14 @@ private struct DirectStreamAVPlayerViewMac: NSViewRepresentable {
 
             loadTask = Task { @MainActor [weak view, weak self] in
                 guard !Task.isCancelled, let view, let self else { return }
-                let options: [String: Any]? = stream.httpHeaders.isEmpty
-                    ? nil
-                    : ["AVURLAssetHTTPHeaderFieldsKey": stream.httpHeaders]
-                let asset = AVURLAsset(url: stream.url, options: options)
+                var assetOptions: [String: Any] = [:]
+                if !stream.httpHeaders.isEmpty {
+                    assetOptions["AVURLAssetHTTPHeaderFieldsKey"] = stream.httpHeaders
+                }
+                if let overrideMIME = stream.overrideMIMEType, !overrideMIME.isEmpty {
+                    assetOptions[AVURLAssetOverrideMIMETypeKey] = overrideMIME
+                }
+                let asset = AVURLAsset(url: stream.url, options: assetOptions.isEmpty ? nil : assetOptions)
                 let playable = (try? await asset.load(.isPlayable)) ?? false
                 guard !Task.isCancelled else { return }
                 guard playable else {
@@ -1518,6 +1540,12 @@ private nonisolated enum RemoteImageFetcher {
                 forHTTPHeaderField: "User-Agent"
             )
             request.setValue("https://www.xiaohongshu.com/", forHTTPHeaderField: "Referer")
+        } else if DouyinURLParser.isDouyinMediaHost(targetURL.host()) {
+            request.setValue(
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_0) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.2 Safari/605.1.15",
+                forHTTPHeaderField: "User-Agent"
+            )
+            request.setValue(DouyinURLParser.referer, forHTTPHeaderField: "Referer")
         } else if VideoPlatformURLParser.isBilibiliMediaHost(targetURL.host()) {
             request.setValue(
                 "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_0) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.2 Safari/605.1.15",

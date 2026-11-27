@@ -67,11 +67,18 @@ public nonisolated struct VideoStreamPlaybackPlan: Equatable, Hashable, Sendable
         public let url: URL
         public let httpHeaders: [String: String]
         public let isHLS: Bool
+        public let overrideMIMEType: String?
 
-        public init(url: URL, httpHeaders: [String: String] = [:], isHLS: Bool = false) {
+        public init(
+            url: URL,
+            httpHeaders: [String: String] = [:],
+            isHLS: Bool = false,
+            overrideMIMEType: String? = nil
+        ) {
             self.url = url
             self.httpHeaders = httpHeaders
             self.isHLS = isHLS
+            self.overrideMIMEType = overrideMIMEType
         }
     }
 
@@ -878,6 +885,8 @@ public nonisolated enum VideoPlatformResolver {
             return await resolveBilibiliPlaybackPlan(for: post, watchURL: watchURL)
         case .youtube:
             return await resolveYouTubePlaybackPlan(for: post, watchURL: watchURL)
+        case .douyin:
+            return await resolveDouyinPlaybackPlan(for: post, watchURL: watchURL)
         default:
             var streams: [VideoStreamPlaybackPlan.DirectStream] = []
             var seen = Set<String>()
@@ -1102,6 +1111,9 @@ public nonisolated enum VideoPlatformResolver {
             return true
         }
         let lower = url.absoluteString.lowercased()
+        if DouyinURLParser.isDouyinVideoHost(url.host()) && DouyinURLParser.parse(url) == nil {
+            return true
+        }
         return lower.contains(".mp4?")
             || lower.contains(".m3u8?")
             || lower.contains(".mov?")
@@ -1242,6 +1254,74 @@ public nonisolated enum VideoPlatformResolver {
         )
     }
 
+    private static func resolveDouyinPlaybackPlan(
+        for post: SocialPostMetadata,
+        watchURL: URL?
+    ) async -> VideoStreamPlaybackPlan {
+        let headers: [String: String] = [
+            "Referer": DouyinURLParser.referer,
+            "User-Agent": browserUA
+        ]
+        var freshStreams: [VideoStreamPlaybackPlan.DirectStream] = []
+        var expiredStreams: [VideoStreamPlaybackPlan.DirectStream] = []
+        var seen = Set<String>()
+
+        func appendCandidate(_ rawURLString: String?) {
+            guard let raw = rawURLString?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !raw.isEmpty,
+                  let url = URL(string: raw),
+                  WebBookmark.isSafeRemoteFetchURL(url),
+                  !raw.lowercased().contains("playwm"),
+                  DouyinURLParser.parse(url) == nil,
+                  seen.insert(url.absoluteString).inserted else {
+                return
+            }
+            let isHLS = url.pathExtension.lowercased() == "m3u8" || raw.lowercased().contains(".m3u8")
+            let stream = VideoStreamPlaybackPlan.DirectStream(
+                url: url,
+                httpHeaders: headers,
+                isHLS: isHLS,
+                overrideMIMEType: isHLS ? nil : "video/mp4"
+            )
+            if DouyinURLParser.isStreamURLExpired(url) {
+                expiredStreams.append(stream)
+            } else {
+                freshStreams.append(stream)
+            }
+        }
+
+        for att in post.effectiveAttachments where att.kind == .video || att.kind == .gif {
+            appendCandidate(att.url)
+        }
+        appendCandidate(post.videoURL)
+
+        if freshStreams.isEmpty, let watchURL, let ref = DouyinURLParser.parse(watchURL) {
+            if let refreshed = await DouyinPostResolver.resolve(ref) {
+                for att in refreshed.metadata.effectiveAttachments where att.kind == .video || att.kind == .gif {
+                    appendCandidate(att.url)
+                }
+                appendCandidate(refreshed.metadata.videoURL)
+            }
+        }
+
+        #if os(macOS)
+        if freshStreams.isEmpty, let watchStr = watchURL?.absoluteString,
+           let ytdlpStream = await resolveDirectStreamURLViaYtDlpIfAvailable(
+                pageURL: watchStr,
+                refererOverride: DouyinURLParser.referer,
+                overrideMIMEType: "video/mp4"
+           ) {
+            freshStreams.append(ytdlpStream)
+        }
+        #endif
+
+        return VideoStreamPlaybackPlan(
+            directStreams: freshStreams + expiredStreams,
+            embedPlayer: nil,
+            watchURL: watchURL
+        )
+    }
+
     // MARK: - 2. Explicit On-Demand Video Download (Triggered ONLY When User Saves Video as Standalone Asset)
 
     public static func downloadVideo(
@@ -1254,9 +1334,48 @@ public nonisolated enum VideoPlatformResolver {
             return try await downloadBilibiliVideo(for: post, to: directory, baseName: baseName)
         case .youtube:
             return try await downloadYouTubeVideo(for: post, to: directory, baseName: baseName)
+        case .douyin:
+            return try await downloadDouyinVideo(for: post, to: directory, baseName: baseName)
         default:
             throw VideoPlatformDownloadError.unsupportedURL
         }
+    }
+
+    private static func downloadDouyinVideo(
+        for post: SocialPostMetadata,
+        to directory: URL,
+        baseName: String
+    ) async throws -> URL {
+        let plan = await resolveDouyinPlaybackPlan(for: post, watchURL: URL(string: post.originalURL))
+        for candidate in plan.directStreams where !candidate.isHLS {
+            try Task.checkCancellation()
+            if let file = await downloadStreamFile(
+                from: candidate.url,
+                to: directory,
+                baseName: baseName,
+                userAgent: browserUA,
+                referer: DouyinURLParser.referer
+            ) {
+                return file
+            }
+        }
+
+        #if os(macOS)
+        if let ytdlpFile = await downloadViaYtDlpIfAvailable(
+            pageURL: post.originalURL,
+            to: directory,
+            baseName: baseName
+        ) {
+            return ytdlpFile
+        }
+        throw VideoPlatformDownloadError.streamUnavailable(
+            "该抖音视频直链已过期或受访问限制。可在抖音重新同步后重试，或本机安装 yt-dlp（brew install yt-dlp），也可点击「在抖音打开」观看。"
+        )
+        #else
+        throw VideoPlatformDownloadError.streamUnavailable(
+            "该抖音视频直链已过期或受访问限制，可在抖音重新同步后重试，或点击「在抖音打开」观看。"
+        )
+        #endif
     }
 
     /// Universal on-demand video downloader for arbitrary webpage links (Vimeo, TikTok, Douyin, Weibo,
@@ -1272,16 +1391,19 @@ public nonisolated enum VideoPlatformResolver {
         if let direct = directStreamURL,
            WebBookmark.isSafeRemoteFetchURL(direct) {
             let lower = direct.pathExtension.lowercased()
+            let isDouyinCDN = DouyinURLParser.isDouyinVideoHost(direct.host()) && DouyinURLParser.parse(direct) == nil
             let looksDirect = ["mp4", "mov", "m4v", "webm"].contains(lower)
                 || direct.absoluteString.lowercased().contains(".mp4")
                 || direct.absoluteString.lowercased().contains("video")
+                || isDouyinCDN
+            let effectiveReferer = isDouyinCDN ? DouyinURLParser.referer : pageURL
             if looksDirect,
                let file = await downloadStreamFile(
                     from: direct,
                     to: directory,
                     baseName: baseName,
                     userAgent: browserUA,
-                    referer: pageURL
+                    referer: effectiveReferer
                ) {
                 return file
             }
@@ -1680,7 +1802,11 @@ public nonisolated enum VideoPlatformResolver {
     }
 
     /// Optional macOS zero-download helper: resolves a direct streaming URL via `yt-dlp -g` for generic video sites.
-    private static func resolveDirectStreamURLViaYtDlpIfAvailable(pageURL: String) async -> VideoStreamPlaybackPlan.DirectStream? {
+    private static func resolveDirectStreamURLViaYtDlpIfAvailable(
+        pageURL: String,
+        refererOverride: String? = nil,
+        overrideMIMEType: String? = nil
+    ) async -> VideoStreamPlaybackPlan.DirectStream? {
         guard let parsedPageURL = URL(string: pageURL),
               WebBookmark.isSafeRemoteFetchURL(parsedPageURL) else {
             return nil
@@ -1724,8 +1850,9 @@ public nonisolated enum VideoPlatformResolver {
             || streamURL.absoluteString.lowercased().contains(".m3u8")
         return .init(
             url: streamURL,
-            httpHeaders: ["Referer": safePageURL, "User-Agent": browserUA],
-            isHLS: isHLS
+            httpHeaders: ["Referer": refererOverride ?? safePageURL, "User-Agent": browserUA],
+            isHLS: isHLS,
+            overrideMIMEType: isHLS ? nil : overrideMIMEType
         )
     }
 

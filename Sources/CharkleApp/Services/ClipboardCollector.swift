@@ -19,8 +19,17 @@ public enum ClipboardDetectedLink: Equatable, Sendable {
     public var notchHintLabel: String {
         switch self {
         case .social(let url):
-            if let ref = SocialPostURLParser.parse(url), ref.platform == .xiaohongshu {
-                return "检测到剪贴板小红书笔记链接 · 点击或按 ⌘V 立即保存"
+            if let ref = SocialPostURLParser.parse(url) {
+                switch ref.platform {
+                case .xiaohongshu:
+                    return "检测到剪贴板小红书笔记链接 · 点击或按 ⌘V 立即保存"
+                case .douyin:
+                    return "检测到剪贴板抖音作品链接 · 点击或按 ⌘V 立即保存"
+                case .youtube, .bilibili:
+                    return "检测到剪贴板\(ref.platform.displayName)视频链接 · 点击或按 ⌘V 立即保存"
+                default:
+                    return "检测到剪贴板\(ref.platform.postTypeLabel)链接 · 点击或按 ⌘V 立即保存"
+                }
             }
             return "检测到剪贴板推文链接 · 点击或按 ⌘V 立即保存"
         case .github:

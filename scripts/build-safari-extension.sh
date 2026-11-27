@@ -36,8 +36,8 @@ xcrun swiftc \
 chmod +x "$OUT_APPEX/Contents/MacOS/CharkleSafariExtension"
 cp -X "$SAFARI_SRC/Info.plist" "$OUT_APPEX/Contents/Info.plist"
 
-# Copy shared extension assets (popup, options, content, lib, icons)
-for f in content.js popup.html popup.css popup.js options.html options.css options.js; do
+# Copy shared extension assets (popup, options, content, page bridges, lib, icons)
+for f in content.js page-bridge.js x-bridge-loader.js popup.html popup.css popup.js options.html options.css options.js; do
   cp -X "$EXT_SRC/$f" "$OUT_APPEX/Contents/Resources/$f"
 done
 cp -X "$EXT_SRC"/lib/*.js "$OUT_APPEX/Contents/Resources/lib/"
@@ -95,10 +95,12 @@ out_bg = dst_dir / 'background.js'
 out_bg.write_text('\n\n'.join(bundle_parts), encoding='utf-8')
 PY
 
-# Verify generated classic Safari background script parses cleanly in JS engine
+# Verify generated classic Safari background script and content bridges parse cleanly in JS engine
 if command -v node >/dev/null 2>&1; then
   node --check "$OUT_APPEX/Contents/Resources/background.js"
   node --check "$OUT_APPEX/Contents/Resources/content.js"
+  node --check "$OUT_APPEX/Contents/Resources/page-bridge.js"
+  node --check "$OUT_APPEX/Contents/Resources/x-bridge-loader.js"
 fi
 
 echo "==> Built Safari Web Extension: $OUT_APPEX"

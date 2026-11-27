@@ -705,6 +705,34 @@ private final class ShareExtensionViewModel {
            scheme == "http" || scheme == "https" || scheme == "file" {
             return direct
         }
+        // Scan explicitly for http(s):// stopping at whitespace, CJK characters, or brackets
+        // so Chinese mobile share copy (e.g. Douyin/Xiaohongshu zero-space glued links) always resolves.
+        let trailingPunctuation = CharacterSet(charactersIn: ".,;!?)]，。！？")
+        let boundaryChars: Set<Character> = ["<", ">", "\"", "'", "（", "）", "【", "】"]
+        var scanIdx = trimmed.startIndex
+        while scanIdx < trimmed.endIndex {
+            let rest = trimmed[scanIdx...]
+            let prefixLower = rest.prefix(8).lowercased()
+            if prefixLower.hasPrefix("https://") || prefixLower.hasPrefix("http://") {
+                var end = rest.endIndex
+                var cursor = rest.startIndex
+                while cursor < rest.endIndex {
+                    let ch = rest[cursor]
+                    let scalar = ch.unicodeScalars.first?.value ?? 0
+                    if ch.isWhitespace || scalar >= 0x2E80 || boundaryChars.contains(ch) {
+                        end = cursor
+                        break
+                    }
+                    cursor = rest.index(after: cursor)
+                }
+                let candidate = String(rest[..<end]).trimmingCharacters(in: trailingPunctuation)
+                if let url = URL(string: candidate),
+                   let host = url.host(), host.contains(".") {
+                    return url
+                }
+            }
+            scanIdx = trimmed.index(after: scanIdx)
+        }
         guard let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) else {
             return nil
         }
@@ -749,6 +777,9 @@ private final class ShareExtensionViewModel {
         }
         if host.contains("xiaohongshu.com") || host.contains("xhslink.com") {
             return "小红书笔记"
+        }
+        if host.contains("douyin.com") || host.contains("iesdouyin.com") {
+            return "抖音作品"
         }
         if host.contains("github.com") {
             return "GitHub 仓库"

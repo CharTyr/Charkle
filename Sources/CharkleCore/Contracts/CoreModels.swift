@@ -57,7 +57,7 @@ public enum MediaKind: String, Codable, CaseIterable, Hashable, Sendable {
     }
 }
 
-public enum SocialPlatform: String, Codable, CaseIterable, Hashable, Sendable {
+public enum SocialPlatform: Codable, CaseIterable, Hashable, Sendable {
     case x
     case threads
     case bluesky
@@ -66,21 +66,93 @@ public enum SocialPlatform: String, Codable, CaseIterable, Hashable, Sendable {
     case instagram
     case youtube
     case bilibili
+    case douyin
+    case unknown(String)
 
+    public static let allCases: [SocialPlatform] = [
+        .x, .threads, .bluesky, .xiaohongshu, .pixiv, .instagram, .youtube, .bilibili, .douyin
+    ]
+
+    public var rawValue: String {
+        switch self {
+        case .x: "x"
+        case .threads: "threads"
+        case .bluesky: "bluesky"
+        case .xiaohongshu: "xiaohongshu"
+        case .pixiv: "pixiv"
+        case .instagram: "instagram"
+        case .youtube: "youtube"
+        case .bilibili: "bilibili"
+        case .douyin: "douyin"
+        case .unknown(let raw): raw
+        }
+    }
+
+    public init?(rawValue: String) {
+        switch rawValue {
+        case "x": self = .x
+        case "threads": self = .threads
+        case "bluesky": self = .bluesky
+        case "xiaohongshu": self = .xiaohongshu
+        case "pixiv": self = .pixiv
+        case "instagram": self = .instagram
+        case "youtube": self = .youtube
+        case "bilibili": self = .bilibili
+        case "douyin": self = .douyin
+        default: return nil
+        }
+    }
+
+    /// Losslessly decodes any platform wire identifier, preserving unrecognized future platforms verbatim.
+    public init(losslessRawValue raw: String) {
+        if let known = Self(rawValue: raw) {
+            self = known
+        } else {
+            self = .unknown(raw)
+        }
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        let raw = try container.decode(String.self)
+        self = Self(losslessRawValue: raw)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
+    }
+
+    /// Horizontal 16:9 video platforms (YouTube / Bilibili).
+    /// Kept separate from `prefersZeroDownloadVideoBookmark` so Douyin preserves 3:4 vertical cards & photo-notes.
     public var isVideoPlatform: Bool {
         self == .youtube || self == .bilibili
     }
 
+    /// Platforms whose video bookmarks should store cover + metadata + streaming playback only (no eager MP4 download).
+    public var prefersZeroDownloadVideoBookmark: Bool {
+        self == .youtube || self == .bilibili || self == .douyin
+    }
+
+    /// Vertical 3:4 feed card platforms (`900x1440`, ratio `0.625`).
+    public var isVerticalFeedPlatform: Bool {
+        self == .xiaohongshu || self == .douyin
+    }
+
     public var displayName: String {
         switch self {
-        case .x: "X"
-        case .threads: "Threads"
-        case .bluesky: "Bluesky"
-        case .xiaohongshu: "小红书"
-        case .pixiv: "Pixiv"
-        case .instagram: "Instagram"
-        case .youtube: "YouTube"
-        case .bilibili: "B站"
+        case .x: return "X"
+        case .threads: return "Threads"
+        case .bluesky: return "Bluesky"
+        case .xiaohongshu: return "小红书"
+        case .pixiv: return "Pixiv"
+        case .instagram: return "Instagram"
+        case .youtube: return "YouTube"
+        case .bilibili: return "B站"
+        case .douyin: return "抖音"
+        case .unknown(let raw):
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? "社媒" : trimmed
         }
     }
 
@@ -88,9 +160,9 @@ public enum SocialPlatform: String, Codable, CaseIterable, Hashable, Sendable {
         switch self {
         case .x: "推文"
         case .xiaohongshu: "笔记"
-        case .pixiv: "作品"
+        case .pixiv, .douyin: "作品"
         case .youtube, .bilibili: "视频"
-        case .threads, .bluesky, .instagram: "贴文"
+        case .threads, .bluesky, .instagram, .unknown: "贴文"
         }
     }
 
@@ -108,6 +180,8 @@ public enum SocialPlatform: String, Codable, CaseIterable, Hashable, Sendable {
         case .instagram: "在 Instagram 打开"
         case .youtube: "在 YouTube 打开"
         case .bilibili: "在 B 站打开"
+        case .douyin: "在抖音打开"
+        case .unknown: "打开原链接"
         }
     }
 }
@@ -328,7 +402,25 @@ public struct SocialPostMetadata: Codable, Hashable, Sendable {
         self.videoCID = try c.decodeIfPresent(Int64.self, forKey: .videoCID)
     }
 
-    /// Displayable handle subtitle (omits internal 24-hex Xiaohongshu user IDs and redundant video IDs).
+    /// True when this post uses the zero-download inline streaming video flow (YouTube, Bilibili, or Douyin videos).
+    /// Douyin photo-notes (`hasVideo == false`) return `false` and use the multi-image gallery & extraction flow.
+    public var isZeroDownloadVideoBookmark: Bool {
+        platform.isVideoPlatform || (platform == .douyin && hasVideo)
+    }
+
+    /// Sanitized author display name (hides internal Douyin `sec_uid` tokens such as `MS4wLjAB...`).
+    public var displayAuthorName: String {
+        let trimmed = authorName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if platform == .douyin {
+            if trimmed.isEmpty || trimmed.hasPrefix("MS4wLjAB") {
+                return "抖音用户"
+            }
+            return trimmed
+        }
+        return trimmed.isEmpty ? platform.displayName : trimmed
+    }
+
+    /// Displayable handle subtitle (omits internal Xiaohongshu hex IDs, Douyin `sec_uid`/numeric UIDs, and redundant video IDs).
     public var displayHandleLine: String? {
         let trimmed = authorHandle.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
@@ -339,6 +431,15 @@ public struct SocialPostMetadata: Codable, Hashable, Sendable {
             }
             return "小红书号 \(trimmed)"
         }
+        if platform == .douyin {
+            let lower = trimmed.lowercased()
+            let isNumericUID = trimmed.count >= 12 && trimmed.allSatisfy { $0.isASCII && $0.isNumber }
+            let isSecUID = trimmed.hasPrefix("MS4wLjAB")
+            if isSecUID || isNumericUID || lower == "douyin" || trimmed == authorName || trimmed == displayAuthorName {
+                return nil
+            }
+            return "抖音号 \(trimmed)"
+        }
         if platform == .bilibili {
             if trimmed.lowercased() == "bilibili" || trimmed == authorName { return nil }
             return trimmed.hasPrefix("UP") ? trimmed : "UP 主 · \(trimmed)"
@@ -346,6 +447,10 @@ public struct SocialPostMetadata: Codable, Hashable, Sendable {
         if platform == .youtube {
             if trimmed.lowercased() == "youtube" || trimmed == authorName { return nil }
             return trimmed.hasPrefix("@") ? trimmed : trimmed
+        }
+        if case .unknown = platform {
+            if trimmed == authorName { return nil }
+            return trimmed.hasPrefix("@") ? trimmed : "@\(trimmed)"
         }
         return "@\(trimmed)"
     }
@@ -378,7 +483,13 @@ public struct SocialPostMetadata: Codable, Hashable, Sendable {
         }
         for (idx, urlStr) in mediaURLs.enumerated() where seen.insert(urlStr).inserted {
             let lower = urlStr.lowercased()
-            let isVid = lower.contains(".mp4") || lower.contains(".m3u8") || lower.contains("/ext_tw_video/") || lower.contains("/amplify_video/") || lower.contains("video.twimg.com")
+            let isVid = lower.contains(".mp4")
+                || lower.contains(".m3u8")
+                || lower.contains("/ext_tw_video/")
+                || lower.contains("/amplify_video/")
+                || lower.contains("video.twimg.com")
+                || lower.contains("douyinvod.com")
+                || lower.contains("/aweme/v1/play")
             let thumb = idx < mediaThumbnailURLs.count ? mediaThumbnailURLs[idx] : nil
             items.append(SocialMediaAttachment(kind: isVid ? .video : .photo, url: urlStr, thumbnailURL: thumb))
         }

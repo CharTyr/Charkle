@@ -743,6 +743,7 @@ public actor LocalExtensionBridgeServer {
                 case .threads(_, let pid, _): return pid
                 case .bluesky(_, let rkey, _): return rkey
                 case .xiaohongshu(let xhsRef): return xhsRef.noteID ?? ""
+                case .douyin(let dyRef): return dyRef.awemeID ?? ""
                 case .pixiv(let illustID, _): return illustID
                 case .instagram(let code, _): return code
                 case .videoPlatform(let vRef):
@@ -771,7 +772,7 @@ public actor LocalExtensionBridgeServer {
                 case .x(let xRef): return xRef.handle
                 case .threads(let h, _, _): return h
                 case .bluesky(let h, _, _): return h
-                case .xiaohongshu, .pixiv, .instagram, .videoPlatform: return platform.rawValue
+                case .xiaohongshu, .douyin, .pixiv, .instagram, .videoPlatform: return platform.rawValue
                 }
             }
             return platform == .x ? "i" : platform.rawValue
@@ -802,11 +803,12 @@ public actor LocalExtensionBridgeServer {
             switch platform {
             case .pixiv: return URL(string: "https://www.pixiv.net/")
             case .xiaohongshu: return URL(string: "https://www.xiaohongshu.com/")
+            case .douyin: return URL(string: DouyinURLParser.referer)
             case .instagram: return URL(string: "https://www.instagram.com/")
             case .threads: return URL(string: "https://www.threads.net/")
             case .bilibili: return URL(string: "https://www.bilibili.com/")
             case .youtube: return URL(string: "https://www.youtube.com/")
-            case .x, .bluesky: return nil
+            case .x, .bluesky, .unknown: return nil
             }
         }()
 
@@ -821,8 +823,10 @@ public actor LocalExtensionBridgeServer {
             case .threads: return "threads:\(safePostID)"
             case .bluesky: return "bsky:\(authorHandle.lowercased()):\(safePostID)"
             case .xiaohongshu: return "xhs:\(safePostID.lowercased())"
+            case .douyin: return "douyin:\(safePostID)"
             case .youtube: return "yt:\(safePostID)"
             case .bilibili: return "bili:\(safePostID)"
+            case .unknown(let raw): return "\(raw.lowercased()):\(safePostID)"
             }
         }()
 
@@ -1023,7 +1027,7 @@ public actor LocalExtensionBridgeServer {
             let cleanSnippet = Self.cleanTweetHeadline(resolvedTitle.isEmpty ? resolvedBody : resolvedTitle)
             var noteSections: [String] = []
             let authorLine: String = {
-                if job.platform == .pixiv || job.platform == .xiaohongshu {
+                if job.platform == .pixiv || job.platform == .xiaohongshu || job.platform == .douyin {
                     return resolvedAuthorName
                 }
                 return resolvedAuthorName.caseInsensitiveCompare(resolvedHandle) == .orderedSame
@@ -1042,17 +1046,20 @@ public actor LocalExtensionBridgeServer {
             }
             let sourcePrefix: String = switch job.platform {
             case .x: "原推文："
-            case .pixiv: "原作品："
+            case .pixiv, .douyin: "原作品："
             case .xiaohongshu: "原笔记："
             case .youtube, .bilibili: "原视频："
-            case .bluesky, .threads, .instagram: "原贴文："
+            case .bluesky, .threads, .instagram, .unknown: "原贴文："
             }
             noteSections.append("\(sourcePrefix)\(job.originalURL)")
             let formattedNotes = noteSections.joined(separator: "\n\n")
 
             var mergedTags = Set(job.tags)
             mergedTags.insert(job.platform.displayName)
-            if job.platform == .pixiv || job.platform == .xiaohongshu {
+            if job.platform == .douyin {
+                mergedTags.insert(DouyinURLParser.classificationTag(hasVideo: job.hasVideo))
+            }
+            if job.platform == .pixiv || job.platform == .xiaohongshu || job.platform == .douyin {
                 if !resolvedAuthorName.isEmpty { mergedTags.insert(resolvedAuthorName) }
             } else {
                 mergedTags.insert("@\(resolvedHandle)")
@@ -1063,7 +1070,7 @@ public actor LocalExtensionBridgeServer {
             let sortedTags = mergedTags.sorted()
 
             let totalCount = ingested.count
-            let authorPrefix: String = (job.platform == .pixiv || job.platform == .xiaohongshu)
+            let authorPrefix: String = (job.platform == .pixiv || job.platform == .xiaohongshu || job.platform == .douyin)
                 ? resolvedAuthorName
                 : "@\(resolvedHandle)"
             let baseTitle: String = {
@@ -1342,10 +1349,11 @@ public actor LocalExtensionBridgeServer {
             return nil
         }
 
-        let rawPlatform = (item["platform"] as? String ?? "").lowercased()
+        let parsedRef = SocialPostURLParser.parse(url)
+        let rawPlatform = (item["platform"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let platform: SocialPlatform = {
             if let parsed = SocialPlatform(rawValue: rawPlatform) { return parsed }
-            if let ref = SocialPostURLParser.parse(url) { return ref.platform }
+            if let ref = parsedRef { return ref.platform }
             return .x
         }()
 
@@ -1399,11 +1407,36 @@ public actor LocalExtensionBridgeServer {
         }
 
         let videoURL = validatedWebURLString(item["videoURL"] as? String)
-        let hasVideo = (item["hasVideo"] as? Bool) ?? (videoURL != nil)
+        let hasVideo: Bool = {
+            if let explicit = item["hasVideo"] as? Bool { return explicit }
+            if videoURL != nil || attachments.contains(where: { $0.kind == .video || $0.kind == .gif }) {
+                return true
+            }
+            if case .douyin(let dyRef) = parsedRef {
+                return !dyRef.isNote
+            }
+            return false
+        }()
         let avatarURL = validatedWebURLString(item["authorAvatarURL"] as? String)
         let publishedAt = (item["publishedAtText"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
         let quotedAuthor = (item["quotedAuthor"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
         let quotedText = (item["quotedText"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let durationSeconds = doubleValue(item["videoDurationSeconds"] ?? item["durationSeconds"])
+        let parsedVideoID: String? = {
+            if let explicit = (item["videoID"] as? String ?? item["videoId"] as? String ?? item["awemeId"] as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+               !explicit.isEmpty {
+                return explicit
+            }
+            if case .douyin(let dyRef) = parsedRef { return dyRef.awemeID }
+            return nil
+        }()
+        let canonicalOriginalURL: String = {
+            if platform == .douyin, case .douyin(let dyRef) = parsedRef {
+                return dyRef.canonicalURL.absoluteString
+            }
+            return rawURL
+        }()
 
         let meta = SocialPostMetadata(
             platform: platform,
@@ -1411,7 +1444,7 @@ public actor LocalExtensionBridgeServer {
             authorHandle: effectiveHandle,
             authorAvatarURL: (avatarURL?.isEmpty == false) ? avatarURL : nil,
             publishedAtText: (publishedAt?.isEmpty == false) ? publishedAt : nil,
-            bodyText: bodyText.isEmpty ? (articleTitle ?? rawURL) : bodyText,
+            bodyText: bodyText.isEmpty ? (articleTitle ?? canonicalOriginalURL) : bodyText,
             quotedAuthor: (quotedAuthor?.isEmpty == false) ? quotedAuthor : nil,
             quotedText: (quotedText?.isEmpty == false) ? quotedText : nil,
             articleTitle: (articleTitle?.isEmpty == false) ? articleTitle : nil,
@@ -1424,13 +1457,35 @@ public actor LocalExtensionBridgeServer {
             repostCount: intValue(item["repostCount"]),
             likeCount: intValue(item["likeCount"]),
             viewCount: intValue(item["viewCount"]),
-            originalURL: rawURL,
-            mediaFetchFailed: false
+            originalURL: canonicalOriginalURL,
+            mediaFetchFailed: false,
+            videoDurationSeconds: (durationSeconds ?? 0) > 0 ? durationSeconds : nil,
+            videoID: parsedVideoID
         )
 
         let coverData = (item["coverDataUrl"] as? String).flatMap(Self.decodeBase64Payload)
-        let tags = (item["tags"] as? [String] ?? []).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
-        return (meta, coverData, tags)
+        var tagSet = Set(
+            (item["tags"] as? [String] ?? [])
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+        )
+        if platform == .douyin {
+            tagSet.insert(DouyinURLParser.classificationTag(hasVideo: hasVideo))
+        }
+        return (meta, coverData, tagSet.sorted())
+    }
+
+    private static func doubleValue(_ raw: Any?) -> Double? {
+        if let d = raw as? Double, d.isFinite { return d }
+        if let i = raw as? Int { return Double(i) }
+        if let n = raw as? NSNumber {
+            let v = n.doubleValue
+            return v.isFinite ? v : nil
+        }
+        if let s = raw as? String, let v = Double(s.trimmingCharacters(in: .whitespacesAndNewlines)), v.isFinite {
+            return v
+        }
+        return nil
     }
 
     private static func intValue(_ raw: Any?) -> Int? {
