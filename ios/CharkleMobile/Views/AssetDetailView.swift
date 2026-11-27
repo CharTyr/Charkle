@@ -384,6 +384,58 @@ struct AssetDetailView: View {
                     Task { await store.retagAssets([currentAsset.id]) }
                 }
 
+                if let post = currentAsset.richMetadata?.socialPost, !post.effectiveAttachments.isEmpty {
+                    let attachments = post.effectiveAttachments
+                    Divider()
+                    Button {
+                        let target = currentAsset
+                        Task { _ = await store.extractAllMediaFromSocialPost(postAsset: target) }
+                    } label: {
+                        Label(
+                            post.platform.isVideoPlatform
+                                ? "保存视频为独立素材"
+                                : "全部提取为独立素材（\(attachments.count) 项）",
+                            systemImage: post.platform.isVideoPlatform ? "film.stack" : "square.and.arrow.down.on.square"
+                        )
+                    }
+                    .disabled(store.isExtractingSocialMedia)
+
+                    if !post.platform.isVideoPlatform && attachments.count > 1 {
+                        Menu("逐项提取帖子媒体", systemImage: "photo.on.rectangle") {
+                            ForEach(Array(attachments.enumerated()), id: \.offset) { idx, attachment in
+                                Button {
+                                    let target = currentAsset
+                                    Task {
+                                        _ = await store.extractMediaFromSocialPost(
+                                            postAsset: target,
+                                            attachment: attachment,
+                                            index: idx
+                                        )
+                                    }
+                                } label: {
+                                    Label(
+                                        "提取第 \(idx + 1) 个\(attachment.kind.localizedLabel)为独立素材",
+                                        systemImage: attachment.kind == .photo ? "photo" : "film"
+                                    )
+                                }
+                            }
+                        }
+                        .disabled(store.isExtractingSocialMedia)
+                    }
+                } else if let web = currentAsset.richMetadata?.webPage, !web.attachments.isEmpty {
+                    Divider()
+                    Button {
+                        let target = currentAsset
+                        Task { _ = await store.extractAllMediaFromLinkAsset(target) }
+                    } label: {
+                        Label(
+                            web.hasVideo ? "保存网页视频为独立素材" : "提取网页媒体为独立素材（\(web.attachments.count) 项）",
+                            systemImage: web.hasVideo ? "film.stack" : "square.and.arrow.down.on.square"
+                        )
+                    }
+                    .disabled(store.isExtractingSocialMedia)
+                }
+
                 if let externalURL = currentAsset.externalWebURL {
                     Button("在浏览器打开", systemImage: "safari") {
                         UIApplication.shared.open(externalURL)
@@ -857,6 +909,8 @@ private struct AssetStageContentView: View {
                     .padding(12)
             } else if let post = asset.richMetadata?.socialPost {
                 socialPostStage(post)
+            } else if let web = asset.richMetadata?.webPage, web.hasRichSummary || !web.attachments.isEmpty {
+                webPageStage(web)
             } else if let repo = asset.richMetadata?.githubRepo {
                 githubRepoStage(repo)
             } else {
@@ -892,8 +946,20 @@ private struct AssetStageContentView: View {
         }
     }
 
+    private func socialBadgeColor(for platform: SocialPlatform) -> Color {
+        switch platform {
+        case .xiaohongshu: Color(charkleHex: "#FF2442")
+        case .youtube: Color(charkleHex: "#FF0000")
+        case .bilibili: Color(charkleHex: "#FB7299")
+        case .pixiv: Color(charkleHex: "#0096FA")
+        case .instagram: Color(charkleHex: "#D93B58")
+        default: MobileTheme.accent(for: colorScheme)
+        }
+    }
+
     private func socialPostStage(_ post: SocialPostMetadata) -> some View {
-        ScrollView {
+        let attachments = post.effectiveAttachments
+        return ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 if let image {
                     Image(uiImage: image)
@@ -905,45 +971,132 @@ private struct AssetStageContentView: View {
                 }
 
                 VStack(alignment: .leading, spacing: 10) {
-                    HStack {
+                    HStack(spacing: 8) {
                         Text(post.platform.displayName)
                             .font(.system(size: 11.5, weight: .semibold))
                             .foregroundStyle(.white)
                             .padding(.horizontal, 8)
                             .padding(.vertical, 3)
-                            .background(
-                                post.platform == .xiaohongshu ? Color(charkleHex: "#FF2442") : MobileTheme.accent(for: colorScheme),
-                                in: Capsule()
-                            )
+                            .background(socialBadgeColor(for: post.platform), in: Capsule())
                         Text(post.authorName)
                             .font(.system(size: 14, weight: .semibold))
-                        if !post.authorHandle.isEmpty && post.platform != .xiaohongshu {
-                            Text(post.authorHandle)
-                                .font(.system(size: 12.5))
+                            .lineLimit(1)
+                        if let handleLine = post.displayHandleLine {
+                            Text(handleLine)
+                                .font(.system(size: 12))
                                 .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
+                                .lineLimit(1)
                         }
                         Spacer()
+                        if let dur = post.formattedVideoDuration {
+                            Text(dur)
+                                .font(.system(size: 11.5, weight: .semibold).monospacedDigit())
+                                .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
+                                .padding(.horizontal, 7)
+                                .padding(.vertical, 3)
+                                .background(MobileTheme.surfaceSubtle(for: colorScheme), in: Capsule())
+                        }
                     }
 
-                    if !post.bodyText.isEmpty {
-                        Text(post.bodyText)
-                            .font(.system(size: 14))
+                    if let headline = post.articleTitle, !headline.isEmpty {
+                        Text(headline)
+                            .font(.system(size: 16, weight: .bold))
                             .textSelection(.enabled)
                             .fixedSize(horizontal: false, vertical: true)
                     }
 
-                    if let url = URL(string: post.originalURL) {
-                        Button {
-                            UIApplication.shared.open(url)
-                        } label: {
-                            Label(post.platform.openActionLabel, systemImage: "arrow.up.right.square")
-                                .font(.system(size: 13.5, weight: .semibold))
+                    if post.hasVideoSummaryContent {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Label("视频摘要", systemImage: "text.quote")
+                                .font(.system(size: 12.5, weight: .semibold))
+                                .foregroundStyle(MobileTheme.accent(for: colorScheme))
+
+                            if let summary = post.videoSummary?.trimmingCharacters(in: .whitespacesAndNewlines), !summary.isEmpty {
+                                Text(summary)
+                                    .font(.system(size: 13.5))
+                                    .textSelection(.enabled)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            if !post.videoOutline.isEmpty {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    ForEach(Array(post.videoOutline.enumerated()), id: \.offset) { _, line in
+                                        Text(line)
+                                            .font(.system(size: 12))
+                                            .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
+                                            .textSelection(.enabled)
+                                            .fixedSize(horizontal: false, vertical: true)
+                                    }
+                                }
+                                .padding(.top, 2)
+                            }
+                        }
+                        .padding(12)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(
+                            MobileTheme.accentSoft(for: colorScheme),
+                            in: RoundedRectangle(cornerRadius: 11, style: .continuous)
+                        )
+                    }
+
+                    if !post.bodyText.isEmpty {
+                        Text(post.bodyText)
+                            .font(.system(size: 13.5))
+                            .foregroundStyle(post.hasVideoSummaryContent ? MobileTheme.secondaryInk(for: colorScheme) : .primary)
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    HStack(spacing: 10) {
+                        if !attachments.isEmpty {
+                            Button {
+                                MobileHaptics.light()
+                                let target = asset
+                                Task { _ = await store.extractAllMediaFromSocialPost(postAsset: target) }
+                            } label: {
+                                HStack(spacing: 6) {
+                                    if store.isExtractingSocialMedia {
+                                        ProgressView()
+                                            .controlSize(.mini)
+                                            .tint(.white)
+                                    } else {
+                                        Image(systemName: post.platform.isVideoPlatform ? "film.stack" : "square.and.arrow.down.on.square")
+                                    }
+                                    Text(
+                                        store.isExtractingSocialMedia
+                                            ? (post.platform.isVideoPlatform ? "正在保存视频…" : "正在提取…")
+                                            : (post.platform.isVideoPlatform
+                                                ? "保存视频为独立素材"
+                                                : "全部提取为独立素材（\(attachments.count)）")
+                                    )
+                                    .font(.system(size: 13, weight: .semibold))
+                                }
                                 .foregroundStyle(.white)
                                 .padding(.horizontal, 14)
                                 .padding(.vertical, 9)
                                 .background(MobileTheme.accentButtonFill(for: colorScheme), in: Capsule())
+                            }
+                            .buttonStyle(MobileTactileButtonStyle())
+                            .disabled(store.isExtractingSocialMedia)
                         }
-                        .buttonStyle(MobileTactileButtonStyle())
+
+                        if let url = URL(string: post.originalURL) {
+                            Button {
+                                UIApplication.shared.open(url)
+                            } label: {
+                                Label(post.platform.openActionLabel, systemImage: "arrow.up.right.square")
+                                    .font(.system(size: 13, weight: .semibold))
+                                    .foregroundStyle(attachments.isEmpty ? .white : .primary)
+                                    .padding(.horizontal, 13)
+                                    .padding(.vertical, 9)
+                                    .background(
+                                        attachments.isEmpty
+                                            ? MobileTheme.accentButtonFill(for: colorScheme)
+                                            : MobileTheme.surfaceSubtle(for: colorScheme),
+                                        in: Capsule()
+                                    )
+                            }
+                            .buttonStyle(MobileTactileButtonStyle())
+                        }
                     }
                 }
                 .padding(16)
@@ -951,6 +1104,258 @@ private struct AssetStageContentView: View {
                     MobileTheme.surfaceElevated(for: colorScheme),
                     in: RoundedRectangle(cornerRadius: MobileTheme.Radius.settingsOuter, style: .continuous)
                 )
+
+                // Individual Social Post Media Attachments (for non-video-platform multi-media posts)
+                if !post.platform.isVideoPlatform && !attachments.isEmpty {
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack {
+                            Text("帖子内媒体（\(attachments.count) 项）")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
+                            Spacer()
+                            Text("提取后自动保留原帖作者与链接")
+                                .font(.system(size: 11))
+                                .foregroundStyle(MobileTheme.tertiaryInk(for: colorScheme))
+                        }
+
+                        ForEach(Array(attachments.enumerated()), id: \.offset) { idx, attachment in
+                            let previewURLString = attachment.thumbnailURL ?? attachment.url
+                            HStack(spacing: 12) {
+                                ZStack(alignment: .bottomLeading) {
+                                    if let previewURL = URL(string: previewURLString) {
+                                        AsyncImage(url: previewURL) { phase in
+                                            switch phase {
+                                            case .success(let img):
+                                                img.resizable().scaledToFill()
+                                            default:
+                                                MobileTheme.surfaceSubtle(for: colorScheme)
+                                                    .overlay {
+                                                        Image(systemName: attachment.kind == .photo ? "photo" : "film")
+                                                            .foregroundStyle(MobileTheme.tertiaryInk(for: colorScheme))
+                                                    }
+                                            }
+                                        }
+                                    } else {
+                                        MobileTheme.surfaceSubtle(for: colorScheme)
+                                    }
+
+                                    if attachment.kind != .photo {
+                                        Text(attachment.kind == .gif ? "GIF" : "视频")
+                                            .font(.system(size: 9.5, weight: .bold))
+                                            .foregroundStyle(.white)
+                                            .padding(.horizontal, 5)
+                                            .padding(.vertical, 2)
+                                            .background(.black.opacity(0.68), in: Capsule())
+                                            .padding(4)
+                                    }
+                                }
+                                .frame(width: 68, height: 68)
+                                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                        .strokeBorder(MobileTheme.hairline(for: colorScheme), lineWidth: 0.75)
+                                )
+
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text("第 \(idx + 1) 项 · \(attachment.kind.localizedLabel)")
+                                        .font(.system(size: 13.5, weight: .semibold))
+                                        .foregroundStyle(.primary)
+                                    Text("转为独立素材存入当前目录")
+                                        .font(.system(size: 11.5))
+                                        .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
+                                }
+
+                                Spacer(minLength: 4)
+
+                                Button {
+                                    MobileHaptics.light()
+                                    let target = asset
+                                    Task {
+                                        _ = await store.extractMediaFromSocialPost(
+                                            postAsset: target,
+                                            attachment: attachment,
+                                            index: idx
+                                        )
+                                    }
+                                } label: {
+                                    Label("转为独立素材", systemImage: "square.and.arrow.down")
+                                        .font(.system(size: 12, weight: .semibold))
+                                        .foregroundStyle(MobileTheme.accent(for: colorScheme))
+                                        .padding(.horizontal, 10)
+                                        .padding(.vertical, 7)
+                                        .background(MobileTheme.accentSoft(for: colorScheme), in: Capsule())
+                                }
+                                .buttonStyle(MobileTactileButtonStyle())
+                                .disabled(store.isExtractingSocialMedia)
+                            }
+                            .padding(10)
+                            .background(
+                                MobileTheme.surfaceElevated(for: colorScheme),
+                                in: RoundedRectangle(cornerRadius: MobileTheme.Radius.cardOuter, style: .continuous)
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: MobileTheme.Radius.cardOuter, style: .continuous)
+                                    .strokeBorder(MobileTheme.hairline(for: colorScheme), lineWidth: 0.75)
+                            )
+                        }
+                    }
+                }
+            }
+            .padding(16)
+        }
+    }
+
+    private func webPageStage(_ web: WebPageRichMetadata) -> some View {
+        let attachments = web.attachments
+        return ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                if let image {
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(maxWidth: 560)
+                        .clipShape(RoundedRectangle(cornerRadius: MobileTheme.Radius.cardOuter, style: .continuous))
+                        .frame(maxWidth: .infinity)
+                }
+
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(spacing: 8) {
+                        Text(web.siteName ?? asset.sourceDomain ?? "网页")
+                            .font(.system(size: 11.5, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(MobileTheme.accent(for: colorScheme), in: Capsule())
+                        if let author = web.authorName, !author.isEmpty {
+                            Text(author)
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
+                                .lineLimit(1)
+                        }
+                        Spacer()
+                    }
+
+                    Text(asset.title)
+                        .font(.system(size: 16, weight: .bold))
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    if let summary = web.summary, !summary.isEmpty {
+                        Text(summary)
+                            .font(.system(size: 13.5))
+                            .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    HStack(spacing: 10) {
+                        if !attachments.isEmpty {
+                            Button {
+                                MobileHaptics.light()
+                                let target = asset
+                                Task { _ = await store.extractAllMediaFromLinkAsset(target) }
+                            } label: {
+                                HStack(spacing: 6) {
+                                    if store.isExtractingSocialMedia {
+                                        ProgressView().controlSize(.mini).tint(.white)
+                                    } else {
+                                        Image(systemName: web.hasVideo ? "film.stack" : "square.and.arrow.down.on.square")
+                                    }
+                                    Text(
+                                        store.isExtractingSocialMedia
+                                            ? "正在提取…"
+                                            : (web.hasVideo ? "保存网页视频为独立素材" : "提取网页媒体（\(attachments.count)）")
+                                    )
+                                    .font(.system(size: 13, weight: .semibold))
+                                }
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 9)
+                                .background(MobileTheme.accentButtonFill(for: colorScheme), in: Capsule())
+                            }
+                            .buttonStyle(MobileTactileButtonStyle())
+                            .disabled(store.isExtractingSocialMedia)
+                        }
+
+                        if let url = URL(string: web.canonicalURL) ?? asset.externalWebURL {
+                            Button {
+                                UIApplication.shared.open(url)
+                            } label: {
+                                Label("在浏览器打开", systemImage: "safari")
+                                    .font(.system(size: 13, weight: .semibold))
+                                    .foregroundStyle(attachments.isEmpty ? .white : .primary)
+                                    .padding(.horizontal, 13)
+                                    .padding(.vertical, 9)
+                                    .background(
+                                        attachments.isEmpty
+                                            ? MobileTheme.accentButtonFill(for: colorScheme)
+                                            : MobileTheme.surfaceSubtle(for: colorScheme),
+                                        in: Capsule()
+                                    )
+                            }
+                            .buttonStyle(MobileTactileButtonStyle())
+                        }
+                    }
+                }
+                .padding(16)
+                .background(
+                    MobileTheme.surfaceElevated(for: colorScheme),
+                    in: RoundedRectangle(cornerRadius: MobileTheme.Radius.settingsOuter, style: .continuous)
+                )
+
+                if !attachments.isEmpty {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("发现的网页媒体（\(attachments.count) 项）")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
+
+                        ForEach(Array(attachments.prefix(8).enumerated()), id: \.offset) { idx, attachment in
+                            HStack(spacing: 12) {
+                                Image(systemName: attachment.kind == .photo ? "photo" : "film")
+                                    .font(.system(size: 16, weight: .medium))
+                                    .foregroundStyle(MobileTheme.accent(for: colorScheme))
+                                    .frame(width: 36, height: 36)
+                                    .background(MobileTheme.accentSoft(for: colorScheme), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("第 \(idx + 1) 项 · \(attachment.kind.localizedLabel)")
+                                        .font(.system(size: 13.5, weight: .semibold))
+                                    Text(attachment.kind == .video ? "按需保存为独立视频素材" : "提取为独立图片素材")
+                                        .font(.system(size: 11.5))
+                                        .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
+                                }
+
+                                Spacer()
+
+                                Button {
+                                    MobileHaptics.light()
+                                    let target = asset
+                                    Task {
+                                        _ = await store.extractMediaFromWebPageAsset(
+                                            webAsset: target,
+                                            attachment: attachment,
+                                            index: idx
+                                        )
+                                    }
+                                } label: {
+                                    Text("转为独立素材")
+                                        .font(.system(size: 12, weight: .semibold))
+                                        .foregroundStyle(MobileTheme.accent(for: colorScheme))
+                                        .padding(.horizontal, 10)
+                                        .padding(.vertical, 6)
+                                        .background(MobileTheme.accentSoft(for: colorScheme), in: Capsule())
+                                }
+                                .buttonStyle(MobileTactileButtonStyle())
+                                .disabled(store.isExtractingSocialMedia)
+                            }
+                            .padding(10)
+                            .background(
+                                MobileTheme.surfaceElevated(for: colorScheme),
+                                in: RoundedRectangle(cornerRadius: MobileTheme.Radius.cardOuter, style: .continuous)
+                            )
+                        }
+                    }
+                }
             }
             .padding(16)
         }
@@ -1214,6 +1619,69 @@ private struct DetailInspectorPanel: View {
                         }
                     ))
                     .font(.system(size: 13))
+                }
+
+                if let post = asset.richMetadata?.socialPost, !post.effectiveAttachments.isEmpty {
+                    let attachments = post.effectiveAttachments
+                    inspectorCard("帖子内媒体（\(attachments.count) 项）") {
+                        Button {
+                            MobileHaptics.light()
+                            let target = asset
+                            Task { _ = await store.extractAllMediaFromSocialPost(postAsset: target) }
+                        } label: {
+                            HStack(spacing: 6) {
+                                if store.isExtractingSocialMedia {
+                                    ProgressView().controlSize(.mini).tint(.white)
+                                } else {
+                                    Image(systemName: "square.and.arrow.down.on.square")
+                                }
+                                Text(
+                                    store.isExtractingSocialMedia
+                                        ? "正在提取…"
+                                        : "全部提取为独立素材（\(attachments.count) 项）"
+                                )
+                                .font(.system(size: 13, weight: .semibold))
+                            }
+                            .foregroundStyle(.white)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 9)
+                            .background(MobileTheme.accentButtonFill(for: colorScheme), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                        }
+                        .buttonStyle(MobileTactileButtonStyle())
+                        .disabled(store.isExtractingSocialMedia)
+
+                        ForEach(Array(attachments.enumerated()), id: \.offset) { idx, attachment in
+                            Button {
+                                MobileHaptics.light()
+                                let target = asset
+                                Task {
+                                    _ = await store.extractMediaFromSocialPost(
+                                        postAsset: target,
+                                        attachment: attachment,
+                                        index: idx
+                                    )
+                                }
+                            } label: {
+                                HStack(spacing: 8) {
+                                    Image(systemName: attachment.kind == .photo ? "photo" : "film")
+                                        .font(.system(size: 12.5, weight: .medium))
+                                        .foregroundStyle(MobileTheme.accent(for: colorScheme))
+                                    Text("提取第 \(idx + 1) 个\(attachment.kind.localizedLabel)为独立素材")
+                                        .font(.system(size: 12.5, weight: .medium))
+                                        .foregroundStyle(.primary)
+                                        .lineLimit(1)
+                                    Spacer()
+                                    Image(systemName: "square.and.arrow.down")
+                                        .font(.system(size: 12, weight: .semibold))
+                                        .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
+                                }
+                                .padding(.vertical, 4)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(store.isExtractingSocialMedia)
+                        }
+                    }
                 }
 
                 if !asset.dominantColors.isEmpty {

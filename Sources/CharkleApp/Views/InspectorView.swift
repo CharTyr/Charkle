@@ -28,6 +28,8 @@ public struct InspectorView: View {
     public let onCopyBoardImage: () -> Void
     public let onSaveBoardImage: (MoodboardExportFormat) -> Void
     public let onExportFigmaBundle: () -> Void
+    public let onExportPureRef: () -> Void
+    public let onOpenInPureRef: () -> Void
     public let onOpenFigmaPluginGuide: () -> Void
     public let onRequestCloseQuickLook: (() -> Void)?
 
@@ -85,6 +87,8 @@ public struct InspectorView: View {
         onCopyBoardImage: @escaping () -> Void = {},
         onSaveBoardImage: @escaping (MoodboardExportFormat) -> Void = { _ in },
         onExportFigmaBundle: @escaping () -> Void = {},
+        onExportPureRef: @escaping () -> Void = {},
+        onOpenInPureRef: @escaping () -> Void = {},
         onOpenFigmaPluginGuide: @escaping () -> Void = {},
         onRequestCloseQuickLook: (() -> Void)? = nil
     ) {
@@ -100,6 +104,8 @@ public struct InspectorView: View {
         self.onCopyBoardImage = onCopyBoardImage
         self.onSaveBoardImage = onSaveBoardImage
         self.onExportFigmaBundle = onExportFigmaBundle
+        self.onExportPureRef = onExportPureRef
+        self.onOpenInPureRef = onOpenInPureRef
         self.onOpenFigmaPluginGuide = onOpenFigmaPluginGuide
         self.onRequestCloseQuickLook = onRequestCloseQuickLook
     }
@@ -350,7 +356,7 @@ public struct InspectorView: View {
             case .githubRepo:
                 return asset.richMetadata?.githubRepo != nil
             case .socialMediaExtract:
-                return !(asset.richMetadata?.socialPost?.effectiveAttachments.isEmpty ?? true)
+                return asset.hasExtractableLinkMedia || (asset.richMetadata?.webPage?.hasRichSummary == true)
             }
         }
     }
@@ -536,6 +542,8 @@ public struct InspectorView: View {
         case .socialMediaExtract:
             if let post = asset.richMetadata?.socialPost, !post.effectiveAttachments.isEmpty {
                 singleAssetSocialExtractSection(asset, post: post, visibleSections: visibleSections, showsTopDivider: showsTopDivider)
+            } else if let web = asset.richMetadata?.webPage, !web.attachments.isEmpty || web.hasRichSummary {
+                singleAssetWebPageExtractSection(asset, web: web, visibleSections: visibleSections, showsTopDivider: showsTopDivider)
             }
         }
     }
@@ -1217,7 +1225,35 @@ public struct InspectorView: View {
                 .foregroundStyle(.tertiary)
         } content: {
             VStack(alignment: .leading, spacing: 7) {
-                Text("可将推文里的图片或视频单独存为素材，并自动保留原推文作者、正文与链接。")
+                if post.hasVideoSummaryContent {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("视频摘要")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                        if let summary = post.videoSummary?.trimmingCharacters(in: .whitespacesAndNewlines), !summary.isEmpty {
+                            Text(summary)
+                                .font(.system(size: 11.5))
+                                .foregroundStyle(.primary.opacity(0.88))
+                                .lineLimit(5)
+                                .textSelection(.enabled)
+                        }
+                        if !post.videoOutline.isEmpty {
+                            Text(post.videoOutline.prefix(4).joined(separator: "\n"))
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(4)
+                        }
+                    }
+                    .padding(8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.accentColor.opacity(0.07), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                }
+
+                Text(
+                    post.platform.isVideoPlatform
+                        ? "默认仅保存封面、链接与视频摘要；点击下方按钮即可按需下载视频并存为独立素材。"
+                        : "可将帖子里的图片或视频单独存为素材，并自动保留原作者、正文与链接。"
+                )
                     .font(.system(size: 11.5))
                     .foregroundStyle(.secondary)
                 if attachments.count > 1 {
@@ -1225,7 +1261,7 @@ public struct InspectorView: View {
                         Task {
                             let extracted = await library.extractAllMediaFromSocialPost(postAsset: asset)
                             if !extracted.isEmpty {
-                                coordinator.showToast("已全部提取 \(extracted.count) 项推文媒体", icon: "square.and.arrow.down.on.square")
+                                coordinator.showToast("已全部提取 \(extracted.count) 项媒体为独立素材", icon: "square.and.arrow.down.on.square")
                             } else if let err = library.lastError {
                                 coordinator.showToast(err, icon: "exclamationmark.triangle", tone: .warning)
                             }
@@ -1244,16 +1280,90 @@ public struct InspectorView: View {
                                 attachment: attachment,
                                 index: idx
                             ) {
-                                coordinator.showToast("已单独提取「\(extracted.title)」并保留推文来源", icon: isVideoLike ? "film" : "photo.badge.plus")
+                                coordinator.showToast("已保存「\(extracted.title)」为独立素材", icon: isVideoLike ? "film" : "photo.badge.plus")
                             } else if let err = library.lastError {
                                 coordinator.showToast(err, icon: "exclamationmark.triangle", tone: .warning)
                             }
                         }
                     } label: {
-                        Label("提取第 \(idx + 1) 个\(attachment.kind.localizedLabel)为独立素材", systemImage: isVideoLike ? "film" : "photo.badge.plus")
+                        Label(
+                            post.platform.isVideoPlatform
+                                ? "保存视频为独立素材"
+                                : "提取第 \(idx + 1) 个\(attachment.kind.localizedLabel)为独立素材",
+                            systemImage: isVideoLike ? "film" : "photo.badge.plus"
+                        )
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    .buttonStyle(.charkle(.standard, size: .xs, fullWidth: true))
+                    .buttonStyle(.charkle(post.platform.isVideoPlatform ? .accent : .standard, size: .xs, fullWidth: true))
+                }
+            }
+        }
+    }
+
+    private func singleAssetWebPageExtractSection(
+        _ asset: AssetRecord,
+        web: WebPageRichMetadata,
+        visibleSections: [InspectorInfoSection],
+        showsTopDivider: Bool
+    ) -> some View {
+        let attachments = web.attachments
+        return CharkleInspectorSection(
+            "网页摘要与媒体提取",
+            systemImage: "globe",
+            showsTopDivider: showsTopDivider,
+            isReorderHighlighted: isSectionHighlighted(.socialMediaExtract),
+            reorderActions: reorderActions(for: .socialMediaExtract, visibleSections: visibleSections)
+        ) {
+            VStack(alignment: .leading, spacing: 7) {
+                if let summary = web.summary?.trimmingCharacters(in: .whitespacesAndNewlines), !summary.isEmpty {
+                    Text(summary)
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(.primary.opacity(0.88))
+                        .lineLimit(5)
+                        .textSelection(.enabled)
+                        .padding(8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color.accentColor.opacity(0.06), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                }
+
+                if attachments.count > 1 {
+                    Button {
+                        Task {
+                            let extracted = await library.extractAllMediaFromLinkAsset(asset)
+                            if !extracted.isEmpty {
+                                coordinator.showToast("已从网页提取 \(extracted.count) 项独立素材", icon: "square.and.arrow.down.on.square")
+                            } else if let err = library.lastError {
+                                coordinator.showToast(err, icon: "exclamationmark.triangle", tone: .warning)
+                            }
+                        }
+                    } label: {
+                        Label("全部提取网页媒体（\(attachments.count) 项）", systemImage: "square.and.arrow.down.on.square")
+                    }
+                    .buttonStyle(.charkle(.accent, size: .sm, fullWidth: true))
+                }
+
+                ForEach(Array(attachments.prefix(6).enumerated()), id: \.offset) { idx, attachment in
+                    let isVideoLike = attachment.kind == .video || attachment.kind == .gif
+                    Button {
+                        Task {
+                            if let extracted = await library.extractMediaFromWebPageAsset(
+                                webAsset: asset,
+                                attachment: attachment,
+                                index: idx
+                            ) {
+                                coordinator.showToast("已保存「\(extracted.title)」为独立素材", icon: isVideoLike ? "film" : "photo.badge.plus")
+                            } else if let err = library.lastError {
+                                coordinator.showToast(err, icon: "exclamationmark.triangle", tone: .warning)
+                            }
+                        }
+                    } label: {
+                        Label(
+                            isVideoLike ? "保存网页视频为独立素材" : "提取网页第 \(idx + 1) 张图片为独立素材",
+                            systemImage: isVideoLike ? "film" : "photo.badge.plus"
+                        )
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .buttonStyle(.charkle(isVideoLike ? .accent : .standard, size: .xs, fullWidth: true))
                 }
             }
         }
@@ -2096,6 +2206,22 @@ public struct InspectorView: View {
                         }
                         .buttonStyle(.charkle(.accent, size: .sm, fullWidth: true))
                         .help("导出 .charkleboard 离线迁移包，在 Figma / FigJam 中导入为独立可编辑图片、便签、连线和色卡")
+
+                        HStack(spacing: 6) {
+                            Button(action: onOpenInPureRef) {
+                                Label("PureRef 打开", systemImage: "arrow.up.forward.app")
+                                    .lineLimit(1)
+                            }
+                            .buttonStyle(.charkle(.standard, size: .xs, fullWidth: true))
+                            .help("保留当前画布排版与便签，直接生成 .pur 并在 PureRef 中打开")
+
+                            Button(action: onExportPureRef) {
+                                Label("导出 .pur", systemImage: "square.grid.2x2")
+                                    .lineLimit(1)
+                            }
+                            .buttonStyle(.charkle(.standard, size: .xs, fullWidth: true))
+                            .help("导出标准 PureRef (.pur) 场景文件，保留图片位置、缩放、旋转、裁切与便签")
+                        }
 
                         Button(action: onCopyBoardImage) {
                             Label("复制 2× 高清图（直接 ⌘V 粘贴）", systemImage: "doc.on.clipboard")

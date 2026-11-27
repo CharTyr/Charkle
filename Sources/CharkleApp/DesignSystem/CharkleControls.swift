@@ -1174,26 +1174,22 @@ public struct CharkleFilterTokenChip: View {
 // MARK: - Unified Token Search Field (Liquid Glass Island 1 Ready)
 
 /// Single-line unified search input with inline removable `CharkleFilterToken` chips,
-/// semantic-search toggle, clear button, and trailing filter trigger slot.
+/// seamless background semantic refinement indicator, clear button, and trailing filter trigger slot.
 /// Sits cleanly inside a single Liquid Glass island on macOS 26+ (and calibrated material/solid fallback on macOS 15 / Reduce Transparency).
 public struct CharkleTokenSearchField<FilterTrigger: View>: View {
     @Environment(\.colorScheme) private var colorScheme
-    @Environment(\.charkleAccentSource) private var accentSource
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @Binding public var text: String
     public let tokens: [CharkleFilterToken]
     public let onRemoveToken: (CharkleFilterToken) -> Void
     public let placeholder: String
-    public let semanticSearchEnabled: Bool
-    public let isRunningSemanticSearch: Bool
-    public let showsSemanticToggle: Bool
+    public let isRefiningSearch: Bool
     public let compact: Bool
     public let wrapsInGlassIsland: Bool
     public let isFocused: FocusState<Bool>.Binding?
     public let onSubmit: (() -> Void)?
     public let onClearText: (() -> Void)?
-    public let onToggleSemanticSearch: (() -> Void)?
     private let filterTrigger: FilterTrigger
     private let hasFilterTrigger: Bool
 
@@ -1201,43 +1197,42 @@ public struct CharkleTokenSearchField<FilterTrigger: View>: View {
         text: Binding<String>,
         tokens: [CharkleFilterToken] = [],
         onRemoveToken: @escaping (CharkleFilterToken) -> Void = { _ in },
-        placeholder: String = "搜索标题、标签、备注或颜色…",
-        semanticSearchEnabled: Bool = false,
-        isRunningSemanticSearch: Bool = false,
-        showsSemanticToggle: Bool = true,
+        placeholder: String = "搜索素材、描述画面、标签或颜色…",
+        isRefiningSearch: Bool = false,
         compact: Bool = false,
         wrapsInGlassIsland: Bool = true,
         isFocused: FocusState<Bool>.Binding? = nil,
         onSubmit: (() -> Void)? = nil,
         onClearText: (() -> Void)? = nil,
-        onToggleSemanticSearch: (() -> Void)? = nil,
         @ViewBuilder filterTrigger: () -> FilterTrigger
     ) {
         self._text = text
         self.tokens = tokens
         self.onRemoveToken = onRemoveToken
         self.placeholder = placeholder
-        self.semanticSearchEnabled = semanticSearchEnabled
-        self.isRunningSemanticSearch = isRunningSemanticSearch
-        self.showsSemanticToggle = showsSemanticToggle
+        self.isRefiningSearch = isRefiningSearch
         self.compact = compact
         self.wrapsInGlassIsland = wrapsInGlassIsland
         self.isFocused = isFocused
         self.onSubmit = onSubmit
         self.onClearText = onClearText
-        self.onToggleSemanticSearch = onToggleSemanticSearch
         self.filterTrigger = filterTrigger()
         self.hasFilterTrigger = FilterTrigger.self != EmptyView.self
     }
 
     public var body: some View {
-        let accent = CharkleTheme.accent(for: colorScheme, source: accentSource)
-
         let row = HStack(spacing: 6) {
-            Image(systemName: semanticSearchEnabled ? "sparkles" : "magnifyingglass")
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(semanticSearchEnabled ? accent : CharkleTheme.secondaryInk(for: colorScheme))
-                .frame(width: 14)
+            Group {
+                if isRefiningSearch {
+                    ProgressView()
+                        .controlSize(.mini)
+                } else {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
+                }
+            }
+            .frame(width: 14, height: 14)
 
             if !tokens.isEmpty {
                 let maxTokensWidth: CGFloat = compact ? 116 : 196
@@ -1300,41 +1295,6 @@ public struct CharkleTokenSearchField<FilterTrigger: View>: View {
                 .help("清除搜索关键词")
             }
 
-            if showsSemanticToggle, let onToggleSemanticSearch {
-                Button(action: onToggleSemanticSearch) {
-                    HStack(spacing: 3) {
-                        if isRunningSemanticSearch {
-                            ProgressView()
-                                .controlSize(.mini)
-                        } else {
-                            Image(systemName: "sparkles")
-                                .font(.system(size: 10, weight: .semibold))
-                        }
-                        if !compact {
-                            Text("语义")
-                                .font(.system(size: 10.5, weight: .semibold))
-                                .lineLimit(1)
-                        }
-                    }
-                    .foregroundStyle(
-                        semanticSearchEnabled
-                            ? CharkleTheme.accentButtonForeground(for: colorScheme, source: accentSource)
-                            : accent
-                    )
-                    .padding(.horizontal, compact ? 6 : 7)
-                    .frame(height: 21)
-                    .background(
-                        semanticSearchEnabled
-                            ? CharkleTheme.accentButtonFill(for: colorScheme, source: accentSource)
-                            : CharkleTheme.accentSoft(for: colorScheme, source: accentSource),
-                        in: Capsule(style: .continuous)
-                    )
-                    .fixedSize(horizontal: true, vertical: false)
-                }
-                .buttonStyle(CharkleTactileButtonStyle())
-                .help("混合视觉语义搜图（结合视觉评分、语义向量与全文检索）")
-            }
-
             if hasFilterTrigger {
                 CharkleHairlineDivider(axis: .vertical)
                     .frame(height: 15)
@@ -1377,31 +1337,25 @@ public extension CharkleTokenSearchField where FilterTrigger == EmptyView {
         text: Binding<String>,
         tokens: [CharkleFilterToken] = [],
         onRemoveToken: @escaping (CharkleFilterToken) -> Void = { _ in },
-        placeholder: String = "搜索标题、标签、备注或颜色…",
-        semanticSearchEnabled: Bool = false,
-        isRunningSemanticSearch: Bool = false,
-        showsSemanticToggle: Bool = true,
+        placeholder: String = "搜索素材、描述画面、标签或颜色…",
+        isRefiningSearch: Bool = false,
         compact: Bool = false,
         wrapsInGlassIsland: Bool = true,
         isFocused: FocusState<Bool>.Binding? = nil,
         onSubmit: (() -> Void)? = nil,
-        onClearText: (() -> Void)? = nil,
-        onToggleSemanticSearch: (() -> Void)? = nil
+        onClearText: (() -> Void)? = nil
     ) {
         self.init(
             text: text,
             tokens: tokens,
             onRemoveToken: onRemoveToken,
             placeholder: placeholder,
-            semanticSearchEnabled: semanticSearchEnabled,
-            isRunningSemanticSearch: isRunningSemanticSearch,
-            showsSemanticToggle: showsSemanticToggle,
+            isRefiningSearch: isRefiningSearch,
             compact: compact,
             wrapsInGlassIsland: wrapsInGlassIsland,
             isFocused: isFocused,
             onSubmit: onSubmit,
             onClearText: onClearText,
-            onToggleSemanticSearch: onToggleSemanticSearch,
             filterTrigger: { EmptyView() }
         )
     }

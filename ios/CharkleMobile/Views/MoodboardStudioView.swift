@@ -143,6 +143,11 @@ struct MoodboardStudioView: View {
                         } label: {
                             Label("导出高清图片", systemImage: "square.and.arrow.up")
                         }
+                        Button {
+                            Task { await exportPureRefScene() }
+                        } label: {
+                            Label("导出 PureRef (.pur)", systemImage: "square.grid.2x2")
+                        }
                     } label: {
                         if isExporting {
                             ProgressView().controlSize(.small)
@@ -942,6 +947,13 @@ struct MoodboardStudioView: View {
             document: doc,
             darkAppearance: colorScheme == .dark
         )
+    }
+
+    private func exportPureRefScene() async {
+        guard let doc = document else { return }
+        isExporting = true
+        defer { isExporting = false }
+        exportedImageURL = await store.exportBoardPureRefURL(document: doc)
     }
 
     // MARK: - Editorial Auto-Layout Solver (Matching Desktop Semantics)

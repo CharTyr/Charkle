@@ -262,4 +262,180 @@ struct NativeRedesignRegressionTests {
         #expect(SidebarResizeGeometry.clampedInspectorWidth(480, windowWidth: 1000, sidebarOccupiedWidth: 233) == 406)
         #expect(SidebarResizeGeometry.clampedInspectorWidth(480, windowWidth: 1440, sidebarOccupiedWidth: 0) == SidebarResizeGeometry.maxInspectorWidth)
     }
+
+    @Test("Unified search fuses semantic search seamlessly without separate toggle buttons or mode-exit banners on macOS and iOS")
+    func unifiedSearchZeroToggleContracts() throws {
+        let a = AssetRecord(title: "Literal A", fileName: "a.jpg")
+        let b = AssetRecord(title: "Literal B", fileName: "b.jpg")
+        let c = AssetRecord(title: "Semantic C", fileName: "c.jpg")
+        let d = AssetRecord(title: "Semantic D", fileName: "d.jpg")
+
+        // Local-only semantic fusion keeps literal order stable at top and appends unseen semantic hits
+        let localReport = SemanticSearchReport(
+            query: "赛博",
+            hits: [
+                SemanticSearchHit(asset: c, score: 0.85),
+                SemanticSearchHit(asset: b, score: 0.80),
+                SemanticSearchHit(asset: d, score: 0.72)
+            ],
+            usedTypeSafeJev: false,
+            usedCloudEmbedding: false
+        )
+        #expect(localReport.mergedAssets(withLiteral: [a, b]).map(\.id) == [a.id, b.id, c.id, d.id])
+
+        // Cloud visual / embedding reranking prioritizes semantic relevance while preserving all literal matches
+        let visualReport = SemanticSearchReport(
+            query: "雨夜霓虹街道",
+            hits: [
+                SemanticSearchHit(asset: c, score: 0.94),
+                SemanticSearchHit(asset: d, score: 0.88)
+            ],
+            usedTypeSafeJev: true,
+            usedCloudEmbedding: false
+        )
+        #expect(visualReport.mergedAssets(withLiteral: [a, b]).map(\.id) == [c.id, d.id, a.id, b.id])
+
+        // Pure visual mood query (no literal FTS matches) still surfaces semantic hits
+        #expect(localReport.mergedAssets(withLiteral: []).map(\.id) == [c.id, b.id, d.id])
+
+        // Empty semantic hits preserve literal FTS matches untouched
+        let emptyReport = SemanticSearchReport(query: "IMG_0421", hits: [])
+        #expect(emptyReport.mergedAssets(withLiteral: [a, b]).map(\.id) == [a.id, b.id])
+
+        // UI source contracts: zero standalone "语义" mode toggle buttons and zero "返回普通检索" banners
+        let macControls = try readSource("Sources/CharkleApp/DesignSystem/CharkleControls.swift")
+        let macMain = try readSource("Sources/CharkleApp/Views/MainWindowView.swift")
+        let macStore = try readSource("Sources/CharkleApp/Stores/LibraryStore.swift")
+        let iosFilterBar = try readSource("ios/CharkleMobile/Views/FilterBarView.swift")
+        let iosMasonry = try readSource("ios/CharkleMobile/Views/MasonryGalleryView.swift")
+        let iosStore = try readSource("ios/CharkleMobile/Stores/MobileAppStore.swift")
+
+        for src in [macControls, macMain, iosFilterBar, iosMasonry] {
+            #expect(!src.contains("Text(\"语义\")"))
+            #expect(!src.contains("返回普通检索"))
+            #expect(!src.contains("semanticSearchEnabled"))
+        }
+        #expect(!macStore.contains("semanticSearchEnabled"))
+        #expect(!iosStore.contains("semanticSearchEnabled"))
+        #expect(!iosStore.contains("toggleSemanticSearchMode"))
+        #expect(!iosFilterBar.contains("MobileSemanticSearchStatusBar"))
+        #expect(macControls.contains("isRefiningSearch"))
+        #expect(macStore.contains("SemanticSearchReport.mergeUnifiedAssets"))
+        #expect(iosStore.contains("SemanticSearchReport.mergeUnifiedAssets"))
+    }
+
+    @Test("macOS drag NSItemProvider never registers fileRepresentation for public.file-url (prevents macOS 27 SIGTRAP)")
+    func macOSDragItemProviderSafetyContracts() throws {
+        let notch = try readSource("Sources/CharkleApp/Notch/NotchShelfView.swift")
+        let filmstrip = try readSource("Sources/CharkleApp/Views/GalleryFilmstripView.swift")
+        for src in [notch, filmstrip] {
+            #expect(!src.contains("registerFileRepresentation(forTypeIdentifier: UTType.fileURL"))
+            #expect(src.contains("registerDataRepresentation(forTypeIdentifier: UTType.fileURL.identifier"))
+            #expect(src.contains("fileExists(atPath:"))
+        }
+    }
+
+    @Test("YouTube & Bilibili URL parsing, WBI signature, chapters, and universal webpage parser contracts")
+    func videoPlatformAndUniversalWebParserContracts() throws {
+        // 1. YouTube URL variants
+        let ytWatch = try #require(URL(string: "https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=42s"))
+        let ytShort = try #require(URL(string: "https://youtu.be/dQw4w9WgXcQ"))
+        let ytShorts = try #require(URL(string: "https://www.youtube.com/shorts/dQw4w9WgXcQ"))
+        for url in [ytWatch, ytShort, ytShorts] {
+            let parsed = try #require(SocialPostURLParser.parse(url))
+            #expect(parsed.platform == .youtube)
+            #expect(parsed.dedupKey == "yt:dQw4w9WgXcQ")
+            #expect(parsed.canonicalURL.absoluteString == "https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+        }
+
+        // 2. Bilibili URL variants (BV, av, multi-page, b23.tv short link)
+        let biliBV = try #require(URL(string: "https://www.bilibili.com/video/BV1xx411c7m9/?spm_id_from=333.999"))
+        let parsedBV = try #require(SocialPostURLParser.parse(biliBV))
+        #expect(parsedBV.platform == .bilibili)
+        #expect(parsedBV.dedupKey == "bili:BV1xx411c7m9")
+        #expect(parsedBV.canonicalURL.absoluteString == "https://www.bilibili.com/video/BV1xx411c7m9")
+
+        let biliShort = try #require(URL(string: "https://b23.tv/AbCdEf1"))
+        let parsedShort = try #require(SocialPostURLParser.parse(biliShort))
+        #expect(parsedShort.platform == .bilibili)
+
+        // 3. Bilibili WBI MD5 signature generation produces deterministic 32-hex w_rid + wts
+        let signed = VideoPlatformResolver.signBilibiliWBI(
+            params: ["bvid": "BV1xx411c7m9", "cid": "123456"],
+            imgKey: "7cd084941338484aae1ad9425b84077c",
+            subKey: "4932caff0ff746eab6f01bf08b70ac45",
+            timestamp: 1_700_000_000
+        )
+        let wRid = try #require(signed.first(where: { $0.name == "w_rid" })?.value)
+        let isValidWRid = wRid.count == 32 && wRid.allSatisfy(\.isHexDigit)
+        #expect(isValidWRid)
+        #expect(signed.first(where: { $0.name == "wts" })?.value == "1700000000")
+
+        // 4. Timestamp chapter parsing
+        let chapters = VideoPlatformResolver.extractTimestampChapters(from: """
+        Intro notes
+        00:00 开场与思路
+        02:35 灯光与材质拆解
+        10:12 最终调色对比
+        """)
+        #expect(chapters.count == 3)
+
+        // 5. Universal WebBookmark HTML parser: JSON-LD VideoObject, oEmbed, lazy hero img, readable lead summary
+        let sampleHTML = """
+        <!doctype html>
+        <html>
+        <head>
+          <title>Studio Lighting Breakdown</title>
+          <link rel="alternate" type="application/json+oembed" href="https://vimeo.com/api/oembed.json?url=https%3A%2F%2Fvimeo.com%2F123" />
+          <script type="application/ld+json">
+          {
+            "@type": "VideoObject",
+            "name": "Cinematic Studio Lighting",
+            "author": { "name": "Light Craft" },
+            "duration": "PT8M42S",
+            "thumbnailUrl": "https://cdn.example.com/poster.jpg",
+            "contentUrl": "https://cdn.example.com/reel.mp4"
+          }
+          </script>
+        </head>
+        <body>
+          <article>
+            <p>This comprehensive breakdown walks through key light ratios, softbox diffusion, and color temperature contrast for editorial portraits.</p>
+            <img data-original="https://cdn.example.com/hero-frame.jpg" width="1200" height="800" />
+            <img src="https://cdn.example.com/favicon-16.png" width="16" height="16" />
+          </article>
+        </body>
+        </html>
+        """
+        let baseURL = try #require(URL(string: "https://studio.example.com/posts/lighting"))
+        let parsedHTML = WebBookmark.parseHTML(sampleHTML, baseURL: baseURL)
+        #expect(parsedHTML.title == "Cinematic Studio Lighting")
+        #expect(parsedHTML.authorName == "Light Craft")
+        #expect(parsedHTML.isVideoPage == true)
+        #expect(parsedHTML.durationSeconds == 522)
+        #expect(parsedHTML.oEmbedURL?.absoluteString.contains("oembed.json") == true)
+        #expect(parsedHTML.videoURLs.contains(where: { $0.absoluteString == "https://cdn.example.com/reel.mp4" }))
+        #expect(parsedHTML.imageURLs.contains(where: { $0.absoluteString == "https://cdn.example.com/poster.jpg" }))
+        #expect(parsedHTML.imageURLs.contains(where: { $0.absoluteString == "https://cdn.example.com/hero-frame.jpg" }))
+        #expect(!parsedHTML.imageURLs.contains(where: { $0.absoluteString.contains("favicon-16") }))
+        #expect(parsedHTML.description?.contains("key light ratios") == true)
+
+        // 6. iOS unified Settings, Scheme A Liquid Glass bottom bar, collapsible Directory, and batch link extraction wiring
+        let iosSettings = try readSource("ios/CharkleMobile/Views/MobileSettingsView.swift")
+        let iosTabBar = try readSource("ios/CharkleMobile/Views/LiquidGlassMorphingTabBar.swift")
+        let iosSidebar = try readSource("ios/CharkleMobile/Views/SidebarNavigationView.swift")
+        let iosRoot = try readSource("ios/CharkleMobile/Views/RootShellView.swift")
+        let macMain = try readSource("Sources/CharkleApp/Views/MainWindowView.swift")
+        let iosGallery = try readSource("ios/CharkleMobile/Views/MasonryGalleryView.swift")
+
+        #expect(iosSettings.contains("GoogleDriveSyncSettingsView"))
+        #expect(!iosSettings.contains(".pur"))
+        #expect(iosTabBar.contains("MobileSearchScopeMode"))
+        #expect(iosTabBar.contains("glassEffectID"))
+        #expect(iosSidebar.contains("expandedFolderIDs"))
+        #expect(iosSidebar.contains("quickFilterHeader"))
+        #expect(iosRoot.contains("LiquidGlassMorphingTabBar"))
+        #expect(macMain.contains("extractMediaFromSelectedLinks"))
+        #expect(iosGallery.contains("extractMediaFromSelectedLinks"))
+    }
 }

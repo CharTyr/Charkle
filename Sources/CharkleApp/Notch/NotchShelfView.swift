@@ -780,9 +780,15 @@ public struct NotchShelfView: View {
             completion(Data(encoded.utf8), nil)
             return nil
         }
-        if let firstID = ids.first, let fileURL = onResolveDragFileURL(firstID) {
-            provider.registerFileRepresentation(forTypeIdentifier: UTType.fileURL.identifier, fileOptions: [], visibility: .all) { completion in
-                completion(fileURL, false, nil)
+        // Use data representation for UTType.fileURL (never registerFileRepresentation with empty options,
+        // which causes Foundation's loadInPlaceFileRepresentation to return nil and crash SwiftUI's
+        // PasteboardUtility.loadFileSystemItem with SIGTRAP on macOS 26/27).
+        if let firstID = ids.first,
+           let fileURL = onResolveDragFileURL(firstID),
+           fileURL.isFileURL,
+           FileManager.default.fileExists(atPath: fileURL.path) {
+            provider.registerDataRepresentation(forTypeIdentifier: UTType.fileURL.identifier, visibility: .all) { completion in
+                completion(fileURL.dataRepresentation, nil)
                 return nil
             }
         }

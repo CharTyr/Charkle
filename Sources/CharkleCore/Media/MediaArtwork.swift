@@ -276,6 +276,9 @@ nonisolated enum MediaArtwork {
         if post.platform == .xiaohongshu {
             return xiaohongshuPostCard(post, embeddedMedia: embeddedMedia, authorAvatar: authorAvatar)
         }
+        if post.platform.isVideoPlatform {
+            return videoPlatformCard(post, embeddedMedia: embeddedMedia, authorAvatar: authorAvatar)
+        }
 
         let hasMedia = embeddedMedia != nil
         let width = 800
@@ -379,6 +382,121 @@ nonisolated enum MediaArtwork {
         if let v = post.viewCount { metrics.append("\(formatMetric(v)) 浏览") }
         let footerText = metrics.isEmpty ? post.platform.openActionLabel : metrics.joined(separator: "   ")
         draw(footerText, in: ctx, at: CGPoint(x: 44, y: 30), size: 17, ink: 0x6B7280, width: 712)
+
+        return ctx.makeImage()
+    }
+
+    /// Crisp 16:9 video bookmark card (`960x760`) for YouTube and Bilibili:
+    /// - Top (`960x540`): full-bleed 16:9 video cover with play badge, duration pill, and optional AI summary indicator.
+    /// - Bottom (`220px`): paper-white footer with 2-line video title, creator avatar + name, and view/like metrics.
+    private static func videoPlatformCard(
+        _ post: SocialPostMetadata,
+        embeddedMedia: CGImage?,
+        authorAvatar: CGImage?
+    ) -> CGImage? {
+        let width = 960
+        let coverHeight = 540
+        let footerHeight = 220
+        let height = coverHeight + footerHeight
+        guard let ctx = context(width: width, height: height) else { return nil }
+
+        let canvasRect = CGRect(x: 0, y: 0, width: width, height: height)
+        ctx.setFillColor(color(0xFFFFFF))
+        ctx.fill(canvasRect)
+
+        let coverRect = CGRect(x: 0, y: footerHeight, width: width, height: coverHeight)
+        if let media = embeddedMedia {
+            ctx.saveGState()
+            ctx.clip(to: coverRect)
+            ctx.setFillColor(color(0x16181D))
+            ctx.fill(coverRect)
+            drawAspectFill(media, in: coverRect, ctx: ctx)
+            ctx.restoreGState()
+        } else {
+            ctx.setFillColor(color(0x1E2025))
+            ctx.fill(coverRect)
+        }
+
+        // Centered translucent play circle
+        let playSize: Double = 78
+        let playRect = CGRect(
+            x: coverRect.midX - playSize / 2,
+            y: coverRect.midY - playSize / 2,
+            width: playSize,
+            height: playSize
+        )
+        ctx.setFillColor(color(0x000000, alpha: 0.56))
+        ctx.fillEllipse(in: playRect)
+        ctx.setStrokeColor(color(0xFFFFFF, alpha: 0.40))
+        ctx.setLineWidth(2)
+        ctx.strokeEllipse(in: playRect.insetBy(dx: 1, dy: 1))
+        ctx.setFillColor(color(0xFFFFFF))
+        ctx.beginPath()
+        ctx.move(to: CGPoint(x: coverRect.midX - 11, y: coverRect.midY - 17))
+        ctx.addLine(to: CGPoint(x: coverRect.midX - 11, y: coverRect.midY + 17))
+        ctx.addLine(to: CGPoint(x: coverRect.midX + 20, y: coverRect.midY))
+        ctx.closePath()
+        ctx.fillPath()
+
+        // Top-left AI summary badge when video summary/chapters exist
+        if post.hasVideoSummaryContent {
+            let pillRect = CGRect(x: 24, y: Double(height - 68), width: 124, height: 42)
+            ctx.setFillColor(color(0x111827, alpha: 0.72))
+            addRoundedRectPath(pillRect, radius: 21, in: ctx)
+            ctx.fillPath()
+            draw("含视频摘要", in: ctx, at: CGPoint(x: 42, y: Double(height - 58)), size: 18, ink: 0xFFFFFF, width: 100, bold: true)
+        }
+
+        // Bottom-right duration pill
+        if let durText = post.formattedVideoDuration {
+            let pillW = max(84.0, Double(durText.count) * 14.0 + 28.0)
+            let pillRect = CGRect(x: Double(width) - pillW - 22, y: Double(footerHeight) + 18, width: pillW, height: 38)
+            ctx.setFillColor(color(0x000000, alpha: 0.76))
+            addRoundedRectPath(pillRect, radius: 10, in: ctx)
+            ctx.fillPath()
+            draw(durText, in: ctx, at: CGPoint(x: pillRect.minX + 14, y: pillRect.minY + 9), size: 19, ink: 0xFFFFFF, width: pillW - 20, bold: true)
+        }
+
+        // Footer: Bold 2-line video title
+        let headline = post.articleTitle?.trimmingCharacters(in: .whitespacesAndNewlines)
+            ?? post.bodyText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let titleLines = wrapText(headline.isEmpty ? post.platform.postTypeLabel : headline, maxCharsPerLine: 28, maxLines: 2)
+        var titleY = Double(footerHeight) - 56
+        for line in titleLines {
+            draw(line, in: ctx, at: CGPoint(x: 32, y: titleY), size: 28, ink: 0x111827, width: Double(width - 64), bold: true)
+            titleY -= 40
+        }
+
+        // Footer bottom row: Creator avatar + name + metrics
+        let avatarRect = CGRect(x: 32, y: 26, width: 44, height: 44)
+        let brandHex: UInt32 = post.platform == .bilibili ? 0xFB7299 : 0xFF0000
+        if let authorAvatar {
+            ctx.saveGState()
+            ctx.addEllipse(in: avatarRect)
+            ctx.clip()
+            drawAspectFill(authorAvatar, in: avatarRect, ctx: ctx)
+            ctx.restoreGState()
+            ctx.setStrokeColor(color(0x000000, alpha: 0.08))
+            ctx.setLineWidth(1.5)
+            ctx.strokeEllipse(in: avatarRect.insetBy(dx: 0.75, dy: 0.75))
+        } else {
+            ctx.setFillColor(color(brandHex))
+            ctx.fillEllipse(in: avatarRect)
+            let initial = String((post.authorName.first ?? "V")).uppercased()
+            draw(initial, in: ctx, at: CGPoint(x: 46, y: 39), size: 19, ink: 0xFFFFFF, width: 26, bold: true)
+        }
+
+        draw(post.authorName, in: ctx, at: CGPoint(x: 88, y: 37), size: 22, ink: 0x374151, width: 480, bold: true)
+
+        var metrics: [String] = []
+        if let views = post.viewCount { metrics.append("\(formatMetric(views)) 播放") }
+        if let likes = post.likeCount { metrics.append("\(formatMetric(likes)) 赞") }
+        let rightLabel = metrics.isEmpty ? post.platform.displayName : metrics.joined(separator: " · ")
+        draw(rightLabel, in: ctx, at: CGPoint(x: 590, y: 38), size: 19, ink: 0x6B7280, width: 338)
+
+        ctx.setStrokeColor(color(0xE5E7EB))
+        ctx.setLineWidth(2)
+        ctx.stroke(CGRect(x: 1, y: 1, width: width - 2, height: height - 2))
 
         return ctx.makeImage()
     }

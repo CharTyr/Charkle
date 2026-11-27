@@ -28,6 +28,8 @@
 		A10000160000000000000001 /* PinterestLoginSheetMobile.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000160000000000000001 /* PinterestLoginSheetMobile.swift */; };
 		A10000170000000000000001 /* PinterestInfiniteCanvasMobile.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000170000000000000001 /* PinterestInfiniteCanvasMobile.swift */; };
 		A10000180000000000000001 /* PinterestExploreMobileView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000180000000000000001 /* PinterestExploreMobileView.swift */; };
+		A10000190000000000000001 /* MobileSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000190000000000000001 /* MobileSettingsView.swift */; };
+		A100001A0000000000000001 /* LiquidGlassMorphingTabBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = B100001A0000000000000001 /* LiquidGlassMorphingTabBar.swift */; };
 		A10000100000000000000001 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = B10000100000000000000001 /* Assets.xcassets */; };
 		A10000110000000000000001 /* CharkleCore in Frameworks */ = {isa = PBXBuildFile; productRef = D10000010000000000000001 /* CharkleCore */; };
 		A10000120000000000000001 /* CharkleShareExtension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = B20000020000000000000001 /* CharkleShareExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
@@ -81,6 +83,8 @@
 		B10000160000000000000001 /* PinterestLoginSheetMobile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PinterestLoginSheetMobile.swift; sourceTree = "<group>"; };
 		B10000170000000000000001 /* PinterestInfiniteCanvasMobile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PinterestInfiniteCanvasMobile.swift; sourceTree = "<group>"; };
 		B10000180000000000000001 /* PinterestExploreMobileView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PinterestExploreMobileView.swift; sourceTree = "<group>"; };
+		B10000190000000000000001 /* MobileSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileSettingsView.swift; sourceTree = "<group>"; };
+		B100001A0000000000000001 /* LiquidGlassMorphingTabBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiquidGlassMorphingTabBar.swift; sourceTree = "<group>"; };
 		B10000100000000000000001 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		B10000110000000000000001 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		B10000120000000000000001 /* CharkleMobile.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = CharkleMobile.entitlements; sourceTree = "<group>"; };
@@ -178,6 +182,8 @@
 				B10000160000000000000001 /* PinterestLoginSheetMobile.swift */,
 				B10000170000000000000001 /* PinterestInfiniteCanvasMobile.swift */,
 				B10000180000000000000001 /* PinterestExploreMobileView.swift */,
+				B10000190000000000000001 /* MobileSettingsView.swift */,
+				B100001A0000000000000001 /* LiquidGlassMorphingTabBar.swift */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -328,6 +334,8 @@
 				A10000160000000000000001 /* PinterestLoginSheetMobile.swift in Sources */,
 				A10000170000000000000001 /* PinterestInfiniteCanvasMobile.swift in Sources */,
 				A10000180000000000000001 /* PinterestExploreMobileView.swift in Sources */,
+				A10000190000000000000001 /* MobileSettingsView.swift in Sources */,
+				A100001A0000000000000001 /* LiquidGlassMorphingTabBar.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -401,7 +409,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = CharkleMobile/CharkleMobile.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 11;
+				CURRENT_PROJECT_VERSION = 12;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = CharkleMobile/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
@@ -409,7 +417,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.4.1;
+				MARKETING_VERSION = 1.5.0;
 				OTHER_SWIFT_FLAGS = (
 					"$(inherited)",
 					"-enable-upcoming-feature",
@@ -435,7 +443,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = CharkleMobile/CharkleMobile.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 11;
+				CURRENT_PROJECT_VERSION = 12;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = CharkleMobile/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
@@ -443,7 +451,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.4.1;
+				MARKETING_VERSION = 1.5.0;
 				OTHER_SWIFT_FLAGS = (
 					"$(inherited)",
 					"-enable-upcoming-feature",
@@ -468,7 +476,7 @@
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_ENTITLEMENTS = CharkleShareExtension/CharkleShareExtension.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 11;
+				CURRENT_PROJECT_VERSION = 12;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = CharkleShareExtension/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
@@ -477,7 +485,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 1.4.1;
+				MARKETING_VERSION = 1.5.0;
 				OTHER_SWIFT_FLAGS = (
 					"$(inherited)",
 					"-enable-upcoming-feature",
@@ -503,7 +511,7 @@
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_ENTITLEMENTS = CharkleShareExtension/CharkleShareExtension.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 11;
+				CURRENT_PROJECT_VERSION = 12;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = CharkleShareExtension/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
@@ -512,7 +520,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 1.4.1;
+				MARKETING_VERSION = 1.5.0;
 				OTHER_SWIFT_FLAGS = (
 					"$(inherited)",
 					"-enable-upcoming-feature",

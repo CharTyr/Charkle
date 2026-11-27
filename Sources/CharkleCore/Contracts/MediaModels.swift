@@ -470,6 +470,44 @@ public struct SemanticSearchReport: Codable, Hashable, Sendable {
         self.evaluatedVisualCount = evaluatedVisualCount
         self.summary = summary
     }
+
+    /// Losslessly fuses instant literal FTS/filter matches with hybrid semantic search hits.
+    /// - When cloud visual reranking (Jev) or semantic embeddings contributed, semantic relevance
+    ///   leads while preserving every literal match afterward so exact filenames/tags are never dropped.
+    /// - When only local multi-signal matching ran, literal matches keep their current sort order at
+    ///   the top (avoiding visual reshuffling while typing) and additional bilingual/visual-mood hits append seamlessly.
+    public func mergedAssets(withLiteral literalAssets: [AssetRecord]) -> [AssetRecord] {
+        Self.mergeUnifiedAssets(
+            literal: literalAssets,
+            semantic: hits.map(\.asset),
+            prioritizeSemantic: usedTypeSafeJev || usedCloudEmbedding
+        )
+    }
+
+    public static func mergeUnifiedAssets(
+        literal literalAssets: [AssetRecord],
+        semantic semanticAssets: [AssetRecord],
+        prioritizeSemantic: Bool
+    ) -> [AssetRecord] {
+        guard !semanticAssets.isEmpty else { return literalAssets }
+        guard !literalAssets.isEmpty else { return semanticAssets }
+
+        let primary = prioritizeSemantic ? semanticAssets : literalAssets
+        let secondary = prioritizeSemantic ? literalAssets : semanticAssets
+
+        var merged: [AssetRecord] = []
+        merged.reserveCapacity(primary.count + secondary.count)
+        var seen = Set<UUID>()
+        seen.reserveCapacity(primary.count + secondary.count)
+
+        for asset in primary where seen.insert(asset.id).inserted {
+            merged.append(asset)
+        }
+        for asset in secondary where seen.insert(asset.id).inserted {
+            merged.append(asset)
+        }
+        return merged
+    }
 }
 
 public struct InboxTriageRecommendation: Codable, Hashable, Identifiable, Sendable {

@@ -615,6 +615,10 @@ public nonisolated enum XPostResolver {
             request.setValue(browserUA, forHTTPHeaderField: "User-Agent")
             request.setValue("https://www.xiaohongshu.com/", forHTTPHeaderField: "Referer")
             request.setValue("image/webp,image/avif,image/png,image/jpeg,*/*", forHTTPHeaderField: "Accept")
+        } else if VideoPlatformURLParser.isBilibiliMediaHost(url.host()) {
+            request.setValue(browserUA, forHTTPHeaderField: "User-Agent")
+            request.setValue("https://www.bilibili.com/", forHTTPHeaderField: "Referer")
+            request.setValue("image/webp,image/avif,image/png,image/jpeg,*/*", forHTTPHeaderField: "Accept")
         } else if hostLower.contains("cdninstagram.com") || hostLower.contains("fbcdn.net") {
             request.setValue(browserUA, forHTTPHeaderField: "User-Agent")
             request.setValue(referer?.absoluteString ?? "https://www.instagram.com/", forHTTPHeaderField: "Referer")

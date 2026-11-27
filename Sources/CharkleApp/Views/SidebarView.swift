@@ -24,6 +24,7 @@ public struct SidebarView: View {
     public let moodboards: MoodboardStore
     public let expandedWidth: CGFloat
     public let onImportMaterialPackage: (() -> Void)?
+    public let onExportFolderToPureRef: ((FolderRecord, Bool) -> Void)?
     public let onOpenSmartDeduplication: ((UUID?) -> Void)?
     public let onSelectDestination: (SidebarDestination) -> Void
     public let onDropAssetsOntoFolder: ([UUID], UUID?) -> Void
@@ -96,6 +97,7 @@ public struct SidebarView: View {
         moodboards: MoodboardStore,
         expandedWidth: CGFloat = AppCoordinatorStore.defaultSidebarWidth,
         onImportMaterialPackage: (() -> Void)? = nil,
+        onExportFolderToPureRef: ((FolderRecord, Bool) -> Void)? = nil,
         onOpenSmartDeduplication: ((UUID?) -> Void)? = nil,
         onSelectDestination: @escaping (SidebarDestination) -> Void,
         onDropAssetsOntoFolder: @escaping ([UUID], UUID?) -> Void,
@@ -108,6 +110,7 @@ public struct SidebarView: View {
         self.moodboards = moodboards
         self.expandedWidth = expandedWidth
         self.onImportMaterialPackage = onImportMaterialPackage
+        self.onExportFolderToPureRef = onExportFolderToPureRef
         self.onOpenSmartDeduplication = onOpenSmartDeduplication
         self.onSelectDestination = onSelectDestination
         self.onDropAssetsOntoFolder = onDropAssetsOntoFolder
@@ -824,7 +827,7 @@ public struct SidebarView: View {
                                     .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
-                            .help("导入 .eaglepack / .library 素材包… (⌘⇧I)")
+                            .help("导入素材包 / PureRef 场景 (.eaglepack / .library / .pur)… (⌘⇧I)")
                         }
                         Button {
                             toggleFolderCreation(target: .root)
@@ -836,7 +839,7 @@ public struct SidebarView: View {
                                 .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
-                        .help("新建文件夹（也可直接拖入外部文件夹或 .eaglepack 素材包）")
+                        .help("新建文件夹（也可直接拖入外部文件夹、.eaglepack 素材包或 .pur 场景）")
                     }
                     .padding(.trailing, 10)
                     .padding(.vertical, 2)
@@ -1465,6 +1468,22 @@ public struct SidebarView: View {
                     renamingFolderID = folder.id
                     DispatchQueue.main.async {
                         isRenameFieldFocused = true
+                    }
+                }
+                if let onExportFolderToPureRef {
+                    Menu {
+                        Button {
+                            onExportFolderToPureRef(folder, true)
+                        } label: {
+                            Label("在 PureRef 中打开", systemImage: "arrow.up.forward.app")
+                        }
+                        Button {
+                            onExportFolderToPureRef(folder, false)
+                        } label: {
+                            Label("导出为 PureRef (.pur)…", systemImage: "square.and.arrow.up")
+                        }
+                    } label: {
+                        Label("发送到 PureRef", systemImage: "square.grid.2x2")
                     }
                 }
                 if let onOpenSmartDeduplication {

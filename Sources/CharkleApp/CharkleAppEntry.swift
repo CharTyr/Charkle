@@ -639,14 +639,17 @@ public final class CharkleRuntime {
     public func presentMaterialPackageImportPanel(targetFolderID: UUID? = nil) {
         activateMainWindow()
         let panel = NSOpenPanel()
-        panel.title = "导入素材包（.eaglepack / .library）"
-        panel.message = "选择一个或多个 .eaglepack 素材包、.library 素材库目录或导出的 .zip 包，将无损保留文件夹层级、标签、星级、注释与来源链接。"
+        panel.title = "导入素材包 / PureRef 场景（.eaglepack / .library / .pur）"
+        panel.message = "选择一个或多个 .pur PureRef 场景、.eaglepack 素材包、.library 素材库或 .zip 包，将自动解析素材、目录层级与情绪板排版。"
         panel.prompt = "导入"
         panel.canChooseFiles = true
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = true
         panel.treatsFilePackagesAsDirectories = false
         var allowed: [UTType] = [.zip, .folder]
+        if let purType = UTType(filenameExtension: "pur") {
+            allowed.insert(purType, at: 0)
+        }
         if let packType = UTType(filenameExtension: "eaglepack") {
             allowed.insert(packType, at: 0)
         }
@@ -665,42 +668,141 @@ public final class CharkleRuntime {
             return nil
         }()
 
+        let pureRefURLs = selectedURLs.filter { PureRefCodec.isPureRefFileURL($0) }
+        let packageURLs = selectedURLs.filter { !PureRefCodec.isPureRefFileURL($0) }
+        if !pureRefURLs.isEmpty && packageURLs.isEmpty {
+            importPureRefURLs(pureRefURLs, targetFolderID: resolvedFolderID)
+            return
+        }
+
         coordinator.showToast(
             selectedURLs.count == 1
                 ? "正在解析并导入「\(selectedURLs[0].lastPathComponent)」…"
-                : "正在解析并导入 \(selectedURLs.count) 个素材包…",
+                : "正在解析并导入 \(selectedURLs.count) 个文件…",
             icon: "shippingbox"
         )
 
         Task {
-            let results = await library.importMaterialPackages(
-                urls: selectedURLs,
-                targetFolderID: resolvedFolderID
-            )
+            let purResults = pureRefURLs.isEmpty
+                ? []
+                : await library.importPureRefScenes(urls: pureRefURLs, targetFolderID: resolvedFolderID, createMoodboard: true)
+            if !purResults.isEmpty {
+                await moodboards.refreshBoards()
+            }
+            let results = packageURLs.isEmpty
+                ? []
+                : await library.importMaterialPackages(
+                    urls: packageURLs,
+                    targetFolderID: resolvedFolderID
+                )
             let totalAssets = results.reduce(0) { $0 + $1.importedAssets.count }
-            let totalFolders = results.reduce(0) { $0 + $1.createdFolderCount }
-            guard !results.isEmpty, (totalAssets > 0 || totalFolders > 0) else {
-                let err = library.lastError ?? "未在所选文件中发现可导入的素材包内容"
+                + purResults.reduce(0) { $0 + $1.importedAssets.count }
+            let totalFolders = results.reduce(0) { $0 + $1.createdFolderCount } + purResults.count
+            guard (!results.isEmpty || !purResults.isEmpty), (totalAssets > 0 || totalFolders > 0) else {
+                let err = library.lastError ?? "未在所选文件中发现可导入的素材内容"
                 coordinator.showToast(err, icon: "exclamationmark.triangle", tone: .warning)
                 return
             }
 
-            if results.count == 1, let rootID = results[0].rootFolderID {
+            if results.count == 1 && purResults.isEmpty, let rootID = results[0].rootFolderID {
                 coordinator.selectedDestination = .folder(rootID)
                 await library.applyDestination(.folder(rootID))
             }
             let summary: String
-            if results.count == 1 {
+            if results.count == 1 && purResults.isEmpty {
                 let name = results[0].packageName
                 summary = totalFolders > 0
                     ? "已导入「\(name)」：新建 \(totalFolders) 个文件夹，收入 \(totalAssets) 项素材"
                     : "已导入「\(name)」：收入 \(totalAssets) 项素材"
             } else {
                 summary = totalFolders > 0
-                    ? "已导入 \(results.count) 个素材包：新建 \(totalFolders) 个文件夹，收入 \(totalAssets) 项素材"
-                    : "已导入 \(results.count) 个素材包：收入 \(totalAssets) 项素材"
+                    ? "已完成导入：新建 \(totalFolders) 个文件夹，收入 \(totalAssets) 项素材"
+                    : "已完成导入：收入 \(totalAssets) 项素材"
             }
             coordinator.showToast(summary, icon: "shippingbox.fill", tone: .success)
+        }
+    }
+
+    public func presentPureRefImportPanel(targetFolderID: UUID? = nil) {
+        activateMainWindow()
+        let panel = NSOpenPanel()
+        panel.title = "导入 PureRef 场景（.pur）"
+        panel.message = "选择 .pur 场景文件，将自动提取全部图片导入独立文件夹，并按原画布排版与便签生成 Charkle 情绪板。"
+        panel.prompt = "导入"
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = true
+        if let purType = UTType(filenameExtension: "pur") {
+            panel.allowedContentTypes = [purType]
+        } else {
+            panel.allowedContentTypes = [.data]
+        }
+
+        guard panel.runModal() == .OK, !panel.urls.isEmpty else { return }
+        let resolvedFolderID: UUID? = {
+            if let targetFolderID { return targetFolderID }
+            if case .folder(let currentID) = coordinator.selectedDestination {
+                return currentID
+            }
+            return nil
+        }()
+        importPureRefURLs(panel.urls, targetFolderID: resolvedFolderID)
+    }
+
+    private func importPureRefURLs(_ urls: [URL], targetFolderID: UUID?) {
+        coordinator.showToast(
+            urls.count == 1
+                ? "正在解析 PureRef「\(urls[0].deletingPathExtension().lastPathComponent)」…"
+                : "正在解析 \(urls.count) 个 PureRef 场景…",
+            icon: "square.grid.2x2"
+        )
+        Task {
+            let results = await library.importPureRefScenes(
+                urls: urls,
+                targetFolderID: targetFolderID,
+                createMoodboard: true
+            )
+            await moodboards.refreshBoards()
+
+            let totalAssets = results.reduce(0) { $0 + $1.importedAssets.count }
+            let totalNotes = results.reduce(0) { $0 + $1.importedNoteCount }
+            guard !results.isEmpty, (totalAssets > 0 || totalNotes > 0) else {
+                coordinator.showToast(
+                    library.lastError ?? "未能从所选 .pur 文件中提取到有效图片或便签",
+                    icon: "exclamationmark.triangle",
+                    tone: .warning
+                )
+                return
+            }
+
+            if results.count == 1, let first = results.first {
+                let notePart = first.importedNoteCount > 0 ? "、\(first.importedNoteCount) 条便签" : ""
+                let msg = "已导入 PureRef「\(first.sceneName)」：\(first.importedAssets.count) 张图\(notePart)"
+                if let boardID = first.createdBoardID {
+                    let coord = coordinator
+                    coordinator.showToast(
+                        msg,
+                        icon: "square.grid.2x2.fill",
+                        tone: .success,
+                        actionTitle: "打开情绪板",
+                        onAction: {
+                            coord.openMoodboard(boardID)
+                        }
+                    )
+                } else {
+                    coordinator.showToast(msg, icon: "square.grid.2x2.fill", tone: .success)
+                }
+                if let rootID = first.rootFolderID {
+                    coordinator.selectedDestination = .folder(rootID)
+                    await library.applyDestination(.folder(rootID))
+                }
+            } else {
+                coordinator.showToast(
+                    "已导入 \(results.count) 个 PureRef 场景：共收入 \(totalAssets) 张素材并生成情绪板",
+                    icon: "square.grid.2x2.fill",
+                    tone: .success
+                )
+            }
         }
     }
 
@@ -797,6 +899,7 @@ private struct MainWindowSceneHost: View {
             onSyncDefaultNotchTarget: { runtime.syncDefaultNotchTarget($0) },
             onEnterMinimalCaptureMode: { runtime.enterMinimalCaptureMode() },
             onImportMaterialPackage: { runtime.presentMaterialPackageImportPanel() },
+            onImportPureRef: { runtime.presentPureRefImportPanel() },
             onAppReady: { runtime.startAppKitServicesIfNeeded() }
         )
         .environment(\.charkleAccentSource, accentSource)
@@ -960,10 +1063,14 @@ struct CharkleApp: App {
 
                 Divider()
 
-                Button("导入素材包（.eaglepack / .library）…") {
+                Button("导入素材包（.eaglepack / .library / .pur）…") {
                     runtime.presentMaterialPackageImportPanel()
                 }
                 .keyboardShortcut("i", modifiers: [.command, .shift])
+
+                Button("导入 PureRef 场景（.pur）…") {
+                    runtime.presentPureRefImportPanel()
+                }
 
                 Button("智能去重（全媒体，保留最高质量）…") {
                     runtime.activateMainWindow()

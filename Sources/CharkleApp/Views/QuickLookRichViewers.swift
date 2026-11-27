@@ -307,11 +307,61 @@ struct QuickLookSocialPostCard: View {
                         .background(platformBadgeColor, in: Capsule(style: .continuous))
                 }
 
-                // Article Headline (if X Article)
+                // Article / Video Headline
                 if let article = post.articleTitle, !article.isEmpty {
-                    Text(article)
-                        .font(.system(size: 17, weight: .bold))
-                        .textSelection(.enabled)
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text(article)
+                            .font(.system(size: 17, weight: .bold))
+                            .textSelection(.enabled)
+                        if let dur = post.formattedVideoDuration {
+                            Text(dur)
+                                .font(.system(size: 11.5, weight: .semibold).monospacedDigit())
+                                .foregroundStyle(.secondary)
+                                .padding(.horizontal, 7)
+                                .padding(.vertical, 2)
+                                .background(Color.primary.opacity(0.07), in: Capsule())
+                        }
+                    }
+                }
+
+                // Dedicated Video Summary & Timestamp Outline (Bilibili AI Summary / YouTube Chapters & Caption Digest)
+                if post.hasVideoSummaryContent {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "text.quote")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(Color.accentColor)
+                            Text("视频摘要")
+                                .font(.system(size: 12.5, weight: .semibold))
+                                .foregroundStyle(.primary)
+                        }
+                        if let summary = post.videoSummary?.trimmingCharacters(in: .whitespacesAndNewlines), !summary.isEmpty {
+                            Text(summary)
+                                .font(.system(size: 13.5))
+                                .foregroundStyle(.primary.opacity(0.90))
+                                .textSelection(.enabled)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        if !post.videoOutline.isEmpty {
+                            VStack(alignment: .leading, spacing: 4) {
+                                ForEach(Array(post.videoOutline.enumerated()), id: \.offset) { _, line in
+                                    Text(line)
+                                        .font(.system(size: 12.5))
+                                        .foregroundStyle(.secondary)
+                                        .textSelection(.enabled)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                            }
+                            .padding(.top, 2)
+                        }
+                    }
+                    .padding(12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.accentColor.opacity(0.07), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .strokeBorder(Color.accentColor.opacity(0.18), lineWidth: 0.75)
+                    )
                 }
 
                 // Post Body Text (native Textual rich formatting & selection)
@@ -472,7 +522,71 @@ struct QuickLookSocialPostCard: View {
     private func socialAttachmentView(attachment: SocialMediaAttachment, index: Int) -> some View {
         let isVideoLike = attachment.kind == .video || attachment.kind == .gif
         VStack(alignment: .trailing, spacing: 6) {
-            if isVideoLike {
+            if post.platform.isVideoPlatform && !isLocalVideoFile {
+                // YouTube / Bilibili default bookmark: render crisp 16:9 cover + play link;
+                // video is downloaded ONLY when the user explicitly clicks "保存视频为独立素材".
+                ZStack {
+                    if let thumbStr = attachment.thumbnailURL ?? post.mediaThumbnailURLs.first,
+                       let thumbURL = URL(string: thumbStr) {
+                        RemoteCachedImageView(url: thumbURL, contentMode: .fill) {
+                            CharkleMediaPlaceholderSkeleton(height: 300, cornerRadius: 12)
+                        } failurePlaceholder: {
+                            mediaFailedPlaceholder
+                        }
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 320)
+                        .clipped()
+                    } else {
+                        mediaFailedPlaceholder
+                    }
+
+                    if let watchURL = URL(string: post.originalURL) {
+                        Link(destination: watchURL) {
+                            ZStack {
+                                Circle()
+                                    .fill(Color.black.opacity(0.58))
+                                    .frame(width: 64, height: 64)
+                                    .overlay(Circle().strokeBorder(.white.opacity(0.35), lineWidth: 1.5))
+                                Image(systemName: "play.fill")
+                                    .font(.system(size: 24, weight: .semibold))
+                                    .foregroundStyle(.white)
+                                    .offset(x: 2)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .help(post.platform.openActionLabel)
+                    }
+
+                    if let dur = post.formattedVideoDuration {
+                        VStack {
+                            Spacer()
+                            HStack {
+                                Spacer()
+                                Text(dur)
+                                    .font(.system(size: 11.5, weight: .semibold).monospacedDigit())
+                                    .foregroundStyle(.white)
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 3.5)
+                                    .background(Color.black.opacity(0.75), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                                    .padding(10)
+                            }
+                        }
+                    }
+                }
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .strokeBorder(Color.primary.opacity(0.10), lineWidth: 0.6)
+                )
+
+                HStack {
+                    Label("视频封面（按需保存视频原文件）", systemImage: "film")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    extractMediaButton(attachment: attachment, index: index, pillStyle: false)
+                }
+            } else if isVideoLike {
                 let playbackURL: URL? = (index == 0 && isLocalVideoFile) ? originalURL : URL(string: attachment.url)
                 if let playURL = playbackURL {
                     SocialPostInlineVideoPlayer(url: playURL, isPlaybackSuspended: isPlaybackSuspended)
@@ -540,11 +654,14 @@ struct QuickLookSocialPostCard: View {
 
     private func extractMediaButton(attachment: SocialMediaAttachment, index: Int, pillStyle: Bool) -> some View {
         let iconName = (attachment.kind == .video || attachment.kind == .gif) ? "film.stack" : "photo.badge.plus"
-        let title = switch attachment.kind {
-        case .photo: "提取为单独图片"
-        case .video: "提取为单独视频"
-        case .gif: "提取为单独动图"
-        }
+        let title: String = {
+            if post.platform.isVideoPlatform { return "保存视频为独立素材" }
+            switch attachment.kind {
+            case .photo: return "提取为单独图片"
+            case .video: return "提取为单独视频"
+            case .gif: return "提取为单独动图"
+            }
+        }()
         return Button {
             extractingIndex = index
             onExtractMedia(attachment, index)
@@ -605,6 +722,8 @@ struct QuickLookSocialPostCard: View {
         case .xiaohongshu: Color(charkleHex: "#FF2442")
         case .pixiv: Color(charkleHex: "#0096FA")
         case .instagram: Color(charkleHex: "#D93B58")
+        case .youtube: Color(charkleHex: "#FF0000")
+        case .bilibili: Color(charkleHex: "#FB7299")
         }
     }
 
@@ -839,6 +958,12 @@ private nonisolated enum RemoteImageFetcher {
                 forHTTPHeaderField: "User-Agent"
             )
             request.setValue("https://www.xiaohongshu.com/", forHTTPHeaderField: "Referer")
+        } else if VideoPlatformURLParser.isBilibiliMediaHost(targetURL.host()) {
+            request.setValue(
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_0) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.2 Safari/605.1.15",
+                forHTTPHeaderField: "User-Agent"
+            )
+            request.setValue("https://www.bilibili.com/", forHTTPHeaderField: "Referer")
         } else {
             request.setValue("Charkle/1.0 (+https://charkle.app)", forHTTPHeaderField: "User-Agent")
         }

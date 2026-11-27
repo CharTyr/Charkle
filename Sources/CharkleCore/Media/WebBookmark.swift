@@ -156,42 +156,69 @@ public nonisolated enum WebURLParser {
     }
 }
 
-/// Deterministic HTML metadata extracted from a webpage document.
+/// Deterministic HTML metadata extracted from a webpage document across OpenGraph, Twitter Cards,
+/// JSON-LD Schema.org, oEmbed auto-discovery, embedded `<video>` tags, hero `<img>`s, and readable lead text.
 public nonisolated struct WebPageParsedHTML: Equatable, Sendable {
     public var title: String?
     public var description: String?
     public var siteName: String?
+    public var authorName: String?
+    public var publishedAtText: String?
     public var themeColorHex: String?
     public var imageURLs: [URL]
+    public var videoURLs: [URL]
     public var iconURLs: [URL]
+    public var oEmbedURL: URL?
+    public var canonicalURL: URL?
+    public var isVideoPage: Bool
+    public var durationSeconds: Double?
 
     public init(
         title: String? = nil,
         description: String? = nil,
         siteName: String? = nil,
+        authorName: String? = nil,
+        publishedAtText: String? = nil,
         themeColorHex: String? = nil,
         imageURLs: [URL] = [],
-        iconURLs: [URL] = []
+        videoURLs: [URL] = [],
+        iconURLs: [URL] = [],
+        oEmbedURL: URL? = nil,
+        canonicalURL: URL? = nil,
+        isVideoPage: Bool = false,
+        durationSeconds: Double? = nil
     ) {
         self.title = title
         self.description = description
         self.siteName = siteName
+        self.authorName = authorName
+        self.publishedAtText = publishedAtText
         self.themeColorHex = themeColorHex
         self.imageURLs = imageURLs
+        self.videoURLs = videoURLs
         self.iconURLs = iconURLs
+        self.oEmbedURL = oEmbedURL
+        self.canonicalURL = canonicalURL
+        self.isVideoPage = isVideoPage
+        self.durationSeconds = durationSeconds
     }
 }
 
-/// Resolves arbitrary website URLs into clean titles, descriptions, domains, and visual thumbnails
-/// (Direct Image / OpenGraph & Twitter Cards -> offscreen `WKWebView` page snapshot -> editorial fallback card).
+/// Resolves arbitrary website URLs into clean titles, readable descriptions/summaries, authors, domains,
+/// extractable media attachments, and visual thumbnails across almost any modern website or SPA.
 public nonisolated struct WebBookmark: Sendable {
     public var title: String?
     public var description: String?
     public var siteName: String?
+    public var authorName: String?
+    public var publishedAtText: String?
     public var finalURL: URL?
     public var themeColorHex: String?
     public var poster: CGImage?
     public var favicon: CGImage?
+    public var attachments: [SocialMediaAttachment]
+    public var isVideoPage: Bool
+    public var durationSeconds: Double?
 
     private static let safariUserAgent =
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_0) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15"
@@ -200,18 +227,28 @@ public nonisolated struct WebBookmark: Sendable {
         title: String? = nil,
         description: String? = nil,
         siteName: String? = nil,
+        authorName: String? = nil,
+        publishedAtText: String? = nil,
         finalURL: URL? = nil,
         themeColorHex: String? = nil,
         poster: CGImage? = nil,
-        favicon: CGImage? = nil
+        favicon: CGImage? = nil,
+        attachments: [SocialMediaAttachment] = [],
+        isVideoPage: Bool = false,
+        durationSeconds: Double? = nil
     ) {
         self.title = title
         self.description = description
         self.siteName = siteName
+        self.authorName = authorName
+        self.publishedAtText = publishedAtText
         self.finalURL = finalURL
         self.themeColorHex = themeColorHex
         self.poster = poster
         self.favicon = favicon
+        self.attachments = attachments
+        self.isVideoPage = isVideoPage
+        self.durationSeconds = durationSeconds
     }
 
     public static func isWebURL(_ url: URL) -> Bool {
@@ -314,14 +351,26 @@ public nonisolated struct WebBookmark: Sendable {
         var title: String?
         var description: String?
         var siteName: String?
+        var authorName: String?
+        var publishedAtText: String?
         var finalURL: URL = url
         var themeColorHex: String?
         var poster: CGImage?
         var favicon: CGImage?
         var iconCandidates: [URL] = []
+        var discoveredImageURLs: [URL] = []
+        var discoveredVideoURLs: [URL] = []
+        var isVideoPage = false
+        var durationSeconds: Double?
         var networkUnreachable = false
 
-        switch await fetchResponse(url, referer: nil, accept: "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/*;q=0.8,*/*;q=0.5", limit: 524_288, imageLimit: 8_388_608) {
+        switch await fetchResponse(
+            url,
+            referer: nil,
+            accept: "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/*;q=0.8,*/*;q=0.5",
+            limit: 1_048_576,
+            imageLimit: 8_388_608
+        ) {
         case .success(let responseData, let responseURL, let responseContentType):
             finalURL = responseURL
             let contentType = responseContentType?.lowercased() ?? ""
@@ -339,7 +388,8 @@ public nonisolated struct WebBookmark: Sendable {
                         finalURL: responseURL,
                         themeColorHex: nil,
                         poster: raster,
-                        favicon: nil
+                        favicon: nil,
+                        attachments: [SocialMediaAttachment(kind: .photo, url: responseURL.absoluteString, thumbnailURL: responseURL.absoluteString)]
                     )
                 }
             }
@@ -349,11 +399,41 @@ public nonisolated struct WebBookmark: Sendable {
             title = parsed.title
             description = parsed.description
             siteName = parsed.siteName
+            authorName = parsed.authorName
+            publishedAtText = parsed.publishedAtText
             themeColorHex = parsed.themeColorHex
             iconCandidates = parsed.iconURLs
+            discoveredImageURLs = parsed.imageURLs
+            discoveredVideoURLs = parsed.videoURLs
+            isVideoPage = parsed.isVideoPage || !parsed.videoURLs.isEmpty
+            durationSeconds = parsed.durationSeconds
+            if let canonical = parsed.canonicalURL, isSafeRemoteFetchURL(canonical), canonical.host() == responseURL.host() {
+                finalURL = canonical
+            }
 
-            // Tier 1: Download best OpenGraph / Twitter / JSON-LD preview card image
-            for imageURL in parsed.imageURLs.prefix(4) {
+            // Tier 1.5: Universal oEmbed Auto-Discovery (Vimeo, Behance, Dribbble, TikTok, Reddit, Flickr, SoundCloud, etc.)
+            if let oEmbedURL = parsed.oEmbedURL,
+               let oEmbed = await fetchOEmbed(oEmbedURL, referer: responseURL) {
+                if title == nil || title?.isEmpty == true {
+                    title = oEmbed.title
+                }
+                if authorName == nil || authorName?.isEmpty == true {
+                    authorName = oEmbed.authorName
+                }
+                if siteName == nil || siteName?.isEmpty == true {
+                    siteName = oEmbed.providerName
+                }
+                if oEmbed.isVideo {
+                    isVideoPage = true
+                }
+                if let thumb = oEmbed.thumbnailURL,
+                   !discoveredImageURLs.contains(thumb) {
+                    discoveredImageURLs.insert(thumb, at: 0)
+                }
+            }
+
+            // Tier 1: Download best OpenGraph / Twitter / oEmbed / JSON-LD / Hero image preview
+            for imageURL in discoveredImageURLs.prefix(6) {
                 if let fetched = await fetchImage(imageURL, referer: responseURL, minWidth: 160, minHeight: 100) {
                     poster = fetched
                     break
@@ -368,15 +448,41 @@ public nonisolated struct WebBookmark: Sendable {
             networkUnreachable = true
         }
 
-        // Tier 2: Real headless WKWebView webpage screenshot when no usable social preview image was found
-        if poster == nil, allowWebViewSnapshot, !networkUnreachable {
+        // Tier 2: Real headless WKWebView DOM hydration + snapshot when preview image is missing OR SPA shell gave sparse metadata
+        let needsHydratedSnapshot = poster == nil
+            || (usablePageTitle(title, fallbackURL: nil) == nil)
+            || ((description?.count ?? 0) < 16 && discoveredImageURLs.isEmpty)
+        if needsHydratedSnapshot, allowWebViewSnapshot, !networkUnreachable {
             if let snap = await WebPageSnapshotter.capture(url: finalURL) {
-                poster = snap.image
-                if title == nil || title?.isEmpty == true {
-                    title = snap.title
+                if poster == nil {
+                    poster = snap.image
                 }
-                if description == nil || description?.isEmpty == true {
-                    description = snap.description
+                if usablePageTitle(title, fallbackURL: nil) == nil, let st = snap.title, !st.isEmpty {
+                    title = st
+                }
+                if (description?.isEmpty ?? true), let sd = snap.description, !sd.isEmpty {
+                    description = sd
+                }
+                if (siteName?.isEmpty ?? true), let ss = snap.siteName, !ss.isEmpty {
+                    siteName = ss
+                }
+                if (authorName?.isEmpty ?? true), let sa = snap.authorName, !sa.isEmpty {
+                    authorName = sa
+                }
+                for rawImg in snap.heroImageURLs {
+                    if let resolved = resolveRelativeURL(rawImg, baseURL: snap.finalURL ?? finalURL),
+                       isWebURL(resolved),
+                       !discoveredImageURLs.contains(resolved) {
+                        discoveredImageURLs.append(resolved)
+                    }
+                }
+                for rawVid in snap.videoURLs {
+                    if let resolved = resolveRelativeURL(rawVid, baseURL: snap.finalURL ?? finalURL),
+                       isWebURL(resolved),
+                       !discoveredVideoURLs.contains(resolved) {
+                        discoveredVideoURLs.append(resolved)
+                        isVideoPage = true
+                    }
                 }
                 if let resolvedURL = snap.finalURL, isWebURL(resolvedURL) {
                     finalURL = resolvedURL
@@ -397,14 +503,42 @@ public nonisolated struct WebBookmark: Sendable {
             }
         }
 
+        // Build clean deduplicated extractable media attachments (videos first, then up to 8 hero/article images)
+        var attachments: [SocialMediaAttachment] = []
+        var seenAttachmentURLs = Set<String>()
+        let firstCoverStr = discoveredImageURLs.first?.absoluteString
+        for vidURL in discoveredVideoURLs.prefix(3) {
+            let s = vidURL.absoluteString
+            if seenAttachmentURLs.insert(s).inserted {
+                attachments.append(SocialMediaAttachment(kind: .video, url: s, thumbnailURL: firstCoverStr))
+            }
+        }
+        if isVideoPage && discoveredVideoURLs.isEmpty {
+            let pageStr = finalURL.absoluteString
+            if seenAttachmentURLs.insert(pageStr).inserted {
+                attachments.append(SocialMediaAttachment(kind: .video, url: pageStr, thumbnailURL: firstCoverStr))
+            }
+        }
+        for imgURL in discoveredImageURLs.prefix(8) {
+            let s = imgURL.absoluteString
+            if seenAttachmentURLs.insert(s).inserted {
+                attachments.append(SocialMediaAttachment(kind: .photo, url: s, thumbnailURL: s))
+            }
+        }
+
         return Self(
             title: usablePageTitle(title, fallbackURL: url),
             description: description,
             siteName: siteName ?? WebURLParser.cleanDomain(for: finalURL),
+            authorName: authorName,
+            publishedAtText: publishedAtText,
             finalURL: finalURL,
             themeColorHex: themeColorHex,
             poster: poster,
-            favicon: favicon
+            favicon: favicon,
+            attachments: attachments,
+            isVideoPage: isVideoPage,
+            durationSeconds: durationSeconds
         )
     }
 
@@ -471,20 +605,48 @@ public nonisolated struct WebBookmark: Sendable {
         return String(decoding: data, as: UTF8.self)
     }
 
-    /// Parses titles, descriptions, theme colors, social preview image URLs, and icons from HTML.
+    /// Parses titles, readable descriptions/summaries, authors, theme colors, oEmbed links,
+    /// embedded video URLs, hero/social preview image URLs, and icons from HTML.
     public static func parseHTML(_ html: String, baseURL: URL) -> WebPageParsedHTML {
         let metaMap = extractMetaTags(from: html)
+        let jsonLD = extractJSONLDMetadata(from: html)
 
         let rawTitle = metaMap["og:title"]
             ?? metaMap["twitter:title"]
+            ?? jsonLD.headline
             ?? matches(#"(?is)<title\b[^>]*>(.*?)</title\s*>"#, html).first?[1]
             ?? matches(#"(?is)<h1\b[^>]*>(.*?)</h1\s*>"#, html).first?[1]
 
-        let rawDescription = metaMap["og:description"]
-            ?? metaMap["twitter:description"]
-            ?? metaMap["description"]
+        let metaDescription = cleanText(
+            metaMap["og:description"]
+                ?? metaMap["twitter:description"]
+                ?? metaMap["description"]
+                ?? jsonLD.description,
+            maxLength: 520
+        )
+        let leadParagraph = (metaDescription?.count ?? 0) < 28
+            ? extractReadableLeadSummary(from: html)
+            : nil
+        let finalDescription: String? = {
+            if let metaDescription, let leadParagraph, !leadParagraph.isEmpty,
+               metaDescription.count < 28, leadParagraph.count > metaDescription.count {
+                return leadParagraph
+            }
+            return metaDescription ?? leadParagraph
+        }()
 
-        let rawSiteName = metaMap["og:site_name"] ?? metaMap["application-name"]
+        let rawSiteName = metaMap["og:site_name"]
+            ?? metaMap["application-name"]
+            ?? jsonLD.publisherName
+        let rawAuthor = metaMap["author"]
+            ?? metaMap["article:author"]
+            ?? metaMap["twitter:creator"]
+            ?? metaMap["parsely-author"]
+            ?? jsonLD.authorName
+        let rawPublished = metaMap["article:published_time"]
+            ?? metaMap["og:updated_time"]
+            ?? metaMap["pubdate"]
+            ?? jsonLD.datePublished
         let themeHex = metaMap["theme-color"].flatMap(normalizeHexColor)
 
         var seenImages: Set<String> = []
@@ -492,25 +654,53 @@ public nonisolated struct WebBookmark: Sendable {
         func appendImage(_ raw: String?) {
             guard let resolved = resolveRelativeURL(raw, baseURL: baseURL),
                   isWebURL(resolved),
+                  !isLikelyDecorativeOrTrackingImage(resolved),
                   seenImages.insert(resolved.absoluteString).inserted else { return }
             imageURLs.append(resolved)
         }
 
-        for key in ["og:image:secure_url", "og:image", "og:image:url", "twitter:image", "twitter:image:src"] {
+        for key in ["og:image:secure_url", "og:image", "og:image:url", "twitter:image", "twitter:image:src", "msapplication-tileimage"] {
             appendImage(metaMap[key])
+        }
+
+        var seenVideos: Set<String> = []
+        var videoURLs: [URL] = []
+        func appendVideo(_ raw: String?) {
+            guard let resolved = resolveRelativeURL(raw, baseURL: baseURL),
+                  isWebURL(resolved),
+                  seenVideos.insert(resolved.absoluteString).inserted else { return }
+            videoURLs.append(resolved)
+        }
+
+        for key in ["og:video:secure_url", "og:video:url", "og:video", "twitter:player:stream"] {
+            if let raw = metaMap[key], looksLikeDirectVideoURL(raw) {
+                appendVideo(raw)
+            }
+        }
+        for v in jsonLD.videoURLs {
+            appendVideo(v)
         }
 
         var seenIcons: Set<String> = []
         var iconURLs: [URL] = []
         var appleTouchIcons: [URL] = []
         var standardIcons: [URL] = []
+        var oEmbedURL: URL?
+        var canonicalURL: URL?
         for link in extractLinkTags(from: html) {
             let rel = (link["rel"] ?? "").lowercased()
             let relTokens = Set(rel.split(whereSeparator: \.isWhitespace).map(String.init))
             guard let href = link["href"], let resolved = resolveRelativeURL(href, baseURL: baseURL), isWebURL(resolved) else {
                 continue
             }
-            if relTokens.contains("image_src") {
+            if relTokens.contains("alternate"),
+               let type = link["type"]?.lowercased(),
+               type.contains("json+oembed"),
+               oEmbedURL == nil {
+                oEmbedURL = resolved
+            } else if relTokens.contains("canonical"), canonicalURL == nil {
+                canonicalURL = resolved
+            } else if relTokens.contains("image_src") {
                 appendImage(resolved.absoluteString)
             } else if relTokens.contains("apple-touch-icon") || relTokens.contains("apple-touch-icon-precomposed") {
                 if seenIcons.insert(resolved.absoluteString).inserted {
@@ -529,18 +719,53 @@ public nonisolated struct WebBookmark: Sendable {
             iconURLs.append(fallbackFavicon)
         }
 
-        // JSON-LD fallback for news/blogs/articles without og:image
-        for ldImage in extractJSONLDImageURLs(from: html) {
+        // JSON-LD images & VideoObject thumbnails
+        for ldImage in jsonLD.imageURLs {
             appendImage(ldImage)
         }
 
+        // HTML `<video>` / `<source>` extraction (poster + direct MP4/WebM sources)
+        for videoTag in matches(#"(?is)<video\b[^>]*>"#, html).prefix(6) {
+            let attrs = parseTagAttributes(videoTag[0])
+            appendImage(attrs["poster"])
+            if let src = attrs["src"], looksLikeDirectVideoURL(src) {
+                appendVideo(src)
+            }
+        }
+        for sourceTag in matches(#"(?is)<source\b[^>]*>"#, html).prefix(12) {
+            let attrs = parseTagAttributes(sourceTag[0])
+            let type = (attrs["type"] ?? "").lowercased()
+            if let src = attrs["src"], (type.hasPrefix("video/") || looksLikeDirectVideoURL(src)) {
+                appendVideo(src)
+            }
+        }
+
+        // Hero / article `<img>` extraction (including lazy-loaded `data-src`, `data-original`, `srcset`)
+        for imgCandidate in extractHeroBodyImageURLs(from: html, limit: 10) {
+            appendImage(imgCandidate)
+        }
+
+        let ogType = (metaMap["og:type"] ?? "").lowercased()
+        let isVideoPage = ogType.hasPrefix("video")
+            || jsonLD.isVideoObject
+            || !videoURLs.isEmpty
+            || metaMap["og:video"] != nil
+            || metaMap["og:video:url"] != nil
+
         return WebPageParsedHTML(
             title: cleanText(rawTitle, maxLength: 220),
-            description: cleanText(rawDescription, maxLength: 420),
+            description: finalDescription,
             siteName: cleanText(rawSiteName, maxLength: 80),
+            authorName: cleanText(rawAuthor, maxLength: 80),
+            publishedAtText: cleanText(rawPublished, maxLength: 32).map { String($0.prefix(16)) },
             themeColorHex: themeHex,
             imageURLs: imageURLs,
-            iconURLs: iconURLs
+            videoURLs: videoURLs,
+            iconURLs: iconURLs,
+            oEmbedURL: oEmbedURL,
+            canonicalURL: canonicalURL,
+            isVideoPage: isVideoPage,
+            durationSeconds: jsonLD.durationSeconds
         )
     }
 
@@ -826,46 +1051,250 @@ public nonisolated struct WebBookmark: Sendable {
         return attributes
     }
 
-    private static func extractJSONLDImageURLs(from html: String) -> [String] {
-        var found: [String] = []
-        let scripts = matches(#"(?is)<script\b[^>]*type\s*=\s*["']application/ld\+json["'][^>]*>(.*?)</script\s*>"#, html)
-        for script in scripts.prefix(4) {
-            guard let data = script[1].data(using: .utf8),
-                  let obj = try? JSONSerialization.jsonObject(with: data) else { continue }
-            collectJSONLDImages(from: obj, into: &found)
-            if found.count >= 4 { break }
-        }
-        return found
+    private struct OEmbedPayload: Sendable {
+        let title: String?
+        let authorName: String?
+        let providerName: String?
+        let thumbnailURL: URL?
+        let isVideo: Bool
     }
 
-    private static func collectJSONLDImages(from value: Any, into result: inout [String]) {
-        guard result.count < 4 else { return }
+    private static func fetchOEmbed(_ url: URL, referer: URL) async -> OEmbedPayload? {
+        guard isSafeRemoteFetchURL(url) else { return nil }
+        guard case .success(let data, _, _) = await fetchResponse(
+            url,
+            referer: referer,
+            accept: "application/json,text/json,*/*;q=0.5",
+            limit: 131_072,
+            timeout: 4.5
+        ),
+        let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        let title = cleanText(json["title"] as? String, maxLength: 220)
+        let author = cleanText(json["author_name"] as? String, maxLength: 80)
+        let provider = cleanText(json["provider_name"] as? String, maxLength: 80)
+        let thumb = resolveRelativeURL(json["thumbnail_url"] as? String, baseURL: referer)
+        let isVideo = ((json["type"] as? String)?.lowercased() == "video")
+        return OEmbedPayload(
+            title: title,
+            authorName: author,
+            providerName: provider,
+            thumbnailURL: thumb,
+            isVideo: isVideo
+        )
+    }
+
+    private struct JSONLDExtracted {
+        var headline: String?
+        var description: String?
+        var authorName: String?
+        var publisherName: String?
+        var datePublished: String?
+        var imageURLs: [String] = []
+        var videoURLs: [String] = []
+        var isVideoObject: Bool = false
+        var durationSeconds: Double?
+    }
+
+    private static func extractJSONLDMetadata(from html: String) -> JSONLDExtracted {
+        var out = JSONLDExtracted()
+        let scripts = matches(#"(?is)<script\b[^>]*type\s*=\s*["']application/ld\+json["'][^>]*>(.*?)</script\s*>"#, html)
+        for script in scripts.prefix(6) {
+            let trimmed = script[1].trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let data = trimmed.data(using: .utf8),
+                  let obj = try? JSONSerialization.jsonObject(with: data) else { continue }
+            collectJSONLDFields(from: obj, into: &out)
+        }
+        return out
+    }
+
+    private static func collectJSONLDFields(from value: Any, into out: inout JSONLDExtracted) {
         if let dict = value as? [String: Any] {
-            if let img = dict["image"] {
-                if let str = img as? String {
-                    result.append(str)
-                } else if let arr = img as? [Any] {
-                    for elem in arr.prefix(2) {
-                        if let str = elem as? String {
-                            result.append(str)
-                        } else if let obj = elem as? [String: Any], let u = obj["url"] as? String {
-                            result.append(u)
+            let typeVal: String = {
+                if let s = dict["@type"] as? String { return s.lowercased() }
+                if let arr = dict["@type"] as? [String] { return arr.joined(separator: " ").lowercased() }
+                return ""
+            }()
+            if typeVal.contains("videoobject") {
+                out.isVideoObject = true
+            }
+            if out.headline == nil {
+                out.headline = (dict["headline"] as? String) ?? (dict["name"] as? String)
+            }
+            if out.description == nil {
+                out.description = dict["description"] as? String
+            }
+            if out.datePublished == nil {
+                out.datePublished = (dict["datePublished"] as? String) ?? (dict["uploadDate"] as? String)
+            }
+            if out.authorName == nil {
+                if let s = dict["author"] as? String {
+                    out.authorName = s
+                } else if let aDict = dict["author"] as? [String: Any] {
+                    out.authorName = aDict["name"] as? String
+                } else if let aArr = dict["author"] as? [[String: Any]] {
+                    out.authorName = aArr.first?["name"] as? String
+                }
+            }
+            if out.publisherName == nil, let pub = dict["publisher"] as? [String: Any] {
+                out.publisherName = pub["name"] as? String
+            }
+            if out.durationSeconds == nil, let isoDur = dict["duration"] as? String {
+                out.durationSeconds = parseISO8601Duration(isoDur)
+            }
+            if out.videoURLs.count < 4, let contentURL = dict["contentUrl"] as? String, looksLikeDirectVideoURL(contentURL) {
+                out.videoURLs.append(contentURL)
+            }
+            for imgKey in ["thumbnailUrl", "image"] where out.imageURLs.count < 6 {
+                if let img = dict[imgKey] {
+                    if let str = img as? String {
+                        out.imageURLs.append(str)
+                    } else if let arr = img as? [Any] {
+                        for elem in arr.prefix(3) where out.imageURLs.count < 6 {
+                            if let str = elem as? String {
+                                out.imageURLs.append(str)
+                            } else if let obj = elem as? [String: Any], let u = obj["url"] as? String {
+                                out.imageURLs.append(u)
+                            }
                         }
+                    } else if let imgDict = img as? [String: Any], let u = imgDict["url"] as? String {
+                        out.imageURLs.append(u)
                     }
-                } else if let imgDict = img as? [String: Any], let u = imgDict["url"] as? String {
-                    result.append(u)
                 }
             }
             if let graph = dict["@graph"] as? [Any] {
                 for node in graph {
-                    collectJSONLDImages(from: node, into: &result)
+                    collectJSONLDFields(from: node, into: &out)
                 }
             }
         } else if let arr = value as? [Any] {
             for elem in arr {
-                collectJSONLDImages(from: elem, into: &result)
+                collectJSONLDFields(from: elem, into: &out)
             }
         }
+    }
+
+    private static func parseISO8601Duration(_ raw: String) -> Double? {
+        let upper = raw.uppercased()
+        guard upper.hasPrefix("PT") else { return nil }
+        let pattern = #"^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)?$"#
+        guard let hit = matches(pattern, upper).first else { return nil }
+        let h = Double(hit[1]) ?? 0
+        let m = Double(hit[2]) ?? 0
+        let s = Double(hit[3]) ?? 0
+        let total = h * 3600 + m * 60 + s
+        return total > 0 ? total : nil
+    }
+
+    private static func looksLikeDirectVideoURL(_ raw: String) -> Bool {
+        let lower = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard lower.hasPrefix("http://") || lower.hasPrefix("https://") || lower.hasPrefix("//") || lower.hasPrefix("/") else {
+            return false
+        }
+        return lower.contains(".mp4") || lower.contains(".mov") || lower.contains(".m4v") || lower.contains(".webm")
+    }
+
+    private static func isLikelyDecorativeOrTrackingImage(_ url: URL) -> Bool {
+        let lower = url.absoluteString.lowercased()
+        if lower.hasPrefix("data:") || lower.hasSuffix(".svg") || lower.contains(".svg?") || lower.hasSuffix(".ico") {
+            return true
+        }
+        let noisyTokens = [
+            "favicon", "apple-touch-icon", "sprite", "spacer", "pixel.", "1x1",
+            "tracking", "analytics", "badge", "emoji", "gravatar", "avatar_default"
+        ]
+        return noisyTokens.contains(where: { lower.contains($0) })
+    }
+
+    private static func extractHeroBodyImageURLs(from html: String, limit: Int) -> [String] {
+        // Focus on `<article>` or `<main>` when available so nav logos/sidebar thumbnails don't pollute candidates
+        let scopedHTML: String = {
+            if let article = matches(#"(?is)<article\b[^>]*>(.*?)</article\s*>"#, html).first?[1], article.count >= 120 {
+                return article
+            }
+            if let main = matches(#"(?is)<main\b[^>]*>(.*?)</main\s*>"#, html).first?[1], main.count >= 120 {
+                return main
+            }
+            return html
+        }()
+
+        var found: [String] = []
+        for tag in matches(#"(?is)<img\b[^>]*>"#, scopedHTML).prefix(40) {
+            let attrs = parseTagAttributes(tag[0])
+            // Skip tiny explicit icons/avatars
+            if let wStr = attrs["width"], let w = Int(wStr.filter(\.isNumber)), w > 0, w < 140 { continue }
+            if let hStr = attrs["height"], let h = Int(hStr.filter(\.isNumber)), h > 0, h < 90 { continue }
+            let candidate = attrs["data-original"]
+                ?? attrs["data-src"]
+                ?? attrs["data-lazy-src"]
+                ?? attrs["data-actualsrc"]
+                ?? largestURLFromSrcSet(attrs["srcset"] ?? attrs["data-srcset"])
+                ?? attrs["src"]
+            if let candidate, !candidate.isEmpty, !candidate.lowercased().hasPrefix("data:") {
+                found.append(candidate)
+                if found.count >= limit { break }
+            }
+        }
+        return found
+    }
+
+    private static func largestURLFromSrcSet(_ srcset: String?) -> String? {
+        guard let srcset, !srcset.isEmpty else { return nil }
+        var bestURL: String?
+        var bestScore = -1
+        for entry in srcset.split(separator: ",") {
+            let parts = entry.trimmingCharacters(in: .whitespacesAndNewlines).split(whereSeparator: \.isWhitespace)
+            guard let urlPart = parts.first else { continue }
+            let descriptor = parts.count > 1 ? String(parts[1]).lowercased() : ""
+            let score: Int = {
+                if descriptor.hasSuffix("w"), let w = Int(descriptor.dropLast()) { return w }
+                if descriptor.hasSuffix("x"), let d = Double(descriptor.dropLast()) { return Int(d * 1000) }
+                return 500
+            }()
+            if score >= bestScore {
+                bestScore = score
+                bestURL = String(urlPart)
+            }
+        }
+        return bestURL
+    }
+
+    private static func extractReadableLeadSummary(from html: String) -> String? {
+        var stripped = html
+        for noisy in [
+            #"(?is)<script\b[^>]*>.*?</script\s*>"#,
+            #"(?is)<style\b[^>]*>.*?</style\s*>"#,
+            #"(?is)<noscript\b[^>]*>.*?</noscript\s*>"#,
+            #"(?is)<nav\b[^>]*>.*?</nav\s*>"#,
+            #"(?is)<header\b[^>]*>.*?</header\s*>"#,
+            #"(?is)<footer\b[^>]*>.*?</footer\s*>"#
+        ] {
+            stripped = stripped.replacingOccurrences(of: noisy, with: " ", options: .regularExpression)
+        }
+        let scope: String = {
+            if let article = matches(#"(?is)<article\b[^>]*>(.*?)</article\s*>"#, stripped).first?[1], article.count >= 80 {
+                return article
+            }
+            if let main = matches(#"(?is)<main\b[^>]*>(.*?)</main\s*>"#, stripped).first?[1], main.count >= 80 {
+                return main
+            }
+            return stripped
+        }()
+
+        var paragraphs: [String] = []
+        for match in matches(#"(?is)<p\b[^>]*>(.*?)</p\s*>"#, scope).prefix(16) {
+            guard let text = cleanText(match[1], maxLength: 360), text.count >= 24 else { continue }
+            let lower = text.lowercased()
+            if lower.contains("cookie") && lower.contains("privacy") { continue }
+            paragraphs.append(text)
+            if paragraphs.joined(separator: "\n").count >= 280 || paragraphs.count >= 2 {
+                break
+            }
+        }
+        let joined = paragraphs.joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !joined.isEmpty else { return nil }
+        return String(joined.prefix(460))
     }
 
     private static func extractCharset(fromContentType contentType: String?) -> String? {
@@ -964,6 +1393,10 @@ private struct WebPageSnapshotResult: Sendable {
     let image: CGImage
     let title: String?
     let description: String?
+    let siteName: String?
+    let authorName: String?
+    let heroImageURLs: [String]
+    let videoURLs: [String]
     let finalURL: URL?
 }
 
@@ -1086,10 +1519,44 @@ private final class WebPageSnapshotter: NSObject, WKNavigationDelegate {
         guard !isCompleted, !isCapturing, let wv = webView else { return }
         isCapturing = true
 
-        let domTitle = (try? await wv.evaluateJavaScript("document.title || ''")) as? String
-        let domDesc = (try? await wv.evaluateJavaScript(
-            "(document.querySelector('meta[property=\"og:description\"]')?.content || document.querySelector('meta[name=\"description\"]')?.content || '')"
-        )) as? String
+        let probeJS = """
+        (() => {
+          const meta = (s) => document.querySelector(s)?.content?.trim() || '';
+          const title = meta('meta[property="og:title"]') || document.title?.trim() || document.querySelector('h1')?.innerText?.trim() || '';
+          let desc = meta('meta[property="og:description"]') || meta('meta[name="description"]') || '';
+          if (desc.length < 24) {
+            const root = document.querySelector('article, main') || document.body;
+            const ps = Array.from(root?.querySelectorAll('p') || [])
+              .map(p => (p.innerText || '').replace(/\\s+/g, ' ').trim())
+              .filter(t => t.length >= 24 && !(t.toLowerCase().includes('cookie') && t.toLowerCase().includes('privacy')));
+            if (ps.length > 0) desc = ps.slice(0, 2).join('\\n\\n').slice(0, 460);
+          }
+          const siteName = meta('meta[property="og:site_name"]') || '';
+          const authorName = meta('meta[name="author"]') || meta('meta[property="article:author"]') || '';
+          const imgs = Array.from(document.querySelectorAll('article img, main img, img'))
+            .filter(img => {
+              const w = img.naturalWidth || img.clientWidth || 0;
+              const h = img.naturalHeight || img.clientHeight || 0;
+              const src = img.currentSrc || img.src || '';
+              return w >= 240 && h >= 160 && src.startsWith('http');
+            })
+            .sort((a, b) => ((b.naturalWidth * b.naturalHeight) - (a.naturalWidth * a.naturalHeight)))
+            .map(img => img.currentSrc || img.src);
+          const uniqueImgs = Array.from(new Set(imgs)).slice(0, 6);
+          const vids = Array.from(document.querySelectorAll('video, video source'))
+            .map(el => el.currentSrc || el.src || '')
+            .filter(u => u.startsWith('http') && /\\.(mp4|mov|m4v|webm)(\\?|$)/i.test(u));
+          const uniqueVids = Array.from(new Set(vids)).slice(0, 3);
+          return { title, desc, siteName, authorName, heroImages: uniqueImgs, videos: uniqueVids };
+        })();
+        """
+        let probed = (try? await wv.evaluateJavaScript(probeJS)) as? [String: Any]
+        let domTitle = probed?["title"] as? String
+        let domDesc = probed?["desc"] as? String
+        let domSite = probed?["siteName"] as? String
+        let domAuthor = probed?["authorName"] as? String
+        let domHeroImages = (probed?["heroImages"] as? [String]) ?? []
+        let domVideos = (probed?["videos"] as? [String]) ?? []
         let resolvedURL = wv.url
 
         let snapConfig = WKSnapshotConfiguration()
@@ -1112,10 +1579,16 @@ private final class WebPageSnapshotter: NSObject, WKNavigationDelegate {
             }
             let cleanTitle = domTitle?.trimmingCharacters(in: .whitespacesAndNewlines)
             let cleanDesc = domDesc?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let cleanSite = domSite?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let cleanAuthor = domAuthor?.trimmingCharacters(in: .whitespacesAndNewlines)
             finish(with: WebPageSnapshotResult(
                 image: cgImage,
                 title: (cleanTitle?.isEmpty == false) ? String(cleanTitle!.prefix(220)) : nil,
-                description: (cleanDesc?.isEmpty == false) ? String(cleanDesc!.prefix(420)) : nil,
+                description: (cleanDesc?.isEmpty == false) ? String(cleanDesc!.prefix(460)) : nil,
+                siteName: (cleanSite?.isEmpty == false) ? String(cleanSite!.prefix(80)) : nil,
+                authorName: (cleanAuthor?.isEmpty == false) ? String(cleanAuthor!.prefix(80)) : nil,
+                heroImageURLs: domHeroImages,
+                videoURLs: domVideos,
                 finalURL: resolvedURL
             ))
         } catch {

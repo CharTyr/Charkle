@@ -835,7 +835,7 @@ public struct AISettingsPane: View {
                     SettingsCardDivider()
                     scenarioToggle(
                         title: "自然语言看图语义搜索",
-                        subtitle: "在搜索栏直接按氛围与画面内容检索，未打标素材也能命中",
+                        subtitle: "在搜索栏输入描述时自动融合视觉语义精排，未打标素材也能直接命中",
                         isOn: $draftTypeSafeConfig.enableSemanticSearch
                     )
                     SettingsCardDivider()

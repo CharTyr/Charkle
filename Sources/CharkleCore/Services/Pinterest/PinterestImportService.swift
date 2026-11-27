@@ -488,7 +488,7 @@ public nonisolated enum PinterestImportService {
         guard WebBookmark.isSafeRemoteFetchURL(url) else { return nil }
         var request = URLRequest(url: url, timeoutInterval: 20)
         request.setValue("https://www.pinterest.com/", forHTTPHeaderField: "Referer")
-        request.setValue("Charkle/1.4.1 (+https://charkle.app)", forHTTPHeaderField: "User-Agent")
+        request.setValue("Charkle/1.5.0 (+https://charkle.app)", forHTTPHeaderField: "User-Agent")
         guard let (data, response) = try? await downloadSession.data(for: request),
               let http = response as? HTTPURLResponse,
               (200..<300).contains(http.statusCode),

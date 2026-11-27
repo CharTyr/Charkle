@@ -1,6 +1,7 @@
 #if canImport(AppKit)
 import AppKit
 #endif
+import CryptoKit
 import Foundation
 import ImageIO
 import os
@@ -656,6 +657,275 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         )
     }
 
+    // MARK: - Bidirectional PureRef (.pur) Import & Export
+
+    public func importPureRefScene(
+        at url: URL,
+        targetFolderID: UUID?,
+        createMoodboard: Bool = true
+    ) async throws -> PureRefImportResult {
+        if let targetFolderID, try await database.folder(id: targetFolderID) == nil {
+            throw DriveTransportError.fileNotFound(targetFolderID.uuidString)
+        }
+
+        let sceneName = Self.sanitizedPureRefSceneName(from: url)
+        let scene = try PureRefCodec.decode(contentsOf: url)
+
+        let stagingDir = FileManager.default.temporaryDirectory
+            .appending(path: "charkle-pur-import-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: stagingDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: stagingDir) }
+
+        let (sceneFolder, _) = try await findOrCreateFolderForImportWithStatus(
+            named: sceneName,
+            parentID: targetFolderID,
+            colorHex: nil
+        )
+
+        var works: [ExpandedCaptureWork] = []
+        works.reserveCapacity(scene.images.count)
+        var hashByImageIndex: [Int: String] = [:]
+        var usedFileNames = Set<String>()
+
+        for blob in scene.images {
+            let preferredBase = Self.sanitizedPureRefAssetStem(
+                displayName: blob.displayName,
+                sourcePath: blob.sourcePath,
+                fallbackIndex: blob.index + 1,
+                sceneName: sceneName
+            )
+            var fileName = "\(preferredBase).\(blob.format.fileExtension)"
+            var suffix = 2
+            while !usedFileNames.insert(fileName.lowercased()).inserted {
+                fileName = "\(preferredBase)-\(suffix).\(blob.format.fileExtension)"
+                suffix += 1
+            }
+
+            let fileURL = stagingDir.appending(path: fileName)
+            try blob.data.write(to: fileURL, options: .atomic)
+            hashByImageIndex[blob.index] = SHA256.hash(data: blob.data).map { String(format: "%02x", $0) }.joined()
+
+            let override = ImportedAssetMetadataOverride(
+                title: preferredBase,
+                tags: ["PureRef"],
+                rating: 0,
+                notes: nil,
+                sourceURL: nil,
+                sourceDomain: nil,
+                createdAt: nil,
+                updatedAt: nil,
+                preRenderedBookmarkThumbnailURL: nil
+            )
+            works.append(ExpandedCaptureWork(input: .fileURL(fileURL), folderID: sceneFolder.id, metadataOverride: override))
+        }
+
+        let imported: [AssetRecord]
+        if works.isEmpty {
+            imported = []
+        } else {
+            imported = try await ingestExpandedWork(
+                works,
+                targetFolderID: sceneFolder.id,
+                targetBoardID: nil,
+                toleratesItemErrors: true
+            )
+        }
+
+        var createdBoardID: UUID?
+        var createdBoardTitle: String?
+        var importedNoteCount = 0
+
+        if createMoodboard && (!imported.isEmpty || !scene.notes.isEmpty) {
+            var assetByHash: [String: AssetRecord] = [:]
+            for asset in imported where !asset.contentHash.isEmpty {
+                assetByHash[asset.contentHash] = asset
+            }
+            var assetByImageIndex: [Int: AssetRecord] = [:]
+            for (idx, blob) in scene.images.enumerated() {
+                if let hash = hashByImageIndex[blob.index], let matched = assetByHash[hash] {
+                    assetByImageIndex[blob.index] = matched
+                } else if idx < imported.count {
+                    assetByImageIndex[blob.index] = imported[idx]
+                }
+            }
+
+            let palette = (try? await extractBoardPalette(assetIDs: imported.map(\.id), count: 6)) ?? []
+            let built = PureRefCodec.buildMoodboardDocument(
+                title: sceneName,
+                scene: scene,
+                assetByImageIndex: assetByImageIndex,
+                palette: palette
+            )
+            let savedBoard = try await saveBoard(built.document)
+            createdBoardID = savedBoard.id
+            createdBoardTitle = savedBoard.title
+            importedNoteCount = built.noteCount
+        }
+
+        return PureRefImportResult(
+            sceneName: sceneName,
+            formatVersion: scene.formatVersion,
+            usedFallbackExtraction: scene.usedFallbackExtraction,
+            importedAssets: imported,
+            rootFolderID: sceneFolder.id,
+            createdBoardID: createdBoardID,
+            createdBoardTitle: createdBoardTitle,
+            importedNoteCount: importedNoteCount,
+            skippedMissingLinkCount: scene.skippedMissingLinkCount
+        )
+    }
+
+    public func exportAssetsToPureRef(
+        assetIDs: [UUID],
+        title: String,
+        to destinationURL: URL
+    ) async throws -> PureRefExportReport {
+        var uniqueIDs: [UUID] = []
+        var seen = Set<UUID>()
+        for id in assetIDs where seen.insert(id).inserted {
+            uniqueIDs.append(id)
+        }
+        guard !uniqueIDs.isEmpty else {
+            throw PureRefCodecError.encodingFailed("请先选择至少 1 项要导出的素材。")
+        }
+
+        var inputs: [PureRefAssetInput] = []
+        inputs.reserveCapacity(uniqueIDs.count)
+        var skippedCount = 0
+
+        for id in uniqueIDs {
+            guard let asset = try await database.asset(id: id),
+                  let imageData = await resolvePureRefExportImageData(for: asset) else {
+                skippedCount += 1
+                continue
+            }
+            inputs.append(PureRefAssetInput(
+                id: asset.id,
+                title: asset.title,
+                fileName: asset.fileName,
+                pixelWidth: asset.pixelWidth,
+                pixelHeight: asset.pixelHeight,
+                imageData: imageData
+            ))
+        }
+
+        guard !inputs.isEmpty else {
+            throw PureRefCodecError.encodingFailed("所选素材中没有可导出为图像的条目。")
+        }
+
+        let scene = PureRefCodec.buildScene(fromAssets: inputs)
+        let encoded = try PureRefCodec.encode(scene)
+        let parentDir = destinationURL.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: parentDir, withIntermediateDirectories: true)
+        try encoded.write(to: destinationURL, options: .atomic)
+
+        return PureRefExportReport(
+            fileURL: destinationURL,
+            imageCount: scene.images.count,
+            placementCount: scene.placements.count,
+            noteCount: scene.notes.count,
+            skippedCount: skippedCount,
+            byteCount: encoded.count
+        )
+    }
+
+    public func exportMoodboardToPureRef(
+        board: MoodboardDocument,
+        to destinationURL: URL
+    ) async throws -> PureRefExportReport {
+        let refIDs = Array(Set(board.referencedAssetIDs))
+        var resolvedInputs: [UUID: PureRefAssetInput] = [:]
+        resolvedInputs.reserveCapacity(refIDs.count)
+
+        for id in refIDs {
+            guard let asset = try await database.asset(id: id),
+                  let imageData = await resolvePureRefExportImageData(for: asset) else {
+                continue
+            }
+            resolvedInputs[id] = PureRefAssetInput(
+                id: asset.id,
+                title: asset.title,
+                fileName: asset.fileName,
+                pixelWidth: asset.pixelWidth,
+                pixelHeight: asset.pixelHeight,
+                imageData: imageData
+            )
+        }
+
+        let built = PureRefCodec.buildScene(fromBoard: board, assetsByID: resolvedInputs)
+        guard !built.scene.images.isEmpty || !built.scene.notes.isEmpty else {
+            throw PureRefCodecError.encodingFailed("当前情绪板中没有可导出的图片或便签。")
+        }
+
+        let encoded = try PureRefCodec.encode(built.scene)
+        let parentDir = destinationURL.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: parentDir, withIntermediateDirectories: true)
+        try encoded.write(to: destinationURL, options: .atomic)
+
+        return PureRefExportReport(
+            fileURL: destinationURL,
+            imageCount: built.scene.images.count,
+            placementCount: built.scene.placements.count,
+            noteCount: built.scene.notes.count,
+            skippedCount: built.skippedCount,
+            byteCount: encoded.count
+        )
+    }
+
+    private func resolvePureRefExportImageData(for asset: AssetRecord) async -> Data? {
+        // Prefer full-resolution original if directly image-decodable (PNG/JPEG/HEIC/WebP/GIF/TIFF/BMP)
+        if let original = try? await originalURL(for: asset.id),
+           let data = try? Data(contentsOf: original),
+           PureRefCodec.inspectImageDimensions(data) != nil {
+            if PureRefCodec.detectImageFormat(in: data) != nil {
+                return data
+            }
+            if let converted = PureRefCodec.convertToPNG(data) {
+                return converted
+            }
+        }
+        // Fallback to high-res generated poster thumbnail (videos, PDFs, web bookmarks, design files)
+        for tier in [ThumbnailTier.preview1400, ThumbnailTier.grid520] {
+            if let thumb = await thumbnailURL(for: asset.id, tier: tier),
+               let data = try? Data(contentsOf: thumb),
+               PureRefCodec.inspectImageDimensions(data) != nil {
+                return PureRefCodec.detectImageFormat(in: data) != nil ? data : PureRefCodec.convertToPNG(data)
+            }
+        }
+        return nil
+    }
+
+    private static func sanitizedPureRefSceneName(from url: URL) -> String {
+        let raw = url.deletingPathExtension().lastPathComponent
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return raw.isEmpty ? "PureRef 场景" : raw
+    }
+
+    private static func sanitizedPureRefAssetStem(
+        displayName: String?,
+        sourcePath: String?,
+        fallbackIndex: Int,
+        sceneName: String
+    ) -> String {
+        let candidates: [String?] = [
+            displayName,
+            sourcePath.map { URL(fileURLWithPath: $0).deletingPathExtension().lastPathComponent }
+        ]
+        for candidate in candidates {
+            guard var raw = candidate?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !raw.isEmpty,
+                  raw != "BruteForceLoaded",
+                  raw != "CharkleAsset" else { continue }
+            raw = raw.replacingOccurrences(of: "/", with: "_")
+                .replacingOccurrences(of: ":", with: "_")
+                .replacingOccurrences(of: "\\", with: "_")
+            if !raw.isEmpty {
+                return String(raw.prefix(96))
+            }
+        }
+        return "\(sceneName)-\(String(format: "%02d", fallbackIndex))"
+    }
+
     private func ingestExpandedWork(
         _ expandedItems: [ExpandedCaptureWork],
         targetFolderID: UUID?,
@@ -893,6 +1163,51 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
 
             // Detect `.eaglepack` archives, extracted pack dirs, and `.library` bundles BEFORE raw directory walking
             // so internal `<ID>.info/metadata.json` and `_thumbnail.png` files are never imported as junk assets.
+            if PureRefCodec.isPureRefFileURL(resolved) {
+                let sceneName = Self.sanitizedPureRefSceneName(from: resolved)
+                if let scene = try? PureRefCodec.decode(contentsOf: resolved), !scene.images.isEmpty {
+                    let stagingDir = FileManager.default.temporaryDirectory
+                        .appending(path: "charkle-pur-drop-\(UUID().uuidString)", directoryHint: .isDirectory)
+                    try FileManager.default.createDirectory(at: stagingDir, withIntermediateDirectories: true)
+                    tempStagingDirectories.append(stagingDir)
+                    let (sceneFolder, _) = try await findOrCreateFolderForImportWithStatus(
+                        named: sceneName,
+                        parentID: defaultFolderID,
+                        colorHex: nil
+                    )
+                    var usedNames = Set<String>()
+                    for blob in scene.images {
+                        let stem = Self.sanitizedPureRefAssetStem(
+                            displayName: blob.displayName,
+                            sourcePath: blob.sourcePath,
+                            fallbackIndex: blob.index + 1,
+                            sceneName: sceneName
+                        )
+                        var fileName = "\(stem).\(blob.format.fileExtension)"
+                        var suffix = 2
+                        while !usedNames.insert(fileName.lowercased()).inserted {
+                            fileName = "\(stem)-\(suffix).\(blob.format.fileExtension)"
+                            suffix += 1
+                        }
+                        let fileURL = stagingDir.appending(path: fileName)
+                        try blob.data.write(to: fileURL, options: .atomic)
+                        let override = ImportedAssetMetadataOverride(
+                            title: stem,
+                            tags: ["PureRef"],
+                            rating: 0,
+                            notes: nil,
+                            sourceURL: nil,
+                            sourceDomain: nil,
+                            createdAt: nil,
+                            updatedAt: nil,
+                            preRenderedBookmarkThumbnailURL: nil
+                        )
+                        queue.append(ExpandedCaptureWork(input: .fileURL(fileURL), folderID: sceneFolder.id, metadataOverride: override))
+                    }
+                    continue
+                }
+            }
+
             if EaglePackImporter.isRecognizedMaterialPackage(resolved, allowGenericZip: false) {
                 let batch = try await expandMaterialPackage(
                     at: resolved,
@@ -1205,32 +1520,41 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         folderID: UUID?
     ) async throws -> PreparedAsset {
         let bookmark = await WebBookmark.fetch(url, allowWebViewSnapshot: true)
-        let domain = WebURLParser.cleanDomain(for: url) ?? url.host() ?? "web.link"
+        let resolvedURL = bookmark.finalURL ?? url
+        let domain = WebURLParser.cleanDomain(for: resolvedURL) ?? resolvedURL.host() ?? "web.link"
         let cleanSuppliedTitle = suppliedTitle?.trimmingCharacters(in: .whitespacesAndNewlines)
         let resolvedTitle = (cleanSuppliedTitle?.isEmpty == false ? cleanSuppliedTitle! : nil)
             ?? bookmark.title
-            ?? WebBookmark.fallbackTitle(for: url)
+            ?? WebBookmark.fallbackTitle(for: resolvedURL)
         let cleanSuppliedNotes = suppliedNotes?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let resolvedNotes = (cleanSuppliedNotes?.isEmpty == false ? cleanSuppliedNotes! : nil)
-            ?? bookmark.description
-            ?? ""
+        let pageSummary = bookmark.description?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedNotes: String = {
+            var parts: [String] = []
+            if let cleanSuppliedNotes, !cleanSuppliedNotes.isEmpty, cleanSuppliedNotes != url.absoluteString {
+                parts.append(cleanSuppliedNotes)
+            }
+            if let pageSummary, !pageSummary.isEmpty, !(cleanSuppliedNotes?.contains(pageSummary) ?? false) {
+                parts.append(pageSummary)
+            }
+            return parts.joined(separator: "\n\n")
+        }()
 
         guard let poster = bookmark.poster ?? MediaArtwork.webPageCard(
             title: resolvedTitle,
             domain: domain,
             siteName: bookmark.siteName,
             description: resolvedNotes,
-            urlString: url.absoluteString,
+            urlString: resolvedURL.absoluteString,
             themeColorHex: bookmark.themeColorHex,
             favicon: bookmark.favicon
         ) else {
-            return try await prepare(.webURL(url, title: resolvedTitle, notes: resolvedNotes), folderID: folderID)
+            return try await prepare(.webURL(resolvedURL, title: resolvedTitle, notes: resolvedNotes), folderID: folderID)
         }
 
         let id = UUID()
         do {
-            let source = try await media.ingestPreResolvedWebPage(
-                url: url,
+            var source = try await media.ingestPreResolvedWebPage(
+                url: resolvedURL,
                 title: resolvedTitle,
                 notes: resolvedNotes,
                 domain: domain,
@@ -1238,6 +1562,29 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
                 folderID: folderID,
                 id: id
             )
+            if let dur = bookmark.durationSeconds, dur > 0 {
+                source.asset.durationSeconds = dur
+            }
+            if !resolvedNotes.isEmpty {
+                source.asset.ocrText = resolvedNotes
+            }
+            if !bookmark.attachments.isEmpty
+                || !(pageSummary?.isEmpty ?? true)
+                || bookmark.isVideoPage
+                || !(bookmark.authorName?.isEmpty ?? true) {
+                source.asset.richMetadata = AssetRichMetadata(
+                    webPage: WebPageRichMetadata(
+                        siteName: bookmark.siteName,
+                        authorName: bookmark.authorName,
+                        publishedAtText: bookmark.publishedAtText,
+                        summary: pageSummary,
+                        attachments: bookmark.attachments,
+                        hasVideo: bookmark.isVideoPage,
+                        durationSeconds: bookmark.durationSeconds,
+                        canonicalURL: resolvedURL.absoluteString
+                    )
+                )
+            }
             var feature: Data?
             if let thumbnail = media.thumbnailURL(for: id, tier: .grid520) {
                 let analysis = await intelligence.analyze(
@@ -1422,12 +1769,26 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
 
         prepared.asset.mediaKind = .webBookmark
         prepared.asset.title = resolved.shortTitle
-        if let extraUserNotes {
-            prepared.asset.notes = meta.bodyText.isEmpty ? extraUserNotes : "\(extraUserNotes)\n\n\(meta.bodyText)"
-        } else {
-            prepared.asset.notes = meta.bodyText
+        if let dur = meta.videoDurationSeconds, dur > 0 {
+            prepared.asset.durationSeconds = dur
         }
-        prepared.asset.ocrText = meta.bodyText.isEmpty ? prepared.asset.ocrText : meta.bodyText
+
+        var noteSegments: [String] = []
+        if let extraUserNotes {
+            noteSegments.append(extraUserNotes)
+        }
+        if let summary = meta.videoSummary?.trimmingCharacters(in: .whitespacesAndNewlines), !summary.isEmpty {
+            noteSegments.append("视频摘要：\n\(summary)")
+        }
+        if !meta.videoOutline.isEmpty {
+            noteSegments.append("章节要点：\n" + meta.videoOutline.joined(separator: "\n"))
+        }
+        if !meta.bodyText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            noteSegments.append(meta.bodyText)
+        }
+        let combinedNotes = noteSegments.joined(separator: "\n\n")
+        prepared.asset.notes = combinedNotes
+        prepared.asset.ocrText = combinedNotes.isEmpty ? prepared.asset.ocrText : combinedNotes
         prepared.asset.sourceURL = meta.originalURL
         prepared.asset.sourceDomain = ref.canonicalURL.host() ?? defaultSocialDomain(for: meta.platform)
         prepared.asset.richMetadata = AssetRichMetadata(socialPost: meta)
@@ -1452,6 +1813,8 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         case .xiaohongshu: "xiaohongshu.com"
         case .pixiv: "pixiv.net"
         case .instagram: "instagram.com"
+        case .youtube: "youtube.com"
+        case .bilibili: "bilibili.com"
         }
     }
 
@@ -1614,7 +1977,12 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
             likeCount: live.likeCount ?? supplied.likeCount,
             viewCount: live.viewCount ?? supplied.viewCount,
             originalURL: supplied.originalURL.isEmpty ? live.originalURL : supplied.originalURL,
-            mediaFetchFailed: false
+            mediaFetchFailed: false,
+            videoDurationSeconds: live.videoDurationSeconds ?? supplied.videoDurationSeconds,
+            videoSummary: live.videoSummary ?? supplied.videoSummary,
+            videoOutline: live.videoOutline.isEmpty ? supplied.videoOutline : live.videoOutline,
+            videoID: live.videoID ?? supplied.videoID,
+            videoCID: live.videoCID ?? supplied.videoCID
         )
     }
 
@@ -3045,17 +3413,18 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
             }
 
             evaluatedVisualCount = visualInputs.count
-            let scored = try await intelligence.grounding.scoreCandidatesForQuery(
+            if let scored = try? await intelligence.grounding.scoreCandidatesForQuery(
                 query: trimmed,
                 candidates: visualInputs,
                 config: tsConfig,
                 apiKey: tsKey,
                 batchSize: 4,
                 maxConcurrency: 3
-            )
-            usedJev = !scored.isEmpty
-            for item in scored {
-                jevScores[item.assetID] = item
+            ) {
+                usedJev = !scored.isEmpty
+                for item in scored {
+                    jevScores[item.assetID] = item
+                }
             }
         }
 

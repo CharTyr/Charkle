@@ -82,7 +82,6 @@ final class MobileAppStore {
     // MARK: - Search & Filter State
     var criteria: FilterCriteria = FilterCriteria(includeSubfolders: true)
     var searchDebounceTask: Task<Void, Never>?
-    var semanticSearchEnabled: Bool = false
     var isRunningSemanticSearch: Bool = false
     var semanticSearchReport: SemanticSearchReport? = nil
     var quickJumpMatches: [QuickJumpMatch] = []
@@ -93,6 +92,8 @@ final class MobileAppStore {
     private var colorToleranceDebounceTask: Task<Void, Never>?
     @ObservationIgnored
     private var semanticSearchGeneration: UInt64 = 0
+    @ObservationIgnored
+    private var semanticEnhancementDelayTask: Task<Void, Never>?
     @ObservationIgnored
     private var semanticSearchTask: Task<SemanticSearchReport?, Never>?
     @ObservationIgnored
@@ -124,6 +125,7 @@ final class MobileAppStore {
 
     // MARK: - Capture & UI Feedback
     var isIngesting: Bool = false
+    var isExtractingSocialMedia: Bool = false
     var toast: MobileToast?
     @ObservationIgnored
     private var toastDismissTask: Task<Void, Never>?
@@ -226,7 +228,6 @@ final class MobileAppStore {
         !criteria.searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             || criteria.hasActiveVisualFilters
             || !criteria.tags.isEmpty
-            || semanticSearchReport != nil
     }
 
     // MARK: - Lifecycle & Pending Share Queue
@@ -431,6 +432,8 @@ final class MobileAppStore {
         scope = next
         isReloadingAssets = true
         semanticSearchGeneration &+= 1
+        semanticEnhancementDelayTask?.cancel()
+        semanticEnhancementDelayTask = nil
         semanticSearchTask?.cancel()
         semanticSearchTask = nil
         semanticSearchReport = nil
@@ -448,19 +451,28 @@ final class MobileAppStore {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         refreshQuickJump(for: trimmed)
 
-        if trimmed.isEmpty, semanticSearchReport != nil {
+        if trimmed.isEmpty {
             Task { await clearSemanticSearch() }
             return
         }
 
-        // In semantic search mode, standard FTS stays live while typing; pressing Search/Enter runs full visual semantic ranking.
+        // Stage 1: instant local FTS/tag/OCR/color results; Stage 2 automatically fuses hybrid semantic hits after a brief pause.
         searchDebounceTask = Task {
-            try? await Task.sleep(for: .milliseconds(160))
+            try? await Task.sleep(for: .milliseconds(140))
             guard !Task.isCancelled else { return }
-            if semanticSearchReport != nil {
-                semanticSearchReport = nil
+            await reloadAssets(semanticEnhancementDelayMs: 300)
+        }
+    }
+
+    func submitSearch() {
+        searchDebounceTask?.cancel()
+        let trimmed = criteria.searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        Task {
+            if trimmed.isEmpty {
+                await clearSemanticSearch()
+            } else {
+                await reloadAssets(semanticEnhancementDelayMs: 0)
             }
-            await reloadAssets()
         }
     }
 
@@ -468,14 +480,18 @@ final class MobileAppStore {
         criteria.searchQuery = ""
         criteria.clearVisualFilters()
         criteria.tags.removeAll()
+        searchDebounceTask?.cancel()
+        searchDebounceTask = nil
         semanticSearchGeneration &+= 1
+        semanticEnhancementDelayTask?.cancel()
+        semanticEnhancementDelayTask = nil
         semanticSearchTask?.cancel()
         semanticSearchTask = nil
         semanticSearchReport = nil
         isRunningSemanticSearch = false
         quickJumpTask?.cancel()
         quickJumpMatches = []
-        Task { await reloadAssets() }
+        Task { await reloadAssets(semanticEnhancementDelayMs: nil) }
     }
 
     func toggleColorFilter(_ hex: String) {
@@ -494,13 +510,7 @@ final class MobileAppStore {
         }
         criteria.selectedColorHex = normalized
         MobileHaptics.light()
-        Task {
-            if semanticSearchReport != nil {
-                _ = await runSemanticSearch()
-            } else {
-                await reloadAssets()
-            }
-        }
+        Task { await reloadAssets() }
     }
 
     func updateColorTolerance(_ value: Double) {
@@ -510,31 +520,96 @@ final class MobileAppStore {
         colorToleranceDebounceTask = Task {
             try? await Task.sleep(for: .milliseconds(100))
             guard !Task.isCancelled else { return }
-            if semanticSearchReport != nil {
-                _ = await runSemanticSearch()
-            } else {
-                await reloadAssets()
-            }
+            await reloadAssets()
         }
     }
 
-    func toggleSemanticSearchMode() {
-        let trimmed = criteria.searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
-        if semanticSearchEnabled && trimmed.isEmpty {
-            semanticSearchEnabled = false
-            Task { await clearSemanticSearch() }
-        } else if semanticSearchEnabled && semanticSearchReport != nil {
-            semanticSearchEnabled = false
-            Task { await clearSemanticSearch() }
-        } else {
-            semanticSearchEnabled = true
-            MobileHaptics.light()
-            if !trimmed.isEmpty {
-                Task { _ = await runSemanticSearch(query: trimmed) }
-            } else {
-                showToast("已开启语义搜图：输入画面描述后点击搜索", tone: .info)
+    private func scheduleUnifiedSemanticEnhancement(
+        query: String,
+        snapshotCriteria: FilterCriteria,
+        requestedScope: MobileScope,
+        reloadGen: UInt64,
+        literalAssets: [AssetRecord],
+        delayMilliseconds: Int
+    ) {
+        semanticEnhancementDelayTask?.cancel()
+        semanticEnhancementDelayTask = nil
+        semanticSearchTask?.cancel()
+        semanticSearchTask = nil
+        semanticSearchGeneration &+= 1
+        let semGen = semanticSearchGeneration
+
+        let runEnhancement: @MainActor () -> Void = { [weak self] in
+            guard let self,
+                  semGen == self.semanticSearchGeneration,
+                  reloadGen == self.reloadAssetsGeneration,
+                  self.scope == requestedScope else {
+                return
             }
+            let task = Task<SemanticSearchReport?, Never> { @MainActor [weak self] in
+                guard let self else { return nil }
+                // Avoid a 1-frame spinner blink on fast local-only bilingual/CIELAB fusion.
+                let spinnerTask = Task<Void, Never> { @MainActor [weak self] in
+                    try? await Task.sleep(for: .milliseconds(140))
+                    guard !Task.isCancelled, let self, semGen == self.semanticSearchGeneration else { return }
+                    self.isRunningSemanticSearch = true
+                }
+                defer {
+                    spinnerTask.cancel()
+                    if semGen == self.semanticSearchGeneration {
+                        self.isRunningSemanticSearch = false
+                        self.semanticSearchTask = nil
+                    }
+                }
+                do {
+                    let report = try await self.engine.semanticSearch(
+                        query: query,
+                        criteria: snapshotCriteria,
+                        limit: 80
+                    )
+                    guard !Task.isCancelled,
+                          semGen == self.semanticSearchGeneration,
+                          reloadGen == self.reloadAssetsGeneration,
+                          self.scope == requestedScope else {
+                        return nil
+                    }
+                    self.semanticSearchReport = report
+                    let scopedSemantic = self.applyScopeSmartFolderIfNeeded(
+                        report.hits.map(\.asset),
+                        scope: requestedScope
+                    )
+                    let merged = SemanticSearchReport.mergeUnifiedAssets(
+                        literal: literalAssets,
+                        semantic: scopedSemantic,
+                        prioritizeSemantic: report.usedTypeSafeJev || report.usedCloudEmbedding
+                    )
+                    if self.assets != merged {
+                        self.assets = merged
+                    }
+                    return report
+                } catch {
+                    return nil
+                }
+            }
+            self.semanticSearchTask = task
         }
+
+        if delayMilliseconds > 0 {
+            semanticEnhancementDelayTask = Task<Void, Never> { @MainActor [weak self] in
+                try? await Task.sleep(for: .milliseconds(delayMilliseconds))
+                guard !Task.isCancelled, let self else { return }
+                self.semanticEnhancementDelayTask = nil
+                runEnhancement()
+            }
+        } else {
+            runEnhancement()
+        }
+    }
+
+    private func applyScopeSmartFolderIfNeeded(_ list: [AssetRecord], scope: MobileScope) -> [AssetRecord] {
+        guard case .smartFolder(let smartID) = scope else { return list }
+        guard let smart = smartFolders.first(where: { $0.id == smartID }) else { return [] }
+        return list.filter { smart.rule.matches($0) }
     }
 
     @discardableResult
@@ -544,13 +619,20 @@ final class MobileAppStore {
             await clearSemanticSearch()
             return nil
         }
+        semanticEnhancementDelayTask?.cancel()
+        semanticEnhancementDelayTask = nil
         semanticSearchTask?.cancel()
         semanticSearchGeneration &+= 1
         let semGen = semanticSearchGeneration
-        let snapshotCriteria = effectiveCriteria()
+        var draftCriteria = effectiveCriteria()
+        draftCriteria.searchQuery = resolvedQuery
+        let snapshotCriteria = draftCriteria
+        let requestedScope = scope
+        let engine = self.engine
 
         isRunningSemanticSearch = true
-        let task = Task<SemanticSearchReport?, Never> { @MainActor in
+        let task = Task<SemanticSearchReport?, Never> { @MainActor [weak self] in
+            guard let self else { return nil }
             defer {
                 if semGen == self.semanticSearchGeneration {
                     self.isRunningSemanticSearch = false
@@ -558,22 +640,29 @@ final class MobileAppStore {
                 }
             }
             do {
-                let report = try await self.engine.semanticSearch(
+                async let literalFetched = (try? engine.fetchAssets(matching: snapshotCriteria)) ?? []
+                async let semanticReport = engine.semanticSearch(
                     query: resolvedQuery,
                     criteria: snapshotCriteria,
-                    limit: 60
+                    limit: 80
                 )
-                guard !Task.isCancelled, semGen == self.semanticSearchGeneration else { return nil }
+                let (rawLiteral, report) = try await (literalFetched, semanticReport)
+                guard !Task.isCancelled, semGen == self.semanticSearchGeneration, self.scope == requestedScope else {
+                    return nil
+                }
                 self.semanticSearchReport = report
-                self.assets = report.hits.map(\.asset)
-                if !report.summary.isEmpty {
-                    self.showToast(report.summary, tone: .info)
+                let scopedLiteral = self.applyScopeSmartFolderIfNeeded(rawLiteral, scope: requestedScope)
+                let scopedSemantic = self.applyScopeSmartFolderIfNeeded(report.hits.map(\.asset), scope: requestedScope)
+                let merged = SemanticSearchReport.mergeUnifiedAssets(
+                    literal: scopedLiteral,
+                    semantic: scopedSemantic,
+                    prioritizeSemantic: report.usedTypeSafeJev || report.usedCloudEmbedding
+                )
+                if self.assets != merged {
+                    self.assets = merged
                 }
                 return report
             } catch {
-                if !Task.isCancelled && semGen == self.semanticSearchGeneration {
-                    self.showToast("语义搜图失败：\(error.localizedDescription)", tone: .warning)
-                }
                 return nil
             }
         }
@@ -583,11 +672,13 @@ final class MobileAppStore {
 
     func clearSemanticSearch() async {
         semanticSearchGeneration &+= 1
+        semanticEnhancementDelayTask?.cancel()
+        semanticEnhancementDelayTask = nil
         semanticSearchTask?.cancel()
         semanticSearchTask = nil
         isRunningSemanticSearch = false
         semanticSearchReport = nil
-        await reloadAssets()
+        await reloadAssets(semanticEnhancementDelayMs: nil)
     }
 
     private func refreshQuickJump(for trimmedQuery: String) {
@@ -631,9 +722,18 @@ final class MobileAppStore {
         await reloadAssets()
     }
 
-    func reloadAssets() async {
+    func reloadAssets(semanticEnhancementDelayMs: Int? = 300) async {
+        semanticEnhancementDelayTask?.cancel()
+        semanticEnhancementDelayTask = nil
+        semanticSearchTask?.cancel()
+        semanticSearchTask = nil
+        semanticSearchGeneration &+= 1
+        isRunningSemanticSearch = false
+        semanticSearchReport = nil
+
         reloadAssetsGeneration &+= 1
         let gen = reloadAssetsGeneration
+        let requestedScope = scope
         isReloadingAssets = true
         defer {
             if gen == reloadAssetsGeneration {
@@ -642,22 +742,30 @@ final class MobileAppStore {
         }
         var query = effectiveCriteria()
         let loaded: [AssetRecord]
-        if case .smartFolder(let smartID) = scope {
+        if case .smartFolder = requestedScope {
             query.folderID = nil
             query.onlyInbox = false
             query.onlyTrashed = false
             query.includeTrashed = false
             let all = (try? await engine.fetchAssets(matching: query)) ?? []
-            if let smart = smartFolders.first(where: { $0.id == smartID }) {
-                loaded = all.filter { smart.rule.matches($0) }
-            } else {
-                loaded = []
-            }
+            loaded = applyScopeSmartFolderIfNeeded(all, scope: requestedScope)
         } else {
             loaded = (try? await engine.fetchAssets(matching: query)) ?? []
         }
         guard gen == reloadAssetsGeneration else { return }
         assets = loaded
+
+        let trimmedQuery = query.searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedQuery.isEmpty, let delayMs = semanticEnhancementDelayMs {
+            scheduleUnifiedSemanticEnhancement(
+                query: trimmedQuery,
+                snapshotCriteria: query,
+                requestedScope: requestedScope,
+                reloadGen: gen,
+                literalAssets: loaded,
+                delayMilliseconds: delayMs
+            )
+        }
     }
 
     private func effectiveCriteria() -> FilterCriteria {
@@ -714,7 +822,12 @@ final class MobileAppStore {
 
     // MARK: - Capture (Photos / Files / URLs / Clipboard / Demo)
 
-    func ingestInputs(_ inputs: [CaptureInput], targetFolderID: UUID? = nil, tags: [String] = []) async -> [AssetRecord] {
+    func ingestInputs(
+        _ inputs: [CaptureInput],
+        targetFolderID: UUID? = nil,
+        tags: [String] = [],
+        autoExtractSocialMedia: Bool = false
+    ) async -> [AssetRecord] {
         guard !inputs.isEmpty else { return [] }
         isIngesting = true
         let hasWebInput = inputs.contains {
@@ -732,9 +845,82 @@ final class MobileAppStore {
             if !tags.isEmpty, !imported.isEmpty {
                 _ = try? await engine.updateAssets(AssetBatchPatch(assetIDs: imported.map(\.id), addTags: tags))
             }
-            await reloadAll()
-            MobileHaptics.success()
-            showToast("已收藏 \(imported.count) 项素材", tone: .success)
+
+            let socialPostsWithMedia = imported.filter { asset in
+                guard let post = asset.richMetadata?.socialPost else { return false }
+                return !post.effectiveAttachments.isEmpty
+            }
+            // Never auto-download YouTube/Bilibili videos on default bookmark (strictly on-demand when user taps save video)
+            let autoExtractablePosts = socialPostsWithMedia.filter {
+                !($0.richMetadata?.socialPost?.platform.isVideoPlatform ?? false)
+            }
+
+            if autoExtractSocialMedia && !autoExtractablePosts.isEmpty {
+                var extractedTotal = 0
+                for postAsset in autoExtractablePosts {
+                    let extracted = await extractAllMediaFromSocialPost(postAsset: postAsset, quiet: true)
+                    extractedTotal += extracted.count
+                }
+                await reloadAll()
+                MobileHaptics.success()
+                if extractedTotal > 0 {
+                    showToast("已收藏社媒帖子并拆出 \(extractedTotal) 项独立素材", tone: .success)
+                } else {
+                    showToast("已收藏 \(imported.count) 项素材", tone: .success)
+                }
+            } else {
+                await reloadAll()
+                MobileHaptics.success()
+                if imported.count == 1,
+                   let firstSocial = socialPostsWithMedia.first,
+                   let post = firstSocial.richMetadata?.socialPost {
+                    if post.platform.isVideoPlatform {
+                        let summarySuffix = post.hasVideoSummaryContent ? "与摘要" : ""
+                        showToast(
+                            "已收藏\(post.platform.displayName)视频（含封面\(summarySuffix)）",
+                            tone: .success,
+                            actionTitle: "保存视频",
+                            onAction: { [weak self] in
+                                guard let self else { return }
+                                Task {
+                                    _ = await self.extractAllMediaFromSocialPost(postAsset: firstSocial)
+                                }
+                            }
+                        )
+                    } else {
+                        let count = post.effectiveAttachments.count
+                        showToast(
+                            "已解析\(post.platform.displayName)\(post.platform.postNoun)（含 \(count) 项媒体）",
+                            tone: .success,
+                            actionTitle: "拆为独立素材",
+                            onAction: { [weak self] in
+                                guard let self else { return }
+                                Task {
+                                    _ = await self.extractAllMediaFromSocialPost(postAsset: firstSocial)
+                                }
+                            }
+                        )
+                    }
+                } else if imported.count == 1,
+                          let firstWeb = imported.first,
+                          let web = firstWeb.richMetadata?.webPage,
+                          !web.attachments.isEmpty {
+                    showToast(
+                        "已解析网页（含 \(web.attachments.count) 项可提取媒体）",
+                        tone: .success,
+                        actionTitle: "提取媒体",
+                        onAction: { [weak self] in
+                            guard let self else { return }
+                            Task {
+                                _ = await self.extractAllMediaFromLinkAsset(firstWeb)
+                            }
+                        }
+                    )
+                } else {
+                    showToast("已收藏 \(imported.count) 项素材", tone: .success)
+                }
+            }
+
             if hasConnectedCloudBackend {
                 Task { await self.syncNow(quiet: true) }
             }
@@ -773,7 +959,13 @@ final class MobileAppStore {
         return false
     }
 
-    func captureURLOrShareText(_ rawText: String, notes: String = "", tags: [String] = [], targetFolderID: UUID? = nil) async -> Bool {
+    func captureURLOrShareText(
+        _ rawText: String,
+        notes: String = "",
+        tags: [String] = [],
+        targetFolderID: UUID? = nil,
+        autoExtractSocialMedia: Bool = false
+    ) async -> Bool {
         let trimmed = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             showToast("请先输入网页、小红书、X 或 GitHub 链接", tone: .warning)
@@ -787,8 +979,404 @@ final class MobileAppStore {
         } else {
             input = .textSnippet(title: String(trimmed.prefix(48)), text: trimmed, sourceURL: nil)
         }
-        let imported = await ingestInputs([input], targetFolderID: targetFolderID, tags: tags)
+        let imported = await ingestInputs(
+            [input],
+            targetFolderID: targetFolderID,
+            tags: tags,
+            autoExtractSocialMedia: autoExtractSocialMedia
+        )
         return !imported.isEmpty
+    }
+
+    // MARK: - Social Post Media Extraction (1:1 macOS Parity)
+
+    /// Extracts a single photo/video/GIF attachment from a saved social post into a standalone library asset,
+    /// preserving full originating post provenance (author, handle, body excerpt, platform tag, and source URL).
+    @discardableResult
+    func extractMediaFromSocialPost(
+        postAsset: AssetRecord,
+        attachment: SocialMediaAttachment,
+        index: Int,
+        quiet: Bool = false
+    ) async -> AssetRecord? {
+        guard let post = postAsset.richMetadata?.socialPost else {
+            if !quiet {
+                showToast("该媒体缺少有效的来源信息", tone: .warning)
+            }
+            return nil
+        }
+
+        let startedStandalone = !isExtractingSocialMedia
+        if startedStandalone {
+            isExtractingSocialMedia = true
+        }
+        defer {
+            if startedStandalone {
+                isExtractingSocialMedia = false
+            }
+        }
+
+        if !quiet {
+            if post.platform.isVideoPlatform {
+                showToast("正在从\(post.platform.displayName)保存视频原文件…", tone: .info)
+            } else {
+                showToast("正在提取第 \(index + 1) 项\(attachment.kind.localizedLabel)…", tone: .info)
+            }
+        }
+
+        do {
+            let tempDir = FileManager.default.temporaryDirectory
+                .appending(path: "charkle-social-extract-\(UUID().uuidString)", directoryHint: .isDirectory)
+            try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: tempDir) }
+
+            let kindTag: String = switch attachment.kind {
+            case .photo: "img"
+            case .video: "video"
+            case .gif: "gif"
+            }
+            let safeHandle = post.authorHandle.isEmpty ? "post" : post.authorHandle
+            let baseName = "\(post.platform.displayName)-\(safeHandle)-\(kindTag)\(index + 1)"
+
+            let created: [AssetRecord]
+            if post.platform.isVideoPlatform {
+                let videoFile = try await VideoPlatformResolver.downloadVideo(
+                    for: post,
+                    to: tempDir,
+                    baseName: post.articleTitle ?? baseName
+                )
+                created = try await engine.ingest(
+                    [.fileURL(videoFile)],
+                    targetFolderID: postAsset.folderID,
+                    targetBoardID: nil
+                )
+            } else if attachment.kind == .video || attachment.kind == .gif {
+                guard let mediaURL = URL(string: attachment.url) else { return nil }
+                var localVideoFile: URL?
+                if index == 0,
+                   let cached = try? await engine.originalURL(for: postAsset.id),
+                   ["mp4", "mov", "m4v", "webm"].contains(cached.pathExtension.lowercased()) {
+                    let copied = tempDir.appending(path: "\(baseName).\(cached.pathExtension.lowercased())")
+                    try? FileManager.default.copyItem(at: cached, to: copied)
+                    if FileManager.default.fileExists(atPath: copied.path) {
+                        localVideoFile = copied
+                    }
+                }
+                if localVideoFile == nil {
+                    let xKind: XPostMedia.Kind = attachment.kind == .gif ? .gif : .video
+                    let mediaItem = XPostMedia(
+                        kind: xKind,
+                        url: mediaURL,
+                        thumbnailURL: attachment.thumbnailURL.flatMap(URL.init(string:))
+                    )
+                    localVideoFile = await XPostResolver.downloadMedia(mediaItem, to: tempDir, baseName: baseName)
+                }
+                guard let videoFile = localVideoFile else {
+                    if !quiet {
+                        MobileHaptics.error()
+                        showToast("无法下载该社媒视频，请检查网络或打开原链接查看", tone: .error)
+                    }
+                    return nil
+                }
+                created = try await engine.ingest(
+                    [.fileURL(videoFile)],
+                    targetFolderID: postAsset.folderID,
+                    targetBoardID: nil
+                )
+            } else {
+                guard let mediaURL = URL(string: attachment.url) else { return nil }
+                let mediaItem = XPostMedia(kind: .photo, url: mediaURL)
+                guard let localFile = await XPostResolver.downloadMedia(mediaItem, to: tempDir, baseName: baseName),
+                      let imageData = try? Data(contentsOf: localFile) else {
+                    if !quiet {
+                        MobileHaptics.error()
+                        showToast("无法下载该社媒图片，请检查网络或打开原链接查看", tone: .error)
+                    }
+                    return nil
+                }
+                created = try await engine.ingest(
+                    [.imageData(imageData, suggestedName: localFile.lastPathComponent, sourceURL: post.originalURL)],
+                    targetFolderID: postAsset.folderID,
+                    targetBoardID: nil
+                )
+            }
+
+            guard let standalone = created.first else { return nil }
+
+            let authorAttribution: String = {
+                if let handleLine = post.displayHandleLine {
+                    return "\(post.authorName) (\(handleLine))"
+                }
+                return post.authorName
+            }()
+            var noteParts: [String] = [
+                "来源\(post.platform.postNoun)：\(authorAttribution) · \(post.platform.displayName)"
+            ]
+            if let summary = post.videoSummary?.trimmingCharacters(in: .whitespacesAndNewlines), !summary.isEmpty {
+                noteParts.append("视频摘要：\n\(summary)")
+            }
+            if !post.videoOutline.isEmpty {
+                noteParts.append("章节要点：\n" + post.videoOutline.joined(separator: "\n"))
+            }
+            let bodyTrimmed = post.bodyText.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !bodyTrimmed.isEmpty {
+                noteParts.append(bodyTrimmed)
+            }
+            noteParts.append("原链接：\(post.originalURL)")
+            let attributionNotes = noteParts.joined(separator: "\n\n")
+
+            let extractedTitle: String = {
+                if post.platform.isVideoPlatform,
+                   let article = post.articleTitle?.trimmingCharacters(in: .whitespacesAndNewlines),
+                   !article.isEmpty {
+                    return article
+                }
+                let titleAuthor = (post.platform == .xiaohongshu || post.platform.isVideoPlatform)
+                    ? post.authorName
+                    : (post.authorHandle.hasPrefix("@") ? post.authorHandle : "@\(post.authorHandle)")
+                return "\(titleAuthor) \(attachment.kind.localizedLabel) #\(index + 1)"
+            }()
+
+            let patched = try await engine.updateAssets(
+                AssetBatchPatch(
+                    assetIDs: [standalone.id],
+                    title: extractedTitle,
+                    notes: attributionNotes,
+                    sourceURL: post.originalURL,
+                    addTags: [post.platform.displayName]
+                )
+            )
+            let finalAsset = patched.first ?? standalone
+
+            if !quiet {
+                await reloadAll()
+                MobileHaptics.success()
+                showToast("已保存为独立素材「\(finalAsset.title)」", tone: .success)
+                if hasConnectedCloudBackend {
+                    Task { await self.syncNow(quiet: true) }
+                }
+            }
+            return finalAsset
+        } catch {
+            if !quiet {
+                MobileHaptics.error()
+                showToast(error.localizedDescription, tone: .error)
+            }
+            return nil
+        }
+    }
+
+    @discardableResult
+    func extractMediaFromWebPageAsset(
+        webAsset: AssetRecord,
+        attachment: SocialMediaAttachment,
+        index: Int,
+        quiet: Bool = false
+    ) async -> AssetRecord? {
+        guard let web = webAsset.richMetadata?.webPage else { return nil }
+        let startedStandalone = !isExtractingSocialMedia
+        if startedStandalone { isExtractingSocialMedia = true }
+        defer { if startedStandalone { isExtractingSocialMedia = false } }
+
+        if !quiet {
+            showToast(attachment.kind == .video ? "正在保存网页视频…" : "正在提取网页图片…", tone: .info)
+        }
+        do {
+            let tempDir = FileManager.default.temporaryDirectory
+                .appending(path: "charkle-web-extract-\(UUID().uuidString)", directoryHint: .isDirectory)
+            try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: tempDir) }
+
+            let pageURL = web.canonicalURL.isEmpty ? (webAsset.sourceURL ?? "") : web.canonicalURL
+            let baseName = webAsset.title.isEmpty ? "WebMedia-\(index + 1)" : "\(webAsset.title)-\(index + 1)"
+            let created: [AssetRecord]
+            if attachment.kind == .video || attachment.kind == .gif {
+                let videoFile = try await VideoPlatformResolver.downloadGenericWebVideo(
+                    pageURL: pageURL,
+                    directStreamURL: URL(string: attachment.url),
+                    to: tempDir,
+                    baseName: baseName
+                )
+                created = try await engine.ingest([.fileURL(videoFile)], targetFolderID: webAsset.folderID, targetBoardID: nil)
+            } else {
+                guard let mediaURL = URL(string: attachment.url) else { return nil }
+                let mediaItem = XPostMedia(kind: .photo, url: mediaURL)
+                guard let localFile = await XPostResolver.downloadMedia(
+                    mediaItem,
+                    to: tempDir,
+                    baseName: baseName,
+                    referer: URL(string: pageURL)
+                ),
+                let imageData = try? Data(contentsOf: localFile) else {
+                    if !quiet {
+                        MobileHaptics.error()
+                        showToast("无法下载该网页图片", tone: .error)
+                    }
+                    return nil
+                }
+                created = try await engine.ingest(
+                    [.imageData(imageData, suggestedName: localFile.lastPathComponent, sourceURL: pageURL)],
+                    targetFolderID: webAsset.folderID,
+                    targetBoardID: nil
+                )
+            }
+            guard let standalone = created.first else { return nil }
+            var notesParts: [String] = []
+            if let site = web.siteName, !site.isEmpty { notesParts.append("来源网页：\(site)") }
+            if let summary = web.summary, !summary.isEmpty { notesParts.append(summary) }
+            if !pageURL.isEmpty { notesParts.append("原链接：\(pageURL)") }
+            let title = attachment.kind == .video
+                ? webAsset.title
+                : "\(webAsset.title) \(attachment.kind.localizedLabel) #\(index + 1)"
+            let patched = try await engine.updateAssets(
+                AssetBatchPatch(
+                    assetIDs: [standalone.id],
+                    title: title,
+                    notes: notesParts.joined(separator: "\n\n"),
+                    sourceURL: pageURL.isEmpty ? nil : pageURL,
+                    addTags: web.siteName.map { [$0] } ?? []
+                )
+            )
+            let finalAsset = patched.first ?? standalone
+            if !quiet {
+                await reloadAll()
+                MobileHaptics.success()
+                showToast("已保存为独立素材「\(finalAsset.title)」", tone: .success)
+                if hasConnectedCloudBackend {
+                    Task { await self.syncNow(quiet: true) }
+                }
+            }
+            return finalAsset
+        } catch {
+            if !quiet {
+                MobileHaptics.error()
+                showToast(error.localizedDescription, tone: .error)
+            }
+            return nil
+        }
+    }
+
+    @discardableResult
+    func extractAllMediaFromLinkAsset(_ asset: AssetRecord, quiet: Bool = false) async -> [AssetRecord] {
+        if asset.richMetadata?.socialPost != nil {
+            return await extractAllMediaFromSocialPost(postAsset: asset, quiet: quiet)
+        }
+        guard let web = asset.richMetadata?.webPage, !web.attachments.isEmpty else { return [] }
+        let targets: [SocialMediaAttachment] = {
+            let vids = web.attachments.filter { $0.kind == .video || $0.kind == .gif }
+            return !vids.isEmpty ? vids : Array(web.attachments.prefix(8))
+        }()
+        let startedStandalone = !isExtractingSocialMedia
+        if startedStandalone { isExtractingSocialMedia = true }
+        defer { if startedStandalone { isExtractingSocialMedia = false } }
+        if !quiet {
+            showToast("正在提取 \(targets.count) 项网页媒体…", tone: .info)
+        }
+        var extracted: [AssetRecord] = []
+        for (idx, att) in targets.enumerated() {
+            if let item = await extractMediaFromWebPageAsset(webAsset: asset, attachment: att, index: idx, quiet: true) {
+                extracted.append(item)
+            }
+        }
+        if !quiet {
+            await reloadAll()
+            if !extracted.isEmpty {
+                MobileHaptics.success()
+                showToast("已提取 \(extracted.count) 项网页媒体为独立素材", tone: .success)
+                if hasConnectedCloudBackend {
+                    Task { await self.syncNow(quiet: true) }
+                }
+            } else {
+                MobileHaptics.error()
+                showToast("未能从该网页提取到媒体文件", tone: .error)
+            }
+        }
+        return extracted
+    }
+
+    /// Batch extracts media from multiple selected saved links (YouTube, Bilibili, X, Xiaohongshu, and rich webpages).
+    @discardableResult
+    func extractMediaFromSelectedLinks(_ ids: Set<UUID>) async -> Int {
+        let lookup = Dictionary(uniqueKeysWithValues: (assets + inboxAssets).map { ($0.id, $0) })
+        let targets = ids.compactMap { lookup[$0] }.filter(\.hasExtractableLinkMedia)
+        guard !targets.isEmpty else {
+            showToast("所选项目中没有可提取媒体的链接", tone: .warning)
+            return 0
+        }
+
+        isExtractingSocialMedia = true
+        defer { isExtractingSocialMedia = false }
+        showToast("正在批量提取 \(targets.count) 个链接中的媒体…", tone: .info)
+
+        var totalExtracted = 0
+        var succeededLinks = 0
+        for target in targets {
+            let items = await extractAllMediaFromLinkAsset(target, quiet: true)
+            if !items.isEmpty {
+                totalExtracted += items.count
+                succeededLinks += 1
+            }
+        }
+
+        await reloadAll()
+        if totalExtracted > 0 {
+            MobileHaptics.success()
+            showToast("已从 \(succeededLinks) 个链接批量保存 \(totalExtracted) 项独立素材", tone: .success)
+            if hasConnectedCloudBackend {
+                Task { await self.syncNow(quiet: true) }
+            }
+        } else {
+            MobileHaptics.error()
+            showToast("未能从所选链接提取到媒体，请检查网络或平台限制", tone: .error)
+        }
+        return totalExtracted
+    }
+
+    /// Extracts all photo & video attachments from a saved social post into standalone assets.
+    @discardableResult
+    func extractAllMediaFromSocialPost(postAsset: AssetRecord, quiet: Bool = false) async -> [AssetRecord] {
+        guard let post = postAsset.richMetadata?.socialPost else { return [] }
+        let items = post.effectiveAttachments
+        guard !items.isEmpty else {
+            if !quiet {
+                showToast("该社媒帖子没有可提取的图片或视频", tone: .warning)
+            }
+            return []
+        }
+
+        isExtractingSocialMedia = true
+        defer { isExtractingSocialMedia = false }
+
+        if !quiet {
+            showToast("正在提取 \(items.count) 项帖子媒体…", tone: .info)
+        }
+
+        var extracted: [AssetRecord] = []
+        for (idx, attachment) in items.enumerated() {
+            if let asset = await extractMediaFromSocialPost(
+                postAsset: postAsset,
+                attachment: attachment,
+                index: idx,
+                quiet: true
+            ) {
+                extracted.append(asset)
+            }
+        }
+
+        if !quiet {
+            await reloadAll()
+            if !extracted.isEmpty {
+                MobileHaptics.success()
+                showToast("已提取 \(extracted.count) 项帖子媒体为独立素材", tone: .success)
+                if hasConnectedCloudBackend {
+                    Task { await self.syncNow(quiet: true) }
+                }
+            } else {
+                MobileHaptics.error()
+                showToast("未能下载帖子媒体，请检查网络或打开原链接", tone: .error)
+            }
+        }
+        return extracted
     }
 
     func seedSampleLibrary() async {
@@ -974,9 +1562,14 @@ final class MobileAppStore {
             criteria.searchQuery = ""
             criteria.clearVisualFilters()
             criteria.tags.removeAll()
+            semanticSearchGeneration &+= 1
+            semanticEnhancementDelayTask?.cancel()
+            semanticEnhancementDelayTask = nil
+            semanticSearchTask?.cancel()
+            semanticSearchTask = nil
+            isRunningSemanticSearch = false
             semanticSearchReport = nil
-            semanticSearchEnabled = false
-            await reloadAssets()
+            await reloadAssets(semanticEnhancementDelayMs: nil)
         }
 
         if !assets.contains(where: { $0.id == assetID }), targetScope != .allItems {
@@ -1247,6 +1840,77 @@ final class MobileAppStore {
             return outURL
         } catch {
             showToast("写入导出文件失败：\(error.localizedDescription)", tone: .error)
+            return nil
+        }
+    }
+
+    // MARK: - Bidirectional PureRef (.pur) Import & Export
+
+    @discardableResult
+    func importPureRefScenes(urls: [URL], targetFolderID: UUID?) async -> [PureRefImportResult] {
+        guard !urls.isEmpty else { return [] }
+        isIngesting = true
+        defer { isIngesting = false }
+
+        var results: [PureRefImportResult] = []
+        for url in urls {
+            do {
+                let res = try await engine.importPureRefScene(
+                    at: url,
+                    targetFolderID: targetFolderID,
+                    createMoodboard: true
+                )
+                results.append(res)
+            } catch {
+                showToast("导入 PureRef 失败：\(error.localizedDescription)", tone: .error)
+            }
+        }
+        guard !results.isEmpty else { return [] }
+        await reloadAll()
+        let totalImages = results.reduce(0) { $0 + $1.importedAssets.count }
+        let totalNotes = results.reduce(0) { $0 + $1.importedNoteCount }
+        MobileHaptics.success()
+        if results.count == 1, let first = results.first {
+            let notePart = first.importedNoteCount > 0 ? "、\(first.importedNoteCount) 条便签" : ""
+            showToast("已导入 PureRef「\(first.sceneName)」：\(first.importedAssets.count) 张图\(notePart)并生成情绪板", tone: .success)
+        } else {
+            let notePart = totalNotes > 0 ? "、\(totalNotes) 条便签" : ""
+            showToast("已导入 \(results.count) 个 PureRef 场景（\(totalImages) 张图\(notePart)）", tone: .success)
+        }
+        return results
+    }
+
+    func exportAssetsPureRefURL(assetIDs: [UUID], title: String) async -> URL? {
+        guard !assetIDs.isEmpty else { return nil }
+        let safeTitle = title
+            .replacingOccurrences(of: "/", with: "-")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let fileName = (safeTitle.isEmpty ? "Charkle-References" : safeTitle) + ".pur"
+        let outURL = FileManager.default.temporaryDirectory.appending(path: fileName)
+        do {
+            let report = try await engine.exportAssetsToPureRef(assetIDs: assetIDs, title: title, to: outURL)
+            MobileHaptics.success()
+            showToast("已打包 \(report.imageCount) 张素材为 PureRef (.pur)", tone: .success)
+            return report.fileURL
+        } catch {
+            showToast("导出 PureRef 失败：\(error.localizedDescription)", tone: .error)
+            return nil
+        }
+    }
+
+    func exportBoardPureRefURL(document: MoodboardDocument) async -> URL? {
+        let safeTitle = document.title
+            .replacingOccurrences(of: "/", with: "-")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let fileName = (safeTitle.isEmpty ? "Charkle-Moodboard" : safeTitle) + ".pur"
+        let outURL = FileManager.default.temporaryDirectory.appending(path: fileName)
+        do {
+            let report = try await engine.exportMoodboardToPureRef(board: document, to: outURL)
+            MobileHaptics.success()
+            showToast("已导出情绪板为 PureRef (.pur)", tone: .success)
+            return report.fileURL
+        } catch {
+            showToast("导出 PureRef 失败：\(error.localizedDescription)", tone: .error)
             return nil
         }
     }

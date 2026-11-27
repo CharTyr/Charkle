@@ -7,6 +7,7 @@ import UniformTypeIdentifiers
 struct GoogleDriveSyncSettingsView: View {
     @Bindable var store: MobileAppStore
     let showDoneButton: Bool
+    var includeStorageAndTips: Bool = false
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
@@ -184,55 +185,58 @@ struct GoogleDriveSyncSettingsView: View {
                     .onChange(of: syncEmbeddings) { _, _ in savePreferences() }
             }
 
-            // 5. Local Cache Budget
-            Section {
-                cacheRow("缩略图缓存", MobileFormatters.byteCount(store.cacheStats.thumbnailBytes))
-                cacheRow("已缓存原图（\(store.cacheStats.cachedOriginalCount) 项）", MobileFormatters.byteCount(store.cacheStats.originalCacheBytes))
-                cacheRow("离线置顶原图（\(store.cacheStats.pinnedAssetCount) 项）", MobileFormatters.byteCount(store.cacheStats.pinnedOfflineBytes))
+            // 5. Optional Local Cache Budget & Tips (owned by MobileSettingsView by default)
+            if includeStorageAndTips {
+                Section {
+                    cacheRow("缩略图缓存", MobileFormatters.byteCount(store.cacheStats.thumbnailBytes))
+                    cacheRow("已缓存原图（\(store.cacheStats.cachedOriginalCount) 项）", MobileFormatters.byteCount(store.cacheStats.originalCacheBytes))
+                    cacheRow("离线置顶原图（\(store.cacheStats.pinnedAssetCount) 项）", MobileFormatters.byteCount(store.cacheStats.pinnedOfflineBytes))
 
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack {
-                        Text("原图缓存上限")
-                        Spacer()
-                        Text("\(String(format: "%.1f", cacheBudgetGB)) GB")
-                            .font(.system(size: 13).monospacedDigit())
-                            .foregroundStyle(.secondary)
-                    }
-                    Slider(value: $cacheBudgetGB, in: 1...16, step: 0.5) { editing in
-                        if !editing {
-                            Task { await store.updateCacheBudget(gigabytes: cacheBudgetGB) }
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text("原图缓存上限")
+                            Spacer()
+                            Text("\(String(format: "%.1f", cacheBudgetGB)) GB")
+                                .font(.system(size: 13).monospacedDigit())
+                                .foregroundStyle(.secondary)
+                        }
+                        Slider(value: $cacheBudgetGB, in: 1...16, step: 0.5) { editing in
+                            if !editing {
+                                Task { await store.updateCacheBudget(gigabytes: cacheBudgetGB) }
+                            }
                         }
                     }
+
+                    Button("清理可回收缓存") {
+                        Task { await store.evictCacheNow() }
+                    }
+                } header: {
+                    Text("移动端本地缓存")
+                } footer: {
+                    Text("缩略图常驻本机实现瞬开翻找，高清原图按需拉取并自动按上限回收；已置顶离线原图永不自动清理。")
                 }
 
-                Button("清理可回收缓存") {
-                    Task { await store.evictCacheNow() }
-                }
-            } header: {
-                Text("移动端本地缓存")
-            } footer: {
-                Text("缩略图常驻本机实现瞬开翻找，高清原图按需拉取并自动按上限回收；已置顶离线原图永不自动清理。")
-            }
+                // 6. System Share Extension & Demo
+                Section("快捷采集提示") {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Label("支持系统「分享面板」随手收藏", systemImage: "square.and.arrow.up.on.square")
+                            .font(.system(size: 13.5, weight: .semibold))
+                        Text("在小红书、X、Safari 或系统相册中点击「分享 → 存到 Charkle」，打开应用后自动完成解析入库并同步到已连接的全部云端后端。")
+                            .font(.system(size: 12.5))
+                            .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
+                    }
+                    .padding(.vertical, 4)
 
-            // 6. System Share Extension & Demo
-            Section("快捷采集提示") {
-                VStack(alignment: .leading, spacing: 6) {
-                    Label("支持系统「分享面板」随手收藏", systemImage: "square.and.arrow.up.on.square")
-                        .font(.system(size: 13.5, weight: .semibold))
-                    Text("在小红书、X、Safari 或系统相册中点击「分享 → 存到 Charkle」，打开应用后自动完成解析入库并同步到已连接的全部云端后端。")
-                        .font(.system(size: 12.5))
-                        .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
-                }
-                .padding(.vertical, 4)
-
-                if store.assets.isEmpty {
-                    Button("载入精选示例素材库") {
-                        Task { await store.seedSampleLibrary() }
+                    if store.assets.isEmpty {
+                        Button("载入精选示例素材库") {
+                            Task { await store.seedSampleLibrary() }
+                        }
                     }
                 }
             }
         }
-        .navigationTitle("多后端云同步")
+        .charkleScrollEdgeSoft(for: .bottom)
+        .navigationTitle("同步设置")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             if showDoneButton {

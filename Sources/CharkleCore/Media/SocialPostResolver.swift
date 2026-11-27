@@ -1,7 +1,7 @@
 import Foundation
 import ImageIO
 
-/// Parsed identity of a supported social media post URL (X/Twitter, Threads, Bluesky, Xiaohongshu, Pixiv, Instagram).
+/// Parsed identity of a supported social media or video post URL (X/Twitter, Threads, Bluesky, Xiaohongshu, Pixiv, Instagram, YouTube, Bilibili).
 public nonisolated enum SocialPostReference: Equatable, Hashable, Sendable {
     case x(XPostReference)
     case threads(handle: String, postID: String, canonicalURL: URL)
@@ -9,6 +9,7 @@ public nonisolated enum SocialPostReference: Equatable, Hashable, Sendable {
     case xiaohongshu(XiaohongshuNoteReference)
     case pixiv(illustID: String, canonicalURL: URL)
     case instagram(shortcode: String, canonicalURL: URL)
+    case videoPlatform(VideoPlatformReference)
 
     public var platform: SocialPlatform {
         switch self {
@@ -18,6 +19,7 @@ public nonisolated enum SocialPostReference: Equatable, Hashable, Sendable {
         case .xiaohongshu: .xiaohongshu
         case .pixiv: .pixiv
         case .instagram: .instagram
+        case .videoPlatform(let ref): ref.platform
         }
     }
 
@@ -29,6 +31,7 @@ public nonisolated enum SocialPostReference: Equatable, Hashable, Sendable {
         case .xiaohongshu(let ref): ref.canonicalURL
         case .pixiv(_, let url): url
         case .instagram(_, let url): url
+        case .videoPlatform(let ref): ref.canonicalURL
         }
     }
 
@@ -41,6 +44,7 @@ public nonisolated enum SocialPostReference: Equatable, Hashable, Sendable {
         case .xiaohongshu(let ref): ref.dedupKey
         case .pixiv(let illustID, _): "pixiv:\(illustID)"
         case .instagram(let shortcode, _): "ig:\(shortcode)"
+        case .videoPlatform(let ref): ref.dedupKey
         }
     }
 }
@@ -70,6 +74,9 @@ public nonisolated enum SocialPostURLParser {
         }
         if let xhsRef = XiaohongshuURLParser.parse(url) {
             return .xiaohongshu(xhsRef)
+        }
+        if let videoRef = VideoPlatformURLParser.parse(url) {
+            return .videoPlatform(videoRef)
         }
         guard let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https",
               let host = url.host()?.lowercased() else {
@@ -179,11 +186,15 @@ public nonisolated struct ResolvedSocialPost: Equatable, Sendable {
                 .trimmingCharacters(in: .whitespacesAndNewlines)
                 .nilIfEmpty
         let authorPrefix: String = {
-            if metadata.platform == .xiaohongshu {
-                return metadata.authorName.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? "小红书"
+            if metadata.platform == .xiaohongshu || metadata.platform.isVideoPlatform {
+                return metadata.authorName.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+                    ?? metadata.platform.displayName
             }
             return "@\(metadata.authorHandle)"
         }()
+        if metadata.platform.isVideoPlatform, let headline = candidate {
+            return String(headline.prefix(64))
+        }
         if let headline = candidate {
             let trimmed = String(headline.prefix(44))
             return "\(authorPrefix) · \(trimmed)"
@@ -203,11 +214,24 @@ public nonisolated struct ResolvedSocialPost: Equatable, Sendable {
         }()
         lines.append("# \(display)")
         var sub: [String] = [metadata.platform.displayName]
+        if let duration = metadata.formattedVideoDuration { sub.append(duration) }
         if let date = metadata.publishedAtText, !date.isEmpty { sub.append(date) }
         lines.append("_\(sub.joined(separator: " · "))_")
         if let articleTitle = metadata.articleTitle, !articleTitle.isEmpty {
             lines.append("")
             lines.append("## \(articleTitle)")
+        }
+        if let summary = metadata.videoSummary?.trimmingCharacters(in: .whitespacesAndNewlines), !summary.isEmpty {
+            lines.append("")
+            lines.append("### 视频摘要")
+            lines.append(summary)
+        }
+        if !metadata.videoOutline.isEmpty {
+            lines.append("")
+            lines.append("### 章节要点")
+            for item in metadata.videoOutline {
+                lines.append("- \(item)")
+            }
         }
         let body = metadata.bodyText.trimmingCharacters(in: .whitespacesAndNewlines)
         if !body.isEmpty {
@@ -245,6 +269,8 @@ public nonisolated enum SocialPostResolver {
             return await resolveOpenGraphFallback(platform: .pixiv, handle: illustID, canonicalURL: canonicalURL)
         case .instagram(let shortcode, let canonicalURL):
             return await resolveOpenGraphFallback(platform: .instagram, handle: shortcode, canonicalURL: canonicalURL)
+        case .videoPlatform(let videoRef):
+            return await VideoPlatformResolver.resolve(videoRef)
         }
     }
 
@@ -285,6 +311,9 @@ public nonisolated enum SocialPostResolver {
             if XiaohongshuURLParser.isXiaohongshuMediaHost(url.host()) {
                 req.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 15_0) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.2 Safari/605.1.15", forHTTPHeaderField: "User-Agent")
                 req.setValue("https://www.xiaohongshu.com/", forHTTPHeaderField: "Referer")
+            } else if VideoPlatformURLParser.isBilibiliMediaHost(url.host()) {
+                req.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 15_0) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.2 Safari/605.1.15", forHTTPHeaderField: "User-Agent")
+                req.setValue("https://www.bilibili.com/", forHTTPHeaderField: "Referer")
             } else {
                 req.setValue("Charkle/1.0 (+https://charkle.app)", forHTTPHeaderField: "User-Agent")
             }

@@ -34,6 +34,20 @@ public protocol CharkleEngineProtocol: Sendable {
         targetFolderID: UUID?,
         targetBoardID: UUID?
     ) async throws -> MaterialPackageImportResult
+    func importPureRefScene(
+        at url: URL,
+        targetFolderID: UUID?,
+        createMoodboard: Bool
+    ) async throws -> PureRefImportResult
+    func exportAssetsToPureRef(
+        assetIDs: [UUID],
+        title: String,
+        to destinationURL: URL
+    ) async throws -> PureRefExportReport
+    func exportMoodboardToPureRef(
+        board: MoodboardDocument,
+        to destinationURL: URL
+    ) async throws -> PureRefExportReport
     func updateAssets(_ patch: AssetBatchPatch) async throws -> [AssetRecord]
     func permanentlyDeleteAssets(ids: [UUID]) async throws
     func scanDuplicateImages(
@@ -161,6 +175,34 @@ public extension CharkleEngineProtocol {
             createdFolderCount: 0,
             rootFolderID: imported.first?.folderID ?? targetFolderID
         )
+    }
+
+    func importPureRefScene(
+        at url: URL,
+        targetFolderID: UUID?,
+        createMoodboard: Bool
+    ) async throws -> PureRefImportResult {
+        PureRefImportResult(
+            sceneName: url.deletingPathExtension().lastPathComponent,
+            formatVersion: "1.10",
+            importedAssets: [],
+            rootFolderID: targetFolderID
+        )
+    }
+
+    func exportAssetsToPureRef(
+        assetIDs: [UUID],
+        title: String,
+        to destinationURL: URL
+    ) async throws -> PureRefExportReport {
+        throw PureRefCodecError.encodingFailed("当前演示引擎不支持导出 PureRef 文件。")
+    }
+
+    func exportMoodboardToPureRef(
+        board: MoodboardDocument,
+        to destinationURL: URL
+    ) async throws -> PureRefExportReport {
+        throw PureRefCodecError.encodingFailed("当前演示引擎不支持导出 PureRef 文件。")
     }
 
     nonisolated func cachedThumbnailURL(for assetID: UUID, tier: ThumbnailTier) -> URL? {

@@ -6,7 +6,7 @@ enum CompactTab: Hashable {
     case inbox
     case moodboards
     case search
-    case sync
+    case settings
 }
 
 enum PreviewZoomOrigin: Hashable, Sendable {
@@ -23,22 +23,31 @@ struct PreviewZoomSourceID: Hashable, Sendable {
 }
 
 /// Universal iPadOS + iOS root shell:
-/// - Regular width (iPad): 2-column `NavigationSplitView` (Sidebar + Gallery / Inbox / Moodboards).
-/// - Compact width (iPhone / Slide Over): 5-tab `TabView` (素材库 / 收件箱 / 情绪板 / 搜图 / 同步),
-///   with full-bleed iOS Photos-style floating header on `素材库` and swipe-up/re-tap on the `素材库` tab
-///   opening `目录与筛选`.
+/// - Regular width (iPad): 2-column `NavigationSplitView` (Redesigned Collapsible Sidebar + Detail).
+/// - Compact width (iPhone / Slide Over): Custom Liquid Glass Morphing Bottom Bar (Scheme A):
+///   Left 3-tab capsule (`素材库` / `收件箱` / `情绪板`) with real-time scrubbing lens & swipe-up/re-tap
+///   Directory drawer; Right companion capsule (`⚙️` 1-tap unified Settings + `🔍` Liquid Search morph).
 struct RootShellView: View {
     @Bindable var store: MobileAppStore
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Namespace private var previewZoomNamespace
 
     @State private var compactTab: CompactTab = .library
+    @State private var visitedCompactTabs: Set<CompactTab> = [.library]
+    @State private var lastPrimaryTab: MobilePrimaryTab = .library
+    @State private var isBottomSearchExpanded: Bool = false
+    @State private var searchScopeMode: MobileSearchScopeMode = .all
+    @State private var rememberedFolderID: UUID? = nil
+
     @State private var searchTabIsPinterest: Bool = false
     @State private var moodboardPath: [UUID] = []
+    @State private var settingsPath: [MobileSettingsRoute] = []
+    @State private var settingsSheetPath: [MobileSettingsRoute] = []
     @State private var splitVisibility: NavigationSplitViewVisibility = .automatic
     @State private var isCapturePresented = false
-    @State private var isSyncSheetPresented = false
+    @State private var isSettingsSheetPresented = false
     @State private var isFolderDrawerPresented = false
     @State private var isCreateBoardSheetPresented = false
 
@@ -50,6 +59,19 @@ struct RootShellView: View {
 
     @State private var showNewFolderAlert = false
     @State private var newFolderName = ""
+
+    private var showsCompactBottomBar: Bool {
+        guard horizontalSizeClass != .regular else { return false }
+        if store.isMultiSelectMode { return false }
+        if compactTab == .moodboards && !moodboardPath.isEmpty { return false }
+        if compactTab == .search && searchTabIsPinterest { return false }
+        return true
+    }
+
+    private var activeFolderScopeTitle: String? {
+        guard let id = rememberedFolderID ?? store.activeFolderIDForCapture else { return nil }
+        return store.folders.first(where: { $0.id == id })?.name
+    }
 
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -64,7 +86,7 @@ struct RootShellView: View {
             if let toast = store.toast {
                 toastBanner(toast)
                     .padding(.horizontal, MobileTheme.Space.lg)
-                    .padding(.bottom, horizontalSizeClass == .regular ? 24 : 64)
+                    .padding(.bottom, horizontalSizeClass == .regular ? 24 : (showsCompactBottomBar ? 82 : 24))
                     .transition(.move(edge: .bottom).combined(with: .opacity))
                     .zIndex(100)
             }
@@ -74,9 +96,9 @@ struct RootShellView: View {
                 .presentationDetents([.medium, .large])
                 .presentationDragIndicator(.visible)
         }
-        .sheet(isPresented: $isSyncSheetPresented) {
-            NavigationStack {
-                GoogleDriveSyncSettingsView(store: store, showDoneButton: true)
+        .sheet(isPresented: $isSettingsSheetPresented) {
+            NavigationStack(path: $settingsSheetPath) {
+                MobileSettingsView(store: store, showDoneButton: true)
             }
             .presentationDetents([.large])
         }
@@ -93,13 +115,14 @@ struct RootShellView: View {
             NavigationStack {
                 SidebarNavigationView(
                     store: store,
+                    isCompactSheet: true,
                     onSelectScope: { scope in
                         navigateToScope(scope)
                         isFolderDrawerPresented = false
                     },
                     onOpenSyncSettings: {
                         isFolderDrawerPresented = false
-                        compactTab = .sync
+                        openCompactSettings(jumpToSync: false)
                     },
                     onCreateFolder: {
                         showNewFolderAlert = true
@@ -147,6 +170,7 @@ struct RootShellView: View {
                     detailAsset = nil
                     store.selectScope(.tag(tag))
                     if horizontalSizeClass != .regular {
+                        isBottomSearchExpanded = false
                         compactTab = .library
                     }
                 }
@@ -172,7 +196,12 @@ struct RootShellView: View {
                 Task { await store.createFolder(name: name, parentID: parentID) }
             }
         } message: {
-            Text("新建文件夹将通过 Google Drive 双向同步到 Mac 与 Windows。")
+            Text("新建文件夹将通过已连接的云端后端双向同步到 Mac 与 Windows。")
+        }
+        .onChange(of: store.scope) { _, nextScope in
+            if case .folder(let id) = nextScope {
+                rememberedFolderID = id
+            }
         }
     }
 
@@ -182,13 +211,14 @@ struct RootShellView: View {
         NavigationSplitView(columnVisibility: $splitVisibility) {
             SidebarNavigationView(
                 store: store,
+                isCompactSheet: false,
                 onSelectScope: { store.selectScope($0) },
-                onOpenSyncSettings: { isSyncSheetPresented = true },
+                onOpenSyncSettings: { openIPadSettings(jumpToSync: false) },
                 onCreateFolder: { showNewFolderAlert = true },
                 onCreateMoodboard: { isCreateBoardSheetPresented = true }
             )
             .navigationTitle("Charkle")
-            .navigationSplitViewColumnWidth(min: 230, ideal: 264, max: 320)
+            .navigationSplitViewColumnWidth(min: 248, ideal: 280, max: 340)
         } detail: {
             NavigationStack {
                 Group {
@@ -234,7 +264,7 @@ struct RootShellView: View {
                             onOpenAsset: { openAsset($0, from: .library) },
                             onFindSimilar: { openAsset($0, from: .library, inspectorTab: .similar, openInspector: true) },
                             onOpenCapture: { isCapturePresented = true },
-                            onOpenSyncSettings: { isSyncSheetPresented = true },
+                            onOpenSyncSettings: { openIPadSettings(jumpToSync: true) },
                             onOpenFolders: nil
                         )
                     }
@@ -262,7 +292,7 @@ struct RootShellView: View {
                                 if store.hasConnectedCloudBackend {
                                     Task { await store.syncNow(quiet: false) }
                                 } else {
-                                    isSyncSheetPresented = true
+                                    openIPadSettings(jumpToSync: true)
                                 }
                             } label: {
                                 if store.syncStatus.isSyncing || store.isSyncing {
@@ -278,9 +308,9 @@ struct RootShellView: View {
                             .keyboardShortcut("r", modifiers: .command)
 
                             Button {
-                                isSyncSheetPresented = true
+                                openIPadSettings(jumpToSync: false)
                             } label: {
-                                Label("同步与设置", systemImage: "gearshape")
+                                Label("设置", systemImage: "gearshape")
                             }
                         }
                     }
@@ -290,155 +320,229 @@ struct RootShellView: View {
         .navigationSplitViewStyle(.balanced)
     }
 
-    // MARK: - iPhone Compact Layout (5 Tabs: 素材库 / 收件箱 / 情绪板 / 搜图 / 同步)
+    // MARK: - iPhone Compact Layout (Liquid Glass Morphing Bottom Bar — Scheme A)
 
     private var compactIPhoneShell: some View {
-        TabView(selection: $compactTab) {
-            NavigationStack {
-                MasonryGalleryView(
-                    store: store,
-                    isCompact: true,
-                    showPhotosFloatingHeader: true,
-                    zoomNamespace: previewZoomNamespace,
-                    zoomOrigin: .library,
-                    onOpenAsset: { openAsset($0, from: .library) },
-                    onFindSimilar: { openAsset($0, from: .library, inspectorTab: .similar, openInspector: true) },
-                    onOpenCapture: { isCapturePresented = true },
-                    onOpenSyncSettings: { compactTab = .sync },
-                    onOpenFolders: { isFolderDrawerPresented = true }
-                )
-                .toolbar(.hidden, for: .navigationBar)
-                .background(
-                    LibraryTabBarGestureBridge(
-                        tabCount: 5,
-                        isLibraryTabActive: compactTab == .library,
-                        onOpenDirectoryAndFilters: {
-                            if compactTab != .library {
-                                compactTab = .library
-                            }
-                            if !isFolderDrawerPresented {
-                                isFolderDrawerPresented = true
-                            }
-                        }
-                    )
-                )
-            }
-            .tabItem {
-                Label("素材库", systemImage: "square.grid.2x2")
-            }
-            .tag(CompactTab.library)
-
-            NavigationStack {
-                InboxTriageView(
-                    store: store,
-                    zoomNamespace: previewZoomNamespace,
-                    onOpenAsset: { asset, origin in openAsset(asset, from: origin) },
-                    onFindSimilar: { asset, origin in openAsset(asset, from: origin, inspectorTab: .similar, openInspector: true) },
-                    onOpenCapture: { isCapturePresented = true }
-                )
-                .navigationTitle("收件箱")
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar {
-                    ToolbarItem(placement: .topBarTrailing) {
-                        Button {
-                            isCapturePresented = true
-                        } label: {
-                            Image(systemName: "plus")
-                        }
-                    }
-                }
-            }
-            .tabItem {
-                Label("收件箱", systemImage: "tray")
-            }
-            .badge(store.inboxCount > 0 ? store.inboxCount : 0)
-            .tag(CompactTab.inbox)
-
-            NavigationStack(path: $moodboardPath) {
-                MoodboardsListView(
-                    store: store,
-                    onOpenBoard: { boardID in
-                        moodboardPath.append(boardID)
-                    }
-                )
-                .navigationDestination(for: UUID.self) { boardID in
-                    MoodboardStudioView(
+        ZStack {
+            compactTabSlot(.library) {
+                NavigationStack {
+                    MasonryGalleryView(
                         store: store,
-                        boardID: boardID,
-                        onOpenAsset: { openAsset($0, from: .moodboard) },
-                        onRevealAssetInLibrary: { revealAssetInLibrary($0, sourceBoardID: boardID) }
+                        isCompact: true,
+                        showPhotosFloatingHeader: true,
+                        zoomNamespace: previewZoomNamespace,
+                        zoomOrigin: .library,
+                        onOpenAsset: { openAsset($0, from: .library) },
+                        onFindSimilar: { openAsset($0, from: .library, inspectorTab: .similar, openInspector: true) },
+                        onOpenCapture: { isCapturePresented = true },
+                        onOpenSyncSettings: { openCompactSettings(jumpToSync: true) },
+                        onOpenFolders: { isFolderDrawerPresented = true }
                     )
+                    .toolbar(.hidden, for: .navigationBar)
                 }
             }
-            .tabItem {
-                Label("情绪板", systemImage: "rectangle.3.group")
-            }
-            .tag(CompactTab.moodboards)
 
-            NavigationStack {
-                Group {
-                    if searchTabIsPinterest {
-                        PinterestExploreMobileView(
-                            store: store,
-                            controller: store.pinterestController,
-                            onSwitchToLibrarySearch: {
-                                searchTabIsPinterest = false
-                            }
-                        )
-                        .toolbar(.hidden, for: .navigationBar)
-                    } else {
-                        VisualSearchTabView(
+            if visitedCompactTabs.contains(.inbox) {
+                compactTabSlot(.inbox) {
+                    NavigationStack {
+                        InboxTriageView(
                             store: store,
                             zoomNamespace: previewZoomNamespace,
-                            onOpenAsset: { openAsset($0, from: .visualSearch) },
-                            onFindSimilar: { openAsset($0, from: .visualSearch, inspectorTab: .similar, openInspector: true) },
-                            onNavigateToScope: { scope in navigateToScope(scope) },
-                            onOpenBoard: { openBoard($0) },
-                            onOpenPinterestSpace: {
-                                searchTabIsPinterest = true
-                            }
+                            onOpenAsset: { asset, origin in openAsset(asset, from: origin) },
+                            onFindSimilar: { asset, origin in openAsset(asset, from: origin, inspectorTab: .similar, openInspector: true) },
+                            onOpenCapture: { isCapturePresented = true }
                         )
-                        .navigationTitle("搜图")
+                        .charkleScrollEdgeSoft(for: .bottom)
+                        .navigationTitle("收件箱")
                         .navigationBarTitleDisplayMode(.inline)
+                        .toolbar {
+                            ToolbarItem(placement: .topBarTrailing) {
+                                Button {
+                                    isCapturePresented = true
+                                } label: {
+                                    Image(systemName: "plus")
+                                }
+                            }
+                        }
                     }
                 }
             }
-            .tabItem {
-                Label("搜图", systemImage: searchTabIsPinterest ? "sparkles" : "magnifyingglass")
-            }
-            .tag(CompactTab.search)
 
-            NavigationStack {
-                GoogleDriveSyncSettingsView(store: store, showDoneButton: false)
+            if visitedCompactTabs.contains(.moodboards) {
+                compactTabSlot(.moodboards) {
+                    NavigationStack(path: $moodboardPath) {
+                        MoodboardsListView(
+                            store: store,
+                            onOpenBoard: { boardID in
+                                moodboardPath.append(boardID)
+                            }
+                        )
+                        .charkleScrollEdgeSoft(for: .bottom)
+                        .navigationDestination(for: UUID.self) { boardID in
+                            MoodboardStudioView(
+                                store: store,
+                                boardID: boardID,
+                                onOpenAsset: { openAsset($0, from: .moodboard) },
+                                onRevealAssetInLibrary: { revealAssetInLibrary($0, sourceBoardID: boardID) }
+                            )
+                        }
+                    }
+                }
             }
-            .tabItem {
-                Label("同步", systemImage: store.hasConnectedCloudBackend ? "arrow.triangle.2.circlepath.circle" : "icloud")
+
+            if visitedCompactTabs.contains(.search) {
+                compactTabSlot(.search) {
+                    NavigationStack {
+                        Group {
+                            if searchTabIsPinterest {
+                                PinterestExploreMobileView(
+                                    store: store,
+                                    controller: store.pinterestController,
+                                    onSwitchToLibrarySearch: {
+                                        searchTabIsPinterest = false
+                                        searchScopeMode = .all
+                                        isBottomSearchExpanded = true
+                                    }
+                                )
+                                .toolbar(.hidden, for: .navigationBar)
+                            } else {
+                                VisualSearchTabView(
+                                    store: store,
+                                    zoomNamespace: previewZoomNamespace,
+                                    onOpenAsset: { openAsset($0, from: .visualSearch) },
+                                    onFindSimilar: { openAsset($0, from: .visualSearch, inspectorTab: .similar, openInspector: true) },
+                                    onNavigateToScope: { scope in navigateToScope(scope) },
+                                    onOpenBoard: { openBoard($0) },
+                                    onOpenPinterestSpace: {
+                                        searchScopeMode = .pinterest
+                                        searchTabIsPinterest = true
+                                    },
+                                    externalSearchBarActive: isBottomSearchExpanded,
+                                    searchScopeMode: searchScopeMode,
+                                    activeFolderScopeTitle: activeFolderScopeTitle,
+                                    onClearFolderScope: {
+                                        applySearchScopeMode(.all)
+                                    }
+                                )
+                                .navigationTitle("搜图")
+                                .navigationBarTitleDisplayMode(.inline)
+                            }
+                        }
+                    }
+                }
             }
-            .tag(CompactTab.sync)
+
+            if visitedCompactTabs.contains(.settings) {
+                compactTabSlot(.settings) {
+                    NavigationStack(path: $settingsPath) {
+                        MobileSettingsView(store: store, showDoneButton: false)
+                    }
+                }
+            }
         }
+        // Full-bleed scroll behind floating glass with automatic bottom clearance for ScrollView / Form / List
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            Color.clear
+                .frame(height: showsCompactBottomBar ? 74 : 0)
+                .allowsHitTesting(false)
+        }
+        .overlay(alignment: .bottom) {
+            if showsCompactBottomBar {
+                LiquidGlassMorphingTabBar(
+                    store: store,
+                    activeTab: $compactTab,
+                    lastPrimaryTab: $lastPrimaryTab,
+                    isSearchExpanded: $isBottomSearchExpanded,
+                    searchScopeMode: $searchScopeMode,
+                    onOpenDirectoryAndFilters: {
+                        isFolderDrawerPresented = true
+                    },
+                    onSelectSettings: {
+                        openCompactSettings(jumpToSync: false)
+                    },
+                    onSelectSearchMode: { mode in
+                        applySearchScopeMode(mode)
+                    }
+                )
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .animation(MobileMotion.accessible(MobileMotion.enterSm, reduced: reduceMotion), value: showsCompactBottomBar)
         .onChange(of: compactTab) { _, next in
+            visitedCompactTabs.insert(next)
             switch next {
             case .library:
-                // Inbox uses its own dedicated `store.inboxAssets`, so returning to `素材库` keeps the
-                // library scope and assets intact with zero empty-state flash.
+                lastPrimaryTab = .library
+                isBottomSearchExpanded = false
                 if store.scope == .inbox || isMoodboardScope(store.scope) {
                     store.selectScope(.allItems)
                 }
             case .inbox:
-                break
+                lastPrimaryTab = .inbox
+                isBottomSearchExpanded = false
             case .moodboards:
-                break
+                lastPrimaryTab = .moodboards
+                isBottomSearchExpanded = false
             case .search:
-                if store.scope == .inbox || store.scope == .trash || isMoodboardScope(store.scope) {
+                if searchScopeMode != .currentFolder,
+                   (store.scope == .inbox || store.scope == .trash || isMoodboardScope(store.scope)) {
                     store.selectScope(.allItems)
                 }
-            case .sync:
+            case .settings:
+                isBottomSearchExpanded = false
                 Task { await store.loadSyncAndStorageState() }
             }
         }
     }
 
-    // MARK: - Navigation & Asset Open Routing
+    @ViewBuilder
+    private func compactTabSlot<Content: View>(_ tab: CompactTab, @ViewBuilder content: () -> Content) -> some View {
+        let isActive = compactTab == tab
+        content()
+            .opacity(isActive ? 1 : 0)
+            .allowsHitTesting(isActive)
+            .accessibilityHidden(!isActive)
+            .zIndex(isActive ? 1 : 0)
+    }
+
+    // MARK: - Navigation & Search Scope Routing
+
+    private func openIPadSettings(jumpToSync: Bool) {
+        settingsSheetPath = jumpToSync ? [.sync] : []
+        isSettingsSheetPresented = true
+    }
+
+    private func openCompactSettings(jumpToSync: Bool) {
+        visitedCompactTabs.insert(.settings)
+        isBottomSearchExpanded = false
+        settingsPath = jumpToSync ? [.sync] : []
+        compactTab = .settings
+    }
+
+    private func applySearchScopeMode(_ mode: MobileSearchScopeMode) {
+        searchScopeMode = mode
+        switch mode {
+        case .all:
+            searchTabIsPinterest = false
+            if store.scope != .allItems {
+                store.selectScope(.allItems)
+            }
+        case .color:
+            searchTabIsPinterest = false
+            if store.scope == .inbox || store.scope == .trash || isMoodboardScope(store.scope) {
+                store.selectScope(.allItems)
+            }
+        case .currentFolder:
+            searchTabIsPinterest = false
+            if let folderID = rememberedFolderID ?? store.activeFolderIDForCapture {
+                store.selectScope(.folder(folderID))
+            } else {
+                store.showToast("请先在「目录与筛选」中选择一个文件夹，当前仍按全库搜图", tone: .info)
+            }
+        case .pinterest:
+            searchTabIsPinterest = true
+        }
+    }
 
     private func isMoodboardScope(_ scope: MobileScope) -> Bool {
         switch scope {
@@ -462,10 +566,16 @@ struct RootShellView: View {
             moodboardPath = [id]
             compactTab = .moodboards
         case .pinterest:
+            searchScopeMode = .pinterest
             searchTabIsPinterest = true
+            isBottomSearchExpanded = true
             compactTab = .search
         default:
+            if case .folder(let id) = scope {
+                rememberedFolderID = id
+            }
             store.selectScope(scope)
+            isBottomSearchExpanded = false
             compactTab = .library
         }
     }
@@ -474,6 +584,7 @@ struct RootShellView: View {
         if horizontalSizeClass == .regular {
             store.selectScope(.moodboard(id))
         } else {
+            isBottomSearchExpanded = false
             compactTab = .moodboards
             if moodboardPath.last != id {
                 moodboardPath.append(id)
@@ -485,6 +596,7 @@ struct RootShellView: View {
         Task {
             guard let result = await store.revealAssetInLibrary(assetID: assetID) else { return }
             if horizontalSizeClass != .regular {
+                isBottomSearchExpanded = false
                 compactTab = .library
             }
             if let sourceBoardID {
@@ -509,7 +621,8 @@ struct RootShellView: View {
         openInspector: Bool = false
     ) {
         Task { await store.engine.markAssetOpened(id: asset.id) }
-        if !openInspector, asset.isExternalWebLink, let url = asset.externalWebURL {
+        let hasRichWebPreview = asset.hasExtractableLinkMedia || (asset.richMetadata?.webPage?.hasRichSummary == true)
+        if !openInspector, asset.isExternalWebLink, !hasRichWebPreview, let url = asset.externalWebURL {
             UIApplication.shared.open(url)
             return
         }

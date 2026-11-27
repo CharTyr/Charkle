@@ -745,6 +745,11 @@ public actor LocalExtensionBridgeServer {
                 case .xiaohongshu(let xhsRef): return xhsRef.noteID ?? ""
                 case .pixiv(let illustID, _): return illustID
                 case .instagram(let code, _): return code
+                case .videoPlatform(let vRef):
+                    switch vRef {
+                    case .youtube(let id, _): return id
+                    case .bilibili(let bvid, let aid, _, _, _): return bvid ?? (aid.map { "av\($0)" } ?? "")
+                    }
                 }
             }
             return ""
@@ -766,7 +771,7 @@ public actor LocalExtensionBridgeServer {
                 case .x(let xRef): return xRef.handle
                 case .threads(let h, _, _): return h
                 case .bluesky(let h, _, _): return h
-                case .xiaohongshu, .pixiv, .instagram: return platform.rawValue
+                case .xiaohongshu, .pixiv, .instagram, .videoPlatform: return platform.rawValue
                 }
             }
             return platform == .x ? "i" : platform.rawValue
@@ -799,6 +804,8 @@ public actor LocalExtensionBridgeServer {
             case .xiaohongshu: return URL(string: "https://www.xiaohongshu.com/")
             case .instagram: return URL(string: "https://www.instagram.com/")
             case .threads: return URL(string: "https://www.threads.net/")
+            case .bilibili: return URL(string: "https://www.bilibili.com/")
+            case .youtube: return URL(string: "https://www.youtube.com/")
             case .x, .bluesky: return nil
             }
         }()
@@ -814,6 +821,8 @@ public actor LocalExtensionBridgeServer {
             case .threads: return "threads:\(safePostID)"
             case .bluesky: return "bsky:\(authorHandle.lowercased()):\(safePostID)"
             case .xiaohongshu: return "xhs:\(safePostID.lowercased())"
+            case .youtube: return "yt:\(safePostID)"
+            case .bilibili: return "bili:\(safePostID)"
             }
         }()
 
@@ -1035,6 +1044,7 @@ public actor LocalExtensionBridgeServer {
             case .x: "原推文："
             case .pixiv: "原作品："
             case .xiaohongshu: "原笔记："
+            case .youtube, .bilibili: "原视频："
             case .bluesky, .threads, .instagram: "原贴文："
             }
             noteSections.append("\(sourcePrefix)\(job.originalURL)")

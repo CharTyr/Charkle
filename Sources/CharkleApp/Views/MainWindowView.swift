@@ -22,6 +22,7 @@ public struct MainWindowView: View {
     public let onSyncDefaultNotchTarget: (NotchTargetMode) -> Void
     public let onEnterMinimalCaptureMode: () -> Void
     public let onImportMaterialPackage: () -> Void
+    public let onImportPureRef: () -> Void
     public let onAppReady: () -> Void
 
     @Namespace private var heroNamespace
@@ -91,6 +92,7 @@ public struct MainWindowView: View {
         onSyncDefaultNotchTarget: @escaping (NotchTargetMode) -> Void = { _ in },
         onEnterMinimalCaptureMode: @escaping () -> Void = {},
         onImportMaterialPackage: @escaping () -> Void = {},
+        onImportPureRef: @escaping () -> Void = {},
         onAppReady: @escaping () -> Void = {}
     ) {
         self.coordinator = coordinator
@@ -104,6 +106,7 @@ public struct MainWindowView: View {
         self.onSyncDefaultNotchTarget = onSyncDefaultNotchTarget
         self.onEnterMinimalCaptureMode = onEnterMinimalCaptureMode
         self.onImportMaterialPackage = onImportMaterialPackage
+        self.onImportPureRef = onImportPureRef
         self.onAppReady = onAppReady
     }
 
@@ -133,6 +136,9 @@ public struct MainWindowView: View {
                     moodboards: moodboards,
                     expandedWidth: effectiveExpandedSidebarWidth,
                     onImportMaterialPackage: onImportMaterialPackage,
+                    onExportFolderToPureRef: { folder, openInPureRef in
+                        exportFolderToPureRef(folder, openInPureRef: openInPureRef)
+                    },
                     onOpenSmartDeduplication: { folderID in
                         withAnimation(CharkleMotion.accessible(CharkleMotion.enterMd, reduced: reduceMotion)) {
                             coordinator.presentSmartDeduplication(folderID: folderID)
@@ -149,14 +155,7 @@ public struct MainWindowView: View {
                         }
                     },
                     onDropExternalOntoFolder: { inputs, folderID in
-                        Task {
-                            let created = await library.ingest(inputs, targetFolderID: folderID, targetBoardID: nil)
-                            if created.isEmpty {
-                                coordinator.showToast(library.lastError ?? "导入失败或素材已存在", icon: "exclamationmark.triangle", tone: .warning)
-                            } else {
-                                coordinator.showToast("已导入 \(created.count) 项素材", icon: "arrow.down.circle.fill", tone: .success)
-                            }
-                        }
+                        handleExternalDrop(inputs, targetFolderID: folderID)
                     },
                     onDropAssetsOntoBoard: { ids, boardID in
                         let resolved = ids.compactMap { library.allAssetsByID[$0] }
@@ -250,6 +249,12 @@ public struct MainWindowView: View {
                     },
                     onExportFigmaBundle: {
                         exportCurrentBoardToFigmaBundle(options: MoodboardExportOptions(darkAppearance: colorScheme == .dark))
+                    },
+                    onExportPureRef: {
+                        exportCurrentBoardToPureRef(openInPureRef: false)
+                    },
+                    onOpenInPureRef: {
+                        exportCurrentBoardToPureRef(openInPureRef: true)
                     },
                     onOpenFigmaPluginGuide: {
                         withAnimation(CharkleMotion.accessible(CharkleMotion.enterMd, reduced: reduceMotion)) {
@@ -534,16 +539,14 @@ public struct MainWindowView: View {
             searchDebounceTask?.cancel()
             library.filter.searchQuery = newValue
             if newValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                library.semanticSearchReport = nil
                 searchDebounceTask = Task {
-                    await library.refreshAssets()
+                    await library.clearSemanticSearch()
                 }
-            } else if !library.semanticSearchEnabled {
-                library.semanticSearchReport = nil
+            } else {
                 searchDebounceTask = Task {
                     try? await Task.sleep(for: .milliseconds(120))
                     guard !Task.isCancelled else { return }
-                    await library.refreshAssets()
+                    await library.refreshAssets(semanticEnhancementDelayMs: 300)
                 }
             }
         }
@@ -605,7 +608,6 @@ public struct MainWindowView: View {
         let showFolderSubbar = activeFolderID != nil && (!activeFolderChildren.isEmpty || galleryViewportWidth < 680)
         let topInset: CGFloat = {
             var base: CGFloat = 62
-            if library.semanticSearchReport != nil { base += 44 }
             if isInbox && !library.assets.isEmpty { base += 50 }
             if isTrash && !library.assets.isEmpty { base += 50 }
             if showFolderSubbar { base += 50 }
@@ -860,17 +862,7 @@ public struct MainWindowView: View {
                         onOpenQuickLook: { asset in openQuickLook(asset) },
                         onDropExternalInputs: { inputs in
                             let folderID: UUID? = if case .folder(let id) = coordinator.selectedDestination { id } else { nil }
-                            if inputs.contains(where: { if case .webURL = $0 { true } else { false } }) {
-                                coordinator.showToast("正在解析网页缩略图…", icon: "safari")
-                            }
-                            Task {
-                                let created = await library.ingest(inputs, targetFolderID: folderID, targetBoardID: nil)
-                                if created.isEmpty {
-                                    coordinator.showToast(library.lastError ?? "导入失败或素材已存在", icon: "exclamationmark.triangle", tone: .warning)
-                                } else {
-                                    coordinator.showToast("已导入 \(created.count) 项素材", icon: "arrow.down.circle.fill", tone: .success)
-                                }
-                            }
+                            handleExternalDrop(inputs, targetFolderID: folderID)
                         },
                         onAddToMoodboard: { ids in
                             if let activeID = coordinator.activeMoodboardID {
@@ -924,6 +916,12 @@ public struct MainWindowView: View {
                         onPasteIntoCurrentFolder: {
                             pasteIntoCurrentGalleryFolder()
                         },
+                        onExportToPureRef: { ids in
+                            exportAssetsToPureRef(ids, suggestedTitle: nil, openInPureRef: false)
+                        },
+                        onOpenInPureRef: { ids in
+                            exportAssetsToPureRef(ids, suggestedTitle: nil, openInPureRef: true)
+                        },
                         onRetagAssets: { ids in
                             triggerAIRetagging(for: ids)
                         },
@@ -953,7 +951,11 @@ public struct MainWindowView: View {
                             pendingPermanentDeleteIDs = ids
                         },
                         onResolveDragFileURL: { assetID in
-                            library.engine.cachedThumbnailURL(for: assetID, tier: .preview1400)
+                            if let asset = library.allAssetsByID[assetID],
+                               let original = library.engine.cachedOriginalURL(for: asset) {
+                                return original
+                            }
+                            return library.engine.cachedThumbnailURL(for: assetID, tier: .preview1400)
                                 ?? library.engine.cachedThumbnailURL(for: assetID, tier: .grid520)
                         },
                         onZoomColumnWidth: { newWidth in
@@ -974,11 +976,6 @@ public struct MainWindowView: View {
                             .padding(.top, -10)
                             .padding(.horizontal, -18)
                     }
-
-                if let report = library.semanticSearchReport {
-                    semanticSearchStatusBar(report)
-                        .transition(CharkleMotion.originTransition(anchor: .top, scale: 0.98, reduced: reduceMotion))
-                }
 
                 if isInbox && !library.assets.isEmpty {
                     inboxTriageBar
@@ -1366,32 +1363,19 @@ public struct MainWindowView: View {
             text: $searchDraft,
             tokens: tokens,
             onRemoveToken: removeFilterToken,
-            placeholder: isUltraCompact
-                ? (library.semanticSearchEnabled ? "语义搜图…" : "搜索素材…")
-                : (library.semanticSearchEnabled ? "描述画面，回车语义搜图…" : "搜索素材、标签、备注或颜色…"),
-            semanticSearchEnabled: library.semanticSearchEnabled,
-            isRunningSemanticSearch: library.isRunningSemanticSearch,
-            showsSemanticToggle: true,
+            placeholder: isUltraCompact ? "搜索素材或描述画面…" : "搜索素材、描述画面、标签或颜色…",
+            isRefiningSearch: library.isRunningSemanticSearch,
             compact: galleryViewportWidth < 960,
             wrapsInGlassIsland: true,
             onSubmit: {
-                let q = searchDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !q.isEmpty else { return }
-                if library.semanticSearchEnabled {
-                    triggerSemanticSearch()
-                }
-            },
-            onToggleSemanticSearch: {
+                searchDebounceTask?.cancel()
+                library.filter.searchQuery = searchDraft
                 let trimmed = searchDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-                if library.semanticSearchEnabled && trimmed.isEmpty {
-                    library.semanticSearchEnabled = false
-                    Task { await library.clearSemanticSearch() }
-                } else {
-                    library.semanticSearchEnabled = true
-                    if !trimmed.isEmpty {
-                        triggerSemanticSearch()
+                Task {
+                    if trimmed.isEmpty {
+                        await library.clearSemanticSearch()
                     } else {
-                        coordinator.showToast("已开启语义搜图模式：输入描述后按回车检索", icon: "sparkles")
+                        await library.refreshAssets(semanticEnhancementDelayMs: 0)
                     }
                 }
             }
@@ -1929,19 +1913,7 @@ public struct MainWindowView: View {
         }
     }
 
-    // MARK: - Hybrid Semantic Search Status Pill & Inbox Batch Triage Sheet
-
-    private func triggerSemanticSearch() {
-        let q = searchDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !q.isEmpty else { return }
-        Task {
-            if let report = await library.runSemanticSearch(query: q) {
-                coordinator.showToast(report.summary, icon: "sparkles")
-            } else if let err = library.lastError {
-                coordinator.showToast(err, icon: "exclamationmark.triangle", tone: .warning)
-            }
-        }
-    }
+    // MARK: - Inbox Batch Triage Sheet
 
     private func triggerInboxBatchTriage() {
         let targetIDs = library.selectedAssetIDs.isEmpty ? [] : Array(library.selectedAssetIDs)
@@ -1955,26 +1927,6 @@ public struct MainWindowView: View {
                 coordinator.showToast(err, icon: "exclamationmark.triangle", tone: .warning)
             }
         }
-    }
-
-    private func semanticSearchStatusBar(_ report: SemanticSearchReport) -> some View {
-        HStack(spacing: 10) {
-            Image(systemName: "sparkles")
-                .font(.system(size: 11.5, weight: .semibold))
-                .foregroundStyle(activeAccent)
-            Text(report.summary)
-                .font(.system(size: 11.5, weight: .medium))
-                .lineLimit(1)
-            Spacer(minLength: 8)
-            Button("返回普通检索") {
-                library.semanticSearchEnabled = false
-                Task { await library.clearSemanticSearch() }
-            }
-            .buttonStyle(CharkleButtonStyle(.subtle, size: .xs))
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 5)
-        .charkleLiquidGlass(.regular, in: Capsule(style: .continuous))
     }
 
     private var inboxBatchTriageSheet: some View {
@@ -2716,6 +2668,72 @@ public struct MainWindowView: View {
                     .buttonStyle(.plain)
                     .help(library.isEnrichingTags ? "点击停止批量重新打标" : "按当前语言格式重新生成建议标签并优先合并已有标签")
 
+                    let extractableLinkAssets = selectedAssets.filter(\.hasExtractableLinkMedia)
+                    if !extractableLinkAssets.isEmpty {
+                        Button {
+                            let targets = extractableLinkAssets
+                            coordinator.showToast(
+                                "正在批量提取 \(targets.count) 个链接中的媒体为独立素材…",
+                                icon: "square.and.arrow.down.on.square"
+                            )
+                            Task {
+                                let result = await library.extractMediaFromSelectedLinks(targets)
+                                if result.extractedCount > 0 {
+                                    coordinator.showToast(
+                                        "已从 \(result.processedLinkCount) 个链接批量保存 \(result.extractedCount) 项独立素材",
+                                        icon: "square.and.arrow.down.on.square",
+                                        tone: .success
+                                    )
+                                } else if let err = library.lastError {
+                                    coordinator.showToast(err, icon: "exclamationmark.triangle", tone: .warning)
+                                } else {
+                                    coordinator.showToast("未能从所选链接提取到媒体文件", icon: "exclamationmark.triangle", tone: .warning)
+                                }
+                            }
+                        } label: {
+                            if isCompactPill {
+                                Image(systemName: "square.and.arrow.down.on.square")
+                                    .font(.system(size: 12.5, weight: .medium))
+                                    .frame(width: 26, height: 26)
+                            } else {
+                                Label("提取媒体(\(extractableLinkAssets.count))", systemImage: "square.and.arrow.down.on.square")
+                                    .font(.system(size: 12, weight: .medium))
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 5)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .help("将所选 YouTube / B站 / X / 小红书及网页链接中的视频与图片批量保存为独立素材")
+                    }
+
+                    Menu {
+                        Button {
+                            exportAssetsToPureRef(ids, suggestedTitle: nil, openInPureRef: true)
+                        } label: {
+                            Label("在 PureRef 中打开（\(ids.count) 项）", systemImage: "arrow.up.forward.app")
+                        }
+                        Button {
+                            exportAssetsToPureRef(ids, suggestedTitle: nil, openInPureRef: false)
+                        } label: {
+                            Label("导出为 PureRef (.pur)…", systemImage: "square.and.arrow.up")
+                        }
+                    } label: {
+                        if isCompactPill {
+                            Image(systemName: "square.grid.2x2")
+                                .font(.system(size: 12.5, weight: .medium))
+                                .frame(width: 26, height: 26)
+                        } else {
+                            Label("PureRef", systemImage: "square.grid.2x2")
+                                .font(.system(size: 12, weight: .medium))
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 5)
+                        }
+                    }
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
+                    .fixedSize()
+                    .help("将所选素材自动排板并在 PureRef 中打开或导出为 .pur 文件")
+
                     Menu {
                         ForEach(1...5, id: \.self) { star in
                             Button(String(repeating: "★", count: star)) {
@@ -2815,6 +2833,14 @@ public struct MainWindowView: View {
                             .foregroundStyle(.secondary)
                     }
                     Spacer()
+                    Button {
+                        onImportPureRef()
+                    } label: {
+                        Label("导入 PureRef", systemImage: "square.grid.2x2")
+                    }
+                    .buttonStyle(CharkleButtonStyle(.standard, size: .sm))
+                    .help("一键导入 PureRef (.pur) 场景到素材库并还原为可编辑情绪板")
+
                     Button {
                         Task {
                             if let blank = await moodboards.createBlankBoard(title: "新情绪板") {
@@ -3168,6 +3194,12 @@ public struct MainWindowView: View {
                     onExportFigmaBundle: { options in
                         exportCurrentBoardToFigmaBundle(options: options)
                     },
+                    onExportPureRef: {
+                        exportCurrentBoardToPureRef(openInPureRef: false)
+                    },
+                    onOpenInPureRef: {
+                        exportCurrentBoardToPureRef(openInPureRef: true)
+                    },
                     onOpenFigmaPluginGuide: {
                         withAnimation(CharkleMotion.accessible(CharkleMotion.enterMd, reduced: reduceMotion)) {
                             coordinator.openSettings(tab: .extensions)
@@ -3336,7 +3368,7 @@ public struct MainWindowView: View {
                 library.filter.shape = nil
                 library.filter.minRating = 0
                 library.filter.onlyPinnedOffline = false
-                if library.semanticSearchReport != nil {
+                if library.semanticSearchReport != nil || library.isRunningSemanticSearch {
                     await library.clearSemanticSearch()
                 }
                 await library.applyDestination(targetDestination)
@@ -3667,6 +3699,219 @@ public struct MainWindowView: View {
                 )
             } catch {
                 coordinator.showToast("导出 Figma 包失败：\(error.localizedDescription)", icon: "exclamationmark.triangle", tone: .error)
+            }
+        }
+    }
+
+    // MARK: - Bidirectional PureRef (.pur) Actions
+
+    private func handleExternalDrop(_ inputs: [CaptureInput], targetFolderID: UUID?) {
+        var pureRefURLs: [URL] = []
+        var regularInputs: [CaptureInput] = []
+        for input in inputs {
+            if case .fileURL(let url) = input, PureRefCodec.isPureRefFileURL(url) {
+                pureRefURLs.append(url)
+            } else {
+                regularInputs.append(input)
+            }
+        }
+
+        if !pureRefURLs.isEmpty {
+            coordinator.showToast(
+                pureRefURLs.count == 1
+                    ? "正在解析 PureRef「\(pureRefURLs[0].deletingPathExtension().lastPathComponent)」…"
+                    : "正在解析 \(pureRefURLs.count) 个 PureRef 场景…",
+                icon: "square.grid.2x2"
+            )
+            Task {
+                let results = await library.importPureRefScenes(
+                    urls: pureRefURLs,
+                    targetFolderID: targetFolderID,
+                    createMoodboard: true
+                )
+                await moodboards.refreshBoards()
+
+                let totalAssets = results.reduce(0) { $0 + $1.importedAssets.count }
+                guard !results.isEmpty, totalAssets > 0 || results.contains(where: { $0.importedNoteCount > 0 }) else {
+                    coordinator.showToast(
+                        library.lastError ?? "未能解析拖入的 .pur 场景文件",
+                        icon: "exclamationmark.triangle",
+                        tone: .warning
+                    )
+                    return
+                }
+                if results.count == 1, let first = results.first {
+                    let notePart = first.importedNoteCount > 0 ? "、\(first.importedNoteCount) 条便签" : ""
+                    let msg = "已导入 PureRef「\(first.sceneName)」：\(first.importedAssets.count) 张图\(notePart)"
+                    if let boardID = first.createdBoardID {
+                        coordinator.showToast(
+                            msg,
+                            icon: "square.grid.2x2.fill",
+                            tone: .success,
+                            actionTitle: "打开情绪板",
+                            onAction: {
+                                coordinator.openMoodboard(boardID)
+                            }
+                        )
+                    } else {
+                        coordinator.showToast(msg, icon: "square.grid.2x2.fill", tone: .success)
+                    }
+                } else {
+                    coordinator.showToast(
+                        "已导入 \(results.count) 个 PureRef 场景（共 \(totalAssets) 张素材）",
+                        icon: "square.grid.2x2.fill",
+                        tone: .success
+                    )
+                }
+            }
+        }
+
+        guard !regularInputs.isEmpty else { return }
+        if regularInputs.contains(where: { if case .webURL = $0 { true } else { false } }) {
+            coordinator.showToast("正在解析网页缩略图…", icon: "safari")
+        }
+        Task {
+            let created = await library.ingest(regularInputs, targetFolderID: targetFolderID, targetBoardID: nil)
+            if created.isEmpty {
+                coordinator.showToast(library.lastError ?? "导入失败或素材已存在", icon: "exclamationmark.triangle", tone: .warning)
+            } else {
+                coordinator.showToast("已导入 \(created.count) 项素材", icon: "arrow.down.circle.fill", tone: .success)
+            }
+        }
+    }
+
+    private func exportFolderToPureRef(_ folder: FolderRecord, openInPureRef: Bool) {
+        Task {
+            let criteria = FilterCriteria(folderID: folder.id, includeSubfolders: true)
+            let items = (try? await library.engine.fetchAssets(matching: criteria)) ?? []
+            guard !items.isEmpty else {
+                coordinator.showToast("文件夹「\(folder.name)」中没有可导出的素材", icon: "folder", tone: .warning)
+                return
+            }
+            exportAssetsToPureRef(items.map(\.id), suggestedTitle: folder.name, openInPureRef: openInPureRef)
+        }
+    }
+
+    private func exportAssetsToPureRef(_ ids: [UUID], suggestedTitle: String?, openInPureRef: Bool) {
+        guard !ids.isEmpty else { return }
+        let defaultTitle: String = {
+            if let suggestedTitle, !suggestedTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return suggestedTitle
+            }
+            if ids.count == 1, let first = library.allAssetsByID[ids[0]], !first.title.isEmpty {
+                return first.title
+            }
+            if case .folder(let fid) = coordinator.selectedDestination,
+               let folder = library.folder(byID: fid) {
+                return "\(folder.name)-\(ids.count)图"
+            }
+            return "Charkle精选参考(\(ids.count))"
+        }()
+
+        if openInPureRef, let appURL = LibraryStore.installedPureRefAppURL() {
+            coordinator.showToast("正在生成 PureRef 参考板（\(ids.count) 项）…", icon: "square.grid.2x2")
+            Task {
+                do {
+                    let stagedURL = try LibraryStore.stagedPureRefExportURL(title: defaultTitle)
+                    let report = try await library.exportAssetsToPureRef(
+                        assetIDs: ids,
+                        title: defaultTitle,
+                        to: stagedURL
+                    )
+                    let config = NSWorkspace.OpenConfiguration()
+                    config.activates = true
+                    _ = try await NSWorkspace.shared.open([report.fileURL], withApplicationAt: appURL, configuration: config)
+                    coordinator.showToast(
+                        "已在 PureRef 中打开 \(report.imageCount) 张素材",
+                        icon: "arrow.up.forward.app",
+                        tone: .success
+                    )
+                } catch {
+                    coordinator.showToast("发送到 PureRef 失败：\(error.localizedDescription)", icon: "exclamationmark.triangle", tone: .error)
+                }
+            }
+            return
+        }
+
+        let panel = NSSavePanel()
+        panel.title = openInPureRef ? "本机未检测到 PureRef，另存为 .pur 场景" : "导出为 PureRef 场景 (.pur)"
+        panel.message = "将所选 \(ids.count) 项素材按比例整齐排板并打包为标准 .pur 场景文件（兼容 PureRef 1.x 与 2.x）。"
+        panel.nameFieldStringValue = "\(defaultTitle).pur"
+        panel.allowedContentTypes = [UTType(filenameExtension: "pur") ?? .data]
+        panel.allowsOtherFileTypes = true
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        let targetURL = url.pathExtension.lowercased() == "pur" ? url : url.appendingPathExtension("pur")
+        coordinator.showToast("正在生成 PureRef (.pur) 文件…", icon: "square.grid.2x2")
+        Task {
+            do {
+                let report = try await library.exportAssetsToPureRef(
+                    assetIDs: ids,
+                    title: defaultTitle,
+                    to: targetURL
+                )
+                NSWorkspace.shared.activateFileViewerSelecting([report.fileURL])
+                coordinator.showToast(
+                    "已导出 \(report.imageCount) 张素材至 \(report.fileURL.lastPathComponent)",
+                    icon: "checkmark.circle.fill",
+                    tone: .success
+                )
+            } catch {
+                coordinator.showToast("导出 PureRef 失败：\(error.localizedDescription)", icon: "exclamationmark.triangle", tone: .error)
+            }
+        }
+    }
+
+    private func exportCurrentBoardToPureRef(openInPureRef: Bool) {
+        guard let board = moodboards.activeBoard else { return }
+        let safeTitle = board.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? "Charkle情绪板"
+            : board.title
+
+        if openInPureRef, let appURL = LibraryStore.installedPureRefAppURL() {
+            coordinator.showToast("正在按当前画布排版生成 PureRef 场景…", icon: "square.grid.2x2")
+            Task {
+                do {
+                    let stagedURL = try LibraryStore.stagedPureRefExportURL(title: safeTitle)
+                    let report = try await library.exportMoodboardToPureRef(board: board, to: stagedURL)
+                    let config = NSWorkspace.OpenConfiguration()
+                    config.activates = true
+                    _ = try await NSWorkspace.shared.open([report.fileURL], withApplicationAt: appURL, configuration: config)
+                    let notePart = report.noteCount > 0 ? "、\(report.noteCount) 条便签" : ""
+                    coordinator.showToast(
+                        "已在 PureRef 中打开情绪板（\(report.placementCount) 张图\(notePart)）",
+                        icon: "arrow.up.forward.app",
+                        tone: .success
+                    )
+                } catch {
+                    coordinator.showToast("在 PureRef 中打开失败：\(error.localizedDescription)", icon: "exclamationmark.triangle", tone: .error)
+                }
+            }
+            return
+        }
+
+        let panel = NSSavePanel()
+        panel.title = openInPureRef ? "本机未检测到 PureRef，另存为 .pur 场景" : "导出情绪板为 PureRef 场景 (.pur)"
+        panel.message = "保留当前情绪板的图片位置、尺寸、旋转、裁切、层级与文字便签，生成标准 .pur 文件（兼容 PureRef 1.x 与 2.x）。"
+        panel.nameFieldStringValue = "\(safeTitle).pur"
+        panel.allowedContentTypes = [UTType(filenameExtension: "pur") ?? .data]
+        panel.allowsOtherFileTypes = true
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        let targetURL = url.pathExtension.lowercased() == "pur" ? url : url.appendingPathExtension("pur")
+        coordinator.showToast("正在导出 PureRef (.pur) 场景…", icon: "square.grid.2x2")
+        Task {
+            do {
+                let report = try await library.exportMoodboardToPureRef(board: board, to: targetURL)
+                NSWorkspace.shared.activateFileViewerSelecting([report.fileURL])
+                let notePart = report.noteCount > 0 ? "、\(report.noteCount) 条便签" : ""
+                coordinator.showToast(
+                    "已导出 PureRef 场景（\(report.placementCount) 张图\(notePart)）至 \(report.fileURL.lastPathComponent)",
+                    icon: "checkmark.circle.fill",
+                    tone: .success
+                )
+            } catch {
+                coordinator.showToast("导出 PureRef 失败：\(error.localizedDescription)", icon: "exclamationmark.triangle", tone: .error)
             }
         }
     }

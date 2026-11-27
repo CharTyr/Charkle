@@ -18,6 +18,7 @@ struct CaptureSheetView: View {
     @State private var photoItems: [PhotosPickerItem] = []
     @State private var isFileImporterPresented = false
     @State private var isCameraPresented = false
+    @State private var autoExtractSocialMedia = false
 
     var body: some View {
         NavigationStack {
@@ -106,7 +107,7 @@ struct CaptureSheetView: View {
                             .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
 
                         TextField(
-                            "支持小红书分享文案、X 推文、GitHub 仓库或任意网页链接…",
+                            "支持 B站、YouTube、小红书、X、GitHub 或任意网页链接…",
                             text: $rawLinkText,
                             axis: .vertical
                         )
@@ -139,13 +140,35 @@ struct CaptureSheetView: View {
                                 in: RoundedRectangle(cornerRadius: MobileTheme.Radius.cardOuter, style: .continuous)
                             )
 
+                        Toggle(isOn: $autoExtractSocialMedia) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("社媒链接自动拆出独立素材")
+                                    .font(.system(size: 13.5, weight: .medium))
+                                Text("将小红书 / X 帖子内的图片与视频同步存为单独素材，并保留原帖来源")
+                                    .font(.system(size: 11.5))
+                                    .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
+                            }
+                        }
+                        .tint(MobileTheme.accent(for: colorScheme))
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 9)
+                        .background(
+                            MobileTheme.surfaceElevated(for: colorScheme),
+                            in: RoundedRectangle(cornerRadius: MobileTheme.Radius.cardOuter, style: .continuous)
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: MobileTheme.Radius.cardOuter, style: .continuous)
+                                .strokeBorder(MobileTheme.hairline(for: colorScheme), lineWidth: 0.75)
+                        )
+
                         Button {
                             Task {
                                 let ok = await store.captureURLOrShareText(
                                     rawLinkText,
                                     notes: notesText,
                                     tags: parsedTags,
-                                    targetFolderID: selectedFolderID
+                                    targetFolderID: selectedFolderID,
+                                    autoExtractSocialMedia: autoExtractSocialMedia
                                 )
                                 if ok { dismiss() }
                             }
@@ -291,9 +314,20 @@ struct CaptureSheetView: View {
                 url.stopAccessingSecurityScopedResource()
             }
         }
-        let inputs = urls.map { CaptureInput.fileURL($0) }
-        let imported = await store.ingestInputs(inputs, targetFolderID: selectedFolderID, tags: parsedTags)
-        if !imported.isEmpty {
+        let pureRefURLs = urls.filter { PureRefCodec.isPureRefFileURL($0) }
+        let regularURLs = urls.filter { !PureRefCodec.isPureRefFileURL($0) }
+        var didImportAny = false
+
+        if !pureRefURLs.isEmpty {
+            let results = await store.importPureRefScenes(urls: pureRefURLs, targetFolderID: selectedFolderID)
+            didImportAny = didImportAny || !results.isEmpty
+        }
+        if !regularURLs.isEmpty {
+            let inputs = regularURLs.map { CaptureInput.fileURL($0) }
+            let imported = await store.ingestInputs(inputs, targetFolderID: selectedFolderID, tags: parsedTags)
+            didImportAny = didImportAny || !imported.isEmpty
+        }
+        if didImportAny {
             dismiss()
         }
     }

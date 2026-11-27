@@ -190,8 +190,7 @@ struct MasonryGalleryView: View {
                     let topClearance: CGFloat = showPhotosFloatingHeader
                         ? (store.hasActiveFilters ? 116 : 74)
                         : (colCount >= 5 ? 4 : 8)
-                    let bannerExtra: CGFloat = (store.semanticSearchReport != nil ? 48 : 0)
-                        + (store.syncStatus.isSyncing && store.syncStatus.progressFraction != nil ? 62 : 0)
+                    let bannerExtra: CGFloat = (store.syncStatus.isSyncing && store.syncStatus.progressFraction != nil) ? 62 : 0
                     let snapshot = VirtualizedMasonrySnapshot.build(
                         assets: displayedAssets,
                         containerWidth: proxy.size.width,
@@ -229,15 +228,9 @@ struct MasonryGalleryView: View {
                                             height: max(proxy.size.height, snapshot.contentHeight)
                                         )
 
-                                    // Optional top status banners (semantic search / sync progress)
+                                    // Optional top status banner (sync progress)
                                     if bannerExtra > 0 {
                                         VStack(spacing: 8) {
-                                            if let report = store.semanticSearchReport {
-                                                MobileSemanticSearchStatusBar(report: report) {
-                                                    store.semanticSearchEnabled = false
-                                                    Task { await store.clearSemanticSearch() }
-                                                }
-                                            }
                                             if store.syncStatus.isSyncing, let fraction = store.syncStatus.progressFraction {
                                                 syncProgressBanner(fraction: fraction)
                                             }
@@ -889,7 +882,11 @@ struct MasonryGalleryView: View {
     // MARK: - Multi-Select Floating Dock
 
     private var multiSelectFloatingDock: some View {
-        HStack(spacing: MobileTheme.Space.md) {
+        let extractableCount = displayedAssets.filter {
+            store.selectedAssetIDs.contains($0.id) && $0.hasExtractableLinkMedia
+        }.count
+
+        return HStack(spacing: MobileTheme.Space.sm) {
             Button {
                 if store.selectedAssetIDs.count == displayedAssets.count {
                     store.selectedAssetIDs.removeAll()
@@ -905,15 +902,42 @@ struct MasonryGalleryView: View {
             .buttonStyle(.plain)
 
             Text("已选 \(store.selectedAssetIDs.count)")
-                .font(.system(size: 13.5, weight: .semibold).monospacedDigit())
+                .font(.system(size: 13, weight: .semibold).monospacedDigit())
+                .lineLimit(1)
 
-            Spacer(minLength: 4)
+            Spacer(minLength: 2)
+
+            if extractableCount > 0 {
+                Button {
+                    let ids = store.selectedAssetIDs
+                    MobileHaptics.light()
+                    Task {
+                        let count = await store.extractMediaFromSelectedLinks(ids)
+                        if count > 0 {
+                            store.isMultiSelectMode = false
+                            store.selectedAssetIDs.removeAll()
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        if store.isExtractingSocialMedia {
+                            ProgressView().controlSize(.mini)
+                        } else {
+                            Image(systemName: "square.and.arrow.down.on.square")
+                        }
+                        Text("提取(\(extractableCount))")
+                    }
+                    .font(.system(size: 12.5, weight: .semibold))
+                    .foregroundStyle(MobileTheme.accent(for: colorScheme))
+                }
+                .disabled(store.isExtractingSocialMedia)
+            }
 
             Button {
                 isBatchBoardSheetPresented = true
             } label: {
                 Label("情绪板", systemImage: "rectangle.3.group")
-                    .font(.system(size: 13, weight: .medium))
+                    .font(.system(size: 12.5, weight: .medium))
             }
             .disabled(store.selectedAssetIDs.isEmpty)
 
@@ -921,51 +945,62 @@ struct MasonryGalleryView: View {
                 isBatchFolderSheetPresented = true
             } label: {
                 Label("移动", systemImage: "folder")
-                    .font(.system(size: 13, weight: .medium))
+                    .font(.system(size: 12.5, weight: .medium))
             }
             .disabled(store.selectedAssetIDs.isEmpty)
 
-            if store.scope == .trash {
+            Menu {
                 Button {
                     let ids = Array(store.selectedAssetIDs)
-                    store.isMultiSelectMode = false
-                    store.selectedAssetIDs.removeAll()
+                    let title = "Charkle参考(\(ids.count))"
                     Task {
-                        await store.patchAssets(
-                            AssetBatchPatch(assetIDs: ids, isTrashed: false),
-                            successToast: "已恢复 \(ids.count) 项素材"
-                        )
+                        if let url = await store.exportAssetsPureRefURL(assetIDs: ids, title: title) {
+                            shareAssetURL = url
+                        }
                     }
                 } label: {
-                    Label("恢复", systemImage: "arrow.uturn.backward")
-                        .font(.system(size: 13, weight: .medium))
+                    Label("导出 PureRef (.pur)", systemImage: "square.grid.2x2")
                 }
-                .disabled(store.selectedAssetIDs.isEmpty)
 
-                Button(role: .destructive) {
-                    confirmPermanentDelete = true
-                } label: {
-                    Image(systemName: "trash.slash")
-                        .font(.system(size: 14, weight: .medium))
-                }
-                .disabled(store.selectedAssetIDs.isEmpty)
-            } else {
-                Button(role: .destructive) {
-                    let ids = Array(store.selectedAssetIDs)
-                    store.isMultiSelectMode = false
-                    store.selectedAssetIDs.removeAll()
-                    Task {
-                        await store.patchAssets(
-                            AssetBatchPatch(assetIDs: ids, isTrashed: true),
-                            successToast: "已移入回收站"
-                        )
+                if store.scope == .trash {
+                    Button {
+                        let ids = Array(store.selectedAssetIDs)
+                        store.isMultiSelectMode = false
+                        store.selectedAssetIDs.removeAll()
+                        Task {
+                            await store.patchAssets(
+                                AssetBatchPatch(assetIDs: ids, isTrashed: false),
+                                successToast: "已恢复 \(ids.count) 项素材"
+                            )
+                        }
+                    } label: {
+                        Label("恢复素材", systemImage: "arrow.uturn.backward")
                     }
-                } label: {
-                    Image(systemName: "trash")
-                        .font(.system(size: 14, weight: .medium))
+                    Button(role: .destructive) {
+                        confirmPermanentDelete = true
+                    } label: {
+                        Label("永久删除", systemImage: "trash.slash")
+                    }
+                } else {
+                    Button(role: .destructive) {
+                        let ids = Array(store.selectedAssetIDs)
+                        store.isMultiSelectMode = false
+                        store.selectedAssetIDs.removeAll()
+                        Task {
+                            await store.patchAssets(
+                                AssetBatchPatch(assetIDs: ids, isTrashed: true),
+                                successToast: "已移入回收站"
+                            )
+                        }
+                    } label: {
+                        Label("移入回收站", systemImage: "trash")
+                    }
                 }
-                .disabled(store.selectedAssetIDs.isEmpty)
+            } label: {
+                Image(systemName: "ellipsis.circle")
+                    .font(.system(size: 16, weight: .medium))
             }
+            .disabled(store.selectedAssetIDs.isEmpty)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
@@ -1330,6 +1365,30 @@ struct GalleryCardView: View {
                     store.setColorFilter(hex)
                 } label: {
                     Label("按主色筛图", systemImage: "eyedropper")
+                }
+            }
+
+            if let post = asset.richMetadata?.socialPost, !post.effectiveAttachments.isEmpty {
+                Button {
+                    let target = asset
+                    Task { _ = await store.extractAllMediaFromSocialPost(postAsset: target) }
+                } label: {
+                    Label(
+                        post.platform.isVideoPlatform
+                            ? "保存视频为独立素材"
+                            : "提取帖子内媒体为独立素材（\(post.effectiveAttachments.count) 项）",
+                        systemImage: post.platform.isVideoPlatform ? "film.stack" : "square.and.arrow.down.on.square"
+                    )
+                }
+            } else if let web = asset.richMetadata?.webPage, !web.attachments.isEmpty {
+                Button {
+                    let target = asset
+                    Task { _ = await store.extractAllMediaFromLinkAsset(target) }
+                } label: {
+                    Label(
+                        web.hasVideo ? "保存网页视频为独立素材" : "提取网页媒体为独立素材（\(web.attachments.count) 项）",
+                        systemImage: web.hasVideo ? "film.stack" : "square.and.arrow.down.on.square"
+                    )
                 }
             }
 

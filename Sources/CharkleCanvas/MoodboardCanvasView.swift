@@ -52,6 +52,8 @@ public struct MoodboardCanvasCallbacks {
     public var onCopyExportedImage: (MoodboardExportOptions) -> Void
     public var onSaveExportedImage: (MoodboardExportFormat, MoodboardExportOptions) -> Void
     public var onExportFigmaBundle: (MoodboardExportOptions) -> Void
+    public var onExportPureRef: () -> Void
+    public var onOpenInPureRef: () -> Void
     public var onOpenFigmaPluginGuide: () -> Void
     public var onSmartFocusNode: (UUID, UUID, String?) -> Void
     public var onVisualMatchCropNode: (UUID, UUID, UUID) -> Void
@@ -77,6 +79,8 @@ public struct MoodboardCanvasCallbacks {
         onCopyExportedImage: @escaping (MoodboardExportOptions) -> Void = { _ in },
         onSaveExportedImage: @escaping (MoodboardExportFormat, MoodboardExportOptions) -> Void = { _, _ in },
         onExportFigmaBundle: @escaping (MoodboardExportOptions) -> Void = { _ in },
+        onExportPureRef: @escaping () -> Void = {},
+        onOpenInPureRef: @escaping () -> Void = {},
         onOpenFigmaPluginGuide: @escaping () -> Void = {},
         onSmartFocusNode: @escaping (UUID, UUID, String?) -> Void = { _, _, _ in },
         onVisualMatchCropNode: @escaping (UUID, UUID, UUID) -> Void = { _, _, _ in },
@@ -101,6 +105,8 @@ public struct MoodboardCanvasCallbacks {
         self.onCopyExportedImage = onCopyExportedImage
         self.onSaveExportedImage = onSaveExportedImage
         self.onExportFigmaBundle = onExportFigmaBundle
+        self.onExportPureRef = onExportPureRef
+        self.onOpenInPureRef = onOpenInPureRef
         self.onOpenFigmaPluginGuide = onOpenFigmaPluginGuide
         self.onSmartFocusNode = onSmartFocusNode
         self.onVisualMatchCropNode = onVisualMatchCropNode
@@ -1983,6 +1989,17 @@ public struct MoodboardCanvasView: View {
                         callbacks.onOpenFigmaPluginGuide()
                     } label: {
                         Label("安装 / 获取 Figma Bridge 插件…", systemImage: "puzzlepiece.extension")
+                    }
+                    Divider()
+                    Button {
+                        callbacks.onOpenInPureRef()
+                    } label: {
+                        Label("在 PureRef 中打开当前情绪板", systemImage: "arrow.up.forward.app")
+                    }
+                    Button {
+                        callbacks.onExportPureRef()
+                    } label: {
+                        Label("导出为 PureRef 场景 (.pur)…", systemImage: "square.grid.2x2")
                     }
                     Divider()
                     Button("复制 2× 高清图（直接 ⌘V 到 Figma / Keynote）") {

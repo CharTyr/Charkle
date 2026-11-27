@@ -433,7 +433,9 @@ public nonisolated enum MasonryLayoutEngine {
             if asset.isSocialPost {
                 asset.pixelWidth > 0 && asset.pixelHeight > 0
                     ? CGFloat(asset.aspectRatio)
-                    : (asset.richMetadata?.socialPost?.platform == .xiaohongshu ? 0.625 : 1.12)
+                    : (asset.richMetadata?.socialPost?.platform == .xiaohongshu
+                        ? 0.625
+                        : (asset.richMetadata?.socialPost?.platform.isVideoPlatform == true ? 1.26 : 1.12))
             } else if asset.isGitHubRepo {
                 asset.pixelWidth > 0 && asset.pixelHeight > 0 ? CGFloat(asset.aspectRatio) : 1.32
             } else {
@@ -609,6 +611,8 @@ public struct MasonryCallbacks {
     public var onCopyAssets: ([UUID]) -> Void
     public var onCutAssets: ([UUID]) -> Void
     public var onPasteIntoCurrentFolder: () -> Void
+    public var onExportToPureRef: ([UUID]) -> Void
+    public var onOpenInPureRef: ([UUID]) -> Void
     public var onRetagAssets: ([UUID]) -> Void
     public var onTrashAssets: ([UUID]) -> Void
     public var onRestoreAssets: ([UUID]) -> Void
@@ -627,6 +631,8 @@ public struct MasonryCallbacks {
         onCopyAssets: @escaping ([UUID]) -> Void = { _ in },
         onCutAssets: @escaping ([UUID]) -> Void = { _ in },
         onPasteIntoCurrentFolder: @escaping () -> Void = {},
+        onExportToPureRef: @escaping ([UUID]) -> Void = { _ in },
+        onOpenInPureRef: @escaping ([UUID]) -> Void = { _ in },
         onRetagAssets: @escaping ([UUID]) -> Void = { _ in },
         onTrashAssets: @escaping ([UUID]) -> Void = { _ in },
         onRestoreAssets: @escaping ([UUID]) -> Void = { _ in },
@@ -644,6 +650,8 @@ public struct MasonryCallbacks {
         self.onCopyAssets = onCopyAssets
         self.onCutAssets = onCutAssets
         self.onPasteIntoCurrentFolder = onPasteIntoCurrentFolder
+        self.onExportToPureRef = onExportToPureRef
+        self.onOpenInPureRef = onOpenInPureRef
         self.onRetagAssets = onRetagAssets
         self.onTrashAssets = onTrashAssets
         self.onRestoreAssets = onRestoreAssets
@@ -3966,6 +3974,22 @@ internal final class MasonryDocumentView: NSView, NSDraggingSource {
             menu.addItem(makeMenuItem(title: "加入情绪板…", symbol: "rectangle.3.group") { [weak self] in
                 self?.callbacks.onAddToMoodboard(targets)
             })
+
+            let pureRefItem = NSMenuItem(
+                title: targets.count > 1 ? "发送到 PureRef（\(targets.count) 项）" : "发送到 PureRef",
+                action: nil,
+                keyEquivalent: ""
+            )
+            pureRefItem.image = NSImage(systemSymbolName: "square.grid.2x2", accessibilityDescription: nil)
+            let pureRefSubmenu = NSMenu()
+            pureRefSubmenu.addItem(makeMenuItem(title: "在 PureRef 中打开", symbol: "arrow.up.forward.app") { [weak self] in
+                self?.callbacks.onOpenInPureRef(targets)
+            })
+            pureRefSubmenu.addItem(makeMenuItem(title: "导出为 PureRef (.pur)…", symbol: "square.and.arrow.up") { [weak self] in
+                self?.callbacks.onExportToPureRef(targets)
+            })
+            pureRefItem.submenu = pureRefSubmenu
+            menu.addItem(pureRefItem)
             menu.addItem(makeMenuItem(
                 title: targets.count > 1 ? "AI 批量重新打标（\(targets.count) 项）" : "AI 重新打标",
                 symbol: "sparkles"

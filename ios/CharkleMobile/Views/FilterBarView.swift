@@ -253,44 +253,6 @@ struct MobileColorFilterPanel: View {
     }
 }
 
-// MARK: - Semantic Search Status Bar (Desktop Parity)
-
-struct MobileSemanticSearchStatusBar: View {
-    let report: SemanticSearchReport
-    let onClear: () -> Void
-    @Environment(\.colorScheme) private var colorScheme
-
-    var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "sparkles")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(MobileTheme.accent(for: colorScheme))
-            Text(report.summary.isEmpty ? "语义搜图匹配 \(report.hits.count) 项" : report.summary)
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(.primary)
-                .lineLimit(2)
-            Spacer(minLength: 6)
-            Button("返回普通检索", action: onClear)
-                .font(.system(size: 11.5, weight: .semibold))
-                .foregroundStyle(MobileTheme.accent(for: colorScheme))
-                .padding(.horizontal, 9)
-                .padding(.vertical, 5)
-                .background(MobileTheme.accentSoft(for: colorScheme), in: Capsule())
-                .buttonStyle(.plain)
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(
-            MobileTheme.surfaceElevated(for: colorScheme),
-            in: RoundedRectangle(cornerRadius: MobileTheme.Radius.chip + 2, style: .continuous)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: MobileTheme.Radius.chip + 2, style: .continuous)
-                .strokeBorder(MobileTheme.accent(for: colorScheme).opacity(0.28), lineWidth: 0.75)
-        )
-    }
-}
-
 // MARK: - Active Filter Tokens Row (Desktop Parity)
 
 struct MobileActiveFilterTokensRow: View {
@@ -407,17 +369,22 @@ struct FilterBarView: View {
     var body: some View {
         VStack(spacing: 8) {
             HStack(spacing: 8) {
-                // Desktop-matched Search + Semantic Search capsule
+                // Unified Search capsule (instant literal + automatic hybrid semantic fusion)
                 HStack(spacing: 7) {
-                    Image(systemName: store.semanticSearchEnabled ? "sparkles" : "magnifyingglass")
-                        .font(.system(size: 13.5, weight: .medium))
-                        .foregroundStyle(
-                            store.semanticSearchEnabled
-                                ? MobileTheme.accent(for: colorScheme)
-                                : MobileTheme.secondaryInk(for: colorScheme)
-                        )
+                    Group {
+                        if store.isRunningSemanticSearch {
+                            ProgressView()
+                                .controlSize(.mini)
+                        } else {
+                            Image(systemName: "magnifyingglass")
+                                .font(.system(size: 13.5, weight: .medium))
+                                .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
+                        }
+                    }
+                    .frame(width: 16, height: 16)
+
                     TextField(
-                        store.semanticSearchEnabled ? "描述画面，回车语义搜图…" : "搜标题、标签、备注、OCR 或颜色…",
+                        "搜索素材、描述画面、标签或颜色…",
                         text: Binding(
                             get: { store.criteria.searchQuery },
                             set: { store.updateSearchQuery($0) }
@@ -428,9 +395,7 @@ struct FilterBarView: View {
                     .autocorrectionDisabled()
                     .submitLabel(.search)
                     .onSubmit {
-                        if store.semanticSearchEnabled {
-                            Task { _ = await store.runSemanticSearch() }
-                        }
+                        store.submitSearch()
                     }
 
                     if !store.criteria.searchQuery.isEmpty {
@@ -443,40 +408,10 @@ struct FilterBarView: View {
                         }
                         .buttonStyle(.plain)
                     }
-
-                    // Hybrid visual semantic search toggle matching desktop CharkleTokenSearchField
-                    Button {
-                        store.toggleSemanticSearchMode()
-                    } label: {
-                        HStack(spacing: 3) {
-                            if store.isRunningSemanticSearch {
-                                ProgressView()
-                                    .controlSize(.mini)
-                            } else {
-                                Image(systemName: "sparkles")
-                                    .font(.system(size: 10.5, weight: .semibold))
-                            }
-                            Text("语义")
-                                .font(.system(size: 11, weight: .semibold))
-                                .lineLimit(1)
-                        }
-                        .foregroundStyle(
-                            store.semanticSearchEnabled ? .white : MobileTheme.accent(for: colorScheme)
-                        )
-                        .padding(.horizontal, 8)
-                        .frame(height: 24)
-                        .background(
-                            store.semanticSearchEnabled
-                                ? MobileTheme.accentButtonFill(for: colorScheme)
-                                : MobileTheme.accentSoft(for: colorScheme),
-                            in: Capsule()
-                        )
-                    }
-                    .buttonStyle(MobileTactileButtonStyle())
                 }
                 .padding(.leading, 12)
-                .padding(.trailing, 6)
-                .padding(.vertical, 6)
+                .padding(.trailing, 10)
+                .padding(.vertical, 8)
                 .background(
                     MobileTheme.surfaceElevated(for: colorScheme),
                     in: Capsule()
@@ -740,6 +675,10 @@ struct VisualSearchTabView: View {
     let onNavigateToScope: (MobileScope) -> Void
     let onOpenBoard: (UUID) -> Void
     var onOpenPinterestSpace: (() -> Void)? = nil
+    var externalSearchBarActive: Bool = false
+    var searchScopeMode: MobileSearchScopeMode = .all
+    var activeFolderScopeTitle: String? = nil
+    var onClearFolderScope: (() -> Void)? = nil
 
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -816,9 +755,34 @@ struct VisualSearchTabView: View {
                             .padding(.horizontal, 14)
                         }
 
-                        // 1. Desktop-matched Token Search Field + Hybrid Semantic Search toggle
-                        searchFieldRow
+                        // 1. Unified Search Field (hidden on iPhone when bottom Liquid Search bar is expanded)
+                        if !externalSearchBarActive {
+                            searchFieldRow
+                                .padding(.horizontal, 14)
+                        } else if searchScopeMode == .currentFolder, let folderTitle = activeFolderScopeTitle {
+                            HStack(spacing: 8) {
+                                Label("仅在「\(folderTitle)」中搜图", systemImage: "folder.fill")
+                                    .font(.system(size: 12.5, weight: .semibold))
+                                    .foregroundStyle(MobileTheme.positive(for: colorScheme))
+                                Spacer()
+                                if let onClearFolderScope {
+                                    Button("切回全库") {
+                                        MobileHaptics.light()
+                                        onClearFolderScope()
+                                    }
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .foregroundStyle(MobileTheme.accent(for: colorScheme))
+                                    .buttonStyle(.plain)
+                                }
+                            }
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            .background(
+                                MobileTheme.positive(for: colorScheme).opacity(colorScheme == .dark ? 0.16 : 0.10),
+                                in: RoundedRectangle(cornerRadius: 11, style: .continuous)
+                            )
                             .padding(.horizontal, 14)
+                        }
 
                         // 2. Quick toggle strip: 主色调 · 筛选条件 · 排序
                         quickFilterToolbar
@@ -830,17 +794,7 @@ struct VisualSearchTabView: View {
                                 .padding(.horizontal, 14)
                         }
 
-                        // 4. Semantic Search Status Pill
-                        if let report = store.semanticSearchReport {
-                            MobileSemanticSearchStatusBar(report: report) {
-                                store.semanticSearchEnabled = false
-                                Task { await store.clearSemanticSearch() }
-                            }
-                            .padding(.horizontal, 14)
-                            .transition(.opacity.combined(with: .move(edge: .top)))
-                        }
-
-                        // 5. Desktop 1:1 Studio Color Search Panel (5x2 Swatches + Color Wheel/Eyedropper + #HEX + CIELAB Tolerance)
+                        // 4. Desktop 1:1 Studio Color Search Panel (5x2 Swatches + Color Wheel/Eyedropper + #HEX + CIELAB Tolerance)
                         if isColorPanelExpanded {
                             MobileColorFilterPanel(store: store, title: "按色彩搜图", embedded: false)
                                 .padding(.horizontal, 14)
@@ -885,7 +839,7 @@ struct VisualSearchTabView: View {
                             MobileEmptyStateView(
                                 kind: .noSearchResults,
                                 title: "未找到匹配素材",
-                                subtitle: "试试调宽色彩容差、切换色轮选色，或启用「语义」按画面描述检索。",
+                                subtitle: "试试换个画面描述词、调宽色彩容差，或切换色轮选色。",
                                 primaryActionTitle: store.hasActiveFilters ? "清除条件" : nil,
                                 primaryAction: store.hasActiveFilters ? { store.clearFilters() } : nil
                             )
@@ -931,6 +885,7 @@ struct VisualSearchTabView: View {
                     .padding(.bottom, 40)
                 }
                 .background(MobileTheme.galleryGround(for: colorScheme))
+                .charkleScrollEdgeSoft(for: .bottom)
                 .simultaneousGesture(pinchColumnZoomGesture(currentWidth: proxy.size.width))
 
                 if let activePinchLabel {
@@ -943,6 +898,13 @@ struct VisualSearchTabView: View {
                         .padding(.top, 12)
                         .transition(.opacity.combined(with: .scale(scale: 0.94)))
                         .allowsHitTesting(false)
+                }
+            }
+        }
+        .onChange(of: searchScopeMode) { _, mode in
+            if mode == .color && !isColorPanelExpanded {
+                withAnimation(MobileMotion.accessible(MobileMotion.settleStrong, reduced: reduceMotion)) {
+                    isColorPanelExpanded = true
                 }
             }
         }
@@ -974,17 +936,24 @@ struct VisualSearchTabView: View {
         }
     }
 
-    // MARK: - Search Field + Hybrid Semantic Toggle
+    // MARK: - Unified Search Field
 
     private var searchFieldRow: some View {
-        let accent = MobileTheme.accent(for: colorScheme)
-        return HStack(spacing: 8) {
-            Image(systemName: store.semanticSearchEnabled ? "sparkles" : "magnifyingglass")
-                .font(.system(size: 14.5, weight: .medium))
-                .foregroundStyle(store.semanticSearchEnabled ? accent : MobileTheme.secondaryInk(for: colorScheme))
+        HStack(spacing: 8) {
+            Group {
+                if store.isRunningSemanticSearch {
+                    ProgressView()
+                        .controlSize(.mini)
+                } else {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 14.5, weight: .medium))
+                        .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
+                }
+            }
+            .frame(width: 18, height: 18)
 
             TextField(
-                store.semanticSearchEnabled ? "描述画面、光线或风格，回车语义搜图…" : "搜索素材、拼音、标签、备注、OCR 或颜色…",
+                "搜索素材、描述画面、拼音、标签或颜色…",
                 text: Binding(
                     get: { store.criteria.searchQuery },
                     set: { store.updateSearchQuery($0) }
@@ -995,9 +964,7 @@ struct VisualSearchTabView: View {
             .autocorrectionDisabled()
             .submitLabel(.search)
             .onSubmit {
-                if store.semanticSearchEnabled {
-                    Task { _ = await store.runSemanticSearch() }
-                }
+                store.submitSearch()
             }
 
             if !store.criteria.searchQuery.isEmpty {
@@ -1010,48 +977,16 @@ struct VisualSearchTabView: View {
                 }
                 .buttonStyle(.plain)
             }
-
-            // Desktop-parity Semantic Search Pill
-            Button {
-                store.toggleSemanticSearchMode()
-            } label: {
-                HStack(spacing: 4) {
-                    if store.isRunningSemanticSearch {
-                        ProgressView()
-                            .controlSize(.mini)
-                    } else {
-                        Image(systemName: "sparkles")
-                            .font(.system(size: 11, weight: .semibold))
-                    }
-                    Text("语义")
-                        .font(.system(size: 12, weight: .semibold))
-                        .lineLimit(1)
-                }
-                .foregroundStyle(store.semanticSearchEnabled ? .white : accent)
-                .padding(.horizontal, 9)
-                .frame(height: 28)
-                .background(
-                    store.semanticSearchEnabled
-                        ? MobileTheme.accentButtonFill(for: colorScheme)
-                        : MobileTheme.accentSoft(for: colorScheme),
-                    in: Capsule()
-                )
-            }
-            .buttonStyle(MobileTactileButtonStyle())
         }
-        .padding(.leading, 13)
-        .padding(.trailing, 7)
-        .padding(.vertical, 7)
+        .padding(.horizontal, 13)
+        .padding(.vertical, 10)
         .background(
             MobileTheme.surfaceElevated(for: colorScheme),
             in: RoundedRectangle(cornerRadius: MobileTheme.Radius.cardOuter, style: .continuous)
         )
         .overlay(
             RoundedRectangle(cornerRadius: MobileTheme.Radius.cardOuter, style: .continuous)
-                .strokeBorder(
-                    store.semanticSearchEnabled ? accent.opacity(0.45) : MobileTheme.hairline(for: colorScheme),
-                    lineWidth: store.semanticSearchEnabled ? 1 : 0.75
-                )
+                .strokeBorder(MobileTheme.hairline(for: colorScheme), lineWidth: 0.75)
         )
     }
 

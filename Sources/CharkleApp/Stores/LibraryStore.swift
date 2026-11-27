@@ -82,8 +82,7 @@ public final class LibraryStore {
     public var isLoadingSimilarAssets: Bool = false
     public var suggestedFolder: FolderSuggestion?
 
-    // Phase 2: Hybrid Semantic Search & Inbox Smart Batch Triage
-    public var semanticSearchEnabled: Bool = false
+    // Phase 2: Unified Hybrid Semantic Search & Inbox Smart Batch Triage
     public var isRunningSemanticSearch: Bool = false
     public var semanticSearchReport: SemanticSearchReport?
     public var isRunningInboxTriage: Bool = false
@@ -114,6 +113,7 @@ public final class LibraryStore {
     @ObservationIgnored private var fullRefreshGeneration: UInt64 = 0
     @ObservationIgnored private var minimalRefreshGeneration: UInt64 = 0
     @ObservationIgnored private var semanticSearchGeneration: UInt64 = 0
+    @ObservationIgnored private var semanticEnhancementDelayTask: Task<Void, Never>?
     private var semanticSearchTask: Task<SemanticSearchReport?, Never>?
     @ObservationIgnored private var activeRefreshAllTask: Task<Void, Never>?
     @ObservationIgnored private var activeRefreshAssetsTask: Task<Void, Never>?
@@ -153,6 +153,7 @@ public final class LibraryStore {
     isolated deinit {
         inspectorContextTask?.cancel()
         retagTask?.cancel()
+        semanticEnhancementDelayTask?.cancel()
         semanticSearchTask?.cancel()
         activeRefreshAllTask?.cancel()
         activeRefreshAssetsTask?.cancel()
@@ -240,6 +241,8 @@ public final class LibraryStore {
         activeRefreshAssetsTask = nil
         enrichmentDebounceTask?.cancel()
         enrichmentDebounceTask = nil
+        semanticEnhancementDelayTask?.cancel()
+        semanticEnhancementDelayTask = nil
         semanticSearchTask?.cancel()
         semanticSearchTask = nil
         isRunningSemanticSearch = false
@@ -339,6 +342,8 @@ public final class LibraryStore {
 
     public func applyDestination(_ destination: SidebarDestination) async {
         semanticSearchGeneration &+= 1
+        semanticEnhancementDelayTask?.cancel()
+        semanticEnhancementDelayTask = nil
         semanticSearchTask?.cancel()
         semanticSearchTask = nil
         semanticSearchReport = nil
@@ -532,7 +537,19 @@ public final class LibraryStore {
                    self.filter == requestedFilter,
                    self.activeSmartFolderID == requestedSmartID {
                     let filtered = self.applyActiveSmartFolderIfNeeded(visible)
-                    self.assets = self.canonicalizeAssetsAgainstCache(filtered)
+                    let canonical = self.canonicalizeAssetsAgainstCache(filtered)
+                    self.assets = canonical
+                    let trimmedQuery = requestedFilter.searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !trimmedQuery.isEmpty {
+                        self.scheduleUnifiedSemanticEnhancement(
+                            query: trimmedQuery,
+                            requestedFilter: requestedFilter,
+                            requestedSmartID: requestedSmartID,
+                            assetsGen: assetsGen,
+                            literalAssets: canonical,
+                            delayMilliseconds: 250
+                        )
+                    }
                 }
             } catch {
                 if !(error is CancellationError) && fullGen == self.fullRefreshGeneration {
@@ -545,8 +562,16 @@ public final class LibraryStore {
         await task.value
     }
 
-    public func refreshAssets() async {
+    public func refreshAssets(semanticEnhancementDelayMs: Int? = 300) async {
         activeRefreshAssetsTask?.cancel()
+        semanticEnhancementDelayTask?.cancel()
+        semanticEnhancementDelayTask = nil
+        semanticSearchTask?.cancel()
+        semanticSearchTask = nil
+        semanticSearchGeneration &+= 1
+        isRunningSemanticSearch = false
+        semanticSearchReport = nil
+
         assetsRequestGeneration &+= 1
         let gen = assetsRequestGeneration
         let requestedFilter = filter
@@ -581,6 +606,18 @@ public final class LibraryStore {
                 self.assets = canonical
                 if changedAny {
                     self.allAssetsByID = nextByID
+                }
+
+                let trimmedQuery = requestedFilter.searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmedQuery.isEmpty, let delayMs = semanticEnhancementDelayMs {
+                    self.scheduleUnifiedSemanticEnhancement(
+                        query: trimmedQuery,
+                        requestedFilter: requestedFilter,
+                        requestedSmartID: requestedSmartID,
+                        assetsGen: gen,
+                        literalAssets: canonical,
+                        delayMilliseconds: delayMs
+                    )
                 }
             } catch {
                 if !(error is CancellationError) && gen == self.assetsRequestGeneration {
@@ -720,8 +757,7 @@ public final class LibraryStore {
         attachment: SocialMediaAttachment,
         index: Int
     ) async -> AssetRecord? {
-        guard let post = postAsset.richMetadata?.socialPost,
-              let mediaURL = URL(string: attachment.url) else { return nil }
+        guard let post = postAsset.richMetadata?.socialPost else { return nil }
         do {
             let tempDir = FileManager.default.temporaryDirectory
                 .appending(path: "charkle-social-extract-\(UUID().uuidString)", directoryHint: .isDirectory)
@@ -736,7 +772,19 @@ public final class LibraryStore {
             let baseName = "\(post.platform.displayName)-\(post.authorHandle)-\(kindTag)\(index + 1)"
 
             let created: [AssetRecord]
-            if attachment.kind == .video || attachment.kind == .gif {
+            if post.platform.isVideoPlatform {
+                let videoFile = try await VideoPlatformResolver.downloadVideo(
+                    for: post,
+                    to: tempDir,
+                    baseName: post.articleTitle ?? baseName
+                )
+                created = try await engine.ingest(
+                    [.fileURL(videoFile)],
+                    targetFolderID: postAsset.folderID,
+                    targetBoardID: nil
+                )
+            } else if attachment.kind == .video || attachment.kind == .gif {
+                guard let mediaURL = URL(string: attachment.url) else { return nil }
                 var localVideoFile: URL?
                 if index == 0,
                    let cached = try? await engine.originalURL(for: postAsset.id),
@@ -766,6 +814,7 @@ public final class LibraryStore {
                     targetBoardID: nil
                 )
             } else {
+                guard let mediaURL = URL(string: attachment.url) else { return nil }
                 let mediaItem = XPostMedia(kind: .photo, url: mediaURL)
                 guard let localFile = await XPostResolver.downloadMedia(mediaItem, to: tempDir, baseName: baseName),
                       let imageData = try? Data(contentsOf: localFile) else {
@@ -787,14 +836,33 @@ public final class LibraryStore {
                 }
                 return post.authorName
             }()
-            let attributionNotes = [
-                "来源\(post.platform.postNoun)：\(authorAttribution) · \(post.platform.displayName)",
-                post.bodyText.trimmingCharacters(in: .whitespacesAndNewlines),
-                "原链接：\(post.originalURL)"
-            ].filter { !$0.isEmpty }.joined(separator: "\n\n")
+            var noteParts: [String] = [
+                "来源\(post.platform.postNoun)：\(authorAttribution) · \(post.platform.displayName)"
+            ]
+            if let summary = post.videoSummary?.trimmingCharacters(in: .whitespacesAndNewlines), !summary.isEmpty {
+                noteParts.append("视频摘要：\n\(summary)")
+            }
+            if !post.videoOutline.isEmpty {
+                noteParts.append("章节要点：\n" + post.videoOutline.joined(separator: "\n"))
+            }
+            let bodyTrimmed = post.bodyText.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !bodyTrimmed.isEmpty {
+                noteParts.append(bodyTrimmed)
+            }
+            noteParts.append("原链接：\(post.originalURL)")
+            let attributionNotes = noteParts.joined(separator: "\n\n")
 
-            let titleAuthor = post.platform == .xiaohongshu ? post.authorName : "@\(post.authorHandle)"
-            let extractedTitle = "\(titleAuthor) \(attachment.kind.localizedLabel) #\(index + 1)"
+            let extractedTitle: String = {
+                if post.platform.isVideoPlatform,
+                   let article = post.articleTitle?.trimmingCharacters(in: .whitespacesAndNewlines),
+                   !article.isEmpty {
+                    return article
+                }
+                let titleAuthor = (post.platform == .xiaohongshu || post.platform.isVideoPlatform)
+                    ? post.authorName
+                    : "@\(post.authorHandle)"
+                return "\(titleAuthor) \(attachment.kind.localizedLabel) #\(index + 1)"
+            }()
             let patched = try await engine.updateAssets(
                 AssetBatchPatch(
                     assetIDs: [standalone.id],
@@ -827,6 +895,128 @@ public final class LibraryStore {
             }
         }
         return extracted
+    }
+
+    /// Extracts a single embedded attachment from a saved webpage bookmark (`WebPageRichMetadata`) into a standalone asset.
+    @discardableResult
+    public func extractMediaFromWebPageAsset(
+        webAsset: AssetRecord,
+        attachment: SocialMediaAttachment,
+        index: Int
+    ) async -> AssetRecord? {
+        guard let web = webAsset.richMetadata?.webPage else { return nil }
+        do {
+            let tempDir = FileManager.default.temporaryDirectory
+                .appending(path: "charkle-web-extract-\(UUID().uuidString)", directoryHint: .isDirectory)
+            try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: tempDir) }
+
+            let pageURL = web.canonicalURL.isEmpty ? (webAsset.sourceURL ?? "") : web.canonicalURL
+            let baseName = webAsset.title.isEmpty ? "WebMedia-\(index + 1)" : "\(webAsset.title)-\(index + 1)"
+            let created: [AssetRecord]
+
+            if attachment.kind == .video || attachment.kind == .gif {
+                let videoFile = try await VideoPlatformResolver.downloadGenericWebVideo(
+                    pageURL: pageURL,
+                    directStreamURL: URL(string: attachment.url),
+                    to: tempDir,
+                    baseName: baseName
+                )
+                created = try await engine.ingest(
+                    [.fileURL(videoFile)],
+                    targetFolderID: webAsset.folderID,
+                    targetBoardID: nil
+                )
+            } else {
+                guard let mediaURL = URL(string: attachment.url) else { return nil }
+                let mediaItem = XPostMedia(kind: .photo, url: mediaURL)
+                guard let localFile = await XPostResolver.downloadMedia(
+                    mediaItem,
+                    to: tempDir,
+                    baseName: baseName,
+                    referer: URL(string: pageURL)
+                ),
+                let imageData = try? Data(contentsOf: localFile) else {
+                    lastError = "无法下载该网页图片，请检查网络或打开原网页查看。"
+                    return nil
+                }
+                created = try await engine.ingest(
+                    [.imageData(imageData, suggestedName: localFile.lastPathComponent, sourceURL: pageURL)],
+                    targetFolderID: webAsset.folderID,
+                    targetBoardID: nil
+                )
+            }
+
+            guard let standalone = created.first else { return nil }
+            var notesParts: [String] = []
+            if let site = web.siteName, !site.isEmpty {
+                notesParts.append("来源网页：\(site)")
+            }
+            if let summary = web.summary, !summary.isEmpty {
+                notesParts.append(summary)
+            }
+            if !pageURL.isEmpty {
+                notesParts.append("原链接：\(pageURL)")
+            }
+            let title = attachment.kind == .video
+                ? webAsset.title
+                : "\(webAsset.title) \(attachment.kind.localizedLabel) #\(index + 1)"
+            let tags = web.siteName.map { [$0] } ?? []
+            let patched = try await engine.updateAssets(
+                AssetBatchPatch(
+                    assetIDs: [standalone.id],
+                    title: title,
+                    notes: notesParts.joined(separator: "\n\n"),
+                    sourceURL: pageURL.isEmpty ? nil : pageURL,
+                    addTags: tags
+                )
+            )
+            let finalAsset = patched.first ?? standalone
+            allAssetsByID[finalAsset.id] = finalAsset
+            await refreshAll()
+            return finalAsset
+        } catch {
+            lastError = error.localizedDescription
+            return nil
+        }
+    }
+
+    /// Extracts all attachments from any saved social post, YouTube/Bilibili video, or rich webpage bookmark.
+    @discardableResult
+    public func extractAllMediaFromLinkAsset(_ asset: AssetRecord) async -> [AssetRecord] {
+        if asset.richMetadata?.socialPost != nil {
+            return await extractAllMediaFromSocialPost(postAsset: asset)
+        }
+        guard let web = asset.richMetadata?.webPage, !web.attachments.isEmpty else { return [] }
+        // For generic webpages, prioritize videos if present; otherwise extract up to 8 hero images
+        let targets: [SocialMediaAttachment] = {
+            let vids = web.attachments.filter { $0.kind == .video || $0.kind == .gif }
+            return !vids.isEmpty ? vids : Array(web.attachments.prefix(8))
+        }()
+        var extracted: [AssetRecord] = []
+        for (idx, att) in targets.enumerated() {
+            if let item = await extractMediaFromWebPageAsset(webAsset: asset, attachment: att, index: idx) {
+                extracted.append(item)
+            }
+        }
+        return extracted
+    }
+
+    /// Batch extracts media from multiple selected links (YouTube, Bilibili, X, Xiaohongshu, Threads, Bluesky, Pixiv, Instagram, or rich webpages).
+    @discardableResult
+    public func extractMediaFromSelectedLinks(_ targetAssets: [AssetRecord]) async -> (extractedCount: Int, processedLinkCount: Int) {
+        let candidates = targetAssets.filter(\.hasExtractableLinkMedia)
+        guard !candidates.isEmpty else { return (0, 0) }
+        var totalExtracted = 0
+        var processed = 0
+        for asset in candidates {
+            let items = await extractAllMediaFromLinkAsset(asset)
+            if !items.isEmpty {
+                totalExtracted += items.count
+                processed += 1
+            }
+        }
+        return (totalExtracted, processed)
     }
 
     /// Extracts a single embedded image from a saved social post into a standalone image asset,
@@ -1164,11 +1354,24 @@ public final class LibraryStore {
         guard !urls.isEmpty else { return }
         let pb = NSPasteboard.general
         pb.clearContents()
-        var objects: [any NSPasteboardWriting] = urls.map { $0 as NSURL }
-        if urls.count == 1, let single = urls.first, let image = NSImage(contentsOf: single) {
-            objects.append(image)
+        if urls.count == 1, let single = urls.first {
+            // Keep fileURL and image pixels on a SINGLE NSPasteboardItem so apps that read
+            // pasteboardItems (such as PureRef) never paste duplicate copies of one image,
+            // while chat/document apps that read TIFF/PNG data still paste cleanly.
+            let item = NSPasteboardItem()
+            item.setString(single.absoluteString, forType: .fileURL)
+            if let image = NSImage(contentsOf: single) {
+                if single.pathExtension.lowercased() == "png",
+                   let rawPNG = try? Data(contentsOf: single) {
+                    item.setData(rawPNG, forType: .png)
+                } else if let tiff = image.tiffRepresentation {
+                    item.setData(tiff, forType: .tiff)
+                }
+            }
+            pb.writeObjects([item])
+        } else {
+            pb.writeObjects(urls.map { $0 as NSURL })
         }
-        pb.writeObjects(objects)
     }
 
     public func folder(byID folderID: UUID) -> FolderRecord? {
@@ -1479,6 +1682,102 @@ public final class LibraryStore {
             }
         }
         return results
+    }
+
+    // MARK: - Bidirectional PureRef (.pur) Import & Export
+
+    @discardableResult
+    public func importPureRefScenes(
+        urls: [URL],
+        targetFolderID: UUID? = nil,
+        createMoodboard: Bool = true
+    ) async -> [PureRefImportResult] {
+        guard !urls.isEmpty else { return [] }
+        lastError = nil
+        var results: [PureRefImportResult] = []
+        results.reserveCapacity(urls.count)
+        var anyImported = false
+
+        for url in urls {
+            do {
+                let result = try await engine.importPureRefScene(
+                    at: url,
+                    targetFolderID: targetFolderID,
+                    createMoodboard: createMoodboard
+                )
+                results.append(result)
+                anyImported = anyImported || !result.importedAssets.isEmpty || result.createdBoardID != nil
+                if !isMinimalCaptureMode {
+                    for item in result.importedAssets {
+                        allAssetsByID[item.id] = item
+                    }
+                }
+            } catch {
+                lastError = error.localizedDescription
+                libraryStoreLogger.error("PureRef import failed for \(url.lastPathComponent, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            }
+        }
+
+        if anyImported {
+            if isMinimalCaptureMode {
+                await refreshMinimalMetadataOnly()
+            } else {
+                await refreshAll()
+            }
+        }
+        return results
+    }
+
+    public func exportAssetsToPureRef(
+        assetIDs: [UUID],
+        title: String,
+        to destinationURL: URL
+    ) async throws -> PureRefExportReport {
+        try await engine.exportAssetsToPureRef(assetIDs: assetIDs, title: title, to: destinationURL)
+    }
+
+    public func exportMoodboardToPureRef(
+        board: MoodboardDocument,
+        to destinationURL: URL
+    ) async throws -> PureRefExportReport {
+        try await engine.exportMoodboardToPureRef(board: board, to: destinationURL)
+    }
+
+    /// Resolves installed PureRef.app on macOS if available (checks bundle ID, `.pur` handler, and standard Applications folders).
+    public static func installedPureRefAppURL() -> URL? {
+        let standardPaths = [
+            "/Applications/PureRef.app",
+            (NSHomeDirectory() as NSString).appendingPathComponent("Applications/PureRef.app")
+        ]
+        for path in standardPaths where FileManager.default.fileExists(atPath: path) {
+            return URL(fileURLWithPath: path, isDirectory: true)
+        }
+        for bundleID in ["com.pureref.PureRef", "com.idyllicpixel.PureRef", "com.pureref.app"] {
+            if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
+                return url
+            }
+        }
+        let probeURL = FileManager.default.temporaryDirectory.appending(path: "charkle-pur-probe.pur")
+        if let appURL = NSWorkspace.shared.urlForApplication(toOpen: probeURL),
+           appURL.deletingPathExtension().lastPathComponent.localizedCaseInsensitiveContains("pureref") {
+            return appURL
+        }
+        return nil
+    }
+
+    /// Returns a clean temporary export URL inside Charkle's cache directory for one-click "Open in PureRef".
+    public static func stagedPureRefExportURL(title: String) throws -> URL {
+        let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory
+        let dir = caches.appending(path: "Charkle/PureRefExports", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let sanitized = title
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "/", with: "-")
+            .replacingOccurrences(of: ":", with: "-")
+        let stem = sanitized.isEmpty ? "Charkle-References" : String(sanitized.prefix(64))
+        let stamp = Int(Date().timeIntervalSince1970)
+        return dir.appending(path: "\(stem)-\(stamp).pur")
     }
 
     // MARK: - Asset Patching & Batch Operations
@@ -1972,7 +2271,109 @@ public final class LibraryStore {
         }
     }
 
-    // MARK: - Hybrid Semantic Search
+    // MARK: - Unified Hybrid Semantic Search
+
+    private func scheduleUnifiedSemanticEnhancement(
+        query: String,
+        requestedFilter: FilterCriteria,
+        requestedSmartID: UUID?,
+        assetsGen: UInt64,
+        literalAssets: [AssetRecord],
+        delayMilliseconds: Int
+    ) {
+        semanticEnhancementDelayTask?.cancel()
+        semanticEnhancementDelayTask = nil
+        semanticSearchTask?.cancel()
+        semanticSearchTask = nil
+        semanticSearchGeneration &+= 1
+        let semGen = semanticSearchGeneration
+
+        let runEnhancement: @MainActor () -> Void = { [weak self] in
+            guard let self,
+                  semGen == self.semanticSearchGeneration,
+                  assetsGen == self.assetsRequestGeneration,
+                  !self.isMinimalCaptureMode,
+                  self.filter == requestedFilter,
+                  self.activeSmartFolderID == requestedSmartID else {
+                return
+            }
+            let task = Task<SemanticSearchReport?, Never> { @MainActor [weak self] in
+                guard let self else { return nil }
+                // Delay indicator slightly so fast local-only semantic fusion (~5ms) never flashes a 1-frame spinner.
+                let spinnerTask = Task<Void, Never> { @MainActor [weak self] in
+                    try? await Task.sleep(for: .milliseconds(140))
+                    guard !Task.isCancelled, let self, semGen == self.semanticSearchGeneration else { return }
+                    self.isRunningSemanticSearch = true
+                }
+                defer {
+                    spinnerTask.cancel()
+                    if semGen == self.semanticSearchGeneration {
+                        self.isRunningSemanticSearch = false
+                        self.semanticSearchTask = nil
+                    }
+                }
+                do {
+                    let report = try await self.engine.semanticSearch(query: query, criteria: requestedFilter, limit: 80)
+                    guard !Task.isCancelled,
+                          semGen == self.semanticSearchGeneration,
+                          assetsGen == self.assetsRequestGeneration,
+                          !self.isMinimalCaptureMode,
+                          self.filter == requestedFilter,
+                          self.activeSmartFolderID == requestedSmartID else {
+                        return nil
+                    }
+                    self.semanticSearchReport = report
+                    let scopedSemantic = self.applyActiveSmartFolderIfNeeded(report.hits.map(\.asset))
+                    let merged = SemanticSearchReport.mergeUnifiedAssets(
+                        literal: literalAssets,
+                        semantic: scopedSemantic,
+                        prioritizeSemantic: report.usedTypeSafeJev || report.usedCloudEmbedding
+                    )
+                    self.applyCanonicalAssetsIfChanged(merged)
+                    return report
+                } catch {
+                    if !Task.isCancelled && semGen == self.semanticSearchGeneration {
+                        libraryStoreLogger.debug("Background semantic fusion skipped: \(error.localizedDescription, privacy: .public)")
+                    }
+                    return nil
+                }
+            }
+            self.semanticSearchTask = task
+        }
+
+        if delayMilliseconds > 0 {
+            semanticEnhancementDelayTask = Task<Void, Never> { @MainActor [weak self] in
+                try? await Task.sleep(for: .milliseconds(delayMilliseconds))
+                guard !Task.isCancelled, let self else { return }
+                self.semanticEnhancementDelayTask = nil
+                runEnhancement()
+            }
+        } else {
+            runEnhancement()
+        }
+    }
+
+    private func applyCanonicalAssetsIfChanged(_ list: [AssetRecord]) {
+        var nextByID = allAssetsByID
+        var changedAny = false
+        var canonical: [AssetRecord] = []
+        canonical.reserveCapacity(list.count)
+        for asset in list {
+            if let existing = nextByID[asset.id], existing == asset {
+                canonical.append(existing)
+            } else {
+                nextByID[asset.id] = asset
+                canonical.append(asset)
+                changedAny = true
+            }
+        }
+        if assets != canonical {
+            assets = canonical
+        }
+        if changedAny {
+            allAssetsByID = nextByID
+        }
+    }
 
     @discardableResult
     public func runSemanticSearch(query: String? = nil) async -> SemanticSearchReport? {
@@ -1981,17 +2382,24 @@ public final class LibraryStore {
             await clearSemanticSearch()
             return nil
         }
+        semanticEnhancementDelayTask?.cancel()
+        semanticEnhancementDelayTask = nil
         semanticSearchTask?.cancel()
         semanticSearchGeneration &+= 1
         assetsRequestGeneration &+= 1
         let semGen = semanticSearchGeneration
         let assetsGen = assetsRequestGeneration
-        let snapshotFilter = filter
+        var draftFilter = filter
+        draftFilter.searchQuery = resolvedQuery
+        let snapshotFilter = draftFilter
+        let requestedSmartID = activeSmartFolderID
+        let engine = self.engine
 
         isRunningSemanticSearch = true
         lastError = nil
 
-        let task = Task<SemanticSearchReport?, Never> { @MainActor in
+        let task = Task<SemanticSearchReport?, Never> { @MainActor [weak self] in
+            guard let self else { return nil }
             defer {
                 if semGen == self.semanticSearchGeneration {
                     self.isRunningSemanticSearch = false
@@ -1999,32 +2407,25 @@ public final class LibraryStore {
                 }
             }
             do {
-                let report = try await self.engine.semanticSearch(query: resolvedQuery, criteria: snapshotFilter, limit: 60)
+                async let literalFetched = (try? engine.fetchAssets(matching: snapshotFilter)) ?? []
+                async let semanticReport = engine.semanticSearch(query: resolvedQuery, criteria: snapshotFilter, limit: 80)
+                let (rawLiteral, report) = try await (literalFetched, semanticReport)
                 guard !Task.isCancelled,
                       semGen == self.semanticSearchGeneration,
                       assetsGen == self.assetsRequestGeneration,
-                      !self.isMinimalCaptureMode else {
+                      !self.isMinimalCaptureMode,
+                      self.activeSmartFolderID == requestedSmartID else {
                     return nil
                 }
                 self.semanticSearchReport = report
-                let hitAssets = report.hits.map(\.asset)
-                var nextByID = self.allAssetsByID
-                var changedAny = false
-                var canonical: [AssetRecord] = []
-                canonical.reserveCapacity(hitAssets.count)
-                for asset in hitAssets {
-                    if let existing = nextByID[asset.id], existing == asset {
-                        canonical.append(existing)
-                    } else {
-                        nextByID[asset.id] = asset
-                        canonical.append(asset)
-                        changedAny = true
-                    }
-                }
-                self.assets = canonical
-                if changedAny {
-                    self.allAssetsByID = nextByID
-                }
+                let scopedLiteral = self.applyActiveSmartFolderIfNeeded(rawLiteral)
+                let scopedSemantic = self.applyActiveSmartFolderIfNeeded(report.hits.map(\.asset))
+                let merged = SemanticSearchReport.mergeUnifiedAssets(
+                    literal: scopedLiteral,
+                    semantic: scopedSemantic,
+                    prioritizeSemantic: report.usedTypeSafeJev || report.usedCloudEmbedding
+                )
+                self.applyCanonicalAssetsIfChanged(merged)
                 return report
             } catch {
                 if !Task.isCancelled && semGen == self.semanticSearchGeneration {
@@ -2039,11 +2440,13 @@ public final class LibraryStore {
 
     public func clearSemanticSearch() async {
         semanticSearchGeneration &+= 1
+        semanticEnhancementDelayTask?.cancel()
+        semanticEnhancementDelayTask = nil
         semanticSearchTask?.cancel()
         semanticSearchTask = nil
         isRunningSemanticSearch = false
         semanticSearchReport = nil
-        await refreshAssets()
+        await refreshAssets(semanticEnhancementDelayMs: nil)
     }
 
     // MARK: - Inbox Smart Batch Triage

@@ -1208,9 +1208,13 @@ private struct FilmstripScrubberBar<ContextMenuContent: View>: View {
                 completion(Data(encoded.utf8), nil)
                 return nil
             }
-            if let fileURL = loader.cachedDragFileURL(for: item) {
-                provider.registerFileRepresentation(forTypeIdentifier: UTType.fileURL.identifier, fileOptions: [], visibility: .all) { completion in
-                    completion(fileURL, false, nil)
+            // Use data representation for UTType.fileURL (avoid registerFileRepresentation(.fileURL) which
+            // triggers nil URL bridging SIGTRAP inside SwiftUI PasteboardUtility.loadFileSystemItem on macOS 26/27).
+            if let fileURL = loader.cachedDragFileURL(for: item),
+               fileURL.isFileURL,
+               FileManager.default.fileExists(atPath: fileURL.path) {
+                provider.registerDataRepresentation(forTypeIdentifier: UTType.fileURL.identifier, visibility: .all) { completion in
+                    completion(fileURL.dataRepresentation, nil)
                     return nil
                 }
             }

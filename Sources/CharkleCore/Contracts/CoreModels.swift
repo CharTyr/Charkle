@@ -64,6 +64,12 @@ public enum SocialPlatform: String, Codable, CaseIterable, Hashable, Sendable {
     case xiaohongshu
     case pixiv
     case instagram
+    case youtube
+    case bilibili
+
+    public var isVideoPlatform: Bool {
+        self == .youtube || self == .bilibili
+    }
 
     public var displayName: String {
         switch self {
@@ -73,6 +79,8 @@ public enum SocialPlatform: String, Codable, CaseIterable, Hashable, Sendable {
         case .xiaohongshu: "小红书"
         case .pixiv: "Pixiv"
         case .instagram: "Instagram"
+        case .youtube: "YouTube"
+        case .bilibili: "B站"
         }
     }
 
@@ -81,6 +89,7 @@ public enum SocialPlatform: String, Codable, CaseIterable, Hashable, Sendable {
         case .x: "推文"
         case .xiaohongshu: "笔记"
         case .pixiv: "作品"
+        case .youtube, .bilibili: "视频"
         case .threads, .bluesky, .instagram: "贴文"
         }
     }
@@ -97,6 +106,8 @@ public enum SocialPlatform: String, Codable, CaseIterable, Hashable, Sendable {
         case .xiaohongshu: "在小红书打开"
         case .pixiv: "在 Pixiv 打开"
         case .instagram: "在 Instagram 打开"
+        case .youtube: "在 YouTube 打开"
+        case .bilibili: "在 B 站打开"
         }
     }
 }
@@ -205,6 +216,12 @@ public struct SocialPostMetadata: Codable, Hashable, Sendable {
     public var viewCount: Int?
     public var originalURL: String
     public var mediaFetchFailed: Bool
+    /// Optional video platform metadata (YouTube / Bilibili) — parsed on default bookmark without downloading the video.
+    public var videoDurationSeconds: Double?
+    public var videoSummary: String?
+    public var videoOutline: [String]
+    public var videoID: String?
+    public var videoCID: Int64?
 
     public init(
         platform: SocialPlatform,
@@ -226,7 +243,12 @@ public struct SocialPostMetadata: Codable, Hashable, Sendable {
         likeCount: Int? = nil,
         viewCount: Int? = nil,
         originalURL: String,
-        mediaFetchFailed: Bool = false
+        mediaFetchFailed: Bool = false,
+        videoDurationSeconds: Double? = nil,
+        videoSummary: String? = nil,
+        videoOutline: [String] = [],
+        videoID: String? = nil,
+        videoCID: Int64? = nil
     ) {
         self.platform = platform
         self.authorName = authorName
@@ -248,6 +270,11 @@ public struct SocialPostMetadata: Codable, Hashable, Sendable {
         self.viewCount = viewCount
         self.originalURL = originalURL
         self.mediaFetchFailed = mediaFetchFailed
+        self.videoDurationSeconds = videoDurationSeconds
+        self.videoSummary = videoSummary
+        self.videoOutline = videoOutline
+        self.videoID = videoID
+        self.videoCID = videoCID
     }
 
     public init(from decoder: Decoder) throws {
@@ -272,9 +299,14 @@ public struct SocialPostMetadata: Codable, Hashable, Sendable {
         self.viewCount = try c.decodeIfPresent(Int.self, forKey: .viewCount)
         self.originalURL = try c.decode(String.self, forKey: .originalURL)
         self.mediaFetchFailed = try c.decodeIfPresent(Bool.self, forKey: .mediaFetchFailed) ?? false
+        self.videoDurationSeconds = try c.decodeIfPresent(Double.self, forKey: .videoDurationSeconds)
+        self.videoSummary = try c.decodeIfPresent(String.self, forKey: .videoSummary)
+        self.videoOutline = try c.decodeIfPresent([String].self, forKey: .videoOutline) ?? []
+        self.videoID = try c.decodeIfPresent(String.self, forKey: .videoID)
+        self.videoCID = try c.decodeIfPresent(Int64.self, forKey: .videoCID)
     }
 
-    /// Displayable handle subtitle (omits internal 24-hex Xiaohongshu user IDs for cleaner typography).
+    /// Displayable handle subtitle (omits internal 24-hex Xiaohongshu user IDs and redundant video IDs).
     public var displayHandleLine: String? {
         let trimmed = authorHandle.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
@@ -285,7 +317,32 @@ public struct SocialPostMetadata: Codable, Hashable, Sendable {
             }
             return "小红书号 \(trimmed)"
         }
+        if platform == .bilibili {
+            if trimmed.lowercased() == "bilibili" || trimmed == authorName { return nil }
+            return trimmed.hasPrefix("UP") ? trimmed : "UP 主 · \(trimmed)"
+        }
+        if platform == .youtube {
+            if trimmed.lowercased() == "youtube" || trimmed == authorName { return nil }
+            return trimmed.hasPrefix("@") ? trimmed : trimmed
+        }
         return "@\(trimmed)"
+    }
+
+    public var formattedVideoDuration: String? {
+        guard let seconds = videoDurationSeconds, seconds.isFinite, seconds > 0 else { return nil }
+        let total = Int(seconds.rounded())
+        let h = total / 3600
+        let m = (total % 3600) / 60
+        let s = total % 60
+        if h > 0 {
+            return String(format: "%d:%02d:%02d", h, m, s)
+        }
+        return String(format: "%d:%02d", m, s)
+    }
+
+    public var hasVideoSummaryContent: Bool {
+        let hasText = !(videoSummary?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+        return hasText || !videoOutline.isEmpty
     }
 
     /// Unified typed attachment list across both newly saved posts and legacy saved social posts.
@@ -535,11 +592,59 @@ private final class ImmutableMetadataBox<Value: Hashable & Sendable>: Hashable, 
     }
 }
 
+public struct WebPageRichMetadata: Codable, Hashable, Sendable {
+    public var siteName: String?
+    public var authorName: String?
+    public var publishedAtText: String?
+    public var summary: String?
+    public var attachments: [SocialMediaAttachment]
+    public var hasVideo: Bool
+    public var durationSeconds: Double?
+    public var canonicalURL: String
+
+    public init(
+        siteName: String? = nil,
+        authorName: String? = nil,
+        publishedAtText: String? = nil,
+        summary: String? = nil,
+        attachments: [SocialMediaAttachment] = [],
+        hasVideo: Bool = false,
+        durationSeconds: Double? = nil,
+        canonicalURL: String
+    ) {
+        self.siteName = siteName
+        self.authorName = authorName
+        self.publishedAtText = publishedAtText
+        self.summary = summary
+        self.attachments = attachments
+        self.hasVideo = hasVideo
+        self.durationSeconds = durationSeconds
+        self.canonicalURL = canonicalURL
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.siteName = try c.decodeIfPresent(String.self, forKey: .siteName)
+        self.authorName = try c.decodeIfPresent(String.self, forKey: .authorName)
+        self.publishedAtText = try c.decodeIfPresent(String.self, forKey: .publishedAtText)
+        self.summary = try c.decodeIfPresent(String.self, forKey: .summary)
+        self.attachments = try c.decodeIfPresent([SocialMediaAttachment].self, forKey: .attachments) ?? []
+        self.hasVideo = try c.decodeIfPresent(Bool.self, forKey: .hasVideo) ?? false
+        self.durationSeconds = try c.decodeIfPresent(Double.self, forKey: .durationSeconds)
+        self.canonicalURL = try c.decodeIfPresent(String.self, forKey: .canonicalURL) ?? ""
+    }
+
+    public var hasRichSummary: Bool {
+        !(summary?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+    }
+}
+
 public struct AssetRichMetadata: Codable, Hashable, Sendable {
     private final class Storage: Hashable, Sendable {
         static let empty = Storage(
             githubRepo: nil,
             socialPost: nil,
+            webPage: nil,
             photoExif: nil,
             aiGeneration: nil,
             textExcerpt: nil,
@@ -549,6 +654,7 @@ public struct AssetRichMetadata: Codable, Hashable, Sendable {
 
         let githubRepo: ImmutableMetadataBox<GitHubRepoMetadata>?
         let socialPost: ImmutableMetadataBox<SocialPostMetadata>?
+        let webPage: ImmutableMetadataBox<WebPageRichMetadata>?
         let photoExif: ImmutableMetadataBox<PhotoExifMetadata>?
         let aiGeneration: ImmutableMetadataBox<AIGenerationMetadata>?
         let textExcerpt: String?
@@ -558,6 +664,7 @@ public struct AssetRichMetadata: Codable, Hashable, Sendable {
         init(
             githubRepo: ImmutableMetadataBox<GitHubRepoMetadata>?,
             socialPost: ImmutableMetadataBox<SocialPostMetadata>?,
+            webPage: ImmutableMetadataBox<WebPageRichMetadata>?,
             photoExif: ImmutableMetadataBox<PhotoExifMetadata>?,
             aiGeneration: ImmutableMetadataBox<AIGenerationMetadata>?,
             textExcerpt: String?,
@@ -566,6 +673,7 @@ public struct AssetRichMetadata: Codable, Hashable, Sendable {
         ) {
             self.githubRepo = githubRepo
             self.socialPost = socialPost
+            self.webPage = webPage
             self.photoExif = photoExif
             self.aiGeneration = aiGeneration
             self.textExcerpt = textExcerpt
@@ -580,6 +688,7 @@ public struct AssetRichMetadata: Codable, Hashable, Sendable {
                 && lhs.model3DFormat == rhs.model3DFormat
                 && lhs.githubRepo == rhs.githubRepo
                 && lhs.socialPost == rhs.socialPost
+                && lhs.webPage == rhs.webPage
                 && lhs.photoExif == rhs.photoExif
                 && lhs.aiGeneration == rhs.aiGeneration
         }
@@ -587,6 +696,7 @@ public struct AssetRichMetadata: Codable, Hashable, Sendable {
         func hash(into hasher: inout Hasher) {
             hasher.combine(githubRepo)
             hasher.combine(socialPost)
+            hasher.combine(webPage)
             hasher.combine(photoExif)
             hasher.combine(aiGeneration)
             hasher.combine(textExcerpt)
@@ -598,6 +708,7 @@ public struct AssetRichMetadata: Codable, Hashable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case githubRepo
         case socialPost
+        case webPage
         case photoExif
         case aiGeneration
         case textExcerpt
@@ -613,6 +724,7 @@ public struct AssetRichMetadata: Codable, Hashable, Sendable {
             storage = Storage(
                 githubRepo: newValue.map(ImmutableMetadataBox.init),
                 socialPost: storage.socialPost,
+                webPage: storage.webPage,
                 photoExif: storage.photoExif,
                 aiGeneration: storage.aiGeneration,
                 textExcerpt: storage.textExcerpt,
@@ -628,6 +740,23 @@ public struct AssetRichMetadata: Codable, Hashable, Sendable {
             storage = Storage(
                 githubRepo: storage.githubRepo,
                 socialPost: newValue.map(ImmutableMetadataBox.init),
+                webPage: storage.webPage,
+                photoExif: storage.photoExif,
+                aiGeneration: storage.aiGeneration,
+                textExcerpt: storage.textExcerpt,
+                isMarkdown: storage.isMarkdown,
+                model3DFormat: storage.model3DFormat
+            )
+        }
+    }
+
+    public var webPage: WebPageRichMetadata? {
+        get { storage.webPage?.value }
+        set {
+            storage = Storage(
+                githubRepo: storage.githubRepo,
+                socialPost: storage.socialPost,
+                webPage: newValue.map(ImmutableMetadataBox.init),
                 photoExif: storage.photoExif,
                 aiGeneration: storage.aiGeneration,
                 textExcerpt: storage.textExcerpt,
@@ -643,6 +772,7 @@ public struct AssetRichMetadata: Codable, Hashable, Sendable {
             storage = Storage(
                 githubRepo: storage.githubRepo,
                 socialPost: storage.socialPost,
+                webPage: storage.webPage,
                 photoExif: newValue.map(ImmutableMetadataBox.init),
                 aiGeneration: storage.aiGeneration,
                 textExcerpt: storage.textExcerpt,
@@ -658,6 +788,7 @@ public struct AssetRichMetadata: Codable, Hashable, Sendable {
             storage = Storage(
                 githubRepo: storage.githubRepo,
                 socialPost: storage.socialPost,
+                webPage: storage.webPage,
                 photoExif: storage.photoExif,
                 aiGeneration: newValue.map(ImmutableMetadataBox.init),
                 textExcerpt: storage.textExcerpt,
@@ -673,6 +804,7 @@ public struct AssetRichMetadata: Codable, Hashable, Sendable {
             storage = Storage(
                 githubRepo: storage.githubRepo,
                 socialPost: storage.socialPost,
+                webPage: storage.webPage,
                 photoExif: storage.photoExif,
                 aiGeneration: storage.aiGeneration,
                 textExcerpt: newValue,
@@ -688,6 +820,7 @@ public struct AssetRichMetadata: Codable, Hashable, Sendable {
             storage = Storage(
                 githubRepo: storage.githubRepo,
                 socialPost: storage.socialPost,
+                webPage: storage.webPage,
                 photoExif: storage.photoExif,
                 aiGeneration: storage.aiGeneration,
                 textExcerpt: storage.textExcerpt,
@@ -703,6 +836,7 @@ public struct AssetRichMetadata: Codable, Hashable, Sendable {
             storage = Storage(
                 githubRepo: storage.githubRepo,
                 socialPost: storage.socialPost,
+                webPage: storage.webPage,
                 photoExif: storage.photoExif,
                 aiGeneration: storage.aiGeneration,
                 textExcerpt: storage.textExcerpt,
@@ -715,19 +849,21 @@ public struct AssetRichMetadata: Codable, Hashable, Sendable {
     public init(
         githubRepo: GitHubRepoMetadata? = nil,
         socialPost: SocialPostMetadata? = nil,
+        webPage: WebPageRichMetadata? = nil,
         photoExif: PhotoExifMetadata? = nil,
         aiGeneration: AIGenerationMetadata? = nil,
         textExcerpt: String? = nil,
         isMarkdown: Bool = false,
         model3DFormat: String? = nil
     ) {
-        if githubRepo == nil, socialPost == nil, photoExif == nil, aiGeneration == nil,
+        if githubRepo == nil, socialPost == nil, webPage == nil, photoExif == nil, aiGeneration == nil,
            textExcerpt == nil, !isMarkdown, model3DFormat == nil {
             self.storage = .empty
         } else {
             self.storage = Storage(
                 githubRepo: githubRepo.map(ImmutableMetadataBox.init),
                 socialPost: socialPost.map(ImmutableMetadataBox.init),
+                webPage: webPage.map(ImmutableMetadataBox.init),
                 photoExif: photoExif.map(ImmutableMetadataBox.init),
                 aiGeneration: aiGeneration.map(ImmutableMetadataBox.init),
                 textExcerpt: textExcerpt,
@@ -741,6 +877,7 @@ public struct AssetRichMetadata: Codable, Hashable, Sendable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let githubRepo = try container.decodeIfPresent(GitHubRepoMetadata.self, forKey: .githubRepo)
         let socialPost = try container.decodeIfPresent(SocialPostMetadata.self, forKey: .socialPost)
+        let webPage = try container.decodeIfPresent(WebPageRichMetadata.self, forKey: .webPage)
         let photoExif = try container.decodeIfPresent(PhotoExifMetadata.self, forKey: .photoExif)
         let aiGeneration = try container.decodeIfPresent(AIGenerationMetadata.self, forKey: .aiGeneration)
         let textExcerpt = try container.decodeIfPresent(String.self, forKey: .textExcerpt)
@@ -749,6 +886,7 @@ public struct AssetRichMetadata: Codable, Hashable, Sendable {
         self.init(
             githubRepo: githubRepo,
             socialPost: socialPost,
+            webPage: webPage,
             photoExif: photoExif,
             aiGeneration: aiGeneration,
             textExcerpt: textExcerpt,
@@ -761,6 +899,7 @@ public struct AssetRichMetadata: Codable, Hashable, Sendable {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encodeIfPresent(storage.githubRepo?.value, forKey: .githubRepo)
         try container.encodeIfPresent(storage.socialPost?.value, forKey: .socialPost)
+        try container.encodeIfPresent(storage.webPage?.value, forKey: .webPage)
         try container.encodeIfPresent(storage.photoExif?.value, forKey: .photoExif)
         try container.encodeIfPresent(storage.aiGeneration?.value, forKey: .aiGeneration)
         try container.encodeIfPresent(storage.textExcerpt, forKey: .textExcerpt)
@@ -960,6 +1099,22 @@ public struct AssetRecord: Codable, Hashable, Identifiable, Sendable {
 
     public var isSocialPost: Bool {
         richMetadata?.socialPost != nil
+    }
+
+    /// Unified list of extractable media attachments across social posts, YouTube/Bilibili videos,
+    /// and universal rich webpages (embedded videos + high-res cover/article images).
+    public var extractableLinkAttachments: [SocialMediaAttachment] {
+        if let post = richMetadata?.socialPost {
+            return post.effectiveAttachments
+        }
+        if let web = richMetadata?.webPage {
+            return web.attachments
+        }
+        return []
+    }
+
+    public var hasExtractableLinkMedia: Bool {
+        !extractableLinkAttachments.isEmpty
     }
 
     /// Validated `http`/`https` destination URL stored on a web bookmark asset.
