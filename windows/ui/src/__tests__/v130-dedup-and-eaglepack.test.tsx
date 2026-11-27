@@ -276,6 +276,17 @@ describe('Charkle v1.3.0 Parity: Pixiv/Instagram, Smart Dedup & Material Package
       expect(screen.getByTestId('dedup-group-GRP-DOC')).toBeInTheDocument();
     });
 
+    // Opaque Fluent 2 modal surface & smoke scrim (prevents underlying gallery bleed-through)
+    const backdrop = screen.getByTestId('smart-dedup-modal');
+    expect(backdrop.className).toContain('win-smoke-scrim');
+    expect(backdrop.className).not.toContain('--overlay-scrim');
+    const surface = screen.getByTestId('smart-dedup-dialog-surface');
+    expect(surface.className).toContain('bg-[var(--bg-elevated)]');
+    expect(surface.className).toContain('border-[var(--win-stroke-flyout)]');
+    expect(surface.className).toContain('shadow-[var(--shadow-modal)]');
+    expect(surface.className).not.toContain('win-acrylic-elevated');
+    expect(surface.className).not.toContain('--win-stroke-surface');
+
     // Default recommended keeper is ASSET-HI
     expect(screen.getByTestId('dedup-candidate-ASSET-HI')).toHaveAttribute('data-kept', 'true');
     expect(screen.getByTestId('dedup-candidate-ASSET-LO')).toHaveAttribute('data-kept', 'false');

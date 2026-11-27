@@ -299,14 +299,19 @@ export const SmartDeduplicationModal: React.FC = () => {
         aria-modal="true"
         aria-label="全媒体智能去重"
         data-testid="smart-dedup-modal"
-        className="fixed inset-0 z-[115] flex items-center justify-center p-5 bg-[var(--overlay-scrim)]"
+        className="win-smoke-scrim win-dialog-backdrop fixed inset-0 z-[115] flex items-center justify-center p-5"
         onMouseDown={(e) => {
           if (e.target === e.currentTarget && !quickLookAssetId && !confirmPermanentOpen) {
             closeDeduplication();
           }
         }}
       >
-        <div className="win-acrylic-elevated w-[min(1080px,94vw)] h-[min(740px,88vh)] rounded-[var(--win-radius-dialog)] border border-[var(--win-stroke-surface)] flex flex-col overflow-hidden text-[var(--text-primary)]">
+        <div
+          data-testid="smart-dedup-dialog-surface"
+          onMouseDown={(e) => e.stopPropagation()}
+          onClick={(e) => e.stopPropagation()}
+          className="win-dialog-popup w-[min(1080px,94vw)] h-[min(740px,88vh)] rounded-[var(--win-radius-dialog)] bg-[var(--bg-elevated)] border border-[var(--win-stroke-flyout)] shadow-[var(--shadow-modal)] flex flex-col overflow-hidden text-[var(--text-primary)]"
+        >
           {/* Header */}
           <div className="px-5 py-3.5 border-b border-[var(--win-stroke-divider)] flex items-center justify-between gap-3 shrink-0">
             <div className="flex items-center gap-2.5 min-w-0">
@@ -805,12 +810,13 @@ export const SmartDeduplicationModal: React.FC = () => {
         </div>
       </div>
 
-      {/* Centered Irreversible Permanent Delete Confirmation */}
+      {/* Centered Irreversible Permanent Delete Confirmation (above z-[115] Dedup modal, below z-[130] Quick Look) */}
       <ModalShell
         open={confirmPermanentOpen}
         onClose={() => setConfirmPermanentOpen(false)}
         title={`彻底删除 ${activePlans.removeCount} 项重复素材？`}
         width="sm"
+        zIndexBase={122}
         footer={
           <>
             <Button variant="standard" onClick={() => setConfirmPermanentOpen(false)}>

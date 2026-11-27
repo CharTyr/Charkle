@@ -2101,7 +2101,7 @@ export const SyncSettingsPane: React.FC = () => {
                         type="button"
                         aria-label={`更多操作 ${displayName}`}
                         disabled={isBusy}
-                        className="h-7 w-7 inline-flex items-center justify-center rounded-[var(--win-radius-control)] border border-[var(--win-stroke-control)] bg-[var(--win-fill-control)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)] disabled:opacity-45 cursor-pointer"
+                        className="h-7 w-7 inline-flex items-center justify-center rounded-[var(--win-radius-control)] border border-[var(--win-stroke-control)] bg-[var(--win-control-fill)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)] disabled:opacity-45 cursor-pointer"
                       >
                         <MoreHorizontal16Regular className="w-4 h-4" />
                       </button>
@@ -2153,7 +2153,7 @@ export const SyncSettingsPane: React.FC = () => {
                 type="button"
                 data-testid="add-sync-backend-btn"
                 disabled={isBusy}
-                className="h-8 px-3 inline-flex items-center gap-1.5 rounded-[var(--win-radius-control)] border border-[var(--win-stroke-control)] bg-[var(--win-fill-control)] text-[12.5px] font-medium text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)] disabled:opacity-45 cursor-pointer"
+                className="h-8 px-3 inline-flex items-center gap-1.5 rounded-[var(--win-radius-control)] border border-[var(--win-stroke-control)] bg-[var(--win-control-fill)] text-[12.5px] font-medium text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)] disabled:opacity-45 cursor-pointer"
               >
                 <Add16Regular className="w-3.5 h-3.5 shrink-0" />
                 <span>添加同步后端…</span>

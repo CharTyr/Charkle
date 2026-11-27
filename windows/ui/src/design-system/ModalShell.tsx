@@ -25,6 +25,8 @@ export interface ModalShellProps {
   closeOnBackdrop?: boolean;
   /** True for 0ms instant modals like Ctrl+J Jump Anywhere (fluent2-design-system.md §6.1). */
   instant?: boolean;
+  /** Optional base z-index (default 100) so nested confirmation dialogs stay above higher-z overlays (e.g. Dedup z-[115]). */
+  zIndexBase?: number;
   ariaLabel?: string;
   className?: string;
   children: React.ReactNode;
@@ -57,6 +59,7 @@ export const ModalShell: React.FC<ModalShellProps> = ({
   hideCloseButton = false,
   closeOnBackdrop = true,
   instant = false,
+  zIndexBase,
   ariaLabel,
   className = '',
   children,
@@ -80,6 +83,7 @@ export const ModalShell: React.FC<ModalShellProps> = ({
   >
     <BaseDialog.Portal>
       <BaseDialog.Backdrop
+        style={zIndexBase !== undefined ? { zIndex: zIndexBase } : undefined}
         className={[
           'win-smoke-scrim fixed inset-0 z-[100]',
           instant ? '' : 'win-dialog-backdrop',
@@ -90,6 +94,7 @@ export const ModalShell: React.FC<ModalShellProps> = ({
       />
 
       <BaseDialog.Viewport
+        style={zIndexBase !== undefined ? { zIndex: zIndexBase + 1 } : undefined}
         className="fixed inset-0 z-[101] flex items-center justify-center p-4 sm:p-6 pointer-events-none"
         {...stopModalPropagation}
       >
