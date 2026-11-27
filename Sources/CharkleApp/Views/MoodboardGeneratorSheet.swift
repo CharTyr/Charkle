@@ -174,9 +174,9 @@ public struct MoodboardGeneratorSheet: View {
                 CharkleIcon("sparkle-board", style: .layered, size: 26)
                 VStack(alignment: .leading, spacing: 1.5) {
                     Text("AI 情绪板策展工作台")
-                        .font(.system(size: 15, weight: .semibold))
+                        .font(CharkleTheme.text(.headline, weight: .semibold))
                     Text("组合灵感词、目录与种子图，由 Agent 视觉审片、宁缺毋滥挑选并编排分区")
-                        .font(.system(size: 11.5))
+                        .font(CharkleTheme.text(.caption))
                         .foregroundStyle(.secondary)
                 }
             }
@@ -188,7 +188,7 @@ public struct MoodboardGeneratorSheet: View {
                     .fill(isCloudAIReady ? Color.green : Color.orange)
                     .frame(width: 7, height: 7)
                 Text(activeProviderBadge)
-                    .font(.system(size: 11.5, weight: .medium))
+                    .font(CharkleTheme.text(.caption, weight: .medium))
                     .foregroundStyle(.secondary)
                 if !isCloudAIReady {
                     Button("去开启") {
@@ -216,11 +216,11 @@ public struct MoodboardGeneratorSheet: View {
                 // 1. Prompt Brief
                 VStack(alignment: .leading, spacing: 8) {
                     Text("灵感方向与要求")
-                        .font(.system(size: 12.5, weight: .semibold))
+                        .font(CharkleTheme.text(.body, weight: .semibold))
 
                     TextField("描述想要的氛围、题材、光影或排除项（如：只要清凉插画，不要暗色界面）…", text: $promptText, axis: .vertical)
                         .textFieldStyle(.roundedBorder)
-                        .font(.system(size: 12))
+                        .font(CharkleTheme.text(.caption))
                         .lineLimit(3...5)
 
                     CharkleFlowLayout(spacing: 6, lineSpacing: 6) {
@@ -229,7 +229,7 @@ public struct MoodboardGeneratorSheet: View {
                                 promptText = sample
                             } label: {
                                 Text(sample)
-                                    .font(.system(size: 11))
+                                    .font(CharkleTheme.text(.caption))
                                     .foregroundStyle(.secondary)
                                     .padding(.horizontal, 9)
                                     .padding(.vertical, 4)
@@ -250,10 +250,10 @@ public struct MoodboardGeneratorSheet: View {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
                         Text("限定文件夹范围")
-                            .font(.system(size: 12, weight: .semibold))
+                            .font(CharkleTheme.text(.caption, weight: .semibold))
                         Spacer()
                         Text(scopeFolderIDs.isEmpty ? "全库检索" : "已选 \(scopeFolderIDs.count) 个目录")
-                            .font(.system(size: 11))
+                            .font(CharkleTheme.text(.caption))
                             .foregroundStyle(.secondary)
                     }
 
@@ -271,12 +271,12 @@ public struct MoodboardGeneratorSheet: View {
                     VStack(alignment: .leading, spacing: 8) {
                         HStack {
                             Text("点选定调种子图（必入主画布）")
-                                .font(.system(size: 11))
+                                .font(CharkleTheme.text(.caption))
                                 .foregroundStyle(.secondary)
                             Spacer()
                             if !selectedSeedIDs.isEmpty {
                                 Button("清空") { selectedSeedIDs.removeAll() }
-                                    .font(.system(size: 11))
+                                    .font(CharkleTheme.text(.caption))
                                     .buttonStyle(.plain)
                                     .foregroundStyle(.secondary)
                             }
@@ -303,11 +303,11 @@ public struct MoodboardGeneratorSheet: View {
                                             asset: asset,
                                             loader: library.thumbnailLoader,
                                             tier: .grid520,
-                                            cornerRadius: 8
+                                            cornerRadius: CharkleTheme.Radius.chip
                                         )
                                         .frame(height: 64)
                                         .overlay(
-                                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                            RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous)
                                                 .strokeBorder(isPicked ? Color.accentColor : Color.clear, lineWidth: 2)
                                         )
                                         if isPicked {
@@ -329,10 +329,10 @@ public struct MoodboardGeneratorSheet: View {
                 } label: {
                     HStack {
                         Text("定调种子图")
-                            .font(.system(size: 12, weight: .semibold))
+                            .font(CharkleTheme.text(.caption, weight: .semibold))
                         Spacer()
                         Text(selectedSeedIDs.isEmpty ? "可选" : "已选 \(selectedSeedIDs.count) 张")
-                            .font(.system(size: 11))
+                            .font(CharkleTheme.text(.caption))
                             .foregroundStyle(selectedSeedIDs.isEmpty ? Color.secondary : Color.accentColor)
                     }
                 }
@@ -353,11 +353,11 @@ public struct MoodboardGeneratorSheet: View {
                                         selectedPaletteHexes.append(hex)
                                     }
                                 } label: {
-                                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                    RoundedRectangle(cornerRadius: CharkleTheme.Radius.sm, style: .continuous)
                                         .fill(Color(charkleHex: hex))
                                         .frame(width: 28, height: 28)
                                         .overlay(
-                                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                            RoundedRectangle(cornerRadius: CharkleTheme.Radius.sm, style: .continuous)
                                                 .strokeBorder(
                                                     active ? Color.accentColor : Color.primary.opacity(0.14),
                                                     lineWidth: active ? 2 : CharkleTheme.hairlineWidth
@@ -372,11 +372,11 @@ public struct MoodboardGeneratorSheet: View {
                         if !selectedPaletteHexes.isEmpty {
                             HStack(spacing: 8) {
                                 Text("精确")
-                                    .font(.system(size: 10.5))
+                                    .font(CharkleTheme.text(.caption))
                                     .foregroundStyle(.secondary)
                                 Slider(value: $colorTolerance, in: 12...46, step: 2)
                                 Text("宽松")
-                                    .font(.system(size: 10.5))
+                                    .font(CharkleTheme.text(.caption))
                                     .foregroundStyle(.secondary)
                             }
                         }
@@ -385,11 +385,11 @@ public struct MoodboardGeneratorSheet: View {
                 } label: {
                     HStack {
                         Text("色彩倾向")
-                            .font(.system(size: 12, weight: .semibold))
+                            .font(CharkleTheme.text(.caption, weight: .semibold))
                         Spacer()
                         if selectedPaletteHexes.isEmpty {
                             Text("可选")
-                                .font(.system(size: 11))
+                                .font(CharkleTheme.text(.caption))
                                 .foregroundStyle(.secondary)
                         } else {
                             HStack(spacing: 3) {
@@ -408,11 +408,11 @@ public struct MoodboardGeneratorSheet: View {
                 // 5. Composition & Layout Controls
                 VStack(alignment: .leading, spacing: 10) {
                     Text("版面与构成")
-                        .font(.system(size: 12, weight: .semibold))
+                        .font(CharkleTheme.text(.caption, weight: .semibold))
 
                     HStack {
                         Text("初始构图节奏")
-                            .font(.system(size: 11.5))
+                            .font(CharkleTheme.text(.caption))
                             .foregroundStyle(.secondary)
                         Spacer()
                         Picker("", selection: $layoutStyle) {
@@ -427,7 +427,7 @@ public struct MoodboardGeneratorSheet: View {
 
                     HStack {
                         Text("数量上限")
-                            .font(.system(size: 11.5))
+                            .font(CharkleTheme.text(.caption))
                             .foregroundStyle(.secondary)
                         Spacer()
                         Picker("", selection: $preferredCount) {
@@ -443,14 +443,14 @@ public struct MoodboardGeneratorSheet: View {
 
                     Toggle(isOn: $includeCuratorNotes) {
                         Text("附带视觉策展便签与分区标题")
-                            .font(.system(size: 11.5))
+                            .font(CharkleTheme.text(.caption))
                     }
                     .toggleStyle(.checkbox)
 
                     Toggle(isOn: $autoFocusDetailCrop) {
                         HStack(spacing: 4) {
                             Text("细节特写模式（按灵感词自动局部裁切）")
-                                .font(.system(size: 11.5))
+                                .font(CharkleTheme.text(.caption))
                         }
                     }
                     .toggleStyle(.checkbox)
@@ -476,7 +476,7 @@ public struct MoodboardGeneratorSheet: View {
                                 ? "Agent 正在审片策展…"
                                 : (isCloudAIReady ? "开始 AI 视觉策展" : "生成离线策展初稿")
                         )
-                        .font(.system(size: 12.5, weight: .semibold))
+                        .font(CharkleTheme.text(.body, weight: .semibold))
                     }
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 9)
@@ -509,12 +509,12 @@ public struct MoodboardGeneratorSheet: View {
                             Image(systemName: "exclamationmark.triangle.fill")
                                 .foregroundStyle(.orange)
                             Text(err)
-                                .font(.system(size: 11.5))
+                                .font(CharkleTheme.text(.caption))
                                 .fixedSize(horizontal: false, vertical: true)
                             Spacer()
                         }
                         .padding(10)
-                        .background(Color.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        .background(Color.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.popoverInner, style: .continuous))
                         .transition(CharkleMotion.originTransition(anchor: .top, scale: 0.97, reduced: reduceMotion))
                     }
 
@@ -545,7 +545,7 @@ public struct MoodboardGeneratorSheet: View {
                             .foregroundStyle(Color.accentColor)
                         TextField("继续微调初稿… 如：去掉暗色界面、换更通透的色调、按光影与角色分组", text: $refinementInput)
                             .textFieldStyle(.plain)
-                            .font(.system(size: 12))
+                            .font(CharkleTheme.text(.caption))
                             .onSubmit { triggerRefinement() }
                         Button("继续调整") {
                             triggerRefinement()
@@ -598,10 +598,10 @@ public struct MoodboardGeneratorSheet: View {
 
                         VStack(alignment: .leading, spacing: 1.5) {
                             Text(step.title)
-                                .font(.system(size: 11.5, weight: .semibold))
+                                .font(CharkleTheme.text(.caption, weight: .semibold))
                             if !step.detail.isEmpty {
                                 Text(step.detail)
-                                    .font(.system(size: 11))
+                                    .font(CharkleTheme.text(.caption))
                                     .foregroundStyle(.secondary)
                                     .fixedSize(horizontal: false, vertical: true)
                             }
@@ -622,14 +622,14 @@ public struct MoodboardGeneratorSheet: View {
                         .foregroundStyle(Color.accentColor)
                 }
                 Text(moodboards.isGeneratingProposal ? "Agent 策展执行中…" : "策展执行轨迹（\(moodboards.agentTrace.count) 步）")
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(CharkleTheme.text(.caption, weight: .semibold))
                 Spacer()
             }
         }
         .padding(12)
-        .background(CharkleTheme.surfaceElevated(for: colorScheme), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+        .background(CharkleTheme.surfaceElevated(for: colorScheme), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.cardOuter, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 11, style: .continuous)
+            RoundedRectangle(cornerRadius: CharkleTheme.Radius.cardOuter, style: .continuous)
                 .strokeBorder(CharkleTheme.hairline(for: colorScheme), lineWidth: CharkleTheme.hairlineWidth)
         )
     }
@@ -645,17 +645,17 @@ public struct MoodboardGeneratorSheet: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .firstTextBaseline) {
                 Text(prop.draftDocument.title)
-                    .font(.system(size: 15, weight: .semibold))
+                    .font(CharkleTheme.text(.headline, weight: .semibold))
                 Spacer()
                 Text("入选 \(prop.primaryMatches.count) 张 · 候选池 +\(prop.candidatePool.count)")
-                    .font(.system(size: 11, weight: .medium))
+                    .font(CharkleTheme.text(.caption, weight: .medium))
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
             }
 
             if !prop.curatedSummary.isEmpty {
                 Text(prop.curatedSummary)
-                    .font(.system(size: 12))
+                    .font(CharkleTheme.text(.caption))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -663,11 +663,11 @@ public struct MoodboardGeneratorSheet: View {
             if !prop.extractedPalette.isEmpty {
                 HStack(spacing: 4) {
                     ForEach(prop.extractedPalette.prefix(6), id: \.hex) { swatch in
-                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        RoundedRectangle(cornerRadius: CharkleTheme.Radius.cardInnerBadge, style: .continuous)
                             .fill(Color(charkleHex: swatch.hex))
                             .frame(height: 22)
                             .overlay(
-                                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                RoundedRectangle(cornerRadius: CharkleTheme.Radius.cardInnerBadge, style: .continuous)
                                     .strokeBorder(Color.primary.opacity(0.10), lineWidth: CharkleTheme.hairlineWidth)
                             )
                             .help(swatch.hex)
@@ -681,16 +681,16 @@ public struct MoodboardGeneratorSheet: View {
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                     Text(rejected)
-                        .font(.system(size: 11))
+                        .font(CharkleTheme.text(.caption))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
         }
         .padding(14)
-        .background(CharkleTheme.surfaceElevated(for: colorScheme), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .background(CharkleTheme.surfaceElevated(for: colorScheme), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.cardOuter, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            RoundedRectangle(cornerRadius: CharkleTheme.Radius.cardOuter, style: .continuous)
                 .strokeBorder(CharkleTheme.hairline(for: colorScheme), lineWidth: CharkleTheme.hairlineWidth)
         )
 
@@ -700,9 +700,9 @@ public struct MoodboardGeneratorSheet: View {
                     .font(.system(size: 28, weight: .light))
                     .foregroundStyle(.secondary)
                 Text("没有硬塞不符主题的素材")
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(CharkleTheme.text(.body, weight: .semibold))
                 Text("当前限定范围内暂无与描述相符的画面，可以放宽文件夹范围、修改描述，或先在设置开启云端增强智能让 AI 看图筛选。")
-                    .font(.system(size: 11.5))
+                    .font(CharkleTheme.text(.caption))
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
                     .frame(maxWidth: 360)
@@ -721,16 +721,16 @@ public struct MoodboardGeneratorSheet: View {
                             .fill(sectionTintColor(section.tint))
                             .frame(width: 8, height: 8)
                         Text(section.title)
-                            .font(.system(size: 12.5, weight: .semibold))
+                            .font(CharkleTheme.text(.body, weight: .semibold))
                         if !section.rationale.isEmpty {
                             Text("· \(section.rationale)")
-                                .font(.system(size: 11))
+                                .font(CharkleTheme.text(.caption))
                                 .foregroundStyle(.secondary)
                                 .lineLimit(1)
                         }
                         Spacer()
                         Text("\(section.assetIDs.count) 张")
-                            .font(.system(size: 10.5))
+                            .font(CharkleTheme.text(.caption))
                             .foregroundStyle(.tertiary)
                     }
 
@@ -763,12 +763,12 @@ public struct MoodboardGeneratorSheet: View {
                 asset: scored.asset,
                 loader: library.thumbnailLoader,
                 tier: .grid520,
-                cornerRadius: 10
+                cornerRadius: CharkleTheme.Radius.popoverInner
             )
             .frame(height: 118)
-            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: CharkleTheme.Radius.popoverInner, style: .continuous))
             .overlay(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                RoundedRectangle(cornerRadius: CharkleTheme.Radius.popoverInner, style: .continuous)
                     .strokeBorder(
                         isLocked ? Color.accentColor : CharkleTheme.hairline(for: colorScheme),
                         lineWidth: isLocked ? 2 : CharkleTheme.hairlineWidth
@@ -780,11 +780,11 @@ public struct MoodboardGeneratorSheet: View {
                 HStack {
                     if isHero {
                         Text("主视觉")
-                            .font(.system(size: 9.5, weight: .semibold))
+                            .font(CharkleTheme.text(.caption, weight: .semibold))
                             .foregroundStyle(.white)
                             .padding(.horizontal, 6)
                             .padding(.vertical, 2)
-                            .background(Color.accentColor.opacity(0.92), in: Capsule())
+                            .background(Color.accentColor.opacity(0.92), in: Capsule(style: .continuous))
                     }
                     Spacer()
 
@@ -831,7 +831,7 @@ public struct MoodboardGeneratorSheet: View {
                 if let reason = scored.matchReasons.first, !reason.isEmpty {
                     HStack {
                         Text(reason)
-                            .font(.system(size: 9.5, weight: .medium))
+                            .font(CharkleTheme.text(.caption, weight: .medium))
                             .foregroundStyle(.white)
                             .lineLimit(1)
                             .padding(.horizontal, 6)
@@ -856,9 +856,9 @@ public struct MoodboardGeneratorSheet: View {
                 .font(.system(size: 36, weight: .ultraLight))
                 .foregroundStyle(.secondary)
             Text("输入灵感方向，点击左侧「\(isCloudAIReady ? "开始 AI 视觉策展" : "生成离线策展初稿")」")
-                .font(.system(size: 13.5, weight: .semibold))
+                .font(CharkleTheme.text(.body, weight: .semibold))
             Text("系统会把候选素材拼成编号视觉联系表直接看图筛选，只挑选真正契合氛围的作品，自动划分逻辑分区、标注主视觉并提炼全板色卡；初稿生成后还可继续对话微调。")
-                .font(.system(size: 12))
+                .font(CharkleTheme.text(.caption))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 420)
@@ -880,10 +880,10 @@ public struct MoodboardGeneratorSheet: View {
                     Image(systemName: prop.usedCloudAI ? "sparkles" : "desktopcomputer")
                         .font(.system(size: 10.5))
                     Text(prop.usedCloudAI ? "已启用云端增强智能" : "本机离线策展")
-                        .font(.system(size: 11, weight: .medium))
+                        .font(CharkleTheme.text(.caption, weight: .medium))
                     if prop.cachedVisualInsightsCount > 0 {
                         Text("· 沉淀 \(prop.cachedVisualInsightsCount) 条视觉理解")
-                            .font(.system(size: 10.5))
+                            .font(CharkleTheme.text(.caption))
                             .foregroundStyle(.tertiary)
                     }
                 }

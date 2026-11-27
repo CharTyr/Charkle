@@ -59,7 +59,7 @@ public struct PinterestExploreWorkspaceView: View {
                     ProgressView()
                         .controlSize(.regular)
                     Text("正在检查 Pinterest 登录状态…")
-                        .font(.system(size: 13))
+                        .font(CharkleTheme.text(.body))
                         .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
                 }
             } else {
@@ -188,19 +188,19 @@ public struct PinterestExploreWorkspaceView: View {
                     ProgressView()
                         .controlSize(.regular)
                     Text("正在铺展 Pinterest 无限灵感空间…")
-                        .font(.system(size: 13, weight: .medium))
+                        .font(CharkleTheme.text(.body, weight: .medium))
                         .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
                 }
                 .padding(.horizontal, 20)
                 .padding(.vertical, 16)
-                .charkleLiquidGlass(.regular, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .charkleLiquidGlass(.regular, in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.popoverOuter, style: .continuous))
             } else if let error = controller.errorMessage, controller.layout.cards.isEmpty {
                 VStack(spacing: 12) {
                     Image(systemName: "exclamationmark.triangle")
                         .font(.system(size: 24, weight: .medium))
                         .foregroundStyle(CharkleTheme.warning(for: colorScheme))
                     Text(error)
-                        .font(.system(size: 13))
+                        .font(CharkleTheme.text(.body))
                         .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
                         .multilineTextAlignment(.center)
                         .frame(maxWidth: 340)
@@ -219,7 +219,7 @@ public struct PinterestExploreWorkspaceView: View {
                     }
                 }
                 .padding(22)
-                .charkleLiquidGlass(.regular, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                .charkleLiquidGlass(.regular, in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.popoverOuter, style: .continuous))
                 .pinterestExcludeHitTestMac()
                 .zIndex(15)
             }
@@ -252,7 +252,7 @@ public struct PinterestExploreWorkspaceView: View {
                             ProgressView()
                                 .controlSize(.mini)
                             Text("向外拓展更多灵感…")
-                                .font(.system(size: 11.5, weight: .medium))
+                                .font(CharkleTheme.text(.caption, weight: .medium))
                                 .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
                         }
                         .padding(.horizontal, 11)
@@ -308,7 +308,7 @@ public struct PinterestExploreWorkspaceView: View {
                                 Image(systemName: "chevron.left")
                                     .font(.system(size: 11, weight: .semibold))
                                 Text("返回推荐")
-                                    .font(.system(size: 12, weight: .medium))
+                                    .font(CharkleTheme.text(.caption, weight: .medium))
                             }
                             .padding(.horizontal, 9)
                             .frame(height: 28)
@@ -350,7 +350,7 @@ public struct PinterestExploreWorkspaceView: View {
                                 .font(.system(size: 12, weight: .semibold))
                                 .foregroundStyle(activeAccent)
                             Text(controller.feedSource.displayTitle)
-                                .font(.system(size: 12.5, weight: .semibold))
+                                .font(CharkleTheme.text(.body, weight: .semibold))
                                 .foregroundStyle(.primary.opacity(0.92))
                                 .lineLimit(1)
                                 .truncationMode(.tail)
@@ -376,7 +376,7 @@ public struct PinterestExploreWorkspaceView: View {
                         .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
                     TextField("搜索 Pinterest 灵感…", text: $controller.searchText)
                         .textFieldStyle(.plain)
-                        .font(.system(size: 12.5))
+                        .font(CharkleTheme.text(.body))
                         .frame(minWidth: 140, maxWidth: 260)
                         .onSubmit {
                             Task { await controller.submitSearch() }
@@ -408,7 +408,7 @@ public struct PinterestExploreWorkspaceView: View {
                         Image(systemName: "square.and.arrow.down.on.square")
                             .font(.system(size: 12, weight: .semibold))
                         Text("导入画板收藏")
-                            .font(.system(size: 12, weight: .semibold))
+                            .font(CharkleTheme.text(.caption, weight: .semibold))
                     }
                     .foregroundStyle(activeAccent)
                     .padding(.horizontal, 12)
@@ -435,7 +435,7 @@ public struct PinterestExploreWorkspaceView: View {
                         cameraCommand = PinterestCameraCommandMac(action: .resetCenter)
                     } label: {
                         Text("\(Int((cameraScale * 100).rounded()))%")
-                            .font(.system(size: 11.5, weight: .semibold).monospacedDigit())
+                            .font(CharkleTheme.text(.caption, weight: .semibold).monospacedDigit())
                             .frame(minWidth: 42, minHeight: 28)
                             .contentShape(Rectangle())
                     }
@@ -495,7 +495,7 @@ public struct PinterestExploreWorkspaceView: View {
                             .foregroundStyle(activeAccent)
                         if let account = controller.account {
                             Text(account.displayName)
-                                .font(.system(size: 12, weight: .medium))
+                                .font(CharkleTheme.text(.caption, weight: .medium))
                                 .foregroundStyle(.primary.opacity(0.92))
                                 .lineLimit(1)
                                 .frame(maxWidth: 96, alignment: .leading)
@@ -575,9 +575,9 @@ public struct PinterestExploreWorkspaceView: View {
                             ForEach(controller.trayPins.prefix(4)) { pin in
                                 PinterestRemoteThumbMac(url: pin.thumbnailURL, dominantHex: pin.dominantColorHex, maxPixels: 160)
                                     .frame(width: 24, height: 24)
-                                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                                    .clipShape(RoundedRectangle(cornerRadius: CharkleTheme.Radius.sm, style: .continuous))
                                     .overlay(
-                                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                        RoundedRectangle(cornerRadius: CharkleTheme.Radius.sm, style: .continuous)
                                             .strokeBorder(CharkleTheme.surfaceElevated(for: colorScheme), lineWidth: 1.5)
                                     )
                             }
@@ -589,7 +589,7 @@ public struct PinterestExploreWorkspaceView: View {
                     }
 
                     Text(controller.trayCount > 0 ? "采集托盘 · \(controller.trayCount)" : "采集托盘")
-                        .font(.system(size: 12.5, weight: .semibold).monospacedDigit())
+                        .font(CharkleTheme.text(.body, weight: .semibold).monospacedDigit())
 
                     Image(systemName: controller.isTrayExpanded ? "chevron.down" : "chevron.up")
                         .font(.system(size: 10, weight: .semibold))
@@ -615,7 +615,7 @@ public struct PinterestExploreWorkspaceView: View {
                                 .font(.system(size: 11.5, weight: .semibold))
                         }
                         Text(controller.isImportingTray ? "入库中…" : "批量入库")
-                            .font(.system(size: 12, weight: .semibold))
+                            .font(CharkleTheme.text(.caption, weight: .semibold))
                     }
                     .foregroundStyle(.white)
                     .padding(.horizontal, 12)
@@ -638,9 +638,9 @@ public struct PinterestExploreWorkspaceView: View {
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(activeAccent)
                 Text("Pinterest 采集托盘")
-                    .font(.system(size: 13.5, weight: .semibold))
+                    .font(CharkleTheme.text(.body, weight: .semibold))
                 Text("已勾选 \(controller.selectedTrayCount) / 共 \(controller.trayCount) 项 · 点卡片查看条目详情")
-                    .font(.system(size: 12))
+                    .font(CharkleTheme.text(.caption))
                     .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
 
                 Spacer()
@@ -688,9 +688,9 @@ public struct PinterestExploreWorkspaceView: View {
                         .font(.system(size: 26, weight: .light))
                         .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme).opacity(0.72))
                     Text("托盘还是空的")
-                        .font(.system(size: 13, weight: .medium))
+                        .font(CharkleTheme.text(.body, weight: .medium))
                     Text("悬停卡片点击右上角「+」，或切换到左下角「快选入托盘」模式批量点选加入")
-                        .font(.system(size: 12))
+                        .font(CharkleTheme.text(.caption))
                         .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
                 }
                 .frame(maxWidth: .infinity)
@@ -736,14 +736,14 @@ public struct PinterestExploreWorkspaceView: View {
                                 .font(.system(size: 11.5, weight: .medium))
                                 .foregroundStyle(activeAccent)
                             Text(selectedTrayFolderTitle)
-                                .font(.system(size: 12, weight: .medium))
+                                .font(CharkleTheme.text(.caption, weight: .medium))
                                 .foregroundStyle(.primary.opacity(0.92))
                                 .lineLimit(1)
                             CharkleDropdownChevron(size: 8.5)
                         }
                         .padding(.horizontal, 10)
                         .frame(height: 30)
-                        .background(CharkleTheme.surfaceSubtle(for: colorScheme), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        .background(CharkleTheme.surfaceSubtle(for: colorScheme), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous))
                     }
                     .menuStyle(.button)
                     .buttonStyle(CharkleMenuTriggerButtonStyle())
@@ -756,12 +756,12 @@ public struct PinterestExploreWorkspaceView: View {
                             .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme).opacity(0.72))
                         TextField("附加标签（逗号分隔，可选）", text: $trayExtraTagsText)
                             .textFieldStyle(.plain)
-                            .font(.system(size: 12))
+                            .font(CharkleTheme.text(.caption))
                             .frame(width: 170)
                     }
                     .padding(.horizontal, 9)
                     .frame(height: 30)
-                    .background(CharkleTheme.surfaceSubtle(for: colorScheme), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .background(CharkleTheme.surfaceSubtle(for: colorScheme), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous))
 
                     Spacer()
 
@@ -770,7 +770,7 @@ public struct PinterestExploreWorkspaceView: View {
                             ProgressView(value: Double(prog.completed), total: Double(max(1, prog.total)))
                                 .frame(width: 100)
                             Text("\(prog.completed)/\(prog.total)")
-                                .font(.system(size: 11.5, weight: .medium).monospacedDigit())
+                                .font(CharkleTheme.text(.caption, weight: .medium).monospacedDigit())
                                 .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
                         }
                     }
@@ -784,7 +784,7 @@ public struct PinterestExploreWorkspaceView: View {
                             Text(controller.isImportingTray
                                  ? "正在导入…"
                                  : "批量导入已选 (\(controller.selectedTrayCount)) 到素材库")
-                                .font(.system(size: 12.5, weight: .semibold))
+                                .font(CharkleTheme.text(.body, weight: .semibold))
                         }
                     }
                     .buttonStyle(CharkleButtonStyle(.accent, size: .sm, cornerRadius: 999))
@@ -795,7 +795,7 @@ public struct PinterestExploreWorkspaceView: View {
             }
         }
         .frame(maxWidth: 900)
-        .charkleLiquidGlass(.regular, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .charkleLiquidGlass(.regular, in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.popoverOuter, style: .continuous))
         .shadow(color: Color.black.opacity(colorScheme == .dark ? 0.42 : 0.14), radius: 24, y: 8)
     }
 
@@ -804,6 +804,7 @@ public struct PinterestExploreWorkspaceView: View {
         let isImported = controller.importedPinIDs.contains(pin.id)
         let cardHeight: CGFloat = 146
         let cardWidth = max(76, min(260, (cardHeight * CGFloat(pin.aspectRatio)).rounded()))
+        let trayCardRadius = CharkleTheme.Radius.concentricInner(outer: CharkleTheme.Radius.popoverOuter, padding: CharkleTheme.Radius.popoverPadding)
 
         return VStack(alignment: .leading, spacing: 5) {
             ZStack(alignment: .top) {
@@ -820,9 +821,9 @@ public struct PinterestExploreWorkspaceView: View {
                         contentMode: .fill
                     )
                     .frame(width: cardWidth, height: cardHeight)
-                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .clipShape(RoundedRectangle(cornerRadius: trayCardRadius, style: .continuous))
                     .overlay(
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        RoundedRectangle(cornerRadius: trayCardRadius, style: .continuous)
                             .strokeBorder(
                                 isSelected ? activeAccent : Color.primary.opacity(0.10),
                                 lineWidth: isSelected ? 2 : CharkleTheme.hairlineWidth
@@ -865,7 +866,7 @@ public struct PinterestExploreWorkspaceView: View {
                         Spacer()
                         HStack {
                             Text("已入库")
-                                .font(.system(size: 9.5, weight: .semibold))
+                                .font(CharkleTheme.text(.caption, weight: .semibold))
                                 .foregroundStyle(.white)
                                 .padding(.horizontal, 6)
                                 .padding(.vertical, 2)
@@ -885,7 +886,7 @@ public struct PinterestExploreWorkspaceView: View {
                 }
             } label: {
                 Text(pin.displayTitle)
-                    .font(.system(size: 11, weight: .medium))
+                    .font(CharkleTheme.text(.caption, weight: .medium))
                     .foregroundStyle(.primary)
                     .lineLimit(1)
                     .frame(width: cardWidth, alignment: .leading)
@@ -929,9 +930,9 @@ public struct PinterestExploreWorkspaceView: View {
 
                 VStack(spacing: 6) {
                     Text("在 Charkle 无限空间中浏览 Pinterest")
-                        .font(.system(size: 20, weight: .semibold))
+                        .font(CharkleTheme.text(.title, weight: .semibold))
                     Text("登录你的 Pinterest 账号，在丝滑的 2D 无限画布中自由滑动与锚定缩放，像逛灵感购物车一样批量加入托盘并一键收入素材库，也支持把已有画板收藏按目录整批导入。")
-                        .font(.system(size: 13))
+                        .font(CharkleTheme.text(.body))
                         .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
                         .multilineTextAlignment(.center)
                         .frame(maxWidth: 460)
@@ -950,7 +951,7 @@ public struct PinterestExploreWorkspaceView: View {
                         Image(systemName: "person.crop.circle.badge.plus")
                             .font(.system(size: 14, weight: .semibold))
                         Text("登录 Pinterest 账号")
-                            .font(.system(size: 13.5, weight: .semibold))
+                            .font(CharkleTheme.text(.body, weight: .semibold))
                     }
                     .padding(.horizontal, 10)
                 }
@@ -959,16 +960,16 @@ public struct PinterestExploreWorkspaceView: View {
 
                 if !controller.trayPins.isEmpty {
                     Text("你的采集托盘中仍保留着上次挑选的 \(controller.trayPins.count) 项素材，登录后可继续管理与入库。")
-                        .font(.system(size: 11.5))
+                        .font(CharkleTheme.text(.caption))
                         .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme).opacity(0.72))
                 }
             }
             .padding(32)
             .background(
-                RoundedRectangle(cornerRadius: 24, style: .continuous)
+                RoundedRectangle(cornerRadius: CharkleTheme.Radius.dockOuter, style: .continuous)
                     .fill(CharkleTheme.surfaceElevated(for: colorScheme))
                     .overlay(
-                        RoundedRectangle(cornerRadius: 24, style: .continuous)
+                        RoundedRectangle(cornerRadius: CharkleTheme.Radius.dockOuter, style: .continuous)
                             .strokeBorder(CharkleTheme.hairline(for: colorScheme), lineWidth: CharkleTheme.hairlineWidth)
                     )
             )
@@ -983,7 +984,7 @@ public struct PinterestExploreWorkspaceView: View {
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(activeAccent)
             Text(text)
-                .font(.system(size: 11.5, weight: .medium))
+                .font(CharkleTheme.text(.caption, weight: .medium))
                 .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
         }
         .padding(.horizontal, 10)
@@ -1105,7 +1106,7 @@ private struct PinterestPinDetailOverlayMac: View {
                                     Image(systemName: "chevron.left")
                                         .font(.system(size: 11.5, weight: .semibold))
                                     Text("返回上一个")
-                                        .font(.system(size: 12, weight: .medium))
+                                        .font(CharkleTheme.text(.caption, weight: .medium))
                                 }
                             }
                             .buttonStyle(CharkleButtonStyle(.subtle, size: .sm, cornerRadius: 999))
@@ -1113,20 +1114,20 @@ private struct PinterestPinDetailOverlayMac: View {
 
                         VStack(alignment: .leading, spacing: 1) {
                             Text(pin.displayTitle)
-                                .font(.system(size: 14, weight: .semibold))
+                                .font(CharkleTheme.text(.body, weight: .semibold))
                                 .lineLimit(1)
                             HStack(spacing: 6) {
                                 Text("Pinterest 条目")
-                                    .font(.system(size: 11, weight: .medium))
+                                    .font(CharkleTheme.text(.caption, weight: .medium))
                                     .foregroundStyle(accent)
                                 if let board = pin.boardName, !board.isEmpty {
                                     Text("· \(board)")
-                                        .font(.system(size: 11))
+                                        .font(CharkleTheme.text(.caption))
                                         .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
                                 }
                                 if let domain = pin.domain, !domain.isEmpty {
                                     Text("· \(domain)")
-                                        .font(.system(size: 11))
+                                        .font(CharkleTheme.text(.caption))
                                         .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme).opacity(0.72))
                                 }
                             }
@@ -1141,7 +1142,7 @@ private struct PinterestPinDetailOverlayMac: View {
                                 Image(systemName: "sparkles.rectangle.stack")
                                     .font(.system(size: 11.5, weight: .semibold))
                                 Text("在无限空间展开相似")
-                                    .font(.system(size: 12, weight: .medium))
+                                    .font(CharkleTheme.text(.caption, weight: .medium))
                             }
                         }
                         .buttonStyle(CharkleButtonStyle(.subtle, size: .sm, cornerRadius: 999))
@@ -1215,14 +1216,14 @@ private struct PinterestPinDetailOverlayMac: View {
                 }
                 .frame(width: cardWidth, height: cardHeight)
                 .background(
-                    RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    RoundedRectangle(cornerRadius: CharkleTheme.Radius.dockOuter, style: .continuous)
                         .fill(CharkleTheme.surfaceElevated(for: colorScheme))
                 )
                 .overlay(
-                    RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    RoundedRectangle(cornerRadius: CharkleTheme.Radius.dockOuter, style: .continuous)
                         .strokeBorder(CharkleTheme.hairline(for: colorScheme), lineWidth: CharkleTheme.hairlineWidth)
                 )
-                .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+                .clipShape(RoundedRectangle(cornerRadius: CharkleTheme.Radius.dockOuter, style: .continuous))
                 .shadow(color: Color.black.opacity(colorScheme == .dark ? 0.50 : 0.22), radius: 36, y: 14)
             }
         }
@@ -1243,6 +1244,7 @@ private struct PinterestPinDetailOverlayMac: View {
         let heroSize: CGSize = wByH <= maxW
             ? CGSize(width: max(120, wByH.rounded()), height: max(120, maxH.rounded()))
             : CGSize(width: max(120, maxW.rounded()), height: max(120, (maxW / safeRatio).rounded()))
+        let heroCardRadius = CharkleTheme.Radius.concentricInner(outer: CharkleTheme.Radius.dockOuter, padding: CharkleTheme.Radius.dockPadding)
 
         return HStack(alignment: .top, spacing: 20) {
             // Left: Exact-aspect high-res Pin Visual (zero pillarbox dead space; click to expand)
@@ -1258,9 +1260,9 @@ private struct PinterestPinDetailOverlayMac: View {
                         contentMode: .fill
                     )
                     .frame(width: heroSize.width, height: heroSize.height)
-                    .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+                    .clipShape(RoundedRectangle(cornerRadius: heroCardRadius, style: .continuous))
                     .overlay(
-                        RoundedRectangle(cornerRadius: 13, style: .continuous)
+                        RoundedRectangle(cornerRadius: heroCardRadius, style: .continuous)
                             .strokeBorder(CharkleTheme.hairline(for: colorScheme), lineWidth: CharkleTheme.hairlineWidth)
                     )
 
@@ -1269,7 +1271,7 @@ private struct PinterestPinDetailOverlayMac: View {
                             Image(systemName: "video.fill")
                                 .font(.system(size: 10, weight: .bold))
                             Text("视频 Pin")
-                                .font(.system(size: 10.5, weight: .semibold))
+                                .font(CharkleTheme.text(.caption, weight: .semibold))
                         }
                         .foregroundStyle(.white)
                         .padding(.horizontal, 8)
@@ -1285,14 +1287,14 @@ private struct PinterestPinDetailOverlayMac: View {
             // Right: Metadata & Shopping-Cart / Import Actions
             VStack(alignment: .leading, spacing: 12) {
                 Text(pin.displayTitle)
-                    .font(.system(size: 17, weight: .semibold))
+                    .font(CharkleTheme.text(.headline, weight: .semibold))
                     .lineLimit(3)
                     .textSelection(.enabled)
 
                 if !pin.descriptionText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                    pin.descriptionText != pin.displayTitle {
                     Text(pin.descriptionText)
-                        .font(.system(size: 12.5))
+                        .font(CharkleTheme.text(.body))
                         .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
                         .lineLimit(4)
                         .textSelection(.enabled)
@@ -1315,7 +1317,7 @@ private struct PinterestPinDetailOverlayMac: View {
                                 Image(systemName: "globe")
                                     .font(.system(size: 11.5))
                                 Text(pin.domain ?? ext.host() ?? ext.absoluteString)
-                                    .font(.system(size: 12, weight: .medium))
+                                    .font(CharkleTheme.text(.caption, weight: .medium))
                                     .lineLimit(1)
                                 Image(systemName: "arrow.up.right")
                                     .font(.system(size: 10, weight: .semibold))
@@ -1327,7 +1329,7 @@ private struct PinterestPinDetailOverlayMac: View {
                 }
                 .padding(10)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(CharkleTheme.surfaceSubtle(for: colorScheme), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+                .background(CharkleTheme.surfaceSubtle(for: colorScheme), in: RoundedRectangle(cornerRadius: heroCardRadius, style: .continuous))
 
                 // Primary Actions
                 VStack(spacing: 8) {
@@ -1338,11 +1340,11 @@ private struct PinterestPinDetailOverlayMac: View {
                             Image(systemName: isInTray ? "checkmark.circle.fill" : "cart.badge.plus")
                                 .font(.system(size: 13, weight: .semibold))
                             Text(isInTray ? "已在采集托盘中（点击移出）" : "加入采集托盘")
-                                .font(.system(size: 13, weight: .semibold))
+                                .font(CharkleTheme.text(.body, weight: .semibold))
                         }
                         .frame(maxWidth: .infinity)
                     }
-                    .buttonStyle(CharkleButtonStyle(isInTray ? .subtle : .accent, size: .md, cornerRadius: 10))
+                    .buttonStyle(CharkleButtonStyle(isInTray ? .subtle : .accent, size: .md, cornerRadius: CharkleTheme.Radius.popoverInner))
 
                     HStack(spacing: 8) {
                         Button {
@@ -1356,11 +1358,11 @@ private struct PinterestPinDetailOverlayMac: View {
                                         .font(.system(size: 12, weight: .semibold))
                                 }
                                 Text(isImported ? "已入库" : (isSingleImporting ? "入库中…" : "直接入库"))
-                                    .font(.system(size: 12.5, weight: .medium))
+                                    .font(CharkleTheme.text(.body, weight: .medium))
                             }
                             .frame(maxWidth: .infinity)
                         }
-                        .buttonStyle(CharkleButtonStyle(.subtle, size: .md, cornerRadius: 10))
+                        .buttonStyle(CharkleButtonStyle(.subtle, size: .md, cornerRadius: CharkleTheme.Radius.popoverInner))
                         .disabled(isSingleImporting)
 
                         Button {
@@ -1370,11 +1372,11 @@ private struct PinterestPinDetailOverlayMac: View {
                                 Image(systemName: "sparkles")
                                     .font(.system(size: 12, weight: .semibold))
                                 Text("无限空间看相似")
-                                    .font(.system(size: 12.5, weight: .medium))
+                                    .font(CharkleTheme.text(.body, weight: .medium))
                             }
                             .frame(maxWidth: .infinity)
                         }
-                        .buttonStyle(CharkleButtonStyle(.subtle, size: .md, cornerRadius: 10))
+                        .buttonStyle(CharkleButtonStyle(.subtle, size: .md, cornerRadius: CharkleTheme.Radius.popoverInner))
                     }
                 }
             }
@@ -1389,10 +1391,10 @@ private struct PinterestPinDetailOverlayMac: View {
                 .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme).opacity(0.72))
                 .frame(width: 15)
             Text(label)
-                .font(.system(size: 11.5))
+                .font(CharkleTheme.text(.caption))
                 .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
             Text(value)
-                .font(.system(size: 12, weight: .medium))
+                .font(CharkleTheme.text(.caption, weight: .medium))
                 .lineLimit(1)
         }
     }
@@ -1405,10 +1407,10 @@ private struct PinterestPinDetailOverlayMac: View {
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(accent)
                     Text("Pinterest 类似素材")
-                        .font(.system(size: 15, weight: .semibold))
+                        .font(CharkleTheme.text(.headline, weight: .semibold))
                     if !controller.detailSimilarPins.isEmpty {
                         Text("\(controller.detailSimilarPins.count)")
-                            .font(.system(size: 12, weight: .medium).monospacedDigit())
+                            .font(CharkleTheme.text(.caption, weight: .medium).monospacedDigit())
                             .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
                     }
                 }
@@ -1417,7 +1419,7 @@ private struct PinterestPinDetailOverlayMac: View {
                     HStack(spacing: 6) {
                         ProgressView().controlSize(.mini)
                         Text("正在获取相似灵感…")
-                            .font(.system(size: 12))
+                            .font(CharkleTheme.text(.caption))
                             .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
                     }
                 }
@@ -1425,7 +1427,7 @@ private struct PinterestPinDetailOverlayMac: View {
 
             if controller.detailSimilarPins.isEmpty && !controller.isLoadingDetail {
                 Text("暂未获取到该条目的类似推荐，可点击右上角「在无限空间展开相似」或刷新重试。")
-                    .font(.system(size: 12.5))
+                    .font(CharkleTheme.text(.body))
                     .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
                     .padding(.vertical, 16)
             } else {
@@ -1451,7 +1453,7 @@ private struct PinterestPinDetailOverlayMac: View {
                                     ProgressView().controlSize(.mini)
                                 }
                                 Text(controller.isLoadingMoreSimilar ? "正在加载…" : "加载更多类似素材")
-                                    .font(.system(size: 12.5, weight: .medium))
+                                    .font(CharkleTheme.text(.body, weight: .medium))
                             }
                             .padding(.horizontal, 16)
                         }
@@ -1477,9 +1479,9 @@ private struct PinterestPinDetailOverlayMac: View {
                     maxPixels: 520
                 )
                 .aspectRatio(simPin.aspectRatio, contentMode: .fit)
-                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .clipShape(RoundedRectangle(cornerRadius: CharkleTheme.Radius.cardOuter, style: .continuous))
                 .overlay(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    RoundedRectangle(cornerRadius: CharkleTheme.Radius.cardOuter, style: .continuous)
                         .strokeBorder(
                             inTray ? accent : CharkleTheme.hairline(for: colorScheme),
                             lineWidth: inTray ? 2 : CharkleTheme.hairlineWidth
@@ -1566,9 +1568,9 @@ private struct PinterestBoardImportSheetMac: View {
                     .foregroundStyle(accent)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("批量导入 Pinterest 收藏（按画板分目录）")
-                        .font(.system(size: 14.5, weight: .semibold))
+                        .font(CharkleTheme.text(.headline, weight: .semibold))
                     Text("勾选要同步的 Pinterest 画板，Charkle 会自动按画板名建立或复用对应文件夹，并自动去重。")
-                        .font(.system(size: 11.5))
+                        .font(CharkleTheme.text(.caption))
                         .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
                 }
                 Spacer()
@@ -1592,7 +1594,7 @@ private struct PinterestBoardImportSheetMac: View {
             VStack(alignment: .leading, spacing: 10) {
                 HStack {
                     Text("我的 Pinterest 画板（共 \(controller.boards.count) 个）")
-                        .font(.system(size: 12.5, weight: .semibold))
+                        .font(CharkleTheme.text(.body, weight: .semibold))
                     Spacer()
                     if controller.isLoadingBoards {
                         ProgressView().controlSize(.mini)
@@ -1627,14 +1629,14 @@ private struct PinterestBoardImportSheetMac: View {
                             .font(.system(size: 24, weight: .light))
                             .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme).opacity(0.72))
                         Text("未发现可导入的 Pinterest 画板")
-                            .font(.system(size: 13, weight: .medium))
+                            .font(CharkleTheme.text(.body, weight: .medium))
                         Text("请确认你的 Pinterest 账号下已有保存的画板，或点击右上角「刷新列表」重试。")
-                            .font(.system(size: 11.5))
+                            .font(CharkleTheme.text(.caption))
                             .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
                     }
                     .frame(maxWidth: .infinity)
                     .frame(height: 170)
-                    .background(CharkleTheme.surfaceSubtle(for: colorScheme), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .background(CharkleTheme.surfaceSubtle(for: colorScheme), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.cardOuter, style: .continuous))
                 } else {
                     ScrollView {
                         LazyVStack(spacing: 6) {
@@ -1645,13 +1647,13 @@ private struct PinterestBoardImportSheetMac: View {
                         .padding(8)
                     }
                     .frame(height: 220)
-                    .background(CharkleTheme.surfaceSubtle(for: colorScheme), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .background(CharkleTheme.surfaceSubtle(for: colorScheme), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.cardOuter, style: .continuous))
                 }
 
                 // Destination & Options
                 VStack(alignment: .leading, spacing: 10) {
                     Text("素材库目录结构")
-                        .font(.system(size: 12.5, weight: .semibold))
+                        .font(CharkleTheme.text(.body, weight: .semibold))
 
                     Picker("", selection: $destinationMode) {
                         ForEach(DestinationChoice.allCases) { choice in
@@ -1676,13 +1678,13 @@ private struct PinterestBoardImportSheetMac: View {
                                 Image(systemName: "folder")
                                     .foregroundStyle(accent)
                                 Text(selectedCustomParentName)
-                                    .font(.system(size: 12, weight: .medium))
+                                    .font(CharkleTheme.text(.caption, weight: .medium))
                                     .foregroundStyle(.primary.opacity(0.92))
                                 CharkleDropdownChevron(size: 8.5)
                             }
                             .padding(.horizontal, 10)
                             .frame(height: 30)
-                            .background(CharkleTheme.surfaceSubtle(for: colorScheme), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                            .background(CharkleTheme.surfaceSubtle(for: colorScheme), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous))
                         }
                         .menuStyle(.button)
                         .buttonStyle(CharkleMenuTriggerButtonStyle())
@@ -1694,7 +1696,7 @@ private struct PinterestBoardImportSheetMac: View {
                     HStack(spacing: 14) {
                         Toggle("跳过素材库中已存在的 Pin（增量同步）", isOn: $skipDuplicates)
                             .toggleStyle(.checkbox)
-                            .font(.system(size: 12))
+                            .font(CharkleTheme.text(.caption))
                             .disabled(controller.isImportingBoards)
 
                         Spacer()
@@ -1705,13 +1707,13 @@ private struct PinterestBoardImportSheetMac: View {
                                 .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme).opacity(0.72))
                             TextField("附加标签（可选）", text: $extraTagsText)
                                 .textFieldStyle(.plain)
-                                .font(.system(size: 12))
+                                .font(CharkleTheme.text(.caption))
                                 .frame(width: 140)
                                 .disabled(controller.isImportingBoards)
                         }
                         .padding(.horizontal, 8)
                         .frame(height: 28)
-                        .background(CharkleTheme.surfaceSubtle(for: colorScheme), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                        .background(CharkleTheme.surfaceSubtle(for: colorScheme), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous))
                     }
                 }
                 .padding(.top, 4)
@@ -1723,16 +1725,16 @@ private struct PinterestBoardImportSheetMac: View {
                             .tint(accent)
                         HStack {
                             Text(progress.statusText)
-                                .font(.system(size: 12, weight: .medium))
+                                .font(CharkleTheme.text(.caption, weight: .medium))
                                 .lineLimit(1)
                             Spacer()
                             Text("已入库 \(progress.overallImported) · 跳过 \(progress.overallSkipped)")
-                                .font(.system(size: 11.5).monospacedDigit())
+                                .font(CharkleTheme.text(.caption).monospacedDigit())
                                 .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
                         }
                     }
                     .padding(12)
-                    .background(accent.opacity(colorScheme == .dark ? 0.14 : 0.08), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .background(accent.opacity(colorScheme == .dark ? 0.14 : 0.08), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.popoverInner, style: .continuous))
                 }
             }
             .padding(18)
@@ -1742,7 +1744,7 @@ private struct PinterestBoardImportSheetMac: View {
             // Footer CTA
             HStack(spacing: 10) {
                 Text("已选 \(selectedBoards.count) 个画板（约 \(totalEstimatedPins) 项收藏）")
-                    .font(.system(size: 12).monospacedDigit())
+                    .font(CharkleTheme.text(.caption).monospacedDigit())
                     .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
 
                 Spacer()
@@ -1765,7 +1767,7 @@ private struct PinterestBoardImportSheetMac: View {
                             Image(systemName: "square.and.arrow.down.on.square")
                                 .font(.system(size: 12, weight: .semibold))
                             Text("开始按画板导入")
-                                .font(.system(size: 12.5, weight: .semibold))
+                                .font(CharkleTheme.text(.body, weight: .semibold))
                         }
                     }
                     .buttonStyle(CharkleButtonStyle(.accent, size: .md, cornerRadius: 999))
@@ -1790,6 +1792,7 @@ private struct PinterestBoardImportSheetMac: View {
 
     private func boardRow(_ board: PinterestBoard) -> some View {
         let isSelected = selectedBoardIDs.contains(board.id)
+        let rowRadius = CharkleTheme.Radius.concentricInner(outer: CharkleTheme.Radius.cardOuter, padding: 4)
         return Button {
             guard !controller.isImportingBoards else { return }
             if isSelected {
@@ -1806,9 +1809,9 @@ private struct PinterestBoardImportSheetMac: View {
                 if let cover = board.coverURL {
                     PinterestRemoteThumbMac(url: cover, dominantHex: nil, maxPixels: 140)
                         .frame(width: 36, height: 36)
-                        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                        .clipShape(RoundedRectangle(cornerRadius: CharkleTheme.Radius.sm, style: .continuous))
                 } else {
-                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    RoundedRectangle(cornerRadius: CharkleTheme.Radius.sm, style: .continuous)
                         .fill(Color.primary.opacity(0.08))
                         .frame(width: 36, height: 36)
                         .overlay(
@@ -1820,11 +1823,11 @@ private struct PinterestBoardImportSheetMac: View {
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text(board.name)
-                        .font(.system(size: 13, weight: .medium))
+                        .font(CharkleTheme.text(.body, weight: .medium))
                         .foregroundStyle(.primary)
                         .lineLimit(1)
                     Text("将归档至子目录「\(PinterestImportService.sanitizedFolderName(board.name, fallback: "Pinterest"))」")
-                        .font(.system(size: 11))
+                        .font(CharkleTheme.text(.caption))
                         .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
                         .lineLimit(1)
                 }
@@ -1832,14 +1835,14 @@ private struct PinterestBoardImportSheetMac: View {
                 Spacer()
 
                 Text("\(board.pinCount) 项")
-                    .font(.system(size: 12, weight: .medium).monospacedDigit())
+                    .font(CharkleTheme.text(.caption, weight: .medium).monospacedDigit())
                     .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 7)
             .background(
                 isSelected ? accent.opacity(colorScheme == .dark ? 0.14 : 0.08) : Color.clear,
-                in: RoundedRectangle(cornerRadius: 9, style: .continuous)
+                in: RoundedRectangle(cornerRadius: rowRadius, style: .continuous)
             )
             .contentShape(Rectangle())
         }

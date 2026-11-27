@@ -172,10 +172,10 @@ public struct LibrarySettingsPane: View {
                 VStack(alignment: .leading, spacing: 12) {
                     HStack(alignment: .firstTextBaseline) {
                         Text("已使用本机缓存")
-                            .font(.system(size: 13, weight: .medium))
+                            .font(CharkleTheme.text(.body, weight: .medium))
                         Spacer()
                         Text("\(ByteCountFormatter.string(fromByteCount: totalUsed, countStyle: .file)) / \(Int(cacheBudgetGB.rounded())) GB 上限")
-                            .font(.system(size: 12, weight: .medium))
+                            .font(CharkleTheme.text(.caption, weight: .medium))
                             .monospacedDigit()
                             .foregroundStyle(.secondary)
                     }
@@ -196,17 +196,17 @@ public struct LibrarySettingsPane: View {
                         let pinW = rawPin * fitScale
                         HStack(spacing: 2) {
                             if thumbW > 0 {
-                                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                RoundedRectangle(cornerRadius: CharkleTheme.Radius.xs, style: .continuous)
                                     .fill(Color(charkleHex: "#4E7D96"))
                                     .frame(width: thumbW)
                             }
                             if origW > 0 {
-                                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                RoundedRectangle(cornerRadius: CharkleTheme.Radius.xs, style: .continuous)
                                     .fill(Color(charkleHex: "#D4A373"))
                                     .frame(width: origW)
                             }
                             if pinW > 0 {
-                                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                RoundedRectangle(cornerRadius: CharkleTheme.Radius.xs, style: .continuous)
                                     .fill(Color(charkleHex: "#6B8E76"))
                                     .frame(width: pinW)
                             }
@@ -215,7 +215,7 @@ public struct LibrarySettingsPane: View {
                         .padding(3)
                         .background(
                             SettingsPalette.subtleFill(for: colorScheme),
-                            in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.settingsInner, style: .continuous)
                         )
                     }
                     .frame(height: 18)
@@ -235,14 +235,14 @@ public struct LibrarySettingsPane: View {
                     HStack {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("临时原件缓存上限")
-                                .font(.system(size: 13, weight: .medium))
+                                .font(CharkleTheme.text(.body, weight: .medium))
                             Text("超出上限时按最久未用自动回收，常驻离线素材与预览图不受影响")
-                                .font(.system(size: 11.5))
+                                .font(CharkleTheme.text(.caption))
                                 .foregroundStyle(.secondary)
                         }
                         Spacer()
                         Text("\(Int(cacheBudgetGB.rounded())) GB")
-                            .font(.system(size: 12.5, weight: .semibold))
+                            .font(CharkleTheme.text(.body, weight: .semibold))
                             .monospacedDigit()
                     }
                     Slider(value: $cacheBudgetGB, in: 2...100, step: 1) { editing in
@@ -307,10 +307,10 @@ public struct LibrarySettingsPane: View {
             Circle().fill(color).frame(width: 8, height: 8)
             VStack(alignment: .leading, spacing: 1) {
                 Text(title)
-                    .font(.system(size: 11))
+                    .font(CharkleTheme.text(.caption))
                     .foregroundStyle(.secondary)
                 Text(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file))
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(CharkleTheme.text(.caption, weight: .semibold))
                     .monospacedDigit()
             }
         }
@@ -331,9 +331,9 @@ public struct LibrarySettingsPane: View {
                     .foregroundStyle(.primary)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("更改或转移素材库位置")
-                        .font(.system(size: 15, weight: .semibold))
+                        .font(CharkleTheme.text(.headline, weight: .semibold))
                     Text("当前位置：\(syncAndAI.syncConfig.activeStorageLocationSummary)")
-                        .font(.system(size: 11.5))
+                        .font(CharkleTheme.text(.caption))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .truncationMode(.middle)
@@ -345,7 +345,7 @@ public struct LibrarySettingsPane: View {
 
             VStack(alignment: .leading, spacing: 6) {
                 Text("操作方式")
-                    .font(.system(size: 11.5, weight: .medium))
+                    .font(CharkleTheme.text(.caption, weight: .medium))
                     .foregroundStyle(.secondary)
                 Picker("", selection: $wizardAction) {
                     ForEach(LocationWizardAction.allCases, id: \.self) { action in
@@ -358,7 +358,7 @@ public struct LibrarySettingsPane: View {
 
             VStack(alignment: .leading, spacing: 6) {
                 Text("目标存储方式")
-                    .font(.system(size: 11.5, weight: .medium))
+                    .font(CharkleTheme.text(.caption, weight: .medium))
                     .foregroundStyle(.secondary)
                 Picker("", selection: targetModeBinding) {
                     Text("Google Drive").tag(DriveTransportMode.directAPIWithGDirect)
@@ -375,19 +375,19 @@ public struct LibrarySettingsPane: View {
                 case .iCloudDrive:
                     VStack(alignment: .leading, spacing: 6) {
                         Text("iCloud Drive 目录名称（默认保存在 iCloud Drive / Charkle）")
-                            .font(.system(size: 11.5, weight: .medium))
+                            .font(CharkleTheme.text(.caption, weight: .medium))
                             .foregroundStyle(.secondary)
                         TextField("Charkle", text: $draftTargetConfig.iCloudFolderName)
                             .textFieldStyle(.roundedBorder)
                         Text("与 iPhone / iPad 版 Charkle 共享同一份 iCloud Drive 文件夹，支持在「云同步」中同时叠加 Google Drive / WebDAV 多后端。")
-                            .font(.system(size: 11))
+                            .font(CharkleTheme.text(.caption))
                             .foregroundStyle(.secondary)
                     }
 
                 case .directAPIWithGDirect, .gdirectMount:
                     VStack(alignment: .leading, spacing: 4) {
                         Text("目标 Google Drive 路径")
-                            .font(.system(size: 11.5, weight: .medium))
+                            .font(CharkleTheme.text(.caption, weight: .medium))
                             .foregroundStyle(.secondary)
                         TextField("Charkle 或 Design/Charkle", text: $draftTargetConfig.rootFolderName)
                             .textFieldStyle(.roundedBorder)
@@ -402,7 +402,7 @@ public struct LibrarySettingsPane: View {
                             Image(systemName: "info.circle")
                                 .foregroundStyle(.orange)
                             Text("迁移到 Google Drive 前请先在「云同步」完成账号登录。")
-                                .font(.system(size: 11.5))
+                                .font(CharkleTheme.text(.caption))
                                 .foregroundStyle(.secondary)
                             Spacer()
                             Button("前往云同步") {
@@ -431,7 +431,7 @@ public struct LibrarySettingsPane: View {
                 case .localOnly:
                     VStack(alignment: .leading, spacing: 6) {
                         Text("目标本机文件夹路径")
-                            .font(.system(size: 11.5, weight: .medium))
+                            .font(CharkleTheme.text(.caption, weight: .medium))
                             .foregroundStyle(.secondary)
                         HStack(spacing: 8) {
                             TextField("~/Pictures/Charkle", text: $draftTargetConfig.localLibraryPath)
@@ -450,13 +450,13 @@ public struct LibrarySettingsPane: View {
 
             VStack(alignment: .leading, spacing: 4) {
                 Text(wizardAction == .migrate ? "无损迁移流程" : "仅切换说明")
-                    .font(.system(size: 11.5, weight: .semibold))
+                    .font(CharkleTheme.text(.caption, weight: .semibold))
                 Text(
                     wizardAction == .migrate
                         ? "1. 验证目标位置连通与可写性，避免中断损坏原库；\n2. 自动补全拉取尚未缓存在本机的云端原件；\n3. 将全部文件夹、素材原件与情绪板完整写入新位置并切换为默认存储。"
                         : "仅将 Charkle 指向新位置并保存配置，不搬运原位置的现有文件；适合接入已有云端或本地素材库。"
                 )
-                .font(.system(size: 11))
+                .font(CharkleTheme.text(.caption))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             }

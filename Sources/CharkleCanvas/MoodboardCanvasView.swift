@@ -849,7 +849,7 @@ public struct MoodboardCanvasView: View {
             .overlay(alignment: .top) {
                 if isDraggingThis {
                     Text("\(Int(currentRotation.rounded()))°")
-                        .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
+                        .font(CanvasSurface.text(.caption, weight: .semibold, design: .monospaced))
                         .monospacedDigit()
                         .foregroundStyle(.white)
                         .padding(.horizontal, 7)
@@ -925,7 +925,7 @@ public struct MoodboardCanvasView: View {
         return HStack(spacing: 4) {
             if targets.count > 1 {
                 Text("已选 \(targets.count) 项")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(CanvasSurface.text(.caption, weight: .semibold))
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 6)
@@ -945,7 +945,7 @@ public struct MoodboardCanvasView: View {
                 } label: {
                     HStack(spacing: 3) {
                         Text("\(Int(singleAngle.rounded()))°")
-                            .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                            .font(CanvasSurface.text(.caption, weight: .semibold, design: .monospaced))
                             .monospacedDigit()
                         Image(systemName: "arrow.uturn.backward")
                             .font(.system(size: 9.5, weight: .semibold))
@@ -953,7 +953,7 @@ public struct MoodboardCanvasView: View {
                     .foregroundStyle(Color.accentColor)
                     .padding(.horizontal, 7)
                     .padding(.vertical, 5)
-                    .background(Color.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .background(Color.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: CanvasSurface.Radius.chip, style: .continuous))
                 }
                 .buttonStyle(.plain)
                 .help("点击重置旋转角度至 0°")
@@ -995,7 +995,7 @@ public struct MoodboardCanvasView: View {
                 .frame(width: 28, height: 26)
                 .background(
                     isActive ? Color.accentColor.opacity(0.14) : Color.clear,
-                    in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    in: RoundedRectangle(cornerRadius: CanvasSurface.Radius.chip, style: .continuous)
                 )
         }
         .buttonStyle(.plain)
@@ -1470,7 +1470,7 @@ public struct MoodboardCanvasView: View {
                 .overlay(alignment: .bottom) {
                     if isActiveCorner, let live = interaction.liveResizeFrame {
                         Text("\(Int(live.width.rounded())) × \(Int(live.height.rounded()))")
-                            .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                            .font(CanvasSurface.text(.caption, weight: .semibold, design: .monospaced))
                             .monospacedDigit()
                             .foregroundStyle(.white)
                             .padding(.horizontal, 7)
@@ -2036,13 +2036,13 @@ public struct MoodboardCanvasView: View {
                 connectorDashed.toggle()
             } label: {
                 Text("虚线")
-                    .font(.system(size: 11, weight: .medium))
+                    .font(CanvasSurface.text(.caption, weight: .medium))
                     .foregroundStyle(connectorDashed ? Color.accentColor : .secondary)
                     .padding(.horizontal, 7)
                     .padding(.vertical, 3)
                     .background(
                         connectorDashed ? Color.accentColor.opacity(0.14) : Color.primary.opacity(0.06),
-                        in: RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        in: RoundedRectangle(cornerRadius: CanvasSurface.Radius.sm, style: .continuous)
                     )
             }
             .buttonStyle(.plain)
@@ -2059,6 +2059,9 @@ public struct MoodboardCanvasView: View {
         let toolSide: CGFloat = compact ? 26 : 30
         let actionSide: CGFloat = compact ? 25 : 28
         let iconSize: CGFloat = compact ? 12 : 13
+        let dockPadding: CGFloat = compact ? 6 : 8
+        let dockRadius: CGFloat = compact ? CanvasSurface.Radius.popoverOuter : CanvasSurface.Radius.dockOuter
+        let dockItemRadius = CanvasSurface.Radius.concentricInner(outer: dockRadius, padding: dockPadding)
 
         return CanvasGlassContainer(spacing: compact ? 6 : 10) {
             HStack(spacing: itemSpacing) {
@@ -2076,7 +2079,7 @@ public struct MoodboardCanvasView: View {
                             .frame(width: toolSide, height: toolSide)
                             .background(
                                 active ? Color.accentColor.opacity(0.14) : Color.clear,
-                                in: RoundedRectangle(cornerRadius: compact ? 8 : 10, style: .continuous)
+                                in: RoundedRectangle(cornerRadius: dockItemRadius, style: .continuous)
                             )
                     }
                     .buttonStyle(.plain)
@@ -2098,27 +2101,27 @@ public struct MoodboardCanvasView: View {
                 dockDivider
 
                 // Insert Nodes (Note / Group Frame / Palette Strip)
-                dockIconButton(systemName: "note.text.badge.plus", help: "添加便签卡片", side: actionSide, iconSize: iconSize) {
+                dockIconButton(systemName: "note.text.badge.plus", help: "添加便签卡片", side: actionSide, iconSize: iconSize, cornerRadius: dockItemRadius) {
                     addNoteNode()
                 }
-                dockIconButton(systemName: "rectangle.dashed", help: "添加区域分组框", side: actionSide, iconSize: iconSize) {
+                dockIconButton(systemName: "rectangle.dashed", help: "添加区域分组框", side: actionSide, iconSize: iconSize, cornerRadius: dockItemRadius) {
                     addGroupFrameNode()
                 }
-                dockIconButton(systemName: "paintpalette", help: "添加全板色卡条", side: actionSide, iconSize: iconSize) {
+                dockIconButton(systemName: "paintpalette", help: "添加全板色卡条", side: actionSide, iconSize: iconSize, cornerRadius: dockItemRadius) {
                     addPaletteStripNode()
                 }
 
-                dockIconButton(systemName: "sparkles.rectangle.stack", help: "重新整齐排版", side: actionSide, iconSize: iconSize) {
+                dockIconButton(systemName: "sparkles.rectangle.stack", help: "重新整齐排版", side: actionSide, iconSize: iconSize, cornerRadius: dockItemRadius) {
                     tidyFreeformNodes()
                 }
 
                 dockDivider
 
                 // Undo / Redo
-                dockIconButton(systemName: "arrow.uturn.backward", help: "撤销 (⌘Z)", disabled: !canUndo, side: actionSide, iconSize: iconSize) {
+                dockIconButton(systemName: "arrow.uturn.backward", help: "撤销 (⌘Z)", disabled: !canUndo, side: actionSide, iconSize: iconSize, cornerRadius: dockItemRadius) {
                     callbacks.onUndo()
                 }
-                dockIconButton(systemName: "arrow.uturn.forward", help: "重做 (⇧⌘Z)", disabled: !canRedo, side: actionSide, iconSize: iconSize) {
+                dockIconButton(systemName: "arrow.uturn.forward", help: "重做 (⇧⌘Z)", disabled: !canRedo, side: actionSide, iconSize: iconSize, cornerRadius: dockItemRadius) {
                     callbacks.onRedo()
                 }
 
@@ -2178,13 +2181,13 @@ public struct MoodboardCanvasView: View {
                             .font(.system(size: compact ? 11.5 : 12.5, weight: .semibold))
                         if showExportLabel {
                             Text("导出")
-                                .font(.system(size: 11.5, weight: .semibold))
+                                .font(CanvasSurface.text(.caption, weight: .semibold))
                         }
                     }
                     .foregroundStyle(.primary)
                     .padding(.horizontal, showExportLabel ? 10 : 7)
                     .padding(.vertical, compact ? 5 : 6)
-                    .background(Color.primary.opacity(0.08), in: RoundedRectangle(cornerRadius: compact ? 8 : 10, style: .continuous))
+                    .background(Color.primary.opacity(0.08), in: RoundedRectangle(cornerRadius: dockItemRadius, style: .continuous))
                 }
                 .menuStyle(.button)
                 .buttonStyle(CanvasMenuTriggerButtonStyle())
@@ -2192,8 +2195,8 @@ public struct MoodboardCanvasView: View {
                 .fixedSize()
                 .help("导出情绪板或复制到 Figma")
             }
-            .padding(compact ? 6 : 8)
-            .canvasLiquidGlass(in: RoundedRectangle(cornerRadius: compact ? 16 : 20, style: .continuous))
+            .padding(dockPadding)
+            .canvasLiquidGlass(in: RoundedRectangle(cornerRadius: dockRadius, style: .continuous))
         }
     }
 
@@ -2203,6 +2206,7 @@ public struct MoodboardCanvasView: View {
         disabled: Bool = false,
         side: CGFloat = 28,
         iconSize: CGFloat = 13,
+        cornerRadius: CGFloat = CanvasSurface.Radius.popoverInner,
         action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
@@ -2210,7 +2214,7 @@ public struct MoodboardCanvasView: View {
                 .font(.system(size: iconSize, weight: .medium))
                 .foregroundStyle(disabled ? Color.secondary.opacity(0.4) : Color.primary.opacity(0.84))
                 .frame(width: side, height: side)
-                .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .contentShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
         }
         .buttonStyle(.plain)
         .disabled(disabled)
@@ -2229,10 +2233,10 @@ public struct MoodboardCanvasView: View {
                 .font(.system(size: 36, weight: .light))
                 .foregroundStyle(.secondary.opacity(0.6))
             Text("把素材拖进来，或从右侧候选池点击加入")
-                .font(.system(size: 14, weight: .medium))
+                .font(CanvasSurface.text(.body, weight: .medium))
                 .foregroundStyle(.secondary)
             Text("支持直接从 Finder / 浏览器拖入新图（自动保存在 /Charkle/Inbox/ 并引用上板）")
-                .font(.system(size: 12))
+                .font(CanvasSurface.text(.caption))
                 .foregroundStyle(.tertiary)
         }
         .multilineTextAlignment(.center)
@@ -2242,7 +2246,7 @@ public struct MoodboardCanvasView: View {
     private var connectorLabelEditorPopover: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("连线标签与样式")
-                .font(.system(size: 12, weight: .semibold))
+                .font(CanvasSurface.text(.caption, weight: .semibold))
             TextField("输入说明文字（如：色彩呼应、材质参考）", text: $connectorLabelDraft)
                 .textFieldStyle(.roundedBorder)
                 .frame(width: 240)
@@ -2253,7 +2257,7 @@ public struct MoodboardCanvasView: View {
             }
             .pickerStyle(.segmented)
             Toggle("虚线样式", isOn: $connectorDashedDraft)
-                .font(.system(size: 12))
+                .font(CanvasSurface.text(.caption))
             HStack {
                 Button("删除连线", role: .destructive) {
                     if let id = editingConnectorLabelID {
@@ -2474,9 +2478,9 @@ public struct MoodboardCanvasView: View {
                     .foregroundStyle(Color.accentColor)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("一句话语义裁切 (Jev Box)")
-                        .font(.system(size: 14, weight: .semibold))
+                        .font(CanvasSurface.text(.body, weight: .semibold))
                     Text("输入想聚焦的局部元素，非破坏性裁切到目标区域，随时可还原。")
-                        .font(.system(size: 11.5))
+                        .font(CanvasSurface.text(.caption))
                         .foregroundStyle(.secondary)
                 }
             }
@@ -2553,16 +2557,16 @@ public struct MoodboardCanvasView: View {
                     .foregroundStyle(Color.accentColor)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("以图找局部 (Jev Visual-Target Box)")
-                        .font(.system(size: 14, weight: .semibold))
+                        .font(CanvasSurface.text(.body, weight: .semibold))
                     Text("选择一张参考图，Jev Box 会在当前图片中找出与该参考图最匹配的局部并自动裁切。")
-                        .font(.system(size: 11.5))
+                        .font(CanvasSurface.text(.caption))
                         .foregroundStyle(.secondary)
                 }
             }
 
             if candidates.isEmpty {
                 Text("当前没有其他可选参考图片，请先导入更多图片素材。")
-                    .font(.system(size: 12))
+                    .font(CanvasSurface.text(.caption))
                     .foregroundStyle(.secondary)
                     .padding(.vertical, 24)
             } else {
@@ -2579,11 +2583,11 @@ public struct MoodboardCanvasView: View {
                                         asset: refAsset,
                                         loader: loader,
                                         tier: .grid520,
-                                        cornerRadius: 8
+                                        cornerRadius: CanvasSurface.Radius.chip
                                     )
                                     .frame(height: 76)
                                     Text(refAsset.title)
-                                        .font(.system(size: 10))
+                                        .font(CanvasSurface.text(.caption))
                                         .foregroundStyle(.secondary)
                                         .lineLimit(1)
                                 }
@@ -2616,16 +2620,16 @@ public struct MoodboardCanvasView: View {
                     .foregroundStyle(Color.accentColor)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("指物批注 (Jev Box)")
-                        .font(.system(size: 14, weight: .semibold))
+                        .font(CanvasSurface.text(.body, weight: .semibold))
                     Text("定位画面中的目标元素，并在旁侧自动生成便签与精准指向箭头。")
-                        .font(.system(size: 11.5))
+                        .font(CanvasSurface.text(.caption))
                         .foregroundStyle(.secondary)
                 }
             }
 
             VStack(alignment: .leading, spacing: 5) {
                 Text("要指向的图内元素")
-                    .font(.system(size: 11.5, weight: .medium))
+                    .font(CanvasSurface.text(.caption, weight: .medium))
                     .foregroundStyle(.secondary)
                 TextField("例如：主标题衬线字、玻璃高光边缘、左下角徽章…", text: $pinpointTargetQuery)
                     .textFieldStyle(.roundedBorder)
@@ -2633,7 +2637,7 @@ public struct MoodboardCanvasView: View {
 
             VStack(alignment: .leading, spacing: 5) {
                 Text("批注内容（留空则自动以元素名为标题）")
-                    .font(.system(size: 11.5, weight: .medium))
+                    .font(CanvasSurface.text(.caption, weight: .medium))
                     .foregroundStyle(.secondary)
                 TextField("例如：这里的材质反光层次和留白比例值得借鉴", text: $pinpointNoteDraft)
                     .textFieldStyle(.roundedBorder)
@@ -4045,7 +4049,11 @@ private struct FreeformVectorOverlay: View {
                             width: CGFloat(targetFrame.width) * zoom,
                             height: CGFloat(targetFrame.height) * zoom
                         ).insetBy(dx: -3, dy: -3)
-                        let highlightPath = Path(roundedRect: targetScreenRect, cornerRadius: max(8, 14 * zoom), style: .continuous)
+                        let highlightPath = Path(
+                            roundedRect: targetScreenRect,
+                            cornerRadius: max(CanvasSurface.Radius.chip, CanvasSurface.Radius.settingsOuter * zoom),
+                            style: .continuous
+                        )
                         context.stroke(
                             highlightPath,
                             with: .color(Color.accentColor.opacity(0.85)),
@@ -4285,10 +4293,10 @@ private struct FreeformMarqueeOverlay: View {
         if let s = interaction.freeformMarqueeStart, let c = interaction.freeformMarqueeCurrent {
             let rect = CGRect(x: min(s.x, c.x), y: min(s.y, c.y), width: abs(c.x - s.x), height: abs(c.y - s.y))
             if rect.width > 3 || rect.height > 3 {
-                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                RoundedRectangle(cornerRadius: CanvasSurface.Radius.xs, style: .continuous)
                     .fill(Color.accentColor.opacity(0.11))
                     .overlay(
-                        RoundedRectangle(cornerRadius: 4, style: .continuous)
+                        RoundedRectangle(cornerRadius: CanvasSurface.Radius.xs, style: .continuous)
                             .strokeBorder(Color.accentColor.opacity(0.68), lineWidth: 1)
                     )
                     .frame(width: rect.width, height: rect.height)
@@ -4338,7 +4346,7 @@ private struct FreeformZoomControlsPill: View {
                 onResetZoom()
             } label: {
                 Text("\(Int((camera.zoom * 100).rounded()))%")
-                    .font(.system(size: compact ? 10.5 : 11, weight: .semibold, design: .monospaced))
+                    .font(CanvasSurface.text(.caption, weight: .semibold, design: .monospaced))
                     .monospacedDigit()
                     .frame(minWidth: compact ? 36 : 42)
             }

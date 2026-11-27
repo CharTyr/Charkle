@@ -220,7 +220,7 @@ public struct CharkleToastOverlay: View {
         } label: {
             HStack(spacing: 5) {
                 Text(label)
-                    .font(.system(size: 11, weight: .medium))
+                    .font(CharkleTheme.text(.caption, weight: .medium))
                     .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
                     .monospacedDigit()
                 Image(systemName: "xmark")
@@ -239,7 +239,7 @@ public struct CharkleToastOverlay: View {
     private func collapsedOverflowBadge(overflowCount: Int) -> some View {
         let pillShape = Capsule(style: .continuous)
         return Text("+\(overflowCount)")
-            .font(.system(size: 10, weight: .semibold, design: .rounded))
+            .font(CharkleTheme.text(.caption, weight: .semibold, design: .rounded))
             .monospacedDigit()
             .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
             .padding(.horizontal, 6.5)
@@ -300,7 +300,13 @@ private struct CharkleToastRow: View {
     }
 
     private var innerShape: RoundedRectangle {
-        RoundedRectangle(cornerRadius: CharkleTheme.Radius.popoverInner, style: .continuous)
+        RoundedRectangle(
+            cornerRadius: CharkleTheme.Radius.concentricInner(
+                outer: CharkleTheme.Radius.popoverOuter,
+                padding: 8
+            ),
+            style: .continuous
+        )
     }
 
     var body: some View {
@@ -349,7 +355,7 @@ private struct CharkleToastRow: View {
             }
 
             Text(toast.message)
-                .font(.system(size: 12.5, weight: .medium))
+                .font(CharkleTheme.text(.body, weight: .medium))
                 .foregroundStyle(.primary)
                 .lineLimit(isCollapsedBackCard ? 1 : 2)
                 .truncationMode(.tail)
@@ -362,7 +368,7 @@ private struct CharkleToastRow: View {
             if !isCollapsedBackCard, let actionTitle = toast.actionTitle {
                 Button(action: onAction) {
                     Text(actionTitle)
-                        .font(.system(size: 12, weight: .semibold))
+                        .font(CharkleTheme.text(.caption, weight: .semibold))
                         .foregroundStyle(accentTint)
                         .padding(.horizontal, 9)
                         .padding(.vertical, 4)

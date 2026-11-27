@@ -377,4 +377,59 @@ struct SwarmMacOSAuditTests {
         #expect(pinterest.contains("CharkleDropdownChevron("))
         #expect(syncPane.contains("CharkleDropdownChevron("))
     }
+
+    @Test("macOS P1 polish: 4-step >=12pt studio typography scale and concentric continuous corner radii")
+    @MainActor
+    func macOSP1TypographyAndConcentricRadiusContracts() throws {
+        // 1. Canonical 4-step typography scale & concentric radius helper invariants
+        #expect(CanvasTextStyle.allCases.map(\.rawValue) == [12, 13, 16, 20])
+        #expect(CanvasTextStyle.allCases.allSatisfy { $0.rawValue >= 12 })
+        #expect(CanvasSurface.Radius.concentricInner(outer: 20, padding: 8) == 12)
+        #expect(CanvasSurface.Radius.concentricInner(outer: 16, padding: 6) == 10)
+        #expect(CanvasSurface.Radius.concentricInner(outer: 12, padding: 6) == 6)
+        #expect(CanvasSurface.Radius.concentricInner(outer: 6, padding: 4) == 4)
+
+        let theme = try readSource("Sources/CharkleApp/DesignSystem/CharkleTheme.swift")
+        #expect(theme.contains("enum CharkleTextStyle"))
+        #expect(theme.contains("case caption = 12"))
+        #expect(theme.contains("case body = 13"))
+        #expect(theme.contains("case headline = 16"))
+        #expect(theme.contains("case title = 20"))
+        #expect(theme.contains("static func text("))
+
+        // 2. App-wide scan: zero oddball non-grid cornerRadius literals & zero raw .font(.system(size:)) on UI text
+        let appFiles = try allAppSwiftFiles()
+        let canvasRoot = Self.repoRoot.appendingPathComponent("Sources/CharkleCanvas", isDirectory: true)
+        var canvasFiles: [URL] = []
+        if let enumerator = FileManager.default.enumerator(
+            at: canvasRoot,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) {
+            for case let url as URL in enumerator where url.pathExtension == "swift" {
+                canvasFiles.append(url)
+            }
+        }
+        let uiFiles = (appFiles + canvasFiles).sorted { $0.path < $1.path }
+
+        let oddRadiusRegex = try NSRegularExpression(pattern: #"cornerRadius:\s*(?:5|7|9|11|13|15|18|22|24)\b"#)
+        let rawTextFontRegex = try NSRegularExpression(
+            pattern: #"(?:Text|TextField|SecureField|TextEditor|Label)\s*\([^\n]*\)\s*\n\s*\.font\(\.system\(size:\s*[0-9]+(?:\.[0-9]+)?"#
+        )
+        var violations: [String] = []
+
+        for file in uiFiles {
+            let content = try String(contentsOf: file, encoding: .utf8)
+            let nsContent = content as NSString
+            let fullRange = NSRange(location: 0, length: nsContent.length)
+
+            if oddRadiusRegex.firstMatch(in: content, range: fullRange) != nil {
+                violations.append("oddball cornerRadius in \(file.lastPathComponent)")
+            }
+            if rawTextFontRegex.firstMatch(in: content, range: fullRange) != nil {
+                violations.append("raw .font(.system(size:)) on text in \(file.lastPathComponent)")
+            }
+        }
+        #expect(violations.isEmpty, "P1 typography/radius violations: \(violations.joined(separator: "; "))")
+    }
 }

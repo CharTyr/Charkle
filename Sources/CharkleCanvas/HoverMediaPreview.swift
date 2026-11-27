@@ -30,7 +30,7 @@ public final class HoverMediaPreviewLayerController {
         let layer = CALayer()
         layer.actions = HoverMediaPreviewLayerController.noImplicitActions
         layer.backgroundColor = NSColor.black.withAlphaComponent(0.56).cgColor
-        layer.cornerRadius = 10
+        layer.cornerRadius = CanvasSurface.Radius.popoverInner
         layer.cornerCurve = .continuous
         layer.zPosition = 10
         layer.isHidden = true
@@ -45,7 +45,7 @@ public final class HoverMediaPreviewLayerController {
     }()
 
     private var activeAssetID: UUID?
-    private var currentCornerRadius: CGFloat = 12
+    private var currentCornerRadius: CGFloat = CanvasSurface.Radius.cardOuter
     private var currentFillMode: Bool = true
     private var currentScale: CGFloat = 2.0
 
@@ -103,7 +103,7 @@ public final class HoverMediaPreviewLayerController {
     public func schedulePreview(
         for asset: AssetRecord,
         in frame: CGRect,
-        cornerRadius: CGFloat = 12,
+        cornerRadius: CGFloat = CanvasSurface.Radius.cardOuter,
         fillMode: Bool = true,
         scale: CGFloat = 2.0,
         loader: ThumbnailImageLoader
@@ -478,7 +478,7 @@ public struct HoverMediaPreviewOverlay: NSViewRepresentable {
     public init(
         asset: AssetRecord,
         loader: ThumbnailImageLoader,
-        cornerRadius: CGFloat = 12,
+        cornerRadius: CGFloat = CanvasSurface.Radius.cardOuter,
         fillMode: Bool = true
     ) {
         self.asset = asset
@@ -505,7 +505,7 @@ public struct HoverMediaPreviewOverlay: NSViewRepresentable {
         private let controller = HoverMediaPreviewLayerController()
         private var currentAsset: AssetRecord?
         private var currentLoader: ThumbnailImageLoader?
-        private var currentCornerRadius: CGFloat = 12
+        private var currentCornerRadius: CGFloat = CanvasSurface.Radius.cardOuter
         private var currentFillMode: Bool = true
         private nonisolated(unsafe) var lifecycleObservers: [NSObjectProtocol] = []
 

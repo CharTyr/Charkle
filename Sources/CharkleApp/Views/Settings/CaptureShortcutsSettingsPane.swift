@@ -208,13 +208,13 @@ public struct CaptureShortcutsSettingsPane: View {
     private func shortcutRow(_ description: String, keys: [String]) -> some View {
         HStack(spacing: 12) {
             Text(description)
-                .font(.system(size: 13))
+                .font(CharkleTheme.text(.body))
                 .foregroundStyle(.primary)
             Spacer(minLength: 10)
             HStack(spacing: 4) {
                 ForEach(Array(keys.enumerated()), id: \.offset) { _, keycap in
                     Text(keycap)
-                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                        .font(CharkleTheme.text(.caption, weight: .semibold, design: .monospaced))
                         .monospacedDigit()
                         .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
                         .padding(.horizontal, 7)
@@ -222,10 +222,10 @@ public struct CaptureShortcutsSettingsPane: View {
                         .frame(minWidth: 22)
                         .background(
                             CharkleTheme.surfaceSubtle(for: colorScheme),
-                            in: RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.sm, style: .continuous)
                         )
                         .overlay(
-                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            RoundedRectangle(cornerRadius: CharkleTheme.Radius.sm, style: .continuous)
                                 .strokeBorder(
                                     CharkleTheme.hairline(for: colorScheme),
                                     lineWidth: CharkleTheme.hairlineWidth

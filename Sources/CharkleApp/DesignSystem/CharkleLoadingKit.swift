@@ -46,16 +46,16 @@ public struct CharkleBoardLoadingSkeleton: View {
             if showSkeleton {
                 HStack(alignment: .top, spacing: 16) {
                     VStack(spacing: 16) {
-                        CharkleSkeletonShape(cornerRadius: 12).frame(width: 210, height: 260)
-                        CharkleSkeletonShape(cornerRadius: 12).frame(width: 210, height: 150)
+                        CharkleSkeletonShape(cornerRadius: CharkleTheme.Radius.cardOuter).frame(width: 210, height: 260)
+                        CharkleSkeletonShape(cornerRadius: CharkleTheme.Radius.cardOuter).frame(width: 210, height: 150)
                     }
                     VStack(spacing: 16) {
-                        CharkleSkeletonShape(cornerRadius: 12).frame(width: 260, height: 170)
-                        CharkleSkeletonShape(cornerRadius: 12).frame(width: 260, height: 240)
+                        CharkleSkeletonShape(cornerRadius: CharkleTheme.Radius.cardOuter).frame(width: 260, height: 170)
+                        CharkleSkeletonShape(cornerRadius: CharkleTheme.Radius.cardOuter).frame(width: 260, height: 240)
                     }
                     VStack(spacing: 16) {
-                        CharkleSkeletonShape(cornerRadius: 12).frame(width: 200, height: 220)
-                        CharkleSkeletonShape(cornerRadius: 12).frame(width: 200, height: 190)
+                        CharkleSkeletonShape(cornerRadius: CharkleTheme.Radius.cardOuter).frame(width: 200, height: 220)
+                        CharkleSkeletonShape(cornerRadius: CharkleTheme.Radius.cardOuter).frame(width: 200, height: 190)
                     }
                 }
                 .padding(36)
@@ -111,7 +111,7 @@ public struct CharkleDelayedSpinner: View {
                         .controlSize(controlSize)
                     if let label, !label.isEmpty {
                         Text(label)
-                            .font(.system(size: 11, weight: .medium))
+                            .font(CharkleTheme.text(.caption, weight: .medium))
                             .foregroundStyle(.secondary)
                     }
                 }
@@ -154,7 +154,7 @@ public struct CharkleMediaPlaceholderSkeleton: View {
 
     @State private var showSkeleton: Bool = false
 
-    public init(height: CGFloat = 180, cornerRadius: CGFloat = 12) {
+    public init(height: CGFloat = 180, cornerRadius: CGFloat = CharkleTheme.Radius.cardOuter) {
         self.height = height
         self.cornerRadius = cornerRadius
     }

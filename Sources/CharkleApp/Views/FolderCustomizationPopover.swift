@@ -114,7 +114,7 @@ public struct FolderCustomizationPopover: View {
                 .animation(CharkleMotion.accessible(CharkleMotion.enterSm, reduced: reduceMotion), value: selectedSymbol)
 
                 Text(folder.name)
-                    .font(.system(size: 12.5, weight: .semibold))
+                    .font(CharkleTheme.text(.body, weight: .semibold))
                     .foregroundStyle(.primary)
                     .lineLimit(1)
             }
@@ -192,7 +192,7 @@ public struct FolderCustomizationPopover: View {
                         HStack(spacing: 6) {
                             TextField("输入任意表情符号…", text: $customEmojiInput)
                                 .textFieldStyle(.roundedBorder)
-                                .font(.system(size: 13))
+                                .font(CharkleTheme.text(.body))
                                 .onSubmit { applyCustomEmoji() }
                             Button("应用") { applyCustomEmoji() }
                                 .buttonStyle(.bordered)
@@ -209,11 +209,11 @@ public struct FolderCustomizationPopover: View {
                                     commit()
                                 } label: {
                                     Text(emoji)
-                                        .font(.system(size: 18))
+                                        .font(CharkleTheme.text(.title))
                                         .frame(width: 30, height: 30)
                                         .background(
                                             active ? accentColor.opacity(0.20) : Color.clear,
-                                            in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                            in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.sm, style: .continuous)
                                         )
                                 }
                                 .buttonStyle(.plain)
@@ -226,7 +226,7 @@ public struct FolderCustomizationPopover: View {
                         ForEach(Self.symbolGroups) { group in
                             VStack(alignment: .leading, spacing: 6) {
                                 Text(group.title)
-                                    .font(.system(size: 11, weight: .semibold))
+                                    .font(CharkleTheme.text(.caption, weight: .semibold))
                                     .foregroundStyle(.secondary)
                                 LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 6), spacing: 8) {
                                     ForEach(group.symbols, id: \.self) { sf in
@@ -242,7 +242,7 @@ public struct FolderCustomizationPopover: View {
                                                 .frame(width: 34, height: 30)
                                                 .background(
                                                     active ? accentColor.opacity(0.16) : Color.primary.opacity(0.03),
-                                                    in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                                    in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.sm, style: .continuous)
                                                 )
                                         }
                                         .buttonStyle(.plain)
@@ -259,6 +259,7 @@ public struct FolderCustomizationPopover: View {
             Divider()
 
             // Bottom Footer: Clear | Emoji Toggle
+            let footerButtonRadius = CharkleTheme.Radius.concentricInner(outer: CharkleTheme.Radius.popoverOuter, padding: 10)
             HStack(spacing: 8) {
                 Button {
                     selectedColorHex = nil
@@ -266,10 +267,13 @@ public struct FolderCustomizationPopover: View {
                     commit()
                 } label: {
                     Text("清除")
-                        .font(.system(size: 12, weight: .medium))
+                        .font(CharkleTheme.text(.caption, weight: .medium))
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 6)
-                        .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                        .background(
+                            Color.primary.opacity(0.06),
+                            in: RoundedRectangle(cornerRadius: footerButtonRadius, style: .continuous)
+                        )
                 }
                 .buttonStyle(.plain)
 
@@ -280,13 +284,13 @@ public struct FolderCustomizationPopover: View {
                         Image(systemName: showEmojiMode ? "square.grid.2x2" : "face.smiling")
                             .font(.system(size: 12))
                         Text(showEmojiMode ? "系统图标" : "表情符号")
-                            .font(.system(size: 12, weight: .medium))
+                            .font(CharkleTheme.text(.caption, weight: .medium))
                     }
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 6)
                     .background(
                         showEmojiMode ? Color.accentColor.opacity(0.16) : Color.primary.opacity(0.06),
-                        in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        in: RoundedRectangle(cornerRadius: footerButtonRadius, style: .continuous)
                     )
                     .foregroundStyle(showEmojiMode ? Color.accentColor : .primary)
                 }

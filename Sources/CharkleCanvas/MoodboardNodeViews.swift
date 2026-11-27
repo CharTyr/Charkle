@@ -80,9 +80,11 @@ public struct BoardPaletteHeaderStrip: View {
 
     public var body: some View {
         if !colors.isEmpty {
+            let chipRadius = CanvasSurface.Radius.chip
+            let swatchRadius = CanvasSurface.Radius.concentricInner(outer: chipRadius, padding: 5)
             HStack(spacing: 6) {
                 Text("板内色卡")
-                    .font(.system(size: 11, weight: .medium))
+                    .font(CanvasSurface.text(.caption, weight: .medium))
                     .foregroundStyle(.secondary)
                     .padding(.trailing, 2)
 
@@ -106,28 +108,28 @@ public struct BoardPaletteHeaderStrip: View {
                         }
                     } label: {
                         HStack(spacing: 5) {
-                            RoundedRectangle(cornerRadius: 4, style: .continuous)
+                            RoundedRectangle(cornerRadius: swatchRadius, style: .continuous)
                                 .fill(Color(charkleHex: hex))
                                 .frame(width: 14, height: 14)
                                 .overlay(
-                                    RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                    RoundedRectangle(cornerRadius: swatchRadius, style: .continuous)
                                         .strokeBorder(
                                             isLight ? Color.black.opacity(0.14) : Color.white.opacity(0.22),
                                             lineWidth: CanvasSurface.hairlineWidth
                                         )
                                 )
                             Text(copiedHex == hex ? "已复制" : hex)
-                                .font(.system(size: 10.5, weight: .medium, design: .monospaced))
+                                .font(CanvasSurface.text(.caption, weight: .medium, design: .monospaced))
                                 .foregroundStyle(.primary.opacity(0.84))
                         }
                         .padding(.horizontal, 8)
                         .padding(.vertical, 5)
                         .background(
                             CanvasSurface.elevated(for: colorScheme).opacity(0.88),
-                            in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            in: RoundedRectangle(cornerRadius: chipRadius, style: .continuous)
                         )
                         .overlay(
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            RoundedRectangle(cornerRadius: chipRadius, style: .continuous)
                                 .strokeBorder(CanvasSurface.hairline(for: colorScheme), lineWidth: CanvasSurface.hairlineWidth)
                         )
                     }
@@ -198,8 +200,11 @@ struct BoardAssetNodeView: View {
         return nil
     }
 
-    private let outerRadius: CGFloat = 12
-    private var innerBadgeRadius: CGFloat { 6 }
+    private let outerRadius: CGFloat = CanvasSurface.Radius.cardOuter
+    private let badgeInset: CGFloat = 6
+    private var innerBadgeRadius: CGFloat {
+        CanvasSurface.Radius.concentricInner(outer: outerRadius, padding: badgeInset)
+    }
 
     private var hoverDisabled: Bool {
         isHoverSuspended || isOverlayInteractionSuspended
@@ -232,7 +237,7 @@ struct BoardAssetNodeView: View {
                             .font(.system(size: 18))
                             .foregroundStyle(.secondary)
                         Text("素材不可用")
-                            .font(.system(size: 11))
+                            .font(CanvasSurface.text(.caption))
                             .foregroundStyle(.secondary)
                     }
                 }
@@ -249,7 +254,7 @@ struct BoardAssetNodeView: View {
                                     Image(systemName: weight >= 2 ? "star.fill" : "star")
                                         .font(.system(size: 9.5, weight: .semibold))
                                     Text(weight >= 2 ? "主图 2×" : "设为主图")
-                                        .font(.system(size: 10, weight: .semibold))
+                                        .font(CanvasSurface.text(.caption, weight: .semibold))
                                 }
                                 .foregroundStyle(.white)
                                 .padding(.horizontal, 7)
@@ -270,7 +275,7 @@ struct BoardAssetNodeView: View {
                                 Image(systemName: "arrow.triangle.2.circlepath")
                                     .font(.system(size: 9.5, weight: .semibold))
                                 Text("换一张")
-                                    .font(.system(size: 10, weight: .semibold))
+                                    .font(CanvasSurface.text(.caption, weight: .semibold))
                             }
                             .foregroundStyle(.white)
                             .padding(.horizontal, 7)
@@ -283,7 +288,7 @@ struct BoardAssetNodeView: View {
                         .buttonStyle(.plain)
                         .help("打开右侧候选池原地替换这张图")
                     }
-                    .padding(6)
+                    .padding(badgeInset)
 
                     Spacer()
 
@@ -301,7 +306,7 @@ struct BoardAssetNodeView: View {
                                     Image(systemName: "viewfinder")
                                         .font(.system(size: 9, weight: .semibold))
                                     Text("局部取景 · 还原")
-                                        .font(.system(size: 9.5, weight: .semibold))
+                                        .font(CanvasSurface.text(.caption, weight: .semibold))
                                 }
                                 .foregroundStyle(.white)
                                 .padding(.horizontal, 7)
@@ -324,7 +329,7 @@ struct BoardAssetNodeView: View {
                             .help(asset?.isExternalWebLink == true ? "在默认浏览器中打开 (Space)" : "快速预览 (Space)")
                         }
                     }
-                    .padding(6)
+                    .padding(badgeInset)
                 }
                 .transition(.opacity)
             }
@@ -511,7 +516,7 @@ struct BoardNoteNodeView: View {
 
     var body: some View {
         let palette = NoteStylePalette.colors(for: style)
-        let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: CanvasSurface.Radius.cardOuter, style: .continuous)
 
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 6) {
@@ -709,7 +714,7 @@ struct BoardGroupFrameView: View {
 
     var body: some View {
         let accent = GroupTintPalette.accent(for: tint)
-        let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: CanvasSurface.Radius.cardOuter, style: .continuous)
 
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 6) {
@@ -719,7 +724,7 @@ struct BoardGroupFrameView: View {
 
                 if itemCount > 0 {
                     Text("\(itemCount) ·")
-                        .font(.system(size: 11.5, weight: .bold, design: .rounded))
+                        .font(CanvasSurface.text(.caption, weight: .bold, design: .rounded))
                         .monospacedDigit()
                         .foregroundStyle(accent)
                 }
@@ -727,7 +732,7 @@ struct BoardGroupFrameView: View {
                 TextField("分组名称", text: $draftTitle)
                     .textFieldStyle(.plain)
                     .focused($isEditingTitle)
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(CanvasSurface.text(.caption, weight: .semibold))
                     .foregroundStyle(accent.opacity(colorScheme == .dark ? 0.96 : 0.92))
                     .onChange(of: draftTitle) { _, newValue in
                         if newValue != title {
@@ -745,7 +750,7 @@ struct BoardGroupFrameView: View {
                                     Image(systemName: "rectangle.3.group")
                                         .font(.system(size: 9.5, weight: .semibold))
                                     Text("自适应排布")
-                                        .font(.system(size: 10, weight: .semibold))
+                                        .font(CanvasSurface.text(.caption, weight: .semibold))
                                 }
                                 .foregroundStyle(accent)
                                 .padding(.horizontal, 6)
@@ -858,7 +863,7 @@ struct BoardPaletteStripNodeView: View {
     let onDelete: () -> Void
 
     var body: some View {
-        let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: CanvasSurface.Radius.cardOuter, style: .continuous)
         let swatches = colors.isEmpty ? [LabColor.fromHex("#8B95A1"), LabColor.fromHex("#C8B8A6"), LabColor.fromHex("#4F5D6B")] : colors
 
         HStack(spacing: 0) {
@@ -871,7 +876,7 @@ struct BoardPaletteStripNodeView: View {
                     ZStack(alignment: .bottomLeading) {
                         Color(charkleHex: hex)
                         Text(hex)
-                            .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                            .font(CanvasSurface.text(.caption, weight: .semibold, design: .monospaced))
                             .foregroundStyle(isLight ? Color.black.opacity(0.76) : Color.white.opacity(0.88))
                             .padding(8)
                     }

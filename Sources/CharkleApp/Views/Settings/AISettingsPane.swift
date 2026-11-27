@@ -170,7 +170,7 @@ public struct AISettingsPane: View {
                 .font(.system(size: 11.5, weight: .medium))
                 .foregroundStyle(SettingsPalette.positiveInk(for: colorScheme))
             Text(label)
-                .font(.system(size: 11.5, weight: .medium))
+                .font(CharkleTheme.text(.caption, weight: .medium))
                 .foregroundStyle(.primary.opacity(0.88))
                 .lineLimit(1)
         }
@@ -417,9 +417,9 @@ public struct AISettingsPane: View {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("配置云端 AI 服务")
-                        .font(.system(size: 15, weight: .semibold))
+                        .font(CharkleTheme.text(.headline, weight: .semibold))
                     Text("所有 API 密钥与登录令牌均加密保存于本机 macOS 钥匙串。")
-                        .font(.system(size: 11.5))
+                        .font(CharkleTheme.text(.caption))
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -445,7 +445,7 @@ public struct AISettingsPane: View {
             switch draftAIConfig.provider {
             case .disabled:
                 Text("关闭云端 AI 后，Charkle 仍会使用本机 Apple Vision 完成配色提取、OCR 文字识别、相似推荐与拼音搜索。")
-                    .font(.system(size: 12))
+                    .font(CharkleTheme.text(.caption))
                     .foregroundStyle(.secondary)
                     .padding(12)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -527,7 +527,7 @@ public struct AISettingsPane: View {
                     VStack(alignment: .leading, spacing: 2) {
                         HStack(spacing: 6) {
                             Text(session.displayName)
-                                .font(.system(size: 13, weight: .semibold))
+                                .font(CharkleTheme.text(.body, weight: .semibold))
                             SettingsStatusBadge(
                                 session.sharingEnabled ? "已授权" : "需授权共享",
                                 tint: session.sharingEnabled
@@ -537,7 +537,7 @@ public struct AISettingsPane: View {
                         }
                         if let email = session.email {
                             Text(email)
-                                .font(.system(size: 11.5))
+                                .font(CharkleTheme.text(.caption))
                                 .foregroundStyle(.secondary)
                         }
                     }
@@ -566,12 +566,12 @@ public struct AISettingsPane: View {
                     .buttonStyle(SettingsDestructiveButtonStyle())
                 }
                 .padding(12)
-                .background(SettingsPalette.subtleFill(for: colorScheme), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .background(SettingsPalette.subtleFill(for: colorScheme), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.popoverInner, style: .continuous))
 
                 if session.sharingEnabled {
                     HStack(spacing: 8) {
                         Text("理解模型")
-                            .font(.system(size: 12, weight: .medium))
+                            .font(CharkleTheme.text(.caption, weight: .medium))
                         Spacer()
                         if !syncAndAI.chatGPTModels.isEmpty {
                             Picker("", selection: $draftAIConfig.chatModel) {
@@ -615,7 +615,7 @@ public struct AISettingsPane: View {
                             }
                         }
                         .buttonStyle(.plain)
-                        .font(.system(size: 11.5, weight: .medium))
+                        .font(CharkleTheme.text(.caption, weight: .medium))
                         .foregroundStyle(.secondary)
                     }
                 }
@@ -624,9 +624,9 @@ public struct AISettingsPane: View {
                     SettingsHelpers.chatGPTBrandMark(size: 20, color: .primary)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(session.status == .reauthRequired ? "ChatGPT 登录已过期" : "直接登录你的 ChatGPT 账号")
-                            .font(.system(size: 13, weight: .semibold))
+                            .font(CharkleTheme.text(.body, weight: .semibold))
                         Text("无需申请 API 密钥，支持 Plus / Pro 等订阅额度，凭证仅保存在本机钥匙串。")
-                            .font(.system(size: 11.5))
+                            .font(CharkleTheme.text(.caption))
                             .foregroundStyle(.secondary)
                     }
                     Spacer()
@@ -641,7 +641,7 @@ public struct AISettingsPane: View {
                     .disabled(syncAndAI.isSigningInChatGPT)
                 }
                 .padding(12)
-                .background(SettingsPalette.subtleFill(for: colorScheme), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .background(SettingsPalette.subtleFill(for: colorScheme), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.popoverInner, style: .continuous))
             }
         }
     }
@@ -651,7 +651,7 @@ public struct AISettingsPane: View {
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
                     Text("Gemini API 密钥")
-                        .font(.system(size: 11.5, weight: .medium))
+                        .font(CharkleTheme.text(.caption, weight: .medium))
                         .foregroundStyle(.secondary)
                     Spacer()
                     Link(destination: SettingsHelpers.geminiKeyURL) {
@@ -660,7 +660,7 @@ public struct AISettingsPane: View {
                             Image(systemName: "arrow.up.right")
                                 .font(.system(size: 9.5, weight: .semibold))
                         }
-                        .font(.system(size: 11, weight: .medium))
+                        .font(CharkleTheme.text(.caption, weight: .medium))
                     }
                 }
                 SecureField(
@@ -688,7 +688,7 @@ public struct AISettingsPane: View {
                 .padding(.top, 8)
             } label: {
                 Text("高级模型与地址参数（可选）")
-                    .font(.system(size: 11.5, weight: .medium))
+                    .font(CharkleTheme.text(.caption, weight: .medium))
                     .foregroundStyle(.secondary)
             }
         }
@@ -698,7 +698,7 @@ public struct AISettingsPane: View {
         VStack(alignment: .leading, spacing: 10) {
             VStack(alignment: .leading, spacing: 5) {
                 Text("一键填充常见服务商预设")
-                    .font(.system(size: 11, weight: .medium))
+                    .font(CharkleTheme.text(.caption, weight: .medium))
                     .foregroundStyle(.secondary)
                 HStack(spacing: 6) {
                     ForEach(Self.customPresets) { preset in
@@ -760,9 +760,9 @@ public struct AISettingsPane: View {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("进阶视觉定位引擎配置")
-                        .font(.system(size: 15, weight: .semibold))
+                        .font(CharkleTheme.text(.headline, weight: .semibold))
                     Text("配置 TypeSafe 密钥并按需勾选视觉定位场景，密钥安全保存于 macOS 钥匙串。")
-                        .font(.system(size: 11.5))
+                        .font(CharkleTheme.text(.caption))
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -772,7 +772,7 @@ public struct AISettingsPane: View {
                         Image(systemName: "arrow.up.right")
                             .font(.system(size: 9.5, weight: .semibold))
                     }
-                    .font(.system(size: 11.5, weight: .medium))
+                    .font(CharkleTheme.text(.caption, weight: .medium))
                 }
             }
 
@@ -880,7 +880,7 @@ public struct AISettingsPane: View {
                 .padding(.top, 6)
             } label: {
                 Text("自定义服务地址（可选）")
-                    .font(.system(size: 11.5, weight: .medium))
+                    .font(CharkleTheme.text(.caption, weight: .medium))
                     .foregroundStyle(.secondary)
             }
 
@@ -934,9 +934,9 @@ public struct AISettingsPane: View {
         Toggle(isOn: isOn) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
-                    .font(.system(size: 12.5, weight: .medium))
+                    .font(CharkleTheme.text(.body, weight: .medium))
                 Text(subtitle)
-                    .font(.system(size: 11))
+                    .font(CharkleTheme.text(.caption))
                     .foregroundStyle(.secondary)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -955,9 +955,9 @@ public struct AISettingsPane: View {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("云端 AI 用量明细")
-                        .font(.system(size: 15, weight: .semibold))
+                        .font(CharkleTheme.text(.headline, weight: .semibold))
                     Text("记录保存于本机，分别统计普通云端模型与视觉定位引擎的调用消耗。")
-                        .font(.system(size: 11.5))
+                        .font(CharkleTheme.text(.caption))
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -1010,9 +1010,9 @@ public struct AISettingsPane: View {
                 HStack {
                     VStack(alignment: .leading, spacing: 1.5) {
                         Text(title)
-                            .font(.system(size: 12.5, weight: .semibold))
+                            .font(CharkleTheme.text(.body, weight: .semibold))
                         Text(subtitle)
-                            .font(.system(size: 11))
+                            .font(CharkleTheme.text(.caption))
                             .foregroundStyle(.secondary)
                     }
                     Spacer()
@@ -1048,7 +1048,7 @@ public struct AISettingsPane: View {
                         Text(emptyHint)
                     }
                 }
-                .font(.system(size: 10.5))
+                .font(CharkleTheme.text(.caption))
                 .foregroundStyle(.tertiary)
                 .padding(.horizontal, 14)
                 .padding(.vertical, 8)
@@ -1059,13 +1059,13 @@ public struct AISettingsPane: View {
     private func metricCell(_ title: String, value: String, detail: String) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(title)
-                .font(.system(size: 10.5, weight: .medium))
+                .font(CharkleTheme.text(.caption, weight: .medium))
                 .foregroundStyle(.secondary)
             Text(value)
-                .font(.system(size: 14, weight: .semibold))
+                .font(CharkleTheme.text(.body, weight: .semibold))
                 .monospacedDigit()
             Text(detail)
-                .font(.system(size: 10))
+                .font(CharkleTheme.text(.caption))
                 .foregroundStyle(.tertiary)
                 .monospacedDigit()
                 .lineLimit(1)
@@ -1127,7 +1127,7 @@ public struct AISettingsPane: View {
     private func sheetField<F: View>(_ label: String, @ViewBuilder field: () -> F) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(label)
-                .font(.system(size: 11.5, weight: .medium))
+                .font(CharkleTheme.text(.caption, weight: .medium))
                 .foregroundStyle(.secondary)
             field()
         }

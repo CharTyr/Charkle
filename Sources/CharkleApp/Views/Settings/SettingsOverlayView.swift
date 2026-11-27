@@ -196,7 +196,7 @@ public struct SettingsContentShell: View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 8) {
                 Text("设置")
-                    .font(.system(size: 15, weight: .semibold))
+                    .font(CharkleTheme.text(.headline, weight: .semibold))
                     .foregroundStyle(.primary)
                 Spacer()
             }
@@ -208,7 +208,7 @@ public struct SettingsContentShell: View {
                     ForEach(CharkleSettingsSection.allCases) { section in
                         VStack(alignment: .leading, spacing: 2) {
                             Text(section.title)
-                                .font(.system(size: 11, weight: .semibold))
+                                .font(CharkleTheme.text(.caption, weight: .semibold))
                                 .foregroundStyle(SettingsPalette.sectionLabel(for: colorScheme))
                                 .padding(.horizontal, 10)
                                 .padding(.bottom, 3)
@@ -244,7 +244,7 @@ public struct SettingsContentShell: View {
                     .foregroundStyle(active ? activeAccent : CharkleTheme.secondaryInk(for: colorScheme))
                     .frame(width: 18, height: 18)
                 Text(tab.label)
-                    .font(.system(size: 13, weight: active ? .semibold : .regular))
+                    .font(CharkleTheme.text(.body, weight: active ? .semibold : .regular))
                     .foregroundStyle(active ? Color.primary : Color.primary.opacity(hovered ? 0.90 : 0.78))
                     .lineLimit(1)
                 Spacer(minLength: 0)
@@ -298,7 +298,7 @@ public struct SettingsContentShell: View {
             // Fixed pane title header + close button
             HStack(spacing: 10) {
                 Text(coordinator.selectedSettingsTab.label)
-                    .font(.system(size: 15, weight: .semibold))
+                    .font(CharkleTheme.text(.headline, weight: .semibold))
                     .foregroundStyle(.primary)
 
                 Spacer()

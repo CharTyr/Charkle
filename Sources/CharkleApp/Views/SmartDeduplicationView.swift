@@ -243,11 +243,11 @@ public struct SmartDeduplicationView: View {
                 .foregroundStyle(activeAccent)
 
             Text("智能去重")
-                .font(.system(size: 15, weight: .semibold))
+                .font(CharkleTheme.text(.headline, weight: .semibold))
                 .foregroundStyle(.primary)
 
             Text("全媒体纯本地算法 · 无需 AI")
-                .font(.system(size: 11, weight: .medium))
+                .font(CharkleTheme.text(.caption, weight: .medium))
                 .foregroundStyle(activeAccent)
                 .padding(.horizontal, 8)
                 .padding(.vertical, 3)
@@ -263,7 +263,7 @@ public struct SmartDeduplicationView: View {
                         max(0.01, report.durationSeconds)
                     )
                 )
-                .font(.system(size: 11.5))
+                .font(CharkleTheme.text(.caption))
                 .monospacedDigit()
                 .foregroundStyle(.secondary)
             }
@@ -310,7 +310,7 @@ public struct SmartDeduplicationView: View {
                             .font(.system(size: 11, weight: .medium))
                             .foregroundStyle(.secondary)
                         Text(scopeLabel)
-                            .font(.system(size: 12, weight: .medium))
+                            .font(CharkleTheme.text(.caption, weight: .medium))
                             .lineLimit(1)
                         CharkleDropdownChevron(size: 8.5)
                     }
@@ -360,7 +360,7 @@ public struct SmartDeduplicationView: View {
                         }
                     } label: {
                         Text(filter.label)
-                            .font(.system(size: 11.5, weight: active ? .semibold : .medium))
+                            .font(CharkleTheme.text(.caption, weight: active ? .semibold : .medium))
                             .foregroundStyle(
                                 active
                                     ? CharkleTheme.accentButtonForeground(for: colorScheme, source: accentSource)
@@ -406,11 +406,11 @@ public struct SmartDeduplicationView: View {
             .frame(width: 280)
 
             Text(scanProgress.phase)
-                .font(.system(size: 13.5, weight: .medium))
+                .font(CharkleTheme.text(.body, weight: .medium))
                 .foregroundStyle(.primary)
 
             Text("纯本地比对文件内容、画面相似度、音频波形与来源链接，不消耗 AI 额度且不上传任何文件")
-                .font(.system(size: 11.5))
+                .font(CharkleTheme.text(.caption))
                 .foregroundStyle(.secondary)
             Spacer()
         }
@@ -425,10 +425,10 @@ public struct SmartDeduplicationView: View {
                 .foregroundStyle(SettingsPalette.positiveInk(for: colorScheme))
 
             Text("素材库很整洁，未发现重复项")
-                .font(.system(size: 16, weight: .semibold))
+                .font(CharkleTheme.text(.headline, weight: .semibold))
 
             Text("已使用「\(sensitivity.localizedLabel)」精度校验 \(report.scannedAssetCount) 项素材（耗时 \(String(format: "%.2fs", max(0.01, report.durationSeconds)))）。")
-                .font(.system(size: 12.5))
+                .font(CharkleTheme.text(.body))
                 .foregroundStyle(.secondary)
 
             if sensitivity != .relaxed {
@@ -452,7 +452,7 @@ public struct SmartDeduplicationView: View {
             VStack(spacing: 0) {
                 HStack {
                     Text("重复组（\(groups.count)）")
-                        .font(.system(size: 12, weight: .semibold))
+                        .font(CharkleTheme.text(.caption, weight: .semibold))
                         .foregroundStyle(.secondary)
                     Spacer()
                     Button(enabledGroupIDs.count == groups.count ? "全部取消" : "全选") {
@@ -499,7 +499,7 @@ public struct SmartDeduplicationView: View {
         let isEnabled = enabledGroupIDs.contains(group.id)
         let keepID = effectiveKeeperID(for: group)
         let keeper = group.candidates.first(where: { $0.asset.id == keepID }) ?? group.candidates.first
-        let rowShape = RoundedRectangle(cornerRadius: 9, style: .continuous)
+        let rowShape = RoundedRectangle(cornerRadius: CharkleTheme.Radius.settingsInner, style: .continuous)
 
         return HStack(spacing: 8) {
             Button {
@@ -519,28 +519,28 @@ public struct SmartDeduplicationView: View {
 
             if let keeperAsset = keeper?.asset {
                 DedupThumbnailPreview(asset: keeperAsset, loader: library.thumbnailLoader, size: CGSize(width: 42, height: 42))
-                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    .clipShape(RoundedRectangle(cornerRadius: CharkleTheme.Radius.sm, style: .continuous))
             }
 
             VStack(alignment: .leading, spacing: 3) {
                 Text(keeper?.asset.title ?? "重复组")
-                    .font(.system(size: 12, weight: isSelected ? .semibold : .medium))
+                    .font(CharkleTheme.text(.caption, weight: isSelected ? .semibold : .medium))
                     .lineLimit(1)
                     .foregroundStyle(.primary)
 
                 HStack(spacing: 5) {
                     Text(group.matchKind.localizedLabel)
-                        .font(.system(size: 10, weight: .semibold))
+                        .font(CharkleTheme.text(.caption, weight: .semibold))
                         .foregroundStyle(group.matchKind == .exactBinary ? SettingsPalette.positiveInk(for: colorScheme) : activeAccent)
                         .padding(.horizontal, 5)
                         .padding(.vertical, 1.5)
                         .background(
                             (group.matchKind == .exactBinary ? SettingsPalette.positiveInk(for: colorScheme) : activeAccent).opacity(0.12),
-                            in: RoundedRectangle(cornerRadius: 4, style: .continuous)
+                            in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.xs, style: .continuous)
                         )
 
                     Text("\(group.candidates.count) 项")
-                        .font(.system(size: 10.5))
+                        .font(CharkleTheme.text(.caption))
                         .monospacedDigit()
                         .foregroundStyle(.secondary)
 
@@ -549,7 +549,7 @@ public struct SmartDeduplicationView: View {
                     let saved = reclaimableBytes(for: group)
                     if saved > 0 {
                         Text("-\(ByteCountFormatter.string(fromByteCount: saved, countStyle: .file))")
-                            .font(.system(size: 10.5, weight: .medium))
+                            .font(CharkleTheme.text(.caption, weight: .medium))
                             .monospacedDigit()
                             .foregroundStyle(.secondary)
                     }
@@ -582,10 +582,10 @@ public struct SmartDeduplicationView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 6) {
                         Text("\(group.primaryMediaKind.localizedLabel) · \(group.matchKind.localizedLabel)")
-                            .font(.system(size: 13.5, weight: .semibold))
+                            .font(CharkleTheme.text(.body, weight: .semibold))
                         if group.matchKind == .nearIdentical || group.matchKind == .audioWaveform {
                             Text("相似度 \(similarityPct)%")
-                                .font(.system(size: 11, weight: .semibold))
+                                .font(CharkleTheme.text(.caption, weight: .semibold))
                                 .monospacedDigit()
                                 .foregroundStyle(activeAccent)
                                 .padding(.horizontal, 6)
@@ -594,7 +594,7 @@ public struct SmartDeduplicationView: View {
                         }
                     }
                     Text("默认保留综合质量最高的 1 项，其余 \(removeCount) 项可清理（预计释放 \(ByteCountFormatter.string(fromByteCount: savedBytes, countStyle: .file))）")
-                        .font(.system(size: 11.5))
+                        .font(CharkleTheme.text(.caption))
                         .foregroundStyle(.secondary)
                 }
 
@@ -645,7 +645,8 @@ public struct SmartDeduplicationView: View {
         isKept: Bool
     ) -> some View {
         let asset = candidate.asset
-        let cardShape = RoundedRectangle(cornerRadius: 12, style: .continuous)
+        let cardShape = RoundedRectangle(cornerRadius: CharkleTheme.Radius.cardOuter, style: .continuous)
+        let previewInnerRadius = CharkleTheme.Radius.concentricInner(outer: CharkleTheme.Radius.cardOuter, padding: 4)
         let positiveTint = SettingsPalette.positiveInk(for: colorScheme)
         let borderTint = isKept
             ? positiveTint.opacity(colorScheme == .dark ? 0.65 : 0.55)
@@ -659,14 +660,14 @@ public struct SmartDeduplicationView: View {
                         candidate.isRecommendedKeep ? "推荐保留 · 质量最高" : "已手动指定保留",
                         systemImage: "crown.fill"
                     )
-                    .font(.system(size: 11.5, weight: .semibold))
+                    .font(CharkleTheme.text(.caption, weight: .semibold))
                     .foregroundStyle(positiveTint)
                 } else {
                     Label(
                         disposalMode == .moveToTrash ? "将移至废纸篓" : "将彻底删除",
                         systemImage: "trash"
                     )
-                    .font(.system(size: 11.5, weight: .medium))
+                    .font(CharkleTheme.text(.caption, weight: .medium))
                     .foregroundStyle(.secondary)
                 }
 
@@ -694,10 +695,10 @@ public struct SmartDeduplicationView: View {
 
             // Large Visual Preview Stage
             ZStack {
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                RoundedRectangle(cornerRadius: previewInnerRadius, style: .continuous)
                     .fill(SettingsPalette.subtleFill(for: colorScheme))
                 DedupThumbnailPreview(asset: asset, loader: library.thumbnailLoader, size: CGSize(width: 300, height: 170))
-                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .clipShape(RoundedRectangle(cornerRadius: previewInnerRadius, style: .continuous))
             }
             .frame(height: 168)
             .onTapGesture {
@@ -707,7 +708,7 @@ public struct SmartDeduplicationView: View {
             // Title & Technical Quality Specs
             VStack(alignment: .leading, spacing: 5) {
                 Text(asset.title)
-                    .font(.system(size: 12.5, weight: .semibold))
+                    .font(CharkleTheme.text(.body, weight: .semibold))
                     .lineLimit(1)
 
                 HStack(spacing: 6) {
@@ -727,18 +728,18 @@ public struct SmartDeduplicationView: View {
                 HStack(spacing: 8) {
                     let location = asset.folderID.map { library.folderDisplayPath(for: $0) } ?? "收件箱"
                     Label(location, systemImage: asset.folderID == nil ? "tray" : "folder")
-                        .font(.system(size: 11))
+                        .font(CharkleTheme.text(.caption))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
 
                     if !asset.tags.isEmpty {
                         Text("\(asset.tags.count) 标签")
-                            .font(.system(size: 11))
+                            .font(CharkleTheme.text(.caption))
                             .foregroundStyle(.secondary)
                     }
                     if asset.rating > 0 {
                         Text("\(asset.rating)★")
-                            .font(.system(size: 11))
+                            .font(CharkleTheme.text(.caption))
                             .foregroundStyle(.secondary)
                     }
                 }
@@ -748,7 +749,7 @@ public struct SmartDeduplicationView: View {
                     CharkleFlowLayout(spacing: 5, lineSpacing: 5) {
                         ForEach(candidate.qualityReasons, id: \.self) { reason in
                             Text(reason)
-                                .font(.system(size: 10.5, weight: .medium))
+                                .font(CharkleTheme.text(.caption, weight: .medium))
                                 .foregroundStyle(isKept ? positiveTint : .secondary)
                                 .padding(.horizontal, 7)
                                 .padding(.vertical, 2.5)
@@ -774,7 +775,7 @@ public struct SmartDeduplicationView: View {
 
     private func specPill(_ text: String, emphasized: Bool = false) -> some View {
         Text(text)
-            .font(.system(size: 10.5, weight: emphasized ? .semibold : .medium))
+            .font(CharkleTheme.text(.caption, weight: emphasized ? .semibold : .medium))
             .monospacedDigit()
             .foregroundStyle(emphasized ? activeAccent : Color.primary.opacity(0.84))
             .padding(.horizontal, 6)
@@ -783,7 +784,7 @@ public struct SmartDeduplicationView: View {
                 emphasized
                     ? activeAccent.opacity(colorScheme == .dark ? 0.18 : 0.10)
                     : SettingsPalette.subtleFill(for: colorScheme),
-                in: RoundedRectangle(cornerRadius: 5, style: .continuous)
+                in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.cardInnerBadge, style: .continuous)
             )
     }
 
@@ -800,7 +801,7 @@ public struct SmartDeduplicationView: View {
         HStack(spacing: 12) {
             Toggle(isOn: $mergeMetadata) {
                 Label("合并标签、评分、备注并自动迁移情绪板引用", systemImage: "arrow.triangle.merge")
-                    .font(.system(size: 12, weight: .medium))
+                    .font(CharkleTheme.text(.caption, weight: .medium))
             }
             .toggleStyle(.checkbox)
 

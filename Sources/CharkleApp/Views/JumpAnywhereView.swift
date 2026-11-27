@@ -83,7 +83,7 @@ public struct JumpAnywhereView: View {
                     CharkleIcon("search", style: .duotone, size: 17, color: .secondary)
                     TextField("快速跳转情绪板、文件夹、标签或素材（支持拼音）…", text: $query)
                         .textFieldStyle(.plain)
-                        .font(.system(size: 15, weight: .regular))
+                        .font(CharkleTheme.text(.headline, weight: .regular))
                         .focused($isSearchFocused)
                         .onSubmit { executeSelectedRow() }
 
@@ -99,11 +99,11 @@ public struct JumpAnywhereView: View {
                     }
 
                     Text("ESC")
-                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .font(CharkleTheme.text(.caption, weight: .semibold, design: .monospaced))
                         .foregroundStyle(.secondary)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 3)
-                        .background(Color.primary.opacity(0.07), in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+                        .background(Color.primary.opacity(0.07), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.xs, style: .continuous))
                 }
                 .padding(.horizontal, 16)
                 .padding(.vertical, 14)
@@ -116,7 +116,7 @@ public struct JumpAnywhereView: View {
                         LazyVStack(alignment: .leading, spacing: 2) {
                             if showingQuickCommands {
                                 Text("快捷操作")
-                                    .font(.system(size: 10.5, weight: .semibold))
+                                    .font(CharkleTheme.text(.caption, weight: .semibold))
                                     .foregroundStyle(.secondary)
                                     .padding(.horizontal, 14)
                                     .padding(.top, 8)
@@ -126,10 +126,10 @@ public struct JumpAnywhereView: View {
                                     rowShell(isSelected: selectedIndex == idx) {
                                         CharkleIcon(cmd.icon, style: .duotone, size: 15, color: selectedIndex == idx ? Color.accentColor : .secondary)
                                         Text(cmd.title)
-                                            .font(.system(size: 13, weight: .medium))
+                                            .font(CharkleTheme.text(.body, weight: .medium))
                                         Spacer()
                                         Text("↵")
-                                            .font(.system(size: 11, design: .monospaced))
+                                            .font(CharkleTheme.text(.caption, design: .monospaced))
                                             .foregroundStyle(.tertiary)
                                     }
                                     .id(idx)
@@ -143,10 +143,10 @@ public struct JumpAnywhereView: View {
                             } else if matches.isEmpty {
                                 VStack(spacing: 6) {
                                     Text("未找到与「\(query)」匹配的内容")
-                                        .font(.system(size: 13, weight: .medium))
+                                        .font(CharkleTheme.text(.body, weight: .medium))
                                         .foregroundStyle(.secondary)
                                     Text("试试搜索文件夹名、情绪板标题、标签或拼音首字母")
-                                        .font(.system(size: 11.5))
+                                        .font(CharkleTheme.text(.caption))
                                         .foregroundStyle(.tertiary)
                                 }
                                 .frame(maxWidth: .infinity)
@@ -157,16 +157,16 @@ public struct JumpAnywhereView: View {
                                         CharkleIcon(iconName(for: match.kind), style: .duotone, size: 15, color: selectedIndex == idx ? Color.accentColor : .secondary)
                                         VStack(alignment: .leading, spacing: 1) {
                                             Text(match.title)
-                                                .font(.system(size: 13, weight: .medium))
+                                                .font(CharkleTheme.text(.body, weight: .medium))
                                                 .lineLimit(1)
                                             Text(match.subtitle)
-                                                .font(.system(size: 11))
+                                                .font(CharkleTheme.text(.caption))
                                                 .foregroundStyle(.secondary)
                                                 .lineLimit(1)
                                         }
                                         Spacer()
                                         Text(kindLabel(for: match.kind))
-                                            .font(.system(size: 10.5, weight: .medium))
+                                            .font(CharkleTheme.text(.caption, weight: .medium))
                                             .foregroundStyle(.secondary)
                                             .padding(.horizontal, 7)
                                             .padding(.vertical, 2.5)
@@ -243,7 +243,13 @@ public struct JumpAnywhereView: View {
         .padding(.vertical, 8)
         .background(
             isSelected ? Color.accentColor.opacity(0.14) : Color.clear,
-            in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+            in: RoundedRectangle(
+                cornerRadius: CharkleTheme.Radius.concentricInner(
+                    outer: CharkleTheme.Radius.popoverOuter,
+                    padding: 6
+                ),
+                style: .continuous
+            )
         )
         .padding(.horizontal, 6)
         .contentShape(Rectangle())

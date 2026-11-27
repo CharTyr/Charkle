@@ -25,7 +25,7 @@ struct QuickLookGitHubRepoCard: View {
     }
 
     var body: some View {
-        let cardShape = RoundedRectangle(cornerRadius: 18, style: .continuous)
+        let cardShape = RoundedRectangle(cornerRadius: CharkleTheme.Radius.popoverOuter, style: .continuous)
         let cardFill = colorScheme == .dark ? Color(charkleHex: "#18191D") : Color(charkleHex: "#FAFAFB")
 
         ScrollView(.vertical) {
@@ -37,7 +37,7 @@ struct QuickLookGitHubRepoCard: View {
                             ownerMonogram
                         }
                         .frame(width: 36, height: 36)
-                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        .clipShape(RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous))
                     } else {
                         ownerMonogram
                     }
@@ -50,7 +50,7 @@ struct QuickLookGitHubRepoCard: View {
                         Text(repo.repo)
                             .foregroundStyle(.primary)
                     }
-                    .font(.system(size: 18, weight: .bold))
+                    .font(CharkleTheme.text(.title, weight: .bold))
                     .lineLimit(1)
 
                     Spacer(minLength: 8)
@@ -86,7 +86,7 @@ struct QuickLookGitHubRepoCard: View {
                                 Image(systemName: "arrow.up.right.square")
                                     .font(.system(size: 11.5, weight: .semibold))
                                 Text("GitHub")
-                                    .font(.system(size: 12, weight: .semibold))
+                                    .font(CharkleTheme.text(.caption, weight: .semibold))
                             }
                             .padding(.horizontal, 11)
                             .padding(.vertical, 6)
@@ -99,7 +99,7 @@ struct QuickLookGitHubRepoCard: View {
                 // Description
                 if let desc = repo.description, !desc.isEmpty {
                     Text(desc)
-                        .font(.system(size: 14))
+                        .font(CharkleTheme.text(.body))
                         .foregroundStyle(.primary.opacity(0.86))
                         .lineSpacing(4)
                         .textSelection(.enabled)
@@ -113,20 +113,20 @@ struct QuickLookGitHubRepoCard: View {
                                 .fill(languageColor(lang))
                                 .frame(width: 9, height: 9)
                             Text(lang)
-                                .font(.system(size: 12.5, weight: .medium))
+                                .font(CharkleTheme.text(.body, weight: .medium))
                                 .foregroundStyle(.secondary)
                         }
                     }
                     if let hp = repo.homepageURL, let hpURL = URL(string: hp.hasPrefix("http") ? hp : "https://\(hp)") {
                         Text("·").foregroundStyle(.tertiary)
                         Link(hp.replacingOccurrences(of: "https://", with: "").replacingOccurrences(of: "http://", with: ""), destination: hpURL)
-                            .font(.system(size: 12.5, weight: .medium))
+                            .font(CharkleTheme.text(.body, weight: .medium))
                             .lineLimit(1)
                     }
                     if let license = repo.licenseName, !license.isEmpty {
                         Text("·").foregroundStyle(.tertiary)
                         Text(license)
-                            .font(.system(size: 12, design: .monospaced))
+                            .font(CharkleTheme.text(.caption, design: .monospaced))
                             .foregroundStyle(.secondary)
                     }
                 }
@@ -145,7 +145,7 @@ struct QuickLookGitHubRepoCard: View {
                     QuickLookFlowWrap(spacing: 6) {
                         ForEach(repo.topics, id: \.self) { topic in
                             Text(topic)
-                                .font(.system(size: 11.5, weight: .medium))
+                                .font(CharkleTheme.text(.caption, weight: .medium))
                                 .foregroundStyle(Color(charkleHex: colorScheme == .dark ? "#93C5FD" : "#2563EB"))
                                 .padding(.horizontal, 9)
                                 .padding(.vertical, 4)
@@ -163,9 +163,9 @@ struct QuickLookGitHubRepoCard: View {
                     RemoteCachedImageView(url: ogURL, contentMode: .fit) {
                         EmptyView()
                     }
-                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .clipShape(RoundedRectangle(cornerRadius: CharkleTheme.Radius.cardOuter, style: .continuous))
                     .overlay(
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        RoundedRectangle(cornerRadius: CharkleTheme.Radius.cardOuter, style: .continuous)
                             .strokeBorder(Color.primary.opacity(0.08), lineWidth: CharkleTheme.hairlineWidth)
                     )
                 }
@@ -175,7 +175,7 @@ struct QuickLookGitHubRepoCard: View {
                 // README Section
                 VStack(alignment: .leading, spacing: 12) {
                     Text("README")
-                        .font(.system(size: 11, weight: .bold, design: .monospaced))
+                        .font(CharkleTheme.text(.caption, weight: .bold, design: .monospaced))
                         .tracking(0.8)
                         .foregroundStyle(.secondary)
 
@@ -186,7 +186,7 @@ struct QuickLookGitHubRepoCard: View {
                         )
                     } else {
                         Text("暂未拉取到 README 内容，可点击右上角刷新重试或前往 GitHub 查看。")
-                            .font(.system(size: 13))
+                            .font(CharkleTheme.text(.body))
                             .foregroundStyle(.secondary)
                     }
                 }
@@ -209,10 +209,10 @@ struct QuickLookGitHubRepoCard: View {
 
     private var ownerMonogram: some View {
         ZStack {
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
+            RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous)
                 .fill(Color.accentColor.opacity(0.18))
             Text(String(repo.owner.prefix(1)).uppercased())
-                .font(.system(size: 16, weight: .bold))
+                .font(CharkleTheme.text(.headline, weight: .bold))
                 .foregroundStyle(Color.accentColor)
         }
         .frame(width: 36, height: 36)
@@ -221,10 +221,10 @@ struct QuickLookGitHubRepoCard: View {
     private func metricPair(value: Int, label: String) -> some View {
         HStack(spacing: 4) {
             Text("\(value)")
-                .font(.system(size: 13.5, weight: .bold, design: .rounded))
+                .font(CharkleTheme.text(.body, weight: .bold, design: .rounded))
                 .monospacedDigit()
             Text(label)
-                .font(.system(size: 12.5))
+                .font(CharkleTheme.text(.body))
                 .foregroundStyle(.secondary)
         }
     }
@@ -276,7 +276,7 @@ struct QuickLookSocialPostCard: View {
     }
 
     var body: some View {
-        let cardShape = RoundedRectangle(cornerRadius: 18, style: .continuous)
+        let cardShape = RoundedRectangle(cornerRadius: CharkleTheme.Radius.popoverOuter, style: .continuous)
         let cardFill = colorScheme == .dark ? Color(charkleHex: "#1B1C20") : Color.white
 
         ScrollView(.vertical) {
@@ -296,16 +296,16 @@ struct QuickLookSocialPostCard: View {
                     VStack(alignment: .leading, spacing: 2) {
                         HStack(spacing: 6) {
                             Text(post.displayAuthorName)
-                                .font(.system(size: 14.5, weight: .bold))
+                                .font(CharkleTheme.text(.headline, weight: .bold))
                             if let handleLine = post.displayHandleLine {
                                 Text(handleLine)
-                                    .font(.system(size: 12.5))
+                                    .font(CharkleTheme.text(.body))
                                     .foregroundStyle(.secondary)
                             }
                         }
                         if let published = post.publishedAtText, !published.isEmpty {
                             Text(published)
-                                .font(.system(size: 11.5))
+                                .font(CharkleTheme.text(.caption))
                                 .foregroundStyle(.tertiary)
                         }
                     }
@@ -313,7 +313,7 @@ struct QuickLookSocialPostCard: View {
                     Spacer()
 
                     Text(post.platform.displayName)
-                        .font(.system(size: 11, weight: .bold))
+                        .font(CharkleTheme.text(.caption, weight: .bold))
                         .foregroundStyle(.white)
                         .padding(.horizontal, 10)
                         .padding(.vertical, 4)
@@ -324,15 +324,15 @@ struct QuickLookSocialPostCard: View {
                 if let article = post.articleTitle, !article.isEmpty {
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
                         Text(article)
-                            .font(.system(size: 17, weight: .bold))
+                            .font(CharkleTheme.text(.headline, weight: .bold))
                             .textSelection(.enabled)
                         if let dur = post.formattedVideoDuration {
                             Text(dur)
-                                .font(.system(size: 11.5, weight: .semibold).monospacedDigit())
+                                .font(CharkleTheme.text(.caption, weight: .semibold).monospacedDigit())
                                 .foregroundStyle(.secondary)
                                 .padding(.horizontal, 7)
                                 .padding(.vertical, 2)
-                                .background(Color.primary.opacity(0.07), in: Capsule())
+                                .background(Color.primary.opacity(0.07), in: Capsule(style: .continuous))
                         }
                     }
                 }
@@ -345,12 +345,12 @@ struct QuickLookSocialPostCard: View {
                                 .font(.system(size: 12, weight: .semibold))
                                 .foregroundStyle(Color.accentColor)
                             Text("视频摘要")
-                                .font(.system(size: 12.5, weight: .semibold))
+                                .font(CharkleTheme.text(.body, weight: .semibold))
                                 .foregroundStyle(.primary)
                         }
                         if let summary = post.videoSummary?.trimmingCharacters(in: .whitespacesAndNewlines), !summary.isEmpty {
                             Text(summary)
-                                .font(.system(size: 13.5))
+                                .font(CharkleTheme.text(.body))
                                 .foregroundStyle(.primary.opacity(0.90))
                                 .textSelection(.enabled)
                                 .fixedSize(horizontal: false, vertical: true)
@@ -359,7 +359,7 @@ struct QuickLookSocialPostCard: View {
                             VStack(alignment: .leading, spacing: 4) {
                                 ForEach(Array(post.videoOutline.enumerated()), id: \.offset) { _, line in
                                     Text(line)
-                                        .font(.system(size: 12.5))
+                                        .font(CharkleTheme.text(.body))
                                         .foregroundStyle(.secondary)
                                         .textSelection(.enabled)
                                         .fixedSize(horizontal: false, vertical: true)
@@ -370,9 +370,9 @@ struct QuickLookSocialPostCard: View {
                     }
                     .padding(12)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Color.accentColor.opacity(0.07), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .background(Color.accentColor.opacity(0.07), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.cardOuter, style: .continuous))
                     .overlay(
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        RoundedRectangle(cornerRadius: CharkleTheme.Radius.cardOuter, style: .continuous)
                             .strokeBorder(Color.accentColor.opacity(0.18), lineWidth: CharkleTheme.hairlineWidth)
                     )
                 }
@@ -382,7 +382,7 @@ struct QuickLookSocialPostCard: View {
                     QuickLookSocialRichTextView(
                         text: post.bodyText,
                         isArticle: post.articleTitle != nil,
-                        fontSize: 15
+                        textStyle: .headline
                     )
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -392,21 +392,21 @@ struct QuickLookSocialPostCard: View {
                     VStack(alignment: .leading, spacing: 6) {
                         if let qAuthor = post.quotedAuthor, !qAuthor.isEmpty {
                             Text(qAuthor)
-                                .font(.system(size: 12, weight: .semibold))
+                                .font(CharkleTheme.text(.caption, weight: .semibold))
                                 .foregroundStyle(.secondary)
                         }
                         QuickLookSocialRichTextView(
                             text: quotedText,
                             isArticle: false,
-                            fontSize: 13.5
+                            textStyle: .body
                         )
                         .foregroundStyle(.primary.opacity(0.86))
                     }
                     .padding(12)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.cardOuter, style: .continuous))
                     .overlay(
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        RoundedRectangle(cornerRadius: CharkleTheme.Radius.cardOuter, style: .continuous)
                             .strokeBorder(Color.primary.opacity(0.10), lineWidth: CharkleTheme.hairlineWidth)
                     )
                 }
@@ -423,7 +423,7 @@ struct QuickLookSocialPostCard: View {
                     if effectiveItems.count > 1, !post.isZeroDownloadVideoBookmark, let onExtractAllMedia {
                         HStack(spacing: 8) {
                             Text("\(post.platform.postNoun)内含 \(effectiveItems.count) 个媒体")
-                                .font(.system(size: 11.5, weight: .medium))
+                                .font(CharkleTheme.text(.caption, weight: .medium))
                                 .foregroundStyle(.secondary)
                             Spacer()
                             Button {
@@ -442,7 +442,7 @@ struct QuickLookSocialPostCard: View {
                                             .font(.system(size: 10.5, weight: .semibold))
                                     }
                                     Text("全部提取为独立素材")
-                                        .font(.system(size: 11, weight: .semibold))
+                                        .font(CharkleTheme.text(.caption, weight: .semibold))
                                 }
                                 .foregroundStyle(Color.accentColor)
                                 .padding(.horizontal, 10)
@@ -471,7 +471,7 @@ struct QuickLookSocialPostCard: View {
                             captureBridge: inlineVideoCaptureBridge
                         )
                         .frame(height: 360)
-                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        .clipShape(RoundedRectangle(cornerRadius: CharkleTheme.Radius.cardOuter, style: .continuous))
 
                         if let onSetCoverFrame {
                             HStack {
@@ -487,11 +487,11 @@ struct QuickLookSocialPostCard: View {
                     VStack(alignment: .leading, spacing: 8) {
                         HStack(spacing: 6) {
                             Text("媒体暂未保存到本地：未能连接目标服务器 ·")
-                                .font(.system(size: 12))
+                                .font(CharkleTheme.text(.caption))
                                 .foregroundStyle(.secondary)
                             if let url = URL(string: post.originalURL) {
                                 Link("前往 \(post.platform.displayName) 观看", destination: url)
-                                    .font(.system(size: 12, weight: .medium))
+                                    .font(CharkleTheme.text(.caption, weight: .medium))
                             }
                         }
                         Button {
@@ -507,7 +507,7 @@ struct QuickLookSocialPostCard: View {
                                     ProgressView().controlSize(.mini)
                                 }
                                 Text("重试获取")
-                                    .font(.system(size: 12.5, weight: .semibold))
+                                    .font(CharkleTheme.text(.body, weight: .semibold))
                             }
                             .foregroundStyle(.white)
                             .padding(.horizontal, 14)
@@ -531,7 +531,7 @@ struct QuickLookSocialPostCard: View {
 
                     if let url = URL(string: post.originalURL) {
                         Link(post.platform.openActionLabel, destination: url)
-                            .font(.system(size: 12.5, weight: .semibold))
+                            .font(CharkleTheme.text(.body, weight: .semibold))
                     }
                 }
             }
@@ -585,15 +585,15 @@ struct QuickLookSocialPostCard: View {
                             .frame(maxWidth: .infinity)
                     }
                 }
-                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .clipShape(RoundedRectangle(cornerRadius: CharkleTheme.Radius.cardOuter, style: .continuous))
                 .overlay(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    RoundedRectangle(cornerRadius: CharkleTheme.Radius.cardOuter, style: .continuous)
                         .strokeBorder(Color.primary.opacity(0.10), lineWidth: CharkleTheme.hairlineWidth)
                 )
 
                 HStack {
                     Label("在线流式播放（不占用本地空间，可按需保存原视频）", systemImage: "play.tv")
-                        .font(.system(size: 11, weight: .medium))
+                        .font(CharkleTheme.text(.caption, weight: .medium))
                         .foregroundStyle(.secondary)
                     Spacer()
                     extractMediaButton(attachment: attachment, index: index, pillStyle: false)
@@ -607,9 +607,9 @@ struct QuickLookSocialPostCard: View {
                         captureBridge: index == 0 ? inlineVideoCaptureBridge : nil
                     )
                         .frame(height: 320)
-                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        .clipShape(RoundedRectangle(cornerRadius: CharkleTheme.Radius.cardOuter, style: .continuous))
                         .overlay(
-                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            RoundedRectangle(cornerRadius: CharkleTheme.Radius.cardOuter, style: .continuous)
                                 .strokeBorder(Color.primary.opacity(0.10), lineWidth: CharkleTheme.hairlineWidth)
                         )
                 } else {
@@ -618,7 +618,7 @@ struct QuickLookSocialPostCard: View {
 
                 HStack(spacing: 8) {
                     Label(attachment.kind == .gif ? "动图媒体" : "视频媒体", systemImage: "film")
-                        .font(.system(size: 11, weight: .medium))
+                        .font(CharkleTheme.text(.caption, weight: .medium))
                         .foregroundStyle(.secondary)
                     Spacer()
                     if index == 0, let onSetCoverFrame {
@@ -639,26 +639,26 @@ struct QuickLookSocialPostCard: View {
                                         url: imgURL,
                                         contentMode: .fill
                                     ) {
-                                        CharkleMediaPlaceholderSkeleton(height: 220, cornerRadius: 12)
+                                        CharkleMediaPlaceholderSkeleton(height: 220, cornerRadius: CharkleTheme.Radius.cardOuter)
                                     } failurePlaceholder: {
                                         mediaFailedPlaceholder
                                     }
                                 }
                                 .clipped()
-                                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                                .clipShape(RoundedRectangle(cornerRadius: CharkleTheme.Radius.cardOuter, style: .continuous))
                         } else {
                             RemoteCachedImageView(
                                 url: imgURL,
                                 contentMode: .fit,
                                 maxHeight: attachments.count == 1 ? (post.platform.isVerticalFeedPlatform ? 520 : 420) : 240
                             ) {
-                                CharkleMediaPlaceholderSkeleton(height: 180, cornerRadius: 12)
+                                CharkleMediaPlaceholderSkeleton(height: 180, cornerRadius: CharkleTheme.Radius.cardOuter)
                             } failurePlaceholder: {
                                 mediaFailedPlaceholder
                             }
                             .frame(maxWidth: .infinity)
                             .background(Color.primary.opacity(0.05))
-                            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                            .clipShape(RoundedRectangle(cornerRadius: CharkleTheme.Radius.cardOuter, style: .continuous))
                         }
                     } else {
                         mediaFailedPlaceholder
@@ -697,7 +697,7 @@ struct QuickLookSocialPostCard: View {
                         .font(.system(size: 11, weight: .semibold))
                 }
                 Text(title)
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(CharkleTheme.text(.caption, weight: .semibold))
             }
             .foregroundStyle(pillStyle ? Color.white : Color.accentColor)
             .padding(.horizontal, 10)
@@ -715,7 +715,7 @@ struct QuickLookSocialPostCard: View {
         ZStack {
             Circle().fill(platformBadgeColor.opacity(0.85))
             Text(String((post.displayAuthorName.first ?? post.authorHandle.first ?? "X")).uppercased())
-                .font(.system(size: 15, weight: .bold))
+                .font(CharkleTheme.text(.headline, weight: .bold))
                 .foregroundStyle(.white)
         }
         .frame(width: 40, height: 40)
@@ -727,7 +727,7 @@ struct QuickLookSocialPostCard: View {
                 .font(.system(size: 26))
                 .foregroundStyle(.secondary)
             Text("图片加载失败")
-                .font(.system(size: 12))
+                .font(CharkleTheme.text(.caption))
                 .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, minHeight: 160)
@@ -772,7 +772,7 @@ struct QuickLookSocialPostCard: View {
                         .font(.system(size: 10.5, weight: .semibold))
                 }
                 Text("设当前帧为封面")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(CharkleTheme.text(.caption, weight: .semibold))
             }
             .foregroundStyle(.primary)
             .padding(.horizontal, 9)
@@ -786,10 +786,10 @@ struct QuickLookSocialPostCard: View {
     private func engagementMetric(_ count: Int, _ label: String) -> some View {
         HStack(spacing: 4) {
             Text("\(count)")
-                .font(.system(size: 12.5, weight: .bold, design: .rounded))
+                .font(CharkleTheme.text(.body, weight: .bold, design: .rounded))
                 .monospacedDigit()
             Text(label)
-                .font(.system(size: 12))
+                .font(CharkleTheme.text(.caption))
                 .foregroundStyle(.secondary)
         }
     }
@@ -975,7 +975,7 @@ struct QuickLookStreamingVideoView: View {
                                 .controlSize(.small)
                                 .tint(.white)
                             Text("正在连接流式播放…")
-                                .font(.system(size: 12.5, weight: .semibold))
+                                .font(CharkleTheme.text(.body, weight: .semibold))
                                 .foregroundStyle(.white)
                         }
                         .padding(.horizontal, 14)
@@ -991,22 +991,22 @@ struct QuickLookStreamingVideoView: View {
                                 .font(.system(size: 24, weight: .medium))
                                 .foregroundStyle(.white.opacity(0.85))
                             Text("暂无法直接流式播放此视频")
-                                .font(.system(size: 12.5, weight: .medium))
+                                .font(CharkleTheme.text(.body, weight: .medium))
                                 .foregroundStyle(.white.opacity(0.92))
                             if let watchURL {
                                 Link(destination: watchURL) {
                                     Label(openActionLabel, systemImage: "arrow.up.right.square")
-                                        .font(.system(size: 12, weight: .semibold))
+                                        .font(CharkleTheme.text(.caption, weight: .semibold))
                                         .foregroundStyle(.white)
                                         .padding(.horizontal, 12)
                                         .padding(.vertical, 6)
-                                        .background(Color.accentColor, in: Capsule())
+                                        .background(Color.accentColor, in: Capsule(style: .continuous))
                                 }
                                 .buttonStyle(.plain)
                             }
                         }
                         .padding(18)
-                        .background(.black.opacity(0.65), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        .background(.black.opacity(0.65), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.cardOuter, style: .continuous))
                     }
             }
 
@@ -1035,7 +1035,7 @@ struct QuickLookStreamingVideoView: View {
                                             .font(.system(size: 11, weight: .semibold))
                                     }
                                     Text("设当前帧为封面")
-                                        .font(.system(size: 11, weight: .semibold))
+                                        .font(CharkleTheme.text(.caption, weight: .semibold))
                                 }
                                 .foregroundStyle(.white)
                                 .padding(.horizontal, 10)
@@ -1055,7 +1055,7 @@ struct QuickLookStreamingVideoView: View {
                                     useEmbedMode ? "切换原生流式" : "切换网页播放器",
                                     systemImage: useEmbedMode ? "play.rectangle" : "globe"
                                 )
-                                .font(.system(size: 11, weight: .semibold))
+                                .font(CharkleTheme.text(.caption, weight: .semibold))
                                 .foregroundStyle(.white)
                                 .padding(.horizontal, 10)
                                 .padding(.vertical, 5)
@@ -1117,11 +1117,11 @@ struct QuickLookStreamingVideoView: View {
                     HStack {
                         Spacer()
                         Text(durationText)
-                            .font(.system(size: 11.5, weight: .semibold).monospacedDigit())
+                            .font(CharkleTheme.text(.caption, weight: .semibold).monospacedDigit())
                             .foregroundStyle(.white)
                             .padding(.horizontal, 8)
                             .padding(.vertical, 3.5)
-                            .background(.black.opacity(0.75), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                            .background(.black.opacity(0.75), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.cardInnerBadge, style: .continuous))
                             .padding(10)
                     }
                 }
@@ -1406,18 +1406,18 @@ struct QuickLookMarkdownReaderCard: View {
     }
 
     var body: some View {
-        let cardShape = RoundedRectangle(cornerRadius: 18, style: .continuous)
+        let cardShape = RoundedRectangle(cornerRadius: CharkleTheme.Radius.popoverOuter, style: .continuous)
 
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 10) {
                 Text(CanvasFormatters.fileExtensionBadge(for: asset.fileName))
-                    .font(.system(size: 11, weight: .bold, design: .monospaced))
+                    .font(CharkleTheme.text(.caption, weight: .bold, design: .monospaced))
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)
-                    .background(Color.primary.opacity(0.08), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    .background(Color.primary.opacity(0.08), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.sm, style: .continuous))
 
                 Text(asset.title)
-                    .font(.system(size: 16, weight: .semibold))
+                    .font(CharkleTheme.text(.headline, weight: .semibold))
                     .lineLimit(1)
 
                 Spacer()
@@ -1450,7 +1450,7 @@ struct QuickLookMarkdownReaderCard: View {
                             .padding(24)
                     } else {
                         Text(fullText.isEmpty ? "暂无可预览正文" : fullText)
-                            .font(showRawSource ? .system(size: 12.5, design: .monospaced) : .system(size: 14))
+                            .font(showRawSource ? CharkleTheme.text(.body, design: .monospaced) : CharkleTheme.text(.body))
                             .lineSpacing(6)
                             .textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -2074,7 +2074,7 @@ private nonisolated struct CharkleMarkdownImageAttachment: Textual.Attachment {
             .resizable()
             .interpolation(.high)
             .aspectRatio(contentMode: .fit)
-            .clipShape(RoundedRectangle(cornerRadius: isBadge ? 4 : 8, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: isBadge ? CharkleTheme.Radius.xs : CharkleTheme.Radius.chip, style: .continuous))
     }
 
     func sizeThatFits(_ proposal: ProposedViewSize, in _: TextEnvironmentValues) -> CGSize {
@@ -2272,13 +2272,13 @@ private struct CharkleCodeBlockBodyView: View {
 
     var body: some View {
         let language = (configuration.languageHint ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        let shape = RoundedRectangle(cornerRadius: 10, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: CharkleTheme.Radius.popoverInner, style: .continuous)
         let accent = CharkleTheme.accent(for: colorScheme, source: accentSource)
 
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 6) {
                 Text(language.isEmpty ? "CODE" : language.uppercased())
-                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .font(CharkleTheme.text(.caption, weight: .semibold, design: .monospaced))
                     .foregroundStyle(.secondary)
                 Spacer()
                 Button {
@@ -2293,14 +2293,14 @@ private struct CharkleCodeBlockBodyView: View {
                         Image(systemName: copied ? "checkmark" : "doc.on.doc")
                             .font(.system(size: 9.5, weight: .semibold))
                         Text(copied ? "已复制" : "复制")
-                            .font(.system(size: 10.5, weight: .medium))
+                            .font(CharkleTheme.text(.caption, weight: .medium))
                     }
                     .foregroundStyle(copied ? accent : .secondary)
                     .padding(.horizontal, 7)
                     .padding(.vertical, 3)
                     .background(
                         Color.primary.opacity(colorScheme == .dark ? 0.08 : 0.055),
-                        in: RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.sm, style: .continuous)
                     )
                 }
                 .buttonStyle(.plain)
@@ -2340,28 +2340,28 @@ private struct CharkleCodeBlockBodyView: View {
 struct QuickLookMarkdownContentView: View {
     let markdown: String
     let urlContext: MarkdownURLContext
-    var fontSize: CGFloat = 13.5
+    var textStyle: CharkleTextStyle = .body
 
     init(
         markdown: String,
         urlContext: MarkdownURLContext = MarkdownURLContext(),
-        fontSize: CGFloat = 13.5
+        textStyle: CharkleTextStyle = .body
     ) {
         self.markdown = markdown
         self.urlContext = urlContext
-        self.fontSize = fontSize
+        self.textStyle = textStyle
     }
 
     var body: some View {
         let normalized = CharkleMarkdownNormalizer.normalize(markdown, urlContext: urlContext)
         if normalized.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             Text("暂无可预览正文")
-                .font(.system(size: fontSize))
+                .font(CharkleTheme.text(textStyle))
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
         } else {
             StructuredText(markdown: normalized, baseURL: urlContext.webLinkBaseURL)
-                .font(.system(size: fontSize))
+                .font(CharkleTheme.text(textStyle))
                 .textual.structuredTextStyle(.gitHub)
                 .textual.inlineStyle(CharkleTextualStyles.inlineStyle)
                 .textual.codeBlockStyle(CharkleCodeBlockStyle())
@@ -2380,15 +2380,15 @@ struct QuickLookMarkdownContentView: View {
 private struct QuickLookSocialRichTextView: View {
     let text: String
     let isArticle: Bool
-    let fontSize: CGFloat
+    let textStyle: CharkleTextStyle
 
     var body: some View {
         let prepared = CharkleMarkdownNormalizer.prepareSocialText(text, forceBlockMode: isArticle)
         if prepared.useStructuredBlocks {
-            QuickLookMarkdownContentView(markdown: prepared.markdown, fontSize: fontSize)
+            QuickLookMarkdownContentView(markdown: prepared.markdown, textStyle: textStyle)
         } else {
             InlineText(markdown: prepared.markdown)
-                .font(.system(size: fontSize))
+                .font(CharkleTheme.text(textStyle))
                 .lineSpacing(5)
                 .textual.inlineStyle(CharkleTextualStyles.inlineStyle)
                 .textual.textSelection(.enabled)
@@ -2412,12 +2412,12 @@ struct QuickLookModel3DViewer: View {
                 SceneKitInteractiveView(url: url, resetTrigger: resetTrigger) {
                     loadFailed = true
                 }
-                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                .clipShape(RoundedRectangle(cornerRadius: CharkleTheme.Radius.popoverOuter, style: .continuous))
                 .shadow(color: .black.opacity(0.45), radius: 28, y: 12)
 
                 HStack(spacing: 8) {
                     Text("3D · \(asset.richMetadata?.model3DFormat ?? url.pathExtension.uppercased())")
-                        .font(.system(size: 11, weight: .bold, design: .monospaced))
+                        .font(CharkleTheme.text(.caption, weight: .bold, design: .monospaced))
                         .foregroundStyle(.white.opacity(0.9))
                         .padding(.horizontal, 10)
                         .padding(.vertical, 5)
@@ -2427,7 +2427,7 @@ struct QuickLookModel3DViewer: View {
                         resetTrigger += 1
                     } label: {
                         Label("重置视角", systemImage: "arrow.counterclockwise")
-                            .font(.system(size: 11, weight: .semibold))
+                            .font(CharkleTheme.text(.caption, weight: .semibold))
                             .foregroundStyle(.white)
                             .padding(.horizontal, 10)
                             .padding(.vertical, 5)
@@ -2440,10 +2440,10 @@ struct QuickLookModel3DViewer: View {
                 VStack(spacing: 14) {
                     CharkleIcon("model3d", style: .duotone, size: 52)
                     Text(asset.title)
-                        .font(.system(size: 17, weight: .semibold))
+                        .font(CharkleTheme.text(.headline, weight: .semibold))
                         .foregroundStyle(.white)
                     Text("该 3D 格式（\(asset.richMetadata?.model3DFormat ?? "3D")）暂不支持 SceneKit 直接渲染，可使用默认 3D 软件打开。")
-                        .font(.system(size: 12.5))
+                        .font(CharkleTheme.text(.body))
                         .foregroundStyle(.white.opacity(0.7))
                         .multilineTextAlignment(.center)
                         .frame(maxWidth: 360)
@@ -2456,7 +2456,10 @@ struct QuickLookModel3DViewer: View {
                 }
                 .padding(32)
                 .frame(maxWidth: 520, maxHeight: 380)
-                .background(Color(charkleHex: "#181A20"), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                .background(
+                    Color(charkleHex: "#181A20"),
+                    in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.popoverOuter, style: .continuous)
+                )
             }
         }
         .frame(maxWidth: 960, maxHeight: 640)

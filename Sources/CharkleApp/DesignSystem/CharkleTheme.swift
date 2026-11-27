@@ -36,10 +36,34 @@ extension EnvironmentValues {
     @Entry public var charkleAccentSource: CharkleAccentSource = .studio
 }
 
+/// Canonical 4-step macOS studio typography scale (`>= 12pt` floor for all UI copy).
+/// Hierarchy is built with weight, ink opacity, and `.monospacedDigit()` rather than
+/// fragmented half-point sizes.
+public nonisolated enum CharkleTextStyle: CGFloat, CaseIterable, Hashable, Sendable {
+    /// `12pt` — Metadata, secondary subtitles, inspector specs, badges, pills, keycaps.
+    case caption = 12
+    /// `13pt` — Standard macOS body text, buttons, inputs, sidebar items, settings row titles.
+    case body = 13
+    /// `16pt` — Section & sheet headers, empty-state headlines, modal card headings.
+    case headline = 16
+    /// `20pt` — Top-level page, onboarding, and hero dialog titles.
+    case title = 20
+}
+
 /// Gallery-First neutral surfaces, continuous concentric radii, dual accent tokens,
 /// and Restrained Apple Liquid Glass tokens (macOS 26+ native with calibrated macOS 15
 /// and Reduce Transparency fallbacks).
 public enum CharkleTheme {
+    // MARK: - Canonical 4-Step Studio Typography (`>= 12pt` Floor)
+
+    public nonisolated static func text(
+        _ style: CharkleTextStyle,
+        weight: Font.Weight = .regular,
+        design: Font.Design = .default
+    ) -> Font {
+        .system(size: style.rawValue, weight: weight, design: design)
+    }
+
     // MARK: - Retina Hairline Geometry
 
     /// Standard Retina 1px interior divider thickness (`0.5pt`).
@@ -195,23 +219,33 @@ public enum CharkleTheme {
 
     // MARK: - Continuous Concentric Corner Tokens (4pt Grid)
 
-    public enum Radius {
+    public nonisolated enum Radius {
+        /// Micro keycaps, inline color swatches, and compact inner thumbnails (`4pt`).
+        public static let xs: CGFloat = 4
+        /// Compact nested badges and pills inside cards or bars (`6pt`).
+        public static let sm: CGFloat = 6
+        /// Standard controls, buttons, text fields, menu triggers, and chips (`8pt`).
+        public static let chip: CGFloat = 8
+        /// Media cards, floating action bars, and compact sheets (`12pt`).
+        public static let cardOuter: CGFloat = 12
+        /// Settings cards, option panels, and inspector drawers (`14pt`).
+        public static let settingsOuter: CGFloat = 14
+        /// Popovers, trays, floating toolbars, and detail sheets (`16pt`).
+        public static let popoverOuter: CGFloat = 16
+        /// Large modal shells, onboarding container, and docks (`20pt`).
         public static let dockOuter: CGFloat = 20
+
         public static let dockPadding: CGFloat = 8
         public static let dockInner: CGFloat = concentricInner(outer: dockOuter, padding: dockPadding) // 12
 
-        public static let cardOuter: CGFloat = 12
         public static let cardBadgePadding: CGFloat = 6
         public static let cardInnerBadge: CGFloat = concentricInner(outer: cardOuter, padding: cardBadgePadding) // 6
 
-        public static let settingsOuter: CGFloat = 14
         public static let settingsPadding: CGFloat = 6
         public static let settingsInner: CGFloat = concentricInner(outer: settingsOuter, padding: settingsPadding) // 8
 
-        public static let popoverOuter: CGFloat = 16
-        public static let popoverInner: CGFloat = 10
-
-        public static let chip: CGFloat = 8
+        public static let popoverPadding: CGFloat = 6
+        public static let popoverInner: CGFloat = concentricInner(outer: popoverOuter, padding: popoverPadding) // 10
 
         public static func concentricInner(outer: CGFloat, padding: CGFloat) -> CGFloat {
             max(4, outer - padding)

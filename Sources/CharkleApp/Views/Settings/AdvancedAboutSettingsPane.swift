@@ -198,7 +198,7 @@ public struct AdvancedAboutSettingsPane: View {
                             .interpolation(.high)
                             .aspectRatio(contentMode: .fit)
                             .frame(width: 44, height: 44)
-                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                            .clipShape(RoundedRectangle(cornerRadius: CharkleTheme.Radius.popoverInner, style: .continuous))
                     } else {
                         CharkleBrandMark(size: 36)
                     }
@@ -206,14 +206,14 @@ public struct AdvancedAboutSettingsPane: View {
                     VStack(alignment: .leading, spacing: 3) {
                         HStack(spacing: 8) {
                             Text("Charkle")
-                                .font(.system(size: 14, weight: .semibold))
+                                .font(CharkleTheme.text(.body, weight: .semibold))
                             Text("v\(appVersion) (\(buildNumber))")
-                                .font(.system(size: 11, weight: .medium, design: .monospaced))
+                                .font(CharkleTheme.text(.caption, weight: .medium, design: .monospaced))
                                 .monospacedDigit()
                                 .foregroundStyle(.secondary)
                         }
                         Text("面向设计师的视觉素材库与 10 秒情绪板创作台 · Apple Vision 离线引擎 + 可读云端存储")
-                            .font(.system(size: 11.5))
+                            .font(CharkleTheme.text(.caption))
                             .foregroundStyle(.secondary)
                     }
                     Spacer()
@@ -397,10 +397,10 @@ public struct AdvancedAboutSettingsPane: View {
                 HStack(alignment: .center, spacing: 12) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("正在下载 \(update.tagName)")
-                            .font(.system(size: 13, weight: .medium))
+                            .font(CharkleTheme.text(.body, weight: .medium))
                             .foregroundStyle(.primary)
                         Text(inlineDownloadBytesText(downloaded: downloadedBytes, total: totalBytes, progress: progress))
-                            .font(.system(size: 11.5, design: .monospaced))
+                            .font(CharkleTheme.text(.caption, design: .monospaced))
                             .monospacedDigit()
                             .foregroundStyle(.secondary)
                     }
@@ -528,9 +528,9 @@ public struct AdvancedAboutSettingsPane: View {
                     .font(.system(size: 18))
                 VStack(alignment: .leading, spacing: 2) {
                     Text("gdirect 本地挂载管理")
-                        .font(.system(size: 15, weight: .semibold))
+                        .font(CharkleTheme.text(.headline, weight: .semibold))
                     Text("通过本机 gdirect 将 Google Drive 挂载为本地目录，与正常直连 OAuth 账号可共存。")
-                        .font(.system(size: 11.5))
+                        .font(CharkleTheme.text(.caption))
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -539,9 +539,9 @@ public struct AdvancedAboutSettingsPane: View {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Google Drive 接入模式")
-                        .font(.system(size: 12.5, weight: .medium))
+                        .font(CharkleTheme.text(.body, weight: .medium))
                     Text("休眠唤醒若遇 NFS 断连提示，可随时切回「正常直连（推荐）」")
-                        .font(.system(size: 11))
+                        .font(CharkleTheme.text(.caption))
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -572,7 +572,7 @@ public struct AdvancedAboutSettingsPane: View {
             if snap.accounts.count > 1 {
                 HStack {
                     Text("本机 gdirect 账号")
-                        .font(.system(size: 12, weight: .medium))
+                        .font(CharkleTheme.text(.caption, weight: .medium))
                     Spacer()
                     Picker("", selection: Binding(
                         get: { gdirectEmail ?? snap.accounts.first ?? "" },
@@ -592,7 +592,7 @@ public struct AdvancedAboutSettingsPane: View {
 
             VStack(alignment: .leading, spacing: 4) {
                 Text("本地挂载目录")
-                    .font(.system(size: 11.5, weight: .medium))
+                    .font(CharkleTheme.text(.caption, weight: .medium))
                     .foregroundStyle(.secondary)
                 TextField(NSHomeDirectory() + "/GoogleDrive", text: $draftSyncConfig.mountPath)
                     .textFieldStyle(.roundedBorder)
@@ -615,7 +615,7 @@ public struct AdvancedAboutSettingsPane: View {
                     .disabled(syncAndAI.isBusy)
                 } else {
                     Text(snap.cliPath == nil ? "未检测到本机 gdirect CLI" : "未登录本机 gdirect 账号")
-                        .font(.system(size: 11.5))
+                        .font(CharkleTheme.text(.caption))
                         .foregroundStyle(.secondary)
                 }
 

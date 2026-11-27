@@ -512,12 +512,13 @@ public struct SidebarView: View {
                             Image(systemName: "magnifyingglass")
                                 .font(.system(size: 10.5, weight: .medium))
                             Text("⌘J")
-                                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                                .font(CharkleTheme.text(.caption, weight: .medium, design: .monospaced))
+                                .lineLimit(1)
                         }
                         .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
                         .padding(.horizontal, 7)
                         .padding(.vertical, 3.5)
-                        .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                        .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.sm, style: .continuous))
                     }
                     .buttonStyle(CharkleTactileButtonStyle())
                     .help("快速跳转 (⌘J)")
@@ -540,7 +541,7 @@ public struct SidebarView: View {
             HStack(spacing: 8) {
                 CharkleBrandMark(size: 20)
                 Text("Charkle")
-                    .font(.system(size: 13.5, weight: .semibold))
+                    .font(CharkleTheme.text(.body, weight: .semibold))
                     .tracking(-0.2)
                 Spacer()
             }
@@ -646,7 +647,8 @@ public struct SidebarView: View {
                                 Image(systemName: "plus")
                                     .font(.system(size: 9.5, weight: .semibold))
                                 Text("快速生成")
-                                    .font(.system(size: 10.5, weight: .medium))
+                                    .font(CharkleTheme.text(.caption, weight: .medium))
+                                    .lineLimit(1)
                             }
                         }
                         .buttonStyle(CharkleButtonStyle(.subtle, size: .xs, cornerRadius: 999))
@@ -743,7 +745,7 @@ public struct SidebarView: View {
                                     .font(.system(size: 13.5, weight: .medium))
                                     .foregroundStyle(.tertiary)
                                 Text("定义规则自动归集素材…")
-                                    .font(.system(size: 11.5))
+                                    .font(CharkleTheme.text(.caption))
                                     .foregroundStyle(.tertiary)
                             }
                             .padding(.horizontal, 14)
@@ -841,7 +843,7 @@ public struct SidebarView: View {
                     .padding(.trailing, 10)
                     .padding(.vertical, 2)
                     .background(
-                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        RoundedRectangle(cornerRadius: CharkleTheme.Radius.sm, style: .continuous)
                             .fill(dropTargetedFolderRoot ? activeAccent.opacity(0.14) : Color.clear)
                             .padding(.horizontal, 8)
                     )
@@ -855,7 +857,7 @@ public struct SidebarView: View {
 
                     if library.folders.isEmpty && creationTarget == nil {
                         Text("暂无文件夹，点击 + 或拖入文件夹 / .eaglepack 素材包")
-                            .font(.system(size: 11.5))
+                            .font(CharkleTheme.text(.caption))
                             .foregroundStyle(.tertiary)
                             .padding(.horizontal, 14)
                             .padding(.vertical, 8)
@@ -955,11 +957,11 @@ public struct SidebarView: View {
                         .foregroundStyle(coordinator.isSettingsPresented ? activeAccent : CharkleTheme.secondaryInk(for: colorScheme))
                         .frame(width: 18, height: 18)
                     Text("设置")
-                        .font(.system(size: 12.5, weight: coordinator.isSettingsPresented ? .semibold : .medium))
+                        .font(CharkleTheme.text(.body, weight: coordinator.isSettingsPresented ? .semibold : .medium))
                         .foregroundStyle(coordinator.isSettingsPresented ? Color.primary : Color.primary.opacity(0.84))
                     Spacer()
                     Text("⌘,")
-                        .font(.system(size: 10.5, weight: .medium, design: .monospaced))
+                        .font(CharkleTheme.text(.caption, weight: .medium, design: .monospaced))
                         .foregroundStyle(.tertiary)
                 }
                 .padding(.horizontal, 10)
@@ -1008,7 +1010,7 @@ public struct SidebarView: View {
                     HStack(spacing: 6) {
                         sectionHeader("标签")
                         Text("\(library.tagCounts.count)")
-                            .font(.system(size: 10, weight: .medium, design: .rounded))
+                            .font(CharkleTheme.text(.caption, weight: .medium, design: .rounded))
                             .monospacedDigit()
                             .foregroundStyle(.tertiary)
                             .padding(.bottom, 4)
@@ -1024,7 +1026,8 @@ public struct SidebarView: View {
                     isAllTagsPopoverPresented = true
                 } label: {
                     Text("全部")
-                        .font(.system(size: 10.5, weight: .medium))
+                        .font(CharkleTheme.text(.caption, weight: .medium))
+                        .lineLimit(1)
                         .foregroundStyle(.secondary)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
@@ -1070,7 +1073,7 @@ public struct SidebarView: View {
 
                 if !recentFive.isEmpty {
                     Text("最近常用")
-                        .font(.system(size: 9.5, weight: .semibold))
+                        .font(CharkleTheme.text(.caption, weight: .semibold))
                         .foregroundStyle(.tertiary)
                         .padding(.horizontal, 14)
                         .padding(.top, 2)
@@ -1088,7 +1091,7 @@ public struct SidebarView: View {
                 if !topNonDuplicate.isEmpty {
                     if !recentFive.isEmpty {
                         Text("高频标签")
-                            .font(.system(size: 9.5, weight: .semibold))
+                            .font(CharkleTheme.text(.caption, weight: .semibold))
                             .foregroundStyle(.tertiary)
                             .padding(.horizontal, 14)
                             .padding(.top, 6)
@@ -1112,7 +1115,7 @@ public struct SidebarView: View {
                             Image(systemName: "ellipsis.circle")
                                 .font(.system(size: 12, weight: .medium))
                             Text("查看全部 \(library.tagCounts.count) 个标签（已隐藏 \(hiddenCount) 个）")
-                                .font(.system(size: 11, weight: .medium))
+                                .font(CharkleTheme.text(.caption, weight: .medium))
                                 .lineLimit(1)
                             Spacer()
                         }
@@ -1148,7 +1151,7 @@ public struct SidebarView: View {
                     .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
                 TextField("搜索全部 \(library.tagCounts.count) 个标签…", text: $allTagsSearchQuery)
                     .textFieldStyle(.plain)
-                    .font(.system(size: 12.5))
+                    .font(CharkleTheme.text(.body))
                 if !allTagsSearchQuery.isEmpty {
                     Button {
                         allTagsSearchQuery = ""
@@ -1163,7 +1166,7 @@ public struct SidebarView: View {
                     allTagsSortByCount.toggle()
                 } label: {
                     Text(allTagsSortByCount ? "按数量" : "按名称")
-                        .font(.system(size: 10.5, weight: .medium))
+                        .font(CharkleTheme.text(.caption, weight: .medium))
                 }
                 .buttonStyle(CharkleButtonStyle(.subtle, size: .xs, cornerRadius: 999))
             }
@@ -1187,11 +1190,11 @@ public struct SidebarView: View {
                                     .foregroundStyle(selected ? activeAccent : CharkleTheme.secondaryInk(for: colorScheme))
                                     .frame(width: 16, height: 16)
                                 Text("#\(tag.name)")
-                                    .font(.system(size: 12.5, weight: selected ? .semibold : .regular))
+                                    .font(CharkleTheme.text(.body, weight: selected ? .semibold : .regular))
                                     .lineLimit(1)
                                 Spacer()
                                 Text("\(tag.count)")
-                                    .font(.system(size: 11, weight: .medium, design: .rounded))
+                                    .font(CharkleTheme.text(.caption, weight: .medium, design: .rounded))
                                     .monospacedDigit()
                                     .foregroundStyle(.secondary)
                             }
@@ -1288,7 +1291,7 @@ public struct SidebarView: View {
         let isSelected = isDestinationSelected || isMultiSelected
         let isDropHighlighted = dropTargetedFolderID == folder.id
         let isPinned = library.isFolderSubtreePinnedOffline(folder.id)
-        let rowShape = RoundedRectangle(cornerRadius: 8, style: .continuous)
+        let rowShape = RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous)
         let indent = CGFloat(min(node.depth, 5)) * 14
 
         let targetFolderIDs: [UUID] = {
@@ -1330,7 +1333,7 @@ public struct SidebarView: View {
                         isActive: isSelected
                     )
                     Text(folder.name)
-                        .font(.system(size: 12.5, weight: isSelected ? .semibold : .regular))
+                        .font(CharkleTheme.text(.body, weight: isSelected ? .semibold : .regular))
                         .foregroundStyle(isSelected ? Color.primary : Color.primary.opacity(0.86))
                         .lineLimit(1)
                     Spacer(minLength: 4)
@@ -1345,7 +1348,7 @@ public struct SidebarView: View {
                     let displayCount = library.subtreeAssetCount(for: folder.id)
                     if displayCount > 0 {
                         Text("\(displayCount)")
-                            .font(.system(size: 10.5, weight: .medium, design: .rounded))
+                            .font(CharkleTheme.text(.caption, weight: .medium, design: .rounded))
                             .monospacedDigit()
                             .foregroundStyle(.secondary)
                             .padding(.horizontal, 4)
@@ -1363,7 +1366,7 @@ public struct SidebarView: View {
                         .font(.system(size: 9.5, weight: .bold))
                         .foregroundStyle(.secondary)
                         .frame(width: 18, height: 18)
-                        .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 4, style: .continuous))
+                        .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.xs, style: .continuous))
                         .contentShape(Rectangle())
                         .onTapGesture {
                             toggleFolderCreation(target: .subfolder(folder.id))
@@ -1401,12 +1404,12 @@ public struct SidebarView: View {
                         isActive: true
                     )
                     Text(targetFolderIDs.count > 1 ? "\(folder.name) 等 \(targetFolderIDs.count) 个文件夹" : folder.name)
-                        .font(.system(size: 12, weight: .medium))
+                        .font(CharkleTheme.text(.caption, weight: .medium))
                         .foregroundStyle(.primary)
                 }
                 .padding(.horizontal, 10)
                 .padding(.vertical, 6)
-                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous))
             }
             .onDrop(
                 of: [.plainText, .fileURL, .url, .image],
@@ -1637,7 +1640,7 @@ public struct SidebarView: View {
         return HStack(spacing: 6) {
             TextField(placeholder, text: $newFolderName)
                 .textFieldStyle(.roundedBorder)
-                .font(.system(size: 12))
+                .font(CharkleTheme.text(.caption))
                 .focused($isNewFolderFieldFocused)
                 .onSubmit { commitNewFolder() }
                 .onExitCommand { cancelFolderCreation() }
@@ -1666,7 +1669,7 @@ public struct SidebarView: View {
         return HStack(spacing: 6) {
             TextField("重命名", text: $renameDraft)
                 .textFieldStyle(.roundedBorder)
-                .font(.system(size: 12))
+                .font(CharkleTheme.text(.caption))
                 .focused($isRenameFieldFocused)
                 .onSubmit { commitFolderRename(folderID: folder.id) }
                 .onExitCommand { renamingFolderID = nil }
@@ -1881,9 +1884,10 @@ extension SidebarView {
 
     private func sectionHeader(_ title: String) -> some View {
         Text(title)
-            .font(.system(size: 10.5, weight: .semibold))
+            .font(CharkleTheme.text(.caption, weight: .semibold))
             .tracking(0.3)
             .foregroundStyle(.secondary.opacity(0.82))
+            .lineLimit(1)
             .padding(.horizontal, 14)
             .padding(.bottom, 4)
     }
@@ -1915,7 +1919,7 @@ extension SidebarView {
                     .frame(width: 18, height: 18)
 
                 Text(title)
-                    .font(.system(size: 12.5, weight: isSelected ? .semibold : .regular))
+                    .font(CharkleTheme.text(.body, weight: isSelected ? .semibold : .regular))
                     .foregroundStyle(isSelected ? Color.primary : Color.primary.opacity(0.86))
                     .lineLimit(1)
 
@@ -1943,7 +1947,7 @@ extension SidebarView {
 
                 if let count = badgeCount, count > 0 {
                     Text("\(count)")
-                        .font(.system(size: 10.5, weight: emphasizeBadge ? .semibold : .medium, design: .rounded))
+                        .font(CharkleTheme.text(.caption, weight: emphasizeBadge ? .semibold : .medium, design: .rounded))
                         .monospacedDigit()
                         .foregroundStyle(
                             emphasizeBadge

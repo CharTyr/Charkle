@@ -289,7 +289,7 @@ public struct InspectorView: View {
         ScrollView(.vertical) {
             VStack(alignment: .leading, spacing: 10) {
                 Text("与「\(asset.title)」相似的素材")
-                    .font(.system(size: 11.5, weight: .medium))
+                    .font(CharkleTheme.text(.caption, weight: .medium))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
 
@@ -299,10 +299,10 @@ public struct InspectorView: View {
                     VStack(spacing: 10) {
                         CharkleEmptyStateVignette(.noFilterResults, compact: true)
                         Text("暂无视觉或色彩相近的素材")
-                            .font(.system(size: 12, weight: .medium))
+                            .font(CharkleTheme.text(.caption, weight: .medium))
                             .foregroundStyle(.secondary)
                         Text("导入更多素材或等待本地视觉特征索引完成后，这里会自动呈现同风格相似项目。")
-                            .font(.system(size: 11))
+                            .font(CharkleTheme.text(.caption))
                             .foregroundStyle(.tertiary)
                             .multilineTextAlignment(.center)
                     }
@@ -584,7 +584,7 @@ public struct InspectorView: View {
                         asset: asset,
                         loader: library.thumbnailLoader,
                         tier: .preview1400,
-                        cornerRadius: CharkleTheme.Radius.chip - 2,
+                        cornerRadius: CharkleTheme.Radius.concentricInner(outer: CharkleTheme.Radius.cardOuter, padding: 8),
                         contentMode: .fit
                     )
                     .frame(width: fittedWidth, height: fittedHeight)
@@ -593,9 +593,9 @@ public struct InspectorView: View {
                 .frame(maxWidth: .infinity)
                 .background(
                     CharkleTheme.inspectorFieldSurface(for: colorScheme),
-                    in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous)
+                    in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.cardOuter, style: .continuous)
                 )
-                .contentShape(RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous))
+                .contentShape(RoundedRectangle(cornerRadius: CharkleTheme.Radius.cardOuter, style: .continuous))
                 .onTapGesture {
                     if !isQuickLookHosted {
                         onOpenQuickLook(asset)
@@ -606,7 +606,7 @@ public struct InspectorView: View {
                 VStack(alignment: .leading, spacing: 8) {
                     TextField("素材标题", text: $titleDraft)
                         .textFieldStyle(.plain)
-                        .font(.system(size: 13.5, weight: .semibold))
+                        .font(CharkleTheme.text(.body, weight: .semibold))
                         .focused($isTitleFocused)
                         .onSubmit { commitSingleAssetTitle(asset) }
                         .padding(.horizontal, 9)
@@ -655,7 +655,7 @@ public struct InspectorView: View {
                                         .symbolVariant(asset.pinnedOffline ? .fill : .none)
                                         .font(.system(size: 11))
                                     Text(asset.pinnedOffline ? "已保留本地" : "保留在本地")
-                                        .font(.system(size: 11, weight: .medium))
+                                        .font(CharkleTheme.text(.caption, weight: .medium))
                                 }
                                 .foregroundStyle(asset.pinnedOffline ? accentColor : CharkleTheme.secondaryInk(for: colorScheme))
                                 .padding(.horizontal, 8)
@@ -826,7 +826,7 @@ public struct InspectorView: View {
                     VStack(alignment: .leading, spacing: 7) {
                         HStack(spacing: 6) {
                             Text("提取色板")
-                                .font(.system(size: 11, weight: .medium))
+                                .font(CharkleTheme.text(.caption, weight: .medium))
                                 .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
                             Spacer()
                             if asset.mediaKind == .image || asset.mediaKind == .webBookmark || asset.mediaKind == .animatedImage {
@@ -845,7 +845,7 @@ public struct InspectorView: View {
                                     }
                                 } label: {
                                     Label("按主体重提", systemImage: "viewfinder")
-                                        .font(.system(size: 11, weight: .medium))
+                                        .font(CharkleTheme.text(.caption, weight: .medium))
                                         .foregroundStyle(accentColor)
                                 }
                                 .buttonStyle(.plain)
@@ -861,15 +861,15 @@ public struct InspectorView: View {
                                         onCopyHex(hex)
                                     } label: {
                                         HStack(spacing: 5) {
-                                            RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                            RoundedRectangle(cornerRadius: CharkleTheme.Radius.xs, style: .continuous)
                                                 .fill(Color(charkleHex: hex))
                                                 .frame(width: 13, height: 13)
                                                 .overlay(
-                                                    RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                                    RoundedRectangle(cornerRadius: CharkleTheme.Radius.xs, style: .continuous)
                                                         .strokeBorder(Color.primary.opacity(0.14), lineWidth: CharkleTheme.hairlineWidth)
                                                 )
                                             Text(hex)
-                                                .font(.system(size: 10.5, weight: .medium, design: .monospaced))
+                                                .font(CharkleTheme.text(.caption, weight: .medium, design: .monospaced))
                                                 .monospacedDigit()
                                         }
                                         .padding(.horizontal, 7)
@@ -896,7 +896,7 @@ public struct InspectorView: View {
                 VStack(alignment: .leading, spacing: 7) {
                     HStack(spacing: 6) {
                         Text("标签")
-                            .font(.system(size: 11, weight: .medium))
+                            .font(CharkleTheme.text(.caption, weight: .medium))
                             .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
                         Spacer()
                         if !asset.isTrashed {
@@ -915,7 +915,7 @@ public struct InspectorView: View {
                                         Text(asset.suggestedTags.isEmpty ? "AI 打标" : "重新打标")
                                     }
                                 }
-                                .font(.system(size: 11, weight: .medium))
+                                .font(CharkleTheme.text(.caption, weight: .medium))
                                 .foregroundStyle(isRetaggingThis ? Color.secondary : accentColor)
                             }
                             .buttonStyle(.plain)
@@ -929,7 +929,7 @@ public struct InspectorView: View {
                             ForEach(asset.tags, id: \.self) { tag in
                                 HStack(spacing: 4) {
                                     Text("#\(tag)")
-                                        .font(.system(size: 11, weight: .medium))
+                                        .font(CharkleTheme.text(.caption, weight: .medium))
                                     Button {
                                         Task { await library.removeTag(tag, from: [asset.id]) }
                                     } label: {
@@ -960,7 +960,7 @@ public struct InspectorView: View {
                         VStack(alignment: .leading, spacing: 5) {
                             HStack(spacing: 8) {
                                 Text("AI 建议标签")
-                                    .font(.system(size: 11, weight: .semibold))
+                                    .font(CharkleTheme.text(.caption, weight: .semibold))
                                     .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
                                 Spacer()
                                 Button("清空") {
@@ -969,7 +969,7 @@ public struct InspectorView: View {
                                         coordinator.showToast("已清空未采纳的建议标签", icon: "xmark.circle")
                                     }
                                 }
-                                .font(.system(size: 11, weight: .medium))
+                                .font(CharkleTheme.text(.caption, weight: .medium))
                                 .buttonStyle(.plain)
                                 .foregroundStyle(.secondary)
                                 .help("忽略并清空当前未采纳的建议标签")
@@ -977,7 +977,7 @@ public struct InspectorView: View {
                                 Button("全部采纳") {
                                     Task { await library.acceptAllSuggestedTags(for: [asset.id]) }
                                 }
-                                .font(.system(size: 11, weight: .medium))
+                                .font(CharkleTheme.text(.caption, weight: .medium))
                                 .buttonStyle(.plain)
                                 .foregroundStyle(accentColor)
                             }
@@ -990,7 +990,7 @@ public struct InspectorView: View {
                                             Image(systemName: "plus")
                                                 .font(.system(size: 8.5, weight: .bold))
                                             Text(tag)
-                                                .font(.system(size: 11, weight: .medium))
+                                                .font(CharkleTheme.text(.caption, weight: .medium))
                                         }
                                         .foregroundStyle(accentColor)
                                         .padding(.horizontal, 8)
@@ -1033,14 +1033,14 @@ public struct InspectorView: View {
                 ZStack(alignment: .topLeading) {
                     if notesDraft.isEmpty {
                         Text("添加灵感备注、构图笔记或来源说明…")
-                            .font(.system(size: 12))
+                            .font(CharkleTheme.text(.caption))
                             .foregroundStyle(.tertiary)
                             .padding(.horizontal, 10)
                             .padding(.vertical, 8)
                             .allowsHitTesting(false)
                     }
                     TextEditor(text: $notesDraft)
-                        .font(.system(size: 12))
+                        .font(CharkleTheme.text(.caption))
                         .scrollContentBackground(.hidden)
                         .scrollIndicators(.hidden)
                         .focused($isNotesFocused)
@@ -1066,10 +1066,10 @@ public struct InspectorView: View {
                     CharkleHairlineDivider()
                     VStack(alignment: .leading, spacing: 4) {
                         Text("OCR 识别文字")
-                            .font(.system(size: 11, weight: .semibold))
+                            .font(CharkleTheme.text(.caption, weight: .semibold))
                             .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
                         Text(ocr)
-                            .font(.system(size: 11.5))
+                            .font(CharkleTheme.text(.caption))
                             .foregroundStyle(.secondary)
                             .textSelection(.enabled)
                             .lineLimit(4)
@@ -1080,10 +1080,10 @@ public struct InspectorView: View {
                     CharkleHairlineDivider()
                     VStack(alignment: .leading, spacing: 4) {
                         Text("画面描述")
-                            .font(.system(size: 11, weight: .semibold))
+                            .font(CharkleTheme.text(.caption, weight: .semibold))
                             .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
                         Text(aiDesc)
-                            .font(.system(size: 11.5))
+                            .font(CharkleTheme.text(.caption))
                             .foregroundStyle(.secondary)
                             .textSelection(.enabled)
                     }
@@ -1146,11 +1146,11 @@ public struct InspectorView: View {
                     CharkleHairlineDivider()
                     HStack(alignment: .firstTextBaseline, spacing: 10) {
                         Text("来源")
-                            .font(.system(size: 11.5))
+                            .font(CharkleTheme.text(.caption))
                             .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
                         Spacer(minLength: 6)
                         Link(asset.sourceDomain ?? url.host ?? "打开链接", destination: url)
-                            .font(.system(size: 12, weight: .medium))
+                            .font(CharkleTheme.text(.caption, weight: .medium))
                             .lineLimit(1)
                     }
                     .padding(.vertical, 4)
@@ -1237,7 +1237,7 @@ public struct InspectorView: View {
             reorderActions: reorderActions(for: .socialMediaExtract, visibleSections: visibleSections)
         ) {
             Text("\(attachments.count) 项")
-                .font(.system(size: 10.5, weight: .medium))
+                .font(CharkleTheme.text(.caption, weight: .medium))
                 .monospacedDigit()
                 .foregroundStyle(.tertiary)
         } content: {
@@ -1245,25 +1245,25 @@ public struct InspectorView: View {
                 if post.hasVideoSummaryContent {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("视频摘要")
-                            .font(.system(size: 11, weight: .semibold))
+                            .font(CharkleTheme.text(.caption, weight: .semibold))
                             .foregroundStyle(.secondary)
                         if let summary = post.videoSummary?.trimmingCharacters(in: .whitespacesAndNewlines), !summary.isEmpty {
                             Text(summary)
-                                .font(.system(size: 11.5))
+                                .font(CharkleTheme.text(.caption))
                                 .foregroundStyle(.primary.opacity(0.88))
                                 .lineLimit(5)
                                 .textSelection(.enabled)
                         }
                         if !post.videoOutline.isEmpty {
                             Text(post.videoOutline.prefix(4).joined(separator: "\n"))
-                                .font(.system(size: 11))
+                                .font(CharkleTheme.text(.caption))
                                 .foregroundStyle(.secondary)
                                 .lineLimit(4)
                         }
                     }
                     .padding(8)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Color.accentColor.opacity(0.07), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .background(Color.accentColor.opacity(0.07), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous))
                 }
 
                 Text(
@@ -1271,7 +1271,7 @@ public struct InspectorView: View {
                         ? "默认仅保存封面、链接与摘要；点击下方按钮即可按需下载视频并存为独立素材。"
                         : "可将帖子里的图片或视频单独存为素材，并自动保留原作者、正文与链接。"
                 )
-                    .font(.system(size: 11.5))
+                    .font(CharkleTheme.text(.caption))
                     .foregroundStyle(.secondary)
                 if attachments.count > 1 && !post.isZeroDownloadVideoBookmark {
                     Button {
@@ -1334,13 +1334,13 @@ public struct InspectorView: View {
             VStack(alignment: .leading, spacing: 7) {
                 if let summary = web.summary?.trimmingCharacters(in: .whitespacesAndNewlines), !summary.isEmpty {
                     Text(summary)
-                        .font(.system(size: 11.5))
+                        .font(CharkleTheme.text(.caption))
                         .foregroundStyle(.primary.opacity(0.88))
                         .lineLimit(5)
                         .textSelection(.enabled)
                         .padding(8)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(Color.accentColor.opacity(0.06), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        .background(Color.accentColor.opacity(0.06), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous))
                 }
 
                 if attachments.count > 1 {
@@ -1402,7 +1402,7 @@ public struct InspectorView: View {
         ) {
             if let generator = aiGen.generator, !generator.isEmpty {
                 Text(generator)
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(CharkleTheme.text(.caption, weight: .semibold))
                     .foregroundStyle(accentColor)
                     .padding(.horizontal, 6.5)
                     .padding(.vertical, 2)
@@ -1415,21 +1415,21 @@ public struct InspectorView: View {
                     VStack(alignment: .leading, spacing: 5) {
                         HStack {
                             Text("正向提示词 (Prompt)")
-                                .font(.system(size: 11, weight: .semibold))
+                                .font(CharkleTheme.text(.caption, weight: .semibold))
                                 .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
                             Spacer()
                             Button {
                                 copyInspectorText(prompt, toast: "已复制正向 Prompt")
                             } label: {
                                 Label("复制", systemImage: "doc.on.doc")
-                                    .font(.system(size: 10.5, weight: .medium))
+                                    .font(CharkleTheme.text(.caption, weight: .medium))
                                     .foregroundStyle(accentColor)
                             }
                             .buttonStyle(.plain)
                         }
 
                         Text(prompt)
-                            .font(.system(size: 11.5))
+                            .font(CharkleTheme.text(.caption))
                             .foregroundStyle(.primary.opacity(0.90))
                             .lineSpacing(3.5)
                             .textSelection(.enabled)
@@ -1446,21 +1446,21 @@ public struct InspectorView: View {
                     VStack(alignment: .leading, spacing: 5) {
                         HStack {
                             Text("负向提示词 (Negative)")
-                                .font(.system(size: 11, weight: .semibold))
+                                .font(CharkleTheme.text(.caption, weight: .semibold))
                                 .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
                             Spacer()
                             Button {
                                 copyInspectorText(neg, toast: "已复制负向 Prompt")
                             } label: {
                                 Label("复制", systemImage: "doc.on.doc")
-                                    .font(.system(size: 10.5, weight: .medium))
+                                    .font(CharkleTheme.text(.caption, weight: .medium))
                                     .foregroundStyle(.secondary)
                             }
                             .buttonStyle(.plain)
                         }
 
                         Text(neg)
-                            .font(.system(size: 11))
+                            .font(CharkleTheme.text(.caption))
                             .foregroundStyle(.secondary)
                             .lineSpacing(3)
                             .textSelection(.enabled)
@@ -1521,18 +1521,18 @@ public struct InspectorView: View {
                 if !aiGen.loras.isEmpty {
                     VStack(alignment: .leading, spacing: 5) {
                         Text("LoRA")
-                            .font(.system(size: 11, weight: .medium))
+                            .font(CharkleTheme.text(.caption, weight: .medium))
                             .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
                         CharkleFlowLayout(spacing: 5, lineSpacing: 5) {
                             ForEach(aiGen.loras, id: \.self) { lora in
                                 Text(lora)
-                                    .font(.system(size: 10.5, weight: .medium, design: .monospaced))
+                                    .font(CharkleTheme.text(.caption, weight: .medium, design: .monospaced))
                                     .foregroundStyle(.primary.opacity(0.85))
                                     .padding(.horizontal, 7)
                                     .padding(.vertical, 3)
                                     .background(
                                         CharkleTheme.surfaceSubtle(for: colorScheme),
-                                        in: RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                        in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.sm, style: .continuous)
                                     )
                             }
                         }
@@ -1566,7 +1566,7 @@ public struct InspectorView: View {
             VStack(alignment: .leading, spacing: 8) {
                 if let summary = exif.exposureSummary {
                     Text(summary)
-                        .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
+                        .font(CharkleTheme.text(.caption, weight: .semibold, design: .monospaced))
                         .monospacedDigit()
                         .foregroundStyle(.primary)
                         .frame(maxWidth: .infinity, alignment: .center)
@@ -1619,7 +1619,7 @@ public struct InspectorView: View {
                         let mapsURL = URL(string: "https://maps.apple.com/?ll=\(lat),\(lon)")
                         HStack(alignment: .firstTextBaseline, spacing: 10) {
                             Text("拍摄位置")
-                                .font(.system(size: 11.5))
+                                .font(CharkleTheme.text(.caption))
                                 .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
                             Spacer(minLength: 6)
                             if let mapsURL {
@@ -1628,14 +1628,14 @@ public struct InspectorView: View {
                                         Image(systemName: "mappin.and.ellipse")
                                             .font(.system(size: 10))
                                         Text(coordText)
-                                            .font(.system(size: 11.5, weight: .medium, design: .monospaced))
+                                            .font(CharkleTheme.text(.caption, weight: .medium, design: .monospaced))
                                             .monospacedDigit()
                                     }
                                 }
                                 .help("在 Apple 地图中查看拍摄位置")
                             } else {
                                 Text(coordText)
-                                    .font(.system(size: 11.5, design: .monospaced))
+                                    .font(CharkleTheme.text(.caption, design: .monospaced))
                                     .monospacedDigit()
                             }
                         }
@@ -1667,10 +1667,10 @@ public struct InspectorView: View {
                 VStack(alignment: .leading, spacing: 10) {
                     VStack(alignment: .leading, spacing: 3) {
                         Text("已选中 \(ids.count) 项素材")
-                            .font(.system(size: 15, weight: .semibold))
+                            .font(CharkleTheme.text(.headline, weight: .semibold))
                             .monospacedDigit()
                         Text(isTrashSelection ? "这些素材当前位于废纸篓，可恢复到原位置或彻底删除" : "批量归档、打标签或一键进入情绪板排版")
-                            .font(.system(size: 11.5))
+                            .font(CharkleTheme.text(.caption))
                             .foregroundStyle(.secondary)
                     }
 
@@ -1716,7 +1716,7 @@ public struct InspectorView: View {
                         VStack(alignment: .leading, spacing: 10) {
                             VStack(alignment: .leading, spacing: 5) {
                                 Text("移动到文件夹")
-                                    .font(.system(size: 11, weight: .medium))
+                                    .font(CharkleTheme.text(.caption, weight: .medium))
                                     .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
                                 Menu {
                                     CharkleHierarchicalFolderMenuContent(
@@ -1742,7 +1742,7 @@ public struct InspectorView: View {
 
                             VStack(alignment: .leading, spacing: 6) {
                                 Text("批量添加标签")
-                                    .font(.system(size: 11, weight: .medium))
+                                    .font(CharkleTheme.text(.caption, weight: .medium))
                                     .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
                                 inspectorTextField(placeholder: "输入标签回车批量添加…", text: $batchTagInput, systemImage: "number") {
                                     let val = batchTagInput.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1760,14 +1760,14 @@ public struct InspectorView: View {
                                     HStack(spacing: 8) {
                                         ProgressView().controlSize(.mini)
                                         Text("正在重新打标 (\(library.enrichCompletedCount)/\(max(1, library.enrichTotalCount)))…")
-                                            .font(.system(size: 11, weight: .medium))
+                                            .font(CharkleTheme.text(.caption, weight: .medium))
                                             .foregroundStyle(.secondary)
                                             .monospacedDigit()
                                         Spacer()
                                         Button("停止") {
                                             library.cancelRetagging()
                                         }
-                                        .font(.system(size: 11, weight: .medium))
+                                        .font(CharkleTheme.text(.caption, weight: .medium))
                                         .buttonStyle(.plain)
                                         .foregroundStyle(CharkleTheme.destructive(for: colorScheme))
                                     }
@@ -1797,7 +1797,7 @@ public struct InspectorView: View {
                                                 coordinator.showToast("已批量采纳 AI 建议标签", icon: "checkmark.circle")
                                             }
                                         }
-                                        .font(.system(size: 11, weight: .medium))
+                                        .font(CharkleTheme.text(.caption, weight: .medium))
                                         .buttonStyle(.plain)
                                         .foregroundStyle(accentColor)
 
@@ -1809,7 +1809,7 @@ public struct InspectorView: View {
                                                 coordinator.showToast("已清空所选素材的未采纳建议标签", icon: "xmark.circle")
                                             }
                                         }
-                                        .font(.system(size: 11, weight: .medium))
+                                        .font(CharkleTheme.text(.caption, weight: .medium))
                                         .buttonStyle(.plain)
                                         .foregroundStyle(.secondary)
                                     }
@@ -1821,13 +1821,13 @@ public struct InspectorView: View {
                             VStack(alignment: .leading, spacing: 6) {
                                 HStack {
                                     Text("批量评分")
-                                        .font(.system(size: 11, weight: .medium))
+                                        .font(CharkleTheme.text(.caption, weight: .medium))
                                         .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
                                     Spacer()
                                     Button("清除评分") {
                                         Task { await library.setRating(0, for: ids) }
                                     }
-                                    .font(.system(size: 11))
+                                    .font(CharkleTheme.text(.caption))
                                     .buttonStyle(.plain)
                                     .foregroundStyle(.secondary)
                                 }
@@ -1912,7 +1912,7 @@ public struct InspectorView: View {
                 VStack(alignment: .leading, spacing: 8) {
                     TextField("情绪板名称", text: $boardTitleDraft)
                         .textFieldStyle(.plain)
-                        .font(.system(size: 14.5, weight: .semibold))
+                        .font(CharkleTheme.text(.headline, weight: .semibold))
                         .focused($isBoardTitleFocused)
                         .onSubmit { commitBoardHeader(board) }
                         .padding(.horizontal, 9)
@@ -1928,7 +1928,7 @@ public struct InspectorView: View {
 
                     TextField("补充创作 Brief 或氛围备注…", text: $boardSubtitleDraft)
                         .textFieldStyle(.plain)
-                        .font(.system(size: 12))
+                        .font(CharkleTheme.text(.caption))
                         .foregroundStyle(.secondary)
                         .focused($isBoardSubtitleFocused)
                         .onSubmit { commitBoardHeader(board) }
@@ -1953,7 +1953,7 @@ public struct InspectorView: View {
                                     .fill(isActiveNotchBoard ? CharkleTheme.positive(for: colorScheme) : Color.secondary.opacity(0.4))
                                     .frame(width: 6, height: 6)
                                 Text(isActiveNotchBoard ? "当前活跃板" : "设为活跃板")
-                                    .font(.system(size: 11, weight: .medium))
+                                    .font(CharkleTheme.text(.caption, weight: .medium))
                             }
                             .foregroundStyle(isActiveNotchBoard ? Color.primary : CharkleTheme.secondaryInk(for: colorScheme))
                             .padding(.horizontal, 8)
@@ -1980,7 +1980,7 @@ public struct InspectorView: View {
                                     .symbolVariant(board.pinnedOffline ? .fill : .none)
                                     .font(.system(size: 11))
                                 Text(board.pinnedOffline ? "已保留本地" : "始终保留本地")
-                                    .font(.system(size: 11, weight: .medium))
+                                    .font(CharkleTheme.text(.caption, weight: .medium))
                             }
                             .foregroundStyle(board.pinnedOffline ? accentColor : CharkleTheme.secondaryInk(for: colorScheme))
                             .padding(.horizontal, 8)
@@ -2011,12 +2011,12 @@ public struct InspectorView: View {
                         Button("取消替换") {
                             moodboards.swappingNodeID = nil
                         }
-                        .font(.system(size: 11, weight: .medium))
+                        .font(CharkleTheme.text(.caption, weight: .medium))
                         .foregroundStyle(accentColor)
                         .buttonStyle(.plain)
                     } else if !moodboards.candidatePool.isEmpty {
                         Text("\(min(24, moodboards.candidatePool.count)) 项")
-                            .font(.system(size: 10.5, weight: .medium))
+                            .font(CharkleTheme.text(.caption, weight: .medium))
                             .monospacedDigit()
                             .foregroundStyle(.tertiary)
                     }
@@ -2028,7 +2028,7 @@ public struct InspectorView: View {
                                     .font(.system(size: 10.5, weight: .semibold))
                                     .foregroundStyle(accentColor)
                                 Text("点击下方任意候选图即可原地替换选中卡片")
-                                    .font(.system(size: 11, weight: .medium))
+                                    .font(CharkleTheme.text(.caption, weight: .medium))
                                     .foregroundStyle(.primary.opacity(0.86))
                             }
                             .padding(.horizontal, 9)
@@ -2048,7 +2048,7 @@ public struct InspectorView: View {
 
                         if moodboards.candidatePool.isEmpty {
                             Text("暂无更多候选图，可从下方直接检索素材库添加。")
-                                .font(.system(size: 11.5))
+                                .font(CharkleTheme.text(.caption))
                                 .foregroundStyle(.tertiary)
                         } else {
                             LazyVGrid(columns: [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)], spacing: 8) {
@@ -2113,7 +2113,7 @@ public struct InspectorView: View {
                             Image(systemName: "arrow.clockwise")
                                 .font(.system(size: 9.5, weight: .semibold))
                             Text("重新提取")
-                                .font(.system(size: 11, weight: .medium))
+                                .font(CharkleTheme.text(.caption, weight: .medium))
                         }
                         .foregroundStyle(.secondary)
                     }
@@ -2122,19 +2122,20 @@ public struct InspectorView: View {
                 } content: {
                     if board.extractedPalette.isEmpty {
                         Text("加入素材后将自动提取全板和谐色卡。")
-                            .font(.system(size: 11.5))
+                            .font(CharkleTheme.text(.caption))
                             .foregroundStyle(.tertiary)
                     } else {
+                        let swatchRadius = CharkleTheme.Radius.concentricInner(outer: CharkleTheme.Radius.chip, padding: 4)
                         HStack(spacing: 5) {
                             ForEach(board.extractedPalette.prefix(7), id: \.hex) { swatch in
                                 Button {
                                     onCopyHex(swatch.hex.uppercased())
                                 } label: {
-                                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                    RoundedRectangle(cornerRadius: swatchRadius, style: .continuous)
                                         .fill(Color(charkleHex: swatch.hex))
                                         .frame(height: 28)
                                         .overlay(
-                                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                            RoundedRectangle(cornerRadius: swatchRadius, style: .continuous)
                                                 .strokeBorder(Color.primary.opacity(0.12), lineWidth: CharkleTheme.hairlineWidth)
                                         )
                                 }
@@ -2142,7 +2143,7 @@ public struct InspectorView: View {
                                 .help("点击复制 \(swatch.hex.uppercased())")
                             }
                         }
-                        .padding(5)
+                        .padding(4)
                         .background(
                             CharkleTheme.inspectorFieldSurface(for: colorScheme),
                             in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous)
@@ -2162,16 +2163,16 @@ public struct InspectorView: View {
                                         asset: asset,
                                         loader: library.thumbnailLoader,
                                         tier: .grid520,
-                                        cornerRadius: 6
+                                        cornerRadius: CharkleTheme.Radius.sm
                                     )
                                     .frame(maxWidth: .infinity)
                                     .frame(height: 56)
-                                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                                    .clipShape(RoundedRectangle(cornerRadius: CharkleTheme.Radius.sm, style: .continuous))
                                     .overlay(
-                                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                        RoundedRectangle(cornerRadius: CharkleTheme.Radius.sm, style: .continuous)
                                             .strokeBorder(CharkleTheme.hairline(for: colorScheme), lineWidth: CharkleTheme.hairlineWidth)
                                     )
-                                    .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                                    .contentShape(RoundedRectangle(cornerRadius: CharkleTheme.Radius.sm, style: .continuous))
                                     .onTapGesture {
                                         Task {
                                             await moodboards.appendAssets([asset])
@@ -2185,17 +2186,17 @@ public struct InspectorView: View {
                                             asset: asset,
                                             loader: library.thumbnailLoader,
                                             tier: .grid520,
-                                            cornerRadius: 6
+                                            cornerRadius: CharkleTheme.Radius.sm
                                         )
                                         .frame(width: 84, height: 64)
-                                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                                        .clipShape(RoundedRectangle(cornerRadius: CharkleTheme.Radius.sm, style: .continuous))
                                     }
                                     .help("点击加入或拖入画布：\(asset.title)")
                                 }
                             }
                         } else if !quickAddQuery.isEmpty {
                             Text("未找到匹配的素材")
-                                .font(.system(size: 11.5))
+                                .font(CharkleTheme.text(.caption))
                                 .foregroundStyle(.tertiary)
                         }
                     }
@@ -2210,7 +2211,7 @@ public struct InspectorView: View {
                             Image(systemName: "puzzlepiece.extension")
                                 .font(.system(size: 9.5, weight: .semibold))
                             Text("插件指南")
-                                .font(.system(size: 11, weight: .medium))
+                                .font(CharkleTheme.text(.caption, weight: .medium))
                         }
                         .foregroundStyle(.secondary)
                     }
@@ -2329,7 +2330,7 @@ public struct InspectorView: View {
                     coordinator.showToast("已撤销上一步画布调整", icon: "arrow.uturn.backward")
                 } label: {
                     Text("撤销")
-                        .font(.system(size: 11, weight: .medium))
+                        .font(CharkleTheme.text(.caption, weight: .medium))
                         .foregroundStyle(.secondary)
                 }
                 .buttonStyle(.plain)
@@ -2340,7 +2341,7 @@ public struct InspectorView: View {
                 HStack(spacing: 6) {
                     TextField("输入指令微调当前情绪板…", text: $boardRefinementDraft)
                         .textFieldStyle(.plain)
-                        .font(.system(size: 12))
+                        .font(CharkleTheme.text(.caption))
                         .focused($isBoardRefinementFocused)
                         .padding(.horizontal, 9)
                         .frame(height: 28)
@@ -2374,7 +2375,7 @@ public struct InspectorView: View {
                     .help("执行 AI 策展微调")
                 }
 
-                HStack(spacing: 5) {
+                CharkleFlowLayout(spacing: 5, lineSpacing: 5) {
                     curatorQuickChip("重新分区编排") {
                         runBoardRefinement("按视觉层次重新划分为清晰分区，突出主视觉并补充简短美术指导批注")
                     }
@@ -2392,10 +2393,10 @@ public struct InspectorView: View {
                         CharkleDelayedSpinner(isActive: moodboards.isRefiningActiveBoard, controlSize: .mini)
                         VStack(alignment: .leading, spacing: 1) {
                             Text(activeStep.title)
-                                .font(.system(size: 11, weight: .semibold))
+                                .font(CharkleTheme.text(.caption, weight: .semibold))
                             if !activeStep.detail.isEmpty {
                                 Text(activeStep.detail)
-                                    .font(.system(size: 10.5))
+                                    .font(CharkleTheme.text(.caption))
                                     .foregroundStyle(.secondary)
                                     .lineLimit(2)
                             }
@@ -2405,7 +2406,7 @@ public struct InspectorView: View {
                 } else if let summary = moodboards.activeBoardLastSummary, !summary.isEmpty {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(summary)
-                            .font(.system(size: 11))
+                            .font(CharkleTheme.text(.caption))
                             .foregroundStyle(.secondary)
                             .lineLimit(3)
                             .fixedSize(horizontal: false, vertical: true)
@@ -2426,10 +2427,10 @@ public struct InspectorView: View {
                                                 .padding(.top, 1.5)
                                             VStack(alignment: .leading, spacing: 1) {
                                                 Text(step.title)
-                                                    .font(.system(size: 10.5, weight: .medium))
+                                                    .font(CharkleTheme.text(.caption, weight: .medium))
                                                 if !step.detail.isEmpty {
                                                     Text(step.detail)
-                                                        .font(.system(size: 10))
+                                                        .font(CharkleTheme.text(.caption))
                                                         .foregroundStyle(.secondary)
                                                 }
                                             }
@@ -2439,7 +2440,7 @@ public struct InspectorView: View {
                                 .padding(.top, 3)
                             } label: {
                                 Text(showBoardAgentTrace ? "收起策展步骤" : "查看策展步骤（\(moodboards.activeBoardAgentTrace.count) 步）")
-                                    .font(.system(size: 11, weight: .medium))
+                                    .font(CharkleTheme.text(.caption, weight: .medium))
                                     .monospacedDigit()
                                     .foregroundStyle(.secondary)
                             }
@@ -2450,13 +2451,14 @@ public struct InspectorView: View {
 
                 HStack(spacing: 4) {
                     Text("已锁定卡片会自动保留 · 支持 ⌘Z 撤销")
-                        .font(.system(size: 10.5))
+                        .font(CharkleTheme.text(.caption))
                         .foregroundStyle(.tertiary)
                     Spacer()
                     Text("\(board.referencedAssetIDs.count) 张素材")
-                        .font(.system(size: 10.5, weight: .medium))
+                        .font(CharkleTheme.text(.caption, weight: .medium))
                         .foregroundStyle(.tertiary)
                         .monospacedDigit()
+                        .fixedSize(horizontal: true, vertical: false)
                 }
             }
         }
@@ -2465,10 +2467,10 @@ public struct InspectorView: View {
     private func curatorQuickChip(_ title: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Text(title)
-                .font(.system(size: 10.5, weight: .medium))
+                .font(CharkleTheme.text(.caption, weight: .medium))
                 .lineLimit(1)
         }
-        .buttonStyle(.charkle(.standard, size: .xs, fullWidth: true))
+        .buttonStyle(.charkle(.standard, size: .xs))
     }
 
     private func runBoardRefinement(_ instruction: String) {
@@ -2518,10 +2520,10 @@ public struct InspectorView: View {
             Spacer()
             CharkleEmptyStateVignette(.emptyInspector, compact: true)
             Text("选择素材查看详情")
-                .font(.system(size: 13, weight: .semibold))
+                .font(CharkleTheme.text(.body, weight: .semibold))
                 .foregroundStyle(.secondary)
             Text("单击卡片检视色板与元数据\n框选多张可一键生成情绪板")
-                .font(.system(size: 11.5))
+                .font(CharkleTheme.text(.caption))
                 .foregroundStyle(.tertiary)
                 .multilineTextAlignment(.center)
             Spacer()
@@ -2541,7 +2543,7 @@ public struct InspectorView: View {
                 .font(.system(size: 11.5, weight: .medium))
                 .foregroundStyle(.secondary)
             Text(title)
-                .font(.system(size: 12, weight: .medium))
+                .font(CharkleTheme.text(.caption, weight: .medium))
                 .foregroundStyle(Color.primary.opacity(0.92))
                 .lineLimit(1)
             if showsChevron {
@@ -2565,7 +2567,7 @@ public struct InspectorView: View {
             }
             TextField(placeholder, text: text)
                 .textFieldStyle(.plain)
-                .font(.system(size: 12))
+                .font(CharkleTheme.text(.caption))
                 .onSubmit { onSubmit?() }
         }
         .padding(.horizontal, 9)

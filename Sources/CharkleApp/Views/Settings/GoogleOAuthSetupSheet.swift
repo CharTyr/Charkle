@@ -34,9 +34,9 @@ public struct GoogleOAuthSetupSheet: View {
                     .foregroundStyle(.primary)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("配置 Google Drive 登录凭据")
-                        .font(.system(size: 15, weight: .semibold))
+                        .font(CharkleTheme.text(.headline, weight: .semibold))
                     Text("Charkle 直连你自己的 Google Drive，仅首次需要配置一次桌面端凭据，密钥安全保存于 macOS 钥匙串。")
-                        .font(.system(size: 11.5))
+                        .font(CharkleTheme.text(.caption))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -54,7 +54,7 @@ public struct GoogleOAuthSetupSheet: View {
                             Image(systemName: "arrow.up.right")
                                 .font(.system(size: 10, weight: .semibold))
                         }
-                        .font(.system(size: 12, weight: .medium))
+                        .font(CharkleTheme.text(.caption, weight: .medium))
                     }
                     Spacer()
                 }
@@ -98,21 +98,21 @@ public struct GoogleOAuthSetupSheet: View {
             .padding(12)
             .background(
                 SettingsPalette.subtleFill(for: colorScheme),
-                in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+                in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.popoverInner, style: .continuous)
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                RoundedRectangle(cornerRadius: CharkleTheme.Radius.popoverInner, style: .continuous)
                     .strokeBorder(SettingsPalette.border(for: colorScheme), lineWidth: CharkleTheme.hairlineWidth)
             )
 
             VStack(alignment: .leading, spacing: 10) {
                 Text("或手动粘贴创建的桌面端凭据")
-                    .font(.system(size: 11.5, weight: .medium))
+                    .font(CharkleTheme.text(.caption, weight: .medium))
                     .foregroundStyle(.secondary)
 
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Client ID")
-                        .font(.system(size: 11.5, weight: .medium))
+                        .font(CharkleTheme.text(.caption, weight: .medium))
                         .foregroundStyle(.secondary)
                     TextField("例如：1234567890-xxxx.apps.googleusercontent.com", text: $clientIDInput)
                         .textFieldStyle(.roundedBorder)
@@ -120,7 +120,7 @@ public struct GoogleOAuthSetupSheet: View {
 
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Client Secret")
-                        .font(.system(size: 11.5, weight: .medium))
+                        .font(CharkleTheme.text(.caption, weight: .medium))
                         .foregroundStyle(.secondary)
                     SecureField("例如：GOCSPX-xxxxxxxx", text: $clientSecretInput)
                         .textFieldStyle(.roundedBorder)

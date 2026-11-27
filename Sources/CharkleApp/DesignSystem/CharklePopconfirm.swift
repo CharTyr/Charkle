@@ -65,11 +65,11 @@ public struct CharklePopconfirmCard: View {
 
                 VStack(alignment: .leading, spacing: 4) {
                     Text(title)
-                        .font(.system(size: 12.5, weight: .semibold))
+                        .font(CharkleTheme.text(.body, weight: .semibold))
                         .foregroundStyle(.primary)
                         .fixedSize(horizontal: false, vertical: true)
                     Text(message)
-                        .font(.system(size: 11.5))
+                        .font(CharkleTheme.text(.caption))
                         .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
                         .fixedSize(horizontal: false, vertical: true)
                 }

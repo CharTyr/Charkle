@@ -517,9 +517,42 @@ public extension Color {
 
 // MARK: - Gallery-First Neutral Canvas Surfaces & Restrained Liquid Glass
 
+/// Canonical 4-step studio typography scale inside `CharkleCanvas`, mirroring `CharkleTextStyle`.
+public nonisolated enum CanvasTextStyle: CGFloat, CaseIterable, Hashable, Sendable {
+    case caption = 12
+    case body = 13
+    case headline = 16
+    case title = 20
+}
+
 public enum CanvasSurface {
     /// Standard Retina 1px hairline border/divider thickness (`0.5pt`), mirroring `CharkleTheme.hairlineWidth`.
     public nonisolated static let hairlineWidth: CGFloat = 0.5
+
+    /// Canonical 4-step studio typography helper (`12 / 13 / 16 / 20pt`).
+    public nonisolated static func text(
+        _ style: CanvasTextStyle,
+        weight: Font.Weight = .regular,
+        design: Font.Design = .default
+    ) -> Font {
+        .system(size: style.rawValue, weight: weight, design: design)
+    }
+
+    /// Continuous concentric corner tokens matching `CharkleTheme.Radius`.
+    public nonisolated enum Radius {
+        public static let xs: CGFloat = 4
+        public static let sm: CGFloat = 6
+        public static let chip: CGFloat = 8
+        public static let popoverInner: CGFloat = 10
+        public static let cardOuter: CGFloat = 12
+        public static let settingsOuter: CGFloat = 14
+        public static let popoverOuter: CGFloat = 16
+        public static let dockOuter: CGFloat = 20
+
+        public static func concentricInner(outer: CGFloat, padding: CGFloat) -> CGFloat {
+            max(4, outer - padding)
+        }
+    }
 
     public static func ground(for scheme: ColorScheme) -> Color {
         scheme == .dark ? Color(charkleHex: "#141517") : Color(charkleHex: "#F6F6F5")

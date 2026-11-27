@@ -303,13 +303,13 @@ public struct QuickLookOverlayView: View {
                     // and aligns vertically with Quick Look's right-hand Inspector header)
                     HStack(spacing: 10) {
                         Text(asset.title)
-                            .font(.system(size: 13.5, weight: .semibold))
+                            .font(CharkleTheme.text(.body, weight: .semibold))
                             .foregroundStyle(.white.opacity(0.94))
                             .lineLimit(1)
                             .truncationMode(.middle)
 
                         Text("\(asset.pixelWidth) × \(asset.pixelHeight) · \(asset.mediaKind.localizedLabel)")
-                            .font(.system(size: 11, weight: .medium, design: .monospaced))
+                            .font(CharkleTheme.text(.caption, weight: .medium, design: .monospaced))
                             .monospacedDigit()
                             .foregroundStyle(.white.opacity(0.62))
                             .fixedSize(horizontal: true, vertical: false)
@@ -639,7 +639,7 @@ public struct QuickLookOverlayView: View {
                     interactiveTransformedSurface {
                         AnimatedGIFPlayerView(url: url)
                             .id(asset.id)
-                            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                            .clipShape(RoundedRectangle(cornerRadius: CharkleTheme.Radius.popoverOuter, style: .continuous))
                     }
                 } else {
                     zoomableImageStage
@@ -649,7 +649,7 @@ public struct QuickLookOverlayView: View {
                     QuickLookVideoPlayerView(url: url, captureBridge: localVideoCaptureBridge)
                         .id(asset.id)
                         .frame(maxWidth: 1020, maxHeight: 640)
-                        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                        .clipShape(RoundedRectangle(cornerRadius: CharkleTheme.Radius.popoverOuter, style: .continuous))
                         .shadow(color: .black.opacity(0.45), radius: 28, y: 12)
                 } else {
                     zoomableImageStage
@@ -666,12 +666,12 @@ public struct QuickLookOverlayView: View {
                     QuickLookPDFView(url: url)
                         .id(asset.id)
                         .frame(maxWidth: 860, maxHeight: 680)
-                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        .clipShape(RoundedRectangle(cornerRadius: CharkleTheme.Radius.popoverOuter, style: .continuous))
                         .shadow(color: .black.opacity(0.40), radius: 24, y: 10)
                 } else if asset.fileName.lowercased().hasSuffix(".swatch") {
                     ProceduralMediaFallbackCard(asset: asset)
                         .frame(width: 420, height: 420)
-                        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+                        .clipShape(RoundedRectangle(cornerRadius: CharkleTheme.Radius.dockOuter, style: .continuous))
                         .shadow(color: .black.opacity(0.40), radius: 28, y: 12)
                 } else {
                     QuickLookMarkdownReaderCard(asset: asset, originalURL: originalURL)
@@ -685,7 +685,7 @@ public struct QuickLookOverlayView: View {
 
     @ViewBuilder
     private var zoomableImageStage: some View {
-        let shape = RoundedRectangle(cornerRadius: 14, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: CharkleTheme.Radius.settingsOuter, style: .continuous)
         let activeImage = highResImage ?? library.thumbnailLoader.cachedImage(for: asset.id, tier: .grid520)
 
         if isLongStripScrollMode && !hasActiveVisualTransform && zoomScale <= 1.01, let image = activeImage {
@@ -890,11 +890,11 @@ public struct QuickLookOverlayView: View {
                         .fill(Color(charkleHex: asset.dominantColors.first?.hex ?? "#5C6B73"))
                         .frame(width: 10, height: 10)
                     Text(webMeta?.siteName ?? asset.sourceDomain ?? "网页书签")
-                        .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                        .font(CharkleTheme.text(.caption, weight: .semibold, design: .monospaced))
                         .foregroundStyle(.secondary)
                     if let author = webMeta?.authorName, !author.isEmpty {
                         Text("· \(author)")
-                            .font(.system(size: 12))
+                            .font(CharkleTheme.text(.caption))
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                     }
@@ -925,24 +925,24 @@ public struct QuickLookOverlayView: View {
                     }
                 }
                 Text(asset.title)
-                    .font(.system(size: 18, weight: .semibold))
+                    .font(CharkleTheme.text(.title, weight: .semibold))
                 if let summary = webMeta?.summary, !summary.isEmpty {
                     Text(summary)
-                        .font(.system(size: 13))
+                        .font(CharkleTheme.text(.body))
                         .foregroundStyle(.secondary)
                         .lineSpacing(4)
                         .lineLimit(4)
                         .textSelection(.enabled)
                 } else if !asset.notes.isEmpty {
                     Text(asset.notes)
-                        .font(.system(size: 13))
+                        .font(CharkleTheme.text(.body))
                         .foregroundStyle(.secondary)
                         .lineSpacing(4)
                         .lineLimit(4)
                 }
                 if let urlStr = asset.sourceURL {
                     Text(urlStr)
-                        .font(.system(size: 11.5, design: .monospaced))
+                        .font(CharkleTheme.text(.caption, design: .monospaced))
                         .foregroundStyle(.tertiary)
                         .lineLimit(2)
                         .textSelection(.enabled)
@@ -952,7 +952,7 @@ public struct QuickLookOverlayView: View {
             .frame(maxWidth: 780, alignment: .leading)
             .background(CharkleTheme.surfaceElevated(for: colorScheme))
         }
-        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: CharkleTheme.Radius.popoverOuter, style: .continuous))
         .shadow(color: .black.opacity(0.38), radius: 26, y: 12)
     }
 
@@ -980,7 +980,7 @@ public struct QuickLookOverlayView: View {
                                 Image(systemName: isLongStripScrollMode ? "arrow.up.and.down.text.horizontal" : "rectangle.arrowtriangle.2.inward")
                                     .font(.system(size: 11, weight: .semibold))
                                 Text(isLongStripScrollMode ? "长图滚动" : "适应窗口")
-                                    .font(.system(size: 11, weight: .semibold))
+                                    .font(CharkleTheme.text(.caption, weight: .semibold))
                             }
                             .foregroundStyle(.white)
                             .padding(.horizontal, 8)
@@ -1003,7 +1003,7 @@ public struct QuickLookOverlayView: View {
                             stepZoom(by: 0.8)
                         }
                         Text("\(Int((zoomScale * 100).rounded()))%")
-                            .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                            .font(CharkleTheme.text(.caption, weight: .semibold, design: .monospaced))
                             .monospacedDigit()
                             .foregroundStyle(.white.opacity(0.88))
                             .frame(minWidth: 42)
@@ -1046,7 +1046,7 @@ public struct QuickLookOverlayView: View {
                                 HStack(spacing: 3) {
                                     if displayRotationDegrees != 0 {
                                         Text("\(displayRotationDegrees)°")
-                                            .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
+                                            .font(CharkleTheme.text(.caption, weight: .semibold, design: .monospaced))
                                             .monospacedDigit()
                                     }
                                     Image(systemName: "arrow.uturn.backward")
@@ -1094,7 +1094,7 @@ public struct QuickLookOverlayView: View {
                                     .font(.system(size: 11.5, weight: .semibold))
                             }
                             Text("设当前帧为封面")
-                                .font(.system(size: 11.5, weight: .semibold))
+                                .font(CharkleTheme.text(.caption, weight: .semibold))
                         }
                         .foregroundStyle(.white)
                         .padding(.horizontal, 9)
@@ -1137,7 +1137,7 @@ public struct QuickLookOverlayView: View {
                         }
                     } label: {
                         Label("放回原处", systemImage: "arrow.uturn.backward")
-                            .font(.system(size: 11.5, weight: .semibold))
+                            .font(CharkleTheme.text(.caption, weight: .semibold))
                             .foregroundStyle(.white)
                             .padding(.horizontal, 8)
                             .padding(.vertical, 4)
@@ -1148,7 +1148,7 @@ public struct QuickLookOverlayView: View {
                         confirmPermanentDelete = true
                     } label: {
                         Label("彻底删除", systemImage: "trash.slash")
-                            .font(.system(size: 11.5, weight: .semibold))
+                            .font(CharkleTheme.text(.caption, weight: .semibold))
                             .foregroundStyle(Color(charkleHex: "#FF6B6B"))
                             .padding(.horizontal, 8)
                             .padding(.vertical, 4)
@@ -1204,7 +1204,7 @@ public struct QuickLookOverlayView: View {
                             .font(.system(size: 13, weight: .medium))
                             .foregroundStyle(.white.opacity(0.9))
                             .frame(width: 28, height: 28)
-                            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                            .contentShape(RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous))
                     }
                     .menuStyle(.button)
                     .buttonStyle(CharkleMenuTriggerButtonStyle())
@@ -1377,7 +1377,7 @@ public struct QuickLookOverlayView: View {
                 .frame(width: 28, height: 28)
                 .background(
                     isActive ? CharkleTheme.accent(for: .dark, source: accentSource).opacity(0.82) : Color.clear,
-                    in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous)
                 )
         }
         .buttonStyle(CharkleTactileButtonStyle())
@@ -1787,14 +1787,14 @@ struct QuickLookAudioStudioCard: View {
 
                 VStack(alignment: .leading, spacing: 3) {
                     Text(asset.title)
-                        .font(.system(size: 16, weight: .semibold))
+                        .font(CharkleTheme.text(.headline, weight: .semibold))
                     Text(fileURL != nil ? "音频原文件就绪 · 点击波形可跳转" : "音频波形预览（原文件按需下载后可播放）")
-                        .font(.system(size: 11.5))
+                        .font(CharkleTheme.text(.caption))
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
                 Text(CanvasFormatters.durationString(asset.durationSeconds))
-                    .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                    .font(CharkleTheme.text(.caption, weight: .semibold, design: .monospaced))
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
             }
@@ -1825,7 +1825,10 @@ struct QuickLookAudioStudioCard: View {
             .frame(height: 76)
         }
         .padding(24)
-        .background(CharkleTheme.surfaceElevated(for: colorScheme), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .background(
+            CharkleTheme.surfaceElevated(for: colorScheme),
+            in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.popoverOuter, style: .continuous)
+        )
         .shadow(color: .black.opacity(0.36), radius: 24, y: 10)
         .onAppear {
             playback.configure(fileURL: fileURL, fallbackDuration: asset.durationSeconds)

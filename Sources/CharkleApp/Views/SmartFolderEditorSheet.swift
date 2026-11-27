@@ -71,14 +71,14 @@ public struct SmartFolderEditorSheet: View {
                 CharkleIcon("smart-folder", style: .duotone, size: 22, isActive: true)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(existing == nil ? "新建智能文件夹" : "编辑智能文件夹")
-                        .font(.system(size: 15, weight: .semibold))
+                        .font(CharkleTheme.text(.headline, weight: .semibold))
                     Text("符合规则的新老素材都会自动实时归入")
-                        .font(.system(size: 11.5))
+                        .font(CharkleTheme.text(.caption))
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
                 Text("当前匹配 \(cachedLiveMatchCount) 项")
-                    .font(.system(size: 11.5, weight: .semibold, design: .rounded))
+                    .font(CharkleTheme.text(.caption, weight: .semibold, design: .rounded))
                     .monospacedDigit()
                     .foregroundStyle(cachedLiveMatchCount > 0 ? Color.accentColor : .secondary)
                     .padding(.horizontal, 10)
@@ -101,7 +101,7 @@ public struct SmartFolderEditorSheet: View {
                             fieldLabel("文件夹名称")
                             TextField("例如：蓝色系夏日插画 / GitHub 灵感", text: $name)
                                 .textFieldStyle(.roundedBorder)
-                                .font(.system(size: 13))
+                                .font(CharkleTheme.text(.body))
                         }
                         VStack(alignment: .leading, spacing: 5) {
                             fieldLabel("规则匹配方式")
@@ -124,7 +124,7 @@ public struct SmartFolderEditorSheet: View {
                                     ForEach(selectedTags, id: \.self) { tag in
                                         HStack(spacing: 4) {
                                             Text("#\(tag)")
-                                                .font(.system(size: 11.5, weight: .medium))
+                                                .font(CharkleTheme.text(.caption, weight: .medium))
                                             Button {
                                                 selectedTags.removeAll { $0 == tag }
                                             } label: {
@@ -144,7 +144,7 @@ public struct SmartFolderEditorSheet: View {
                             HStack(spacing: 8) {
                                 TextField("输入标签后回车添加…", text: $customTagInput)
                                     .textFieldStyle(.roundedBorder)
-                                    .font(.system(size: 12))
+                                    .font(CharkleTheme.text(.caption))
                                     .onSubmit { addCustomTag() }
                                 Button("添加") { addCustomTag() }
                                     .buttonStyle(.bordered)
@@ -162,7 +162,7 @@ public struct SmartFolderEditorSheet: View {
                                             selectedTags.append(tc.name)
                                         } label: {
                                             Text("+ #\(tc.name)")
-                                                .font(.system(size: 11, weight: .medium))
+                                                .font(CharkleTheme.text(.caption, weight: .medium))
                                                 .foregroundStyle(.secondary)
                                                 .padding(.horizontal, 8)
                                                 .padding(.vertical, 3)
@@ -179,7 +179,7 @@ public struct SmartFolderEditorSheet: View {
                     ruleCard(title: "符合描述 / 关键词", subtitle: "匹配标题、AI 描述、备注、OCR 文本、推文正文与 README") {
                         TextField("输入多个关键词用空格分隔，例如：极简 建筑 海报", text: $descriptionQuery)
                             .textFieldStyle(.roundedBorder)
-                            .font(.system(size: 12.5))
+                            .font(CharkleTheme.text(.body))
                     }
 
                     // Condition 3: Specific Colors
@@ -236,7 +236,7 @@ public struct SmartFolderEditorSheet: View {
                                                 .fill(Color(charkleHex: hex))
                                                 .frame(width: 11, height: 11)
                                             Text(hex)
-                                                .font(.system(size: 10.5, weight: .medium, design: .monospaced))
+                                                .font(CharkleTheme.text(.caption, weight: .medium, design: .monospaced))
                                             Button {
                                                 selectedColorHexes.removeAll { $0 == hex }
                                             } label: {
@@ -253,12 +253,12 @@ public struct SmartFolderEditorSheet: View {
 
                                 HStack(spacing: 10) {
                                     Text("色彩容差")
-                                        .font(.system(size: 11.5))
+                                        .font(CharkleTheme.text(.caption))
                                         .foregroundStyle(.secondary)
                                     Slider(value: $colorTolerance, in: 10...48, step: 2)
                                         .frame(width: 180)
                                     Text("ΔE ≤ \(Int(colorTolerance))")
-                                        .font(.system(size: 11, design: .monospaced))
+                                        .font(CharkleTheme.text(.caption, design: .monospaced))
                                         .foregroundStyle(.secondary)
                                 }
                             }
@@ -274,7 +274,7 @@ public struct SmartFolderEditorSheet: View {
                                     if active { selectedKinds.remove(kind) } else { selectedKinds.insert(kind) }
                                 } label: {
                                     Text(kind.localizedLabel)
-                                        .font(.system(size: 12, weight: active ? .semibold : .regular))
+                                        .font(CharkleTheme.text(.caption, weight: active ? .semibold : .regular))
                                         .foregroundStyle(active ? .white : .primary)
                                         .padding(.horizontal, 11)
                                         .padding(.vertical, 5)
@@ -297,7 +297,7 @@ public struct SmartFolderEditorSheet: View {
                                     minRating = star
                                 } label: {
                                     Text(star == 0 ? "不限" : "\(star)★+")
-                                        .font(.system(size: 11.5, weight: minRating == star ? .semibold : .regular))
+                                        .font(CharkleTheme.text(.caption, weight: minRating == star ? .semibold : .regular))
                                         .foregroundStyle(minRating == star ? .white : .secondary)
                                         .padding(.horizontal, 9)
                                         .padding(.vertical, 4)
@@ -318,7 +318,7 @@ public struct SmartFolderEditorSheet: View {
 
             HStack {
                 Text(draftRule.hasAnyCondition ? "规则就绪" : "请至少设置一个筛选条件")
-                    .font(.system(size: 11.5))
+                    .font(CharkleTheme.text(.caption))
                     .foregroundStyle(draftRule.hasAnyCondition ? Color.secondary : Color.orange)
                 Spacer()
                 Button("取消") { dismiss() }
@@ -358,7 +358,7 @@ public struct SmartFolderEditorSheet: View {
 
     private func fieldLabel(_ text: String) -> some View {
         Text(text)
-            .font(.system(size: 11.5, weight: .semibold))
+            .font(CharkleTheme.text(.caption, weight: .semibold))
             .foregroundStyle(.secondary)
     }
 
@@ -370,9 +370,9 @@ public struct SmartFolderEditorSheet: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline, spacing: 6) {
                 Text(title)
-                    .font(.system(size: 12.5, weight: .semibold))
+                    .font(CharkleTheme.text(.body, weight: .semibold))
                 Text(subtitle)
-                    .font(.system(size: 11))
+                    .font(CharkleTheme.text(.caption))
                     .foregroundStyle(.secondary)
             }
             content()
@@ -380,11 +380,11 @@ public struct SmartFolderEditorSheet: View {
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
+            RoundedRectangle(cornerRadius: CharkleTheme.Radius.popoverInner, style: .continuous)
                 .fill(Color.primary.opacity(colorScheme == .dark ? 0.05 : 0.035))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
+            RoundedRectangle(cornerRadius: CharkleTheme.Radius.popoverInner, style: .continuous)
                 .strokeBorder(CharkleTheme.hairline(for: colorScheme), lineWidth: CharkleTheme.hairlineWidth)
         )
     }

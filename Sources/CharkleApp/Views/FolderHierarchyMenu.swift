@@ -237,9 +237,12 @@ public struct CharkleHierarchicalFolderScopeTree: View {
             }
         }
         .padding(6)
-        .background(CharkleTheme.surfaceElevated(for: colorScheme), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .background(
+            CharkleTheme.surfaceElevated(for: colorScheme),
+            in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.cardOuter, style: .continuous)
+        )
         .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
+            RoundedRectangle(cornerRadius: CharkleTheme.Radius.cardOuter, style: .continuous)
                 .strokeBorder(CharkleTheme.hairline(for: colorScheme), lineWidth: CharkleTheme.hairlineWidth)
         )
         .onAppear {
@@ -300,7 +303,7 @@ public struct CharkleHierarchicalFolderScopeTree: View {
                     }
 
                     Text(title)
-                        .font(.system(size: 11.5, weight: isSelected ? .semibold : .regular))
+                        .font(CharkleTheme.text(.caption, weight: isSelected ? .semibold : .regular))
                         .foregroundStyle(isSelected ? Color.accentColor : Color.primary)
                         .lineLimit(1)
 
@@ -316,9 +319,17 @@ public struct CharkleHierarchicalFolderScopeTree: View {
                 .padding(.horizontal, 6)
                 .background(
                     isSelected ? Color.accentColor.opacity(0.11) : Color.clear,
-                    in: RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    in: RoundedRectangle(
+                        cornerRadius: CharkleTheme.Radius.concentricInner(outer: CharkleTheme.Radius.cardOuter, padding: 6),
+                        style: .continuous
+                    )
                 )
-                .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                .contentShape(
+                    RoundedRectangle(
+                        cornerRadius: CharkleTheme.Radius.concentricInner(outer: CharkleTheme.Radius.cardOuter, padding: 6),
+                        style: .continuous
+                    )
+                )
             }
             .buttonStyle(.plain)
         }

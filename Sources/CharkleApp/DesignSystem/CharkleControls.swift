@@ -90,10 +90,9 @@ public struct CharkleButtonStyle: ButtonStyle {
 
         private var font: Font {
             switch size {
-            case .xs: .system(size: 11.5, weight: fontWeight)
-            case .sm: .system(size: 12.5, weight: fontWeight)
-            case .md: .system(size: 13, weight: fontWeight)
-            case .icon: .system(size: 13, weight: .medium)
+            case .xs: CharkleTheme.text(.caption, weight: fontWeight)
+            case .sm, .md: CharkleTheme.text(.body, weight: fontWeight)
+            case .icon: CharkleTheme.text(.body, weight: .medium)
             }
         }
 
@@ -436,7 +435,7 @@ public struct CharkleSegmentedControl<Option: Hashable>: View {
     }
 
     private var outerRadius: CGFloat {
-        size == .compact ? CharkleTheme.Radius.chip : 9
+        size == .compact ? CharkleTheme.Radius.chip : CharkleTheme.Radius.popoverInner
     }
 
     private var trackPadding: CGFloat { 2 }
@@ -475,13 +474,13 @@ public struct CharkleSegmentedControl<Option: Hashable>: View {
 
                         if let title = item.title {
                             Text(title)
-                                .font(.system(size: size == .compact ? 11.5 : 12, weight: isSelected ? .semibold : .medium))
+                                .font(CharkleTheme.text(.caption, weight: isSelected ? .semibold : .medium))
                                 .lineLimit(1)
                         }
 
                         if let badge = item.badge, !badge.isEmpty {
                             Text(badge)
-                                .font(.system(size: 10.5, weight: .semibold, design: .rounded))
+                                .font(CharkleTheme.text(.caption, weight: .semibold, design: .rounded))
                                 .monospacedDigit()
                                 .foregroundStyle(isSelected ? accent : CharkleTheme.secondaryInk(for: colorScheme))
                         }
@@ -847,7 +846,7 @@ public struct CharkleInspectorSection<HeaderTrailing: View, Content: View>: View
                     .foregroundStyle(iconColor ?? CharkleTheme.secondaryInk(for: colorScheme))
             }
             Text(title)
-                .font(.system(size: 11.5, weight: .semibold))
+                .font(CharkleTheme.text(.caption, weight: .semibold))
                 .foregroundStyle(
                     isHeaderHovered
                         ? Color.primary.opacity(0.92)
@@ -874,7 +873,7 @@ public struct CharkleInspectorSection<HeaderTrailing: View, Content: View>: View
                     .foregroundStyle(accent)
             }
             Text(title)
-                .font(.system(size: 12, weight: .semibold))
+                .font(CharkleTheme.text(.caption, weight: .semibold))
                 .foregroundStyle(.primary)
         }
         .padding(.horizontal, 12)
@@ -925,7 +924,7 @@ public extension CharkleInspectorSection where HeaderTrailing == EmptyView {
 
 // MARK: - Precision Spec Row (LabeledContent Metadata Pattern)
 
-/// Clean `LabeledContent`-style metadata row (`11.5pt` secondary key, `12.5pt` primary value with
+/// Clean `LabeledContent`-style metadata row (`12pt` secondary key, `13pt` primary value with
 /// `.monospacedDigit()`, optional monospace font, and optional click-to-copy with transient feedback).
 public struct CharkleSpecRow: View {
     @Environment(\.colorScheme) private var colorScheme
@@ -984,7 +983,7 @@ public struct CharkleSpecRow: View {
                             isHovered
                                 ? Color.primary.opacity(colorScheme == .dark ? 0.06 : 0.04)
                                 : Color.clear,
-                            in: RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.sm, style: .continuous)
                         )
                         .contentShape(Rectangle())
                 }
@@ -1012,7 +1011,7 @@ public struct CharkleSpecRow: View {
     private var rowContent: some View {
         HStack(alignment: .firstTextBaseline, spacing: 10) {
             Text(label)
-                .font(.system(size: 11.5, weight: .regular))
+                .font(CharkleTheme.text(.caption, weight: .regular))
                 .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
                 .lineLimit(1)
                 .layoutPriority(1)
@@ -1023,8 +1022,8 @@ public struct CharkleSpecRow: View {
                 Text(value)
                     .font(
                         monospaced
-                            ? .system(size: 12, weight: .medium, design: .monospaced)
-                            : .system(size: 12.5, weight: .medium)
+                            ? CharkleTheme.text(.caption, weight: .medium, design: .monospaced)
+                            : CharkleTheme.text(.body, weight: .medium)
                     )
                     .monospacedDigit()
                     .foregroundStyle(valueColor ?? Color.primary.opacity(0.90))
@@ -1146,7 +1145,7 @@ public struct CharkleFilterTokenChip: View {
     }
 
     public var body: some View {
-        let chipShape = RoundedRectangle(cornerRadius: 6, style: .continuous)
+        let chipShape = RoundedRectangle(cornerRadius: CharkleTheme.Radius.sm, style: .continuous)
 
         HStack(spacing: 4) {
             leadingGlyph
@@ -1154,8 +1153,8 @@ public struct CharkleFilterTokenChip: View {
             Text(token.label)
                 .font(
                     isColorToken
-                        ? .system(size: 10.5, weight: .medium, design: .monospaced)
-                        : .system(size: 11, weight: .medium)
+                        ? CharkleTheme.text(.caption, weight: .medium, design: .monospaced)
+                        : CharkleTheme.text(.caption, weight: .medium)
                 )
                 .monospacedDigit()
                 .foregroundStyle(.primary.opacity(0.90))
@@ -1178,7 +1177,7 @@ public struct CharkleFilterTokenChip: View {
         }
         .padding(.leading, 6)
         .padding(.trailing, 3)
-        .frame(height: 20)
+        .frame(height: 22)
         .background(chipFill, in: chipShape)
         .overlay {
             if reduceTransparency {
@@ -1320,7 +1319,7 @@ public struct CharkleTokenSearchField<FilterTrigger: View>: View {
 
             TextField(placeholder, text: $text)
                 .textFieldStyle(.plain)
-                .font(.system(size: 12.5))
+                .font(CharkleTheme.text(.body))
                 .frame(minWidth: compact ? 48 : 88, maxWidth: .infinity)
                 .modifier(OptionalFocusBindingModifier(binding: isFocused))
                 .onSubmit {
@@ -1472,7 +1471,7 @@ public struct CharkleColorFilterPopover: View {
                 HStack(spacing: 6) {
                     if let title {
                         Text(title)
-                            .font(.system(size: 11.5, weight: .semibold))
+                            .font(CharkleTheme.text(.caption, weight: .semibold))
                             .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
                     }
 
@@ -1485,7 +1484,7 @@ public struct CharkleColorFilterPopover: View {
                                     Circle().strokeBorder(Color.primary.opacity(0.22), lineWidth: CharkleTheme.hairlineWidth)
                                 )
                             Text(activeHex.uppercased())
-                                .font(.system(size: 10.5, weight: .medium, design: .monospaced))
+                                .font(CharkleTheme.text(.caption, weight: .medium, design: .monospaced))
                                 .foregroundStyle(.primary.opacity(0.86))
                         }
                     }
@@ -1573,7 +1572,7 @@ public struct CharkleColorFilterPopover: View {
 
                     TextField("#RRGGBB", text: $hexDraft)
                         .textFieldStyle(.plain)
-                        .font(.system(size: 11.5, weight: .medium, design: .monospaced))
+                        .font(CharkleTheme.text(.caption, weight: .medium, design: .monospaced))
                         .onSubmit {
                             commitHexDraft()
                         }
@@ -1603,18 +1602,18 @@ public struct CharkleColorFilterPopover: View {
                 VStack(alignment: .leading, spacing: 4) {
                     HStack {
                         Text("匹配范围")
-                            .font(.system(size: 11, weight: .medium))
+                            .font(CharkleTheme.text(.caption, weight: .medium))
                             .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
                         Spacer(minLength: 4)
                         Text(Self.toleranceLabel(toleranceBinding.wrappedValue))
-                            .font(.system(size: 11, weight: .semibold))
+                            .font(CharkleTheme.text(.caption, weight: .semibold))
                             .monospacedDigit()
                             .foregroundStyle(accent)
                     }
 
                     HStack(spacing: 6) {
                         Text("精确")
-                            .font(.system(size: 10.5))
+                            .font(CharkleTheme.text(.caption))
                             .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
                         Slider(
                             value: Binding(
@@ -1627,7 +1626,7 @@ public struct CharkleColorFilterPopover: View {
                             in: 10...55
                         )
                         Text("宽松")
-                            .font(.system(size: 10.5))
+                            .font(CharkleTheme.text(.caption))
                             .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
                     }
                 }

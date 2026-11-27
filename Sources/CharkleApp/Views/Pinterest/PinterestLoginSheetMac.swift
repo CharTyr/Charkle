@@ -40,7 +40,7 @@ struct PinterestLoginSheetMac: View {
                         .font(.system(size: 11.5, weight: .semibold))
                         .foregroundStyle(CharkleTheme.accent(for: colorScheme))
                     Text("正在第三方账号验证窗口（\(URL(string: currentURLString)?.host() ?? "OAuth")）")
-                        .font(.system(size: 11.5, weight: .medium))
+                        .font(CharkleTheme.text(.caption, weight: .medium))
                         .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
                         .lineLimit(1)
                     Spacer()
@@ -91,7 +91,7 @@ struct PinterestLoginSheetMac: View {
                         .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(CharkleTheme.accent(for: colorScheme))
                     Text(statusHint)
-                        .font(.system(size: 12))
+                        .font(CharkleTheme.text(.caption))
                         .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
                     Spacer()
                 }
@@ -132,9 +132,9 @@ struct PinterestLoginSheetMac: View {
 
             VStack(alignment: .leading, spacing: 1) {
                 Text("登录 Pinterest 账号")
-                    .font(.system(size: 13.5, weight: .semibold))
+                    .font(CharkleTheme.text(.body, weight: .semibold))
                 Text(URL(string: currentURLString)?.host() ?? "www.pinterest.com")
-                    .font(.system(size: 11))
+                    .font(CharkleTheme.text(.caption))
                     .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
                     .lineLimit(1)
             }
@@ -153,7 +153,7 @@ struct PinterestLoginSheetMac: View {
                             .font(.system(size: 12, weight: .semibold))
                     }
                     Text(isVerifying ? "验证中…" : "已完成登录")
-                        .font(.system(size: 12, weight: .semibold))
+                        .font(CharkleTheme.text(.caption, weight: .semibold))
                 }
             }
             .buttonStyle(CharkleButtonStyle(.accent, size: .sm, cornerRadius: 999))

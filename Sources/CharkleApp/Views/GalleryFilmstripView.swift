@@ -372,7 +372,7 @@ public struct GalleryFilmstripView: View {
                     interactiveTransformContainer(for: asset) {
                         AnimatedGIFPlayerView(url: url)
                             .id(asset.id)
-                            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                            .clipShape(RoundedRectangle(cornerRadius: CharkleTheme.Radius.cardOuter, style: .continuous))
                     }
                 } else {
                     zoomableVisualStage(for: asset)
@@ -386,7 +386,7 @@ public struct GalleryFilmstripView: View {
                     )
                         .id(asset.id)
                         .frame(maxWidth: 980, maxHeight: 560)
-                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        .clipShape(RoundedRectangle(cornerRadius: CharkleTheme.Radius.settingsOuter, style: .continuous))
                         .shadow(color: .black.opacity(colorScheme == .dark ? 0.42 : 0.14), radius: 22, y: 8)
                 } else {
                     zoomableVisualStage(for: asset)
@@ -408,12 +408,12 @@ public struct GalleryFilmstripView: View {
                     QuickLookPDFView(url: url)
                         .id(asset.id)
                         .frame(maxWidth: 840, maxHeight: 620)
-                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        .clipShape(RoundedRectangle(cornerRadius: CharkleTheme.Radius.cardOuter, style: .continuous))
                         .shadow(color: .black.opacity(colorScheme == .dark ? 0.36 : 0.10), radius: 20, y: 8)
                 } else if asset.fileName.lowercased().hasSuffix(".swatch") {
                     ProceduralMediaFallbackCard(asset: asset)
                         .frame(width: 380, height: 380)
-                        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                        .clipShape(RoundedRectangle(cornerRadius: CharkleTheme.Radius.popoverOuter, style: .continuous))
                         .shadow(color: .black.opacity(colorScheme == .dark ? 0.38 : 0.12), radius: 22, y: 8)
                 } else {
                     QuickLookMarkdownReaderCard(asset: asset, originalURL: activeOriginalURL)
@@ -436,13 +436,13 @@ public struct GalleryFilmstripView: View {
                         .resizable()
                         .interpolation(.high)
                         .aspectRatio(contentMode: .fit)
-                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        .clipShape(RoundedRectangle(cornerRadius: CharkleTheme.Radius.cardOuter, style: .continuous))
                 } else {
                     AssetThumbnailSurface(
                         asset: asset,
                         loader: loader,
                         tier: .preview1400,
-                        cornerRadius: 12,
+                        cornerRadius: CharkleTheme.Radius.cardOuter,
                         contentMode: .fit,
                         enableHoverPlayback: false
                     )
@@ -593,7 +593,7 @@ public struct GalleryFilmstripView: View {
                             onOpenQuickLook(asset)
                         } label: {
                             Label("在默认浏览器中打开", systemImage: "safari")
-                                .font(.system(size: 12, weight: .semibold))
+                                .font(CharkleTheme.text(.caption, weight: .semibold))
                                 .padding(.horizontal, 12)
                                 .padding(.vertical, 6)
                         }
@@ -609,23 +609,23 @@ public struct GalleryFilmstripView: View {
                         .fill(Color(charkleHex: asset.dominantColors.first?.hex ?? "#5C6B73"))
                         .frame(width: 9, height: 9)
                     Text(asset.sourceDomain ?? "网页书签")
-                        .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
+                        .font(CharkleTheme.text(.caption, weight: .semibold, design: .monospaced))
                         .foregroundStyle(.secondary)
                     Spacer()
                     if let urlStr = asset.sourceURL {
                         Text(urlStr)
-                            .font(.system(size: 10.5, design: .monospaced))
+                            .font(CharkleTheme.text(.caption, design: .monospaced))
                             .foregroundStyle(.tertiary)
                             .lineLimit(1)
                             .truncationMode(.middle)
                     }
                 }
                 Text(asset.title)
-                    .font(.system(size: 16, weight: .semibold))
+                    .font(CharkleTheme.text(.headline, weight: .semibold))
                     .lineLimit(2)
                 if !asset.notes.isEmpty {
                     Text(asset.notes)
-                        .font(.system(size: 12.5))
+                        .font(CharkleTheme.text(.body))
                         .foregroundStyle(.secondary)
                         .lineLimit(2)
                 }
@@ -635,9 +635,9 @@ public struct GalleryFilmstripView: View {
             .frame(maxWidth: 780, alignment: .leading)
             .background(CharkleTheme.surfaceElevated(for: colorScheme))
         }
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: CharkleTheme.Radius.popoverOuter, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
+            RoundedRectangle(cornerRadius: CharkleTheme.Radius.popoverOuter, style: .continuous)
                 .strokeBorder(CharkleTheme.hairline(for: colorScheme), lineWidth: CharkleTheme.hairlineWidth)
         )
         .shadow(color: .black.opacity(colorScheme == .dark ? 0.34 : 0.10), radius: 20, y: 8)
@@ -664,7 +664,7 @@ public struct GalleryFilmstripView: View {
                                 resetViewTransform(animated: true)
                             } label: {
                                 Text("\(Int((zoomScale * 100).rounded()))%")
-                                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                    .font(CharkleTheme.text(.caption, weight: .semibold, design: .monospaced))
                                     .monospacedDigit()
                                     .foregroundStyle(.primary.opacity(0.88))
                                     .frame(minWidth: 42)
@@ -714,7 +714,7 @@ public struct GalleryFilmstripView: View {
                                     HStack(spacing: 3) {
                                         if displayRotationDegrees != 0 {
                                             Text("\(displayRotationDegrees)°")
-                                                .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
+                                                .font(CharkleTheme.text(.caption, weight: .semibold, design: .monospaced))
                                                 .monospacedDigit()
                                         }
                                         Image(systemName: "arrow.uturn.backward")
@@ -740,7 +740,7 @@ public struct GalleryFilmstripView: View {
                             HStack(spacing: 4) {
                                 CharkleIcon("quicklook", style: .duotone, size: 13.5)
                                 Text("沉浸预览")
-                                    .font(.system(size: 11.5, weight: .medium))
+                                    .font(CharkleTheme.text(.caption, weight: .medium))
                             }
                             .padding(.horizontal, 8)
                             .padding(.vertical, 4)
@@ -758,19 +758,19 @@ public struct GalleryFilmstripView: View {
             // Compact Metadata & Star Rating Strip
             HStack(spacing: 12) {
                 Text(asset.title)
-                    .font(.system(size: 12.5, weight: .semibold))
+                    .font(CharkleTheme.text(.body, weight: .semibold))
                     .lineLimit(1)
 
                 if asset.pixelWidth > 0 && asset.pixelHeight > 0 {
                     Text("\(asset.pixelWidth) × \(asset.pixelHeight)")
-                        .font(.system(size: 11, design: .monospaced))
+                        .font(CharkleTheme.text(.caption, design: .monospaced))
                         .monospacedDigit()
                         .foregroundStyle(.secondary)
                 }
 
                 if let idx = activeIndex {
                     Text("\(idx + 1) / \(assets.count)")
-                        .font(.system(size: 11, weight: .medium, design: .rounded))
+                        .font(CharkleTheme.text(.caption, weight: .medium, design: .rounded))
                         .monospacedDigit()
                         .foregroundStyle(.secondary)
                         .padding(.horizontal, 7)
@@ -802,7 +802,7 @@ public struct GalleryFilmstripView: View {
                         HStack(spacing: 4) {
                             CharkleIcon("quicklook", style: .duotone, size: 13.5)
                             Text("沉浸预览")
-                                .font(.system(size: 11.5, weight: .medium))
+                                .font(CharkleTheme.text(.caption, weight: .medium))
                         }
                         .padding(.horizontal, 9)
                         .padding(.vertical, 4)
@@ -827,9 +827,9 @@ public struct GalleryFilmstripView: View {
                 .frame(width: 26, height: 26)
                 .background(
                     isActive ? Color.accentColor : Color.clear,
-                    in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous)
                 )
-                .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                .contentShape(RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous))
         }
         .buttonStyle(CharkleTactileButtonStyle())
         .help(help)
@@ -1242,18 +1242,19 @@ private struct FilmstripScrubberBar<ContextMenuContent: View>: View {
         let isFocused = activeAssetID == item.id
         let isSelected = selectedAssetIDs.contains(item.id)
         let thumbW: CGFloat = max(46, min(116, 68 * CGFloat(max(0.6, min(1.75, item.aspectRatio)))))
+        let thumbRadius = CharkleTheme.Radius.concentricInner(outer: CharkleTheme.Radius.popoverOuter, padding: 8)
 
         return AssetThumbnailSurface(
             asset: item,
             loader: loader,
             tier: .grid520,
-            cornerRadius: 7,
+            cornerRadius: thumbRadius,
             contentMode: .fill,
             enableHoverPlayback: !isQuickLookPresented
         )
         .frame(width: thumbW, height: 68)
         .overlay(
-            RoundedRectangle(cornerRadius: 7, style: .continuous)
+            RoundedRectangle(cornerRadius: thumbRadius, style: .continuous)
                 .strokeBorder(
                     isFocused ? Color.accentColor : (isSelected ? Color.accentColor.opacity(0.65) : Color.primary.opacity(0.12)),
                     lineWidth: isFocused ? 2.5 : (isSelected ? 1.5 : CharkleTheme.hairlineWidth)
@@ -1261,7 +1262,7 @@ private struct FilmstripScrubberBar<ContextMenuContent: View>: View {
         )
         .scaleEffect(isFocused && !reduceMotion ? 1.04 : 1.0)
         .animation(CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion), value: isFocused)
-        .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .contentShape(RoundedRectangle(cornerRadius: thumbRadius, style: .continuous))
         .onTapGesture {
             onSelectItem(item)
         }

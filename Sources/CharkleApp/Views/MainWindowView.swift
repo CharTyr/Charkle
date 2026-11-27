@@ -1120,7 +1120,7 @@ public struct MainWindowView: View {
                 folderBreadcrumbPath(folderID: folderID, crumbs: crumbs)
 
                 Text("\(library.assets.count)")
-                    .font(.system(size: 12, weight: .medium))
+                    .font(CharkleTheme.text(.caption, weight: .medium))
                     .monospacedDigit()
                     .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
                     .fixedSize(horizontal: true, vertical: false)
@@ -1148,14 +1148,14 @@ public struct MainWindowView: View {
         } else {
             HStack(alignment: .firstTextBaseline, spacing: 6) {
                 Text(currentDestinationTitle)
-                    .font(.system(size: 15, weight: .semibold))
+                    .font(CharkleTheme.text(.headline, weight: .semibold))
                     .tracking(-0.2)
                     .foregroundStyle(.primary)
                     .lineLimit(1)
                     .truncationMode(.tail)
 
                 Text("\(library.assets.count)")
-                    .font(.system(size: 12, weight: .medium))
+                    .font(CharkleTheme.text(.caption, weight: .medium))
                     .monospacedDigit()
                     .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
                     .fixedSize(horizontal: true, vertical: false)
@@ -1211,7 +1211,7 @@ public struct MainWindowView: View {
             }
         } else {
             Text(currentDestinationTitle)
-                .font(.system(size: 15, weight: .semibold))
+                .font(CharkleTheme.text(.headline, weight: .semibold))
                 .tracking(-0.2)
                 .foregroundStyle(.primary)
                 .lineLimit(1)
@@ -1228,6 +1228,7 @@ public struct MainWindowView: View {
 
     private func ancestorBreadcrumbMenu(_ ancestors: [FolderRecord]) -> some View {
         let fullAncestorPath = ancestors.map(\.name).joined(separator: " / ")
+        let menuShape = RoundedRectangle(cornerRadius: CharkleTheme.Radius.sm, style: .continuous)
         return Menu {
             ForEach(ancestors) { ancestor in
                 Button(ancestor.name) {
@@ -1236,14 +1237,14 @@ public struct MainWindowView: View {
             }
         } label: {
             Text("…")
-                .font(.system(size: 12.5, weight: .semibold))
+                .font(CharkleTheme.text(.body, weight: .semibold))
                 .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
                 .frame(minWidth: 20, minHeight: 22, maxHeight: 22)
                 .background(
                     Color.primary.opacity(colorScheme == .dark ? 0.08 : 0.055),
-                    in: RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    in: menuShape
                 )
-                .contentShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                .contentShape(menuShape)
         }
         .menuStyle(.button)
         .buttonStyle(CharkleMenuTriggerButtonStyle())
@@ -1257,7 +1258,7 @@ public struct MainWindowView: View {
             navigate(to: .folder(crumb.id))
         } label: {
             Text(crumb.name)
-                .font(.system(size: 13, weight: .medium))
+                .font(CharkleTheme.text(.body, weight: .medium))
                 .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
                 .lineLimit(1)
                 .truncationMode(.tail)
@@ -1280,7 +1281,7 @@ public struct MainWindowView: View {
                 )
                 .fixedSize()
                 Text(crumb.name)
-                    .font(.system(size: 15, weight: .semibold))
+                    .font(CharkleTheme.text(.headline, weight: .semibold))
                     .tracking(-0.2)
                     .foregroundStyle(Color.primary)
                     .lineLimit(1)
@@ -1388,7 +1389,7 @@ public struct MainWindowView: View {
                         .symbolVariant(isFilterActive ? .fill : .none)
                     if showFilterText {
                         Text("筛选")
-                            .font(.system(size: 11.5, weight: .medium))
+                            .font(CharkleTheme.text(.caption, weight: .medium))
                             .lineLimit(1)
                     }
                 }
@@ -1519,7 +1520,7 @@ public struct MainWindowView: View {
                             .font(.system(size: 11.5, weight: .medium))
                             .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
                         Text(library.filter.sortBy.localizedLabel)
-                            .font(.system(size: 11.5, weight: .medium))
+                            .font(CharkleTheme.text(.caption, weight: .medium))
                             .foregroundStyle(.primary.opacity(0.88))
                             .lineLimit(1)
                         CharkleDropdownChevron(size: 8)
@@ -1642,7 +1643,7 @@ public struct MainWindowView: View {
                         .foregroundStyle(activeAccent)
                     if let ctaLabel {
                         Text(ctaLabel)
-                            .font(.system(size: 11.5, weight: .semibold))
+                            .font(CharkleTheme.text(.caption, weight: .semibold))
                             .foregroundStyle(.primary.opacity(0.90))
                             .lineLimit(1)
                     }
@@ -1710,7 +1711,7 @@ public struct MainWindowView: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 8) {
                 Text("筛选条件")
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(CharkleTheme.text(.body, weight: .semibold))
                 Spacer(minLength: 4)
                 if hasActiveVisualPopoverFilters {
                     Button("清除全部") {
@@ -1752,7 +1753,7 @@ public struct MainWindowView: View {
             // Media Kinds
             VStack(alignment: .leading, spacing: 7) {
                 Text("媒体类型")
-                    .font(.system(size: 11.5, weight: .semibold))
+                    .font(CharkleTheme.text(.caption, weight: .semibold))
                     .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
 
                 CharkleFlowLayout(spacing: 6, lineSpacing: 6) {
@@ -1768,7 +1769,7 @@ public struct MainWindowView: View {
                                     .font(.system(size: 10.5, weight: .medium))
                                     .symbolVariant(active ? .fill : .none)
                                 Text(kind.localizedLabel)
-                                    .font(.system(size: 11.5, weight: active ? .semibold : .medium))
+                                    .font(CharkleTheme.text(.caption, weight: active ? .semibold : .medium))
                                     .lineLimit(1)
                             }
                             .foregroundStyle(
@@ -1795,7 +1796,7 @@ public struct MainWindowView: View {
             // Aspect Orientation
             VStack(alignment: .leading, spacing: 7) {
                 Text("画幅比例")
-                    .font(.system(size: 11.5, weight: .semibold))
+                    .font(CharkleTheme.text(.caption, weight: .semibold))
                     .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
 
                 HStack(spacing: 6) {
@@ -1806,7 +1807,7 @@ public struct MainWindowView: View {
                             Task { await library.refreshAssets() }
                         } label: {
                             Text(shape.localizedLabel)
-                                .font(.system(size: 11.5, weight: active ? .semibold : .medium))
+                                .font(CharkleTheme.text(.caption, weight: active ? .semibold : .medium))
                                 .lineLimit(1)
                                 .foregroundStyle(
                                     active
@@ -1832,7 +1833,7 @@ public struct MainWindowView: View {
             HStack(spacing: 8) {
                 HStack(spacing: 3) {
                     Text("最低评分")
-                        .font(.system(size: 11.5, weight: .semibold))
+                        .font(CharkleTheme.text(.caption, weight: .semibold))
                         .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
                         .padding(.trailing, 3)
 
@@ -1865,7 +1866,7 @@ public struct MainWindowView: View {
                             .font(.system(size: 11, weight: .medium))
                             .symbolVariant(library.filter.onlyPinnedOffline ? .fill : .none)
                         Text("本地保留")
-                            .font(.system(size: 11.5, weight: library.filter.onlyPinnedOffline ? .semibold : .medium))
+                            .font(CharkleTheme.text(.caption, weight: library.filter.onlyPinnedOffline ? .semibold : .medium))
                             .lineLimit(1)
                     }
                     .foregroundStyle(library.filter.onlyPinnedOffline ? activeAccent : CharkleTheme.secondaryInk(for: colorScheme))
@@ -1944,9 +1945,9 @@ public struct MainWindowView: View {
                     .foregroundStyle(activeAccent)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("收件箱智能分拣预览")
-                        .font(.system(size: 15, weight: .semibold))
+                        .font(CharkleTheme.text(.headline, weight: .semibold))
                     Text("共分析 \(recs.count) 项待整理素材，其中 \(actionable.count) 项匹配到已有目录；高置信度项已默认勾选。")
-                        .font(.system(size: 11.5))
+                        .font(CharkleTheme.text(.caption))
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -1954,10 +1955,13 @@ public struct MainWindowView: View {
 
             if recs.isEmpty {
                 Text("收件箱暂无可分拣素材。")
-                    .font(.system(size: 12))
+                    .font(CharkleTheme.text(.caption))
                     .foregroundStyle(.secondary)
                     .padding(.vertical, 32)
             } else {
+                let rowOuterRadius = CharkleTheme.Radius.settingsOuter
+                let rowPadding: CGFloat = 8
+                let thumbInnerRadius = CharkleTheme.Radius.concentricInner(outer: rowOuterRadius, padding: rowPadding)
                 ScrollView(.vertical) {
                     VStack(spacing: 8) {
                         ForEach(recs) { rec in
@@ -1981,17 +1985,17 @@ public struct MainWindowView: View {
                                         asset: asset,
                                         loader: library.thumbnailLoader,
                                         tier: .grid520,
-                                        cornerRadius: 6
+                                        cornerRadius: thumbInnerRadius
                                     )
                                     .frame(width: 44, height: 44)
                                 }
 
                                 VStack(alignment: .leading, spacing: 3) {
                                     Text(rec.assetTitle)
-                                        .font(.system(size: 12.5, weight: .medium))
+                                        .font(CharkleTheme.text(.body, weight: .medium))
                                         .lineLimit(1)
                                     Text(rec.reason)
-                                        .font(.system(size: 11))
+                                        .font(CharkleTheme.text(.caption))
                                         .foregroundStyle(.secondary)
                                         .lineLimit(1)
                                 }
@@ -2003,9 +2007,9 @@ public struct MainWindowView: View {
                                         Image(systemName: "folder.fill")
                                             .font(.system(size: 10.5))
                                         Text(folderName)
-                                            .font(.system(size: 11.5, weight: .semibold))
+                                            .font(CharkleTheme.text(.caption, weight: .semibold))
                                         Text("\(Int((rec.confidence * 100).rounded()))%")
-                                            .font(.system(size: 10, weight: .medium, design: .monospaced))
+                                            .font(CharkleTheme.text(.caption, weight: .medium, design: .monospaced))
                                             .foregroundStyle(.secondary)
                                     }
                                     .foregroundStyle(rec.confidence >= 0.65 ? activeAccent : Color.primary)
@@ -2019,15 +2023,15 @@ public struct MainWindowView: View {
                                     )
                                 } else {
                                     Text("留在收件箱")
-                                        .font(.system(size: 11, weight: .medium))
+                                        .font(CharkleTheme.text(.caption, weight: .medium))
                                         .foregroundStyle(.secondary)
                                         .padding(.horizontal, 8)
                                         .padding(.vertical, 4)
                                         .background(Color.primary.opacity(0.06), in: Capsule(style: .continuous))
                                 }
                             }
-                            .padding(8)
-                            .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                            .padding(rowPadding)
+                            .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: rowOuterRadius, style: .continuous))
                         }
                     }
                     .charkleCleanScrollbars(hidden: false)
@@ -2084,6 +2088,9 @@ public struct MainWindowView: View {
         }
 
         let isNarrowBar = galleryViewportWidth < 620
+        let barOuterRadius = CharkleTheme.Radius.cardOuter
+        let barVerticalPadding: CGFloat = 6
+        let innerChipRadius = CharkleTheme.Radius.concentricInner(outer: barOuterRadius, padding: barVerticalPadding)
         return HStack(spacing: isNarrowBar ? 7 : 10) {
             HStack(spacing: 6) {
                 Image(systemName: "tray.and.arrow.down")
@@ -2091,7 +2098,7 @@ public struct MainWindowView: View {
                     .symbolVariant(.fill)
                     .foregroundStyle(activeAccent)
                 Text(isNarrowBar ? "\(library.inboxCount) 项" : "待整理 \(library.inboxCount) 项")
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(CharkleTheme.text(.caption, weight: .semibold))
                     .monospacedDigit()
                     .lineLimit(1)
             }
@@ -2111,7 +2118,7 @@ public struct MainWindowView: View {
                         Image(systemName: "sparkles")
                             .font(.system(size: 10, weight: .semibold))
                         Text("推荐：\(suggestion.folderName)")
-                            .font(.system(size: 11, weight: .semibold))
+                            .font(CharkleTheme.text(.caption, weight: .semibold))
                             .lineLimit(1)
                     }
                     .foregroundStyle(activeAccent)
@@ -2137,7 +2144,7 @@ public struct MainWindowView: View {
                                 .font(.system(size: 10.5, weight: .semibold))
                         }
                         Text(library.isRunningInboxTriage ? "分拣中…" : (isNarrowBar ? "分拣" : "智能分拣"))
-                            .font(.system(size: 11, weight: .semibold))
+                            .font(CharkleTheme.text(.caption, weight: .semibold))
                             .lineLimit(1)
                     }
                     .foregroundStyle(activeAccent)
@@ -2166,17 +2173,17 @@ public struct MainWindowView: View {
                         } label: {
                             HStack(spacing: 4) {
                                 Text("\(idx + 1)")
-                                    .font(.system(size: 9.5, weight: .bold, design: .monospaced))
+                                    .font(CharkleTheme.text(.caption, weight: .bold, design: .monospaced))
                                     .foregroundStyle(.secondary)
-                                    .frame(width: 14, height: 14)
-                                    .background(Color.primary.opacity(0.08), in: RoundedRectangle(cornerRadius: 4, style: .continuous))
+                                    .frame(minWidth: 16, minHeight: 16, maxHeight: 16)
+                                    .background(Color.primary.opacity(0.08), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.xs, style: .continuous))
                                 Text(node.depth > 0 ? "↳ \(folder.name)" : folder.name)
-                                    .font(.system(size: 11, weight: .medium))
+                                    .font(CharkleTheme.text(.caption, weight: .medium))
                                     .lineLimit(1)
                             }
                             .padding(.horizontal, 8)
                             .padding(.vertical, 4)
-                            .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                            .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: innerChipRadius, style: .continuous))
                         }
                         .buttonStyle(CharkleTactileButtonStyle())
                         .help(library.folderDisplayPath(for: folder.id))
@@ -2200,14 +2207,14 @@ public struct MainWindowView: View {
                                 Image(systemName: "folder")
                                     .font(.system(size: 10, weight: .medium))
                                 Text("全部目录")
-                                    .font(.system(size: 11, weight: .medium))
+                                    .font(CharkleTheme.text(.caption, weight: .medium))
                                     .lineLimit(1)
                                 CharkleDropdownChevron(size: 8)
                             }
                             .foregroundStyle(.secondary)
                             .padding(.horizontal, 8)
                             .padding(.vertical, 4)
-                            .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                            .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: innerChipRadius, style: .continuous))
                         }
                         .menuStyle(.button)
                         .buttonStyle(CharkleMenuTriggerButtonStyle())
@@ -2242,7 +2249,7 @@ public struct MainWindowView: View {
                         .symbolVariant(.fill)
                         .foregroundStyle(activeAccent)
                     Text(isNarrowBar ? "收入板" : "一键收入情绪板")
-                        .font(.system(size: 11.5, weight: .semibold))
+                        .font(CharkleTheme.text(.caption, weight: .semibold))
                         .foregroundStyle(.primary.opacity(0.90))
                         .lineLimit(1)
                     CharkleDropdownChevron(size: 8)
@@ -2257,8 +2264,8 @@ public struct MainWindowView: View {
             .fixedSize()
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, 7)
-        .charkleLiquidGlass(.regular, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .padding(.vertical, barVerticalPadding)
+        .charkleLiquidGlass(.regular, in: RoundedRectangle(cornerRadius: barOuterRadius, style: .continuous))
     }
 
     // MARK: - Trash Recovery & Empty Bar
@@ -2271,7 +2278,7 @@ public struct MainWindowView: View {
                     .font(.system(size: 12.5, weight: .medium))
                     .foregroundStyle(.secondary)
                 Text("废纸篓 · 共 \(allIDs.count) 项素材")
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(CharkleTheme.text(.caption, weight: .semibold))
                     .monospacedDigit()
             }
 
@@ -2296,7 +2303,7 @@ public struct MainWindowView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
-        .charkleLiquidGlass(.regular, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .charkleLiquidGlass(.regular, in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.cardOuter, style: .continuous))
     }
 
     // MARK: - Folder Subfolders Strip + Click-Outside Popover Creator
@@ -2324,7 +2331,7 @@ public struct MainWindowView: View {
                                         CharkleFolderIcon(colorHex: crumb.colorHex, customSymbol: crumb.customSymbol, size: 15, isActive: true)
                                     }
                                     Text(crumb.name)
-                                        .font(.system(size: 12, weight: crumb.id == folderID ? .semibold : .medium))
+                                        .font(CharkleTheme.text(.caption, weight: crumb.id == folderID ? .semibold : .medium))
                                         .foregroundStyle(crumb.id == folderID ? Color.primary : Color.secondary)
                                         .lineLimit(1)
                                 }
@@ -2350,11 +2357,11 @@ public struct MainWindowView: View {
                                 HStack(spacing: 5) {
                                     CharkleFolderIcon(colorHex: child.colorHex, customSymbol: child.customSymbol, size: 14, isActive: false)
                                     Text(child.name)
-                                        .font(.system(size: 11.5, weight: .medium))
+                                        .font(CharkleTheme.text(.caption, weight: .medium))
                                         .lineLimit(1)
                                     if childCount > 0 {
                                         Text("\(childCount)")
-                                            .font(.system(size: 10, design: .rounded))
+                                            .font(CharkleTheme.text(.caption, design: .rounded))
                                             .monospacedDigit()
                                             .foregroundStyle(.secondary)
                                     }
@@ -2379,7 +2386,7 @@ public struct MainWindowView: View {
                     Image(systemName: "folder.badge.plus")
                         .font(.system(size: 11, weight: .medium))
                     Text(galleryViewportWidth < 580 ? "新建" : "新建子文件夹")
-                        .font(.system(size: 11.5, weight: .medium))
+                        .font(CharkleTheme.text(.caption, weight: .medium))
                         .lineLimit(1)
                 }
                 .fixedSize(horizontal: true, vertical: false)
@@ -2397,17 +2404,17 @@ public struct MainWindowView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
-        .charkleLiquidGlass(.regular, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .charkleLiquidGlass(.regular, in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.cardOuter, style: .continuous))
     }
 
     private func createSubfolderPopoverContent(parentID: UUID) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("新建子文件夹")
-                .font(.system(size: 12.5, weight: .semibold))
+                .font(CharkleTheme.text(.body, weight: .semibold))
             HStack(spacing: 6) {
                 TextField("子文件夹名称", text: $subfolderNameDraft)
                     .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 12))
+                    .font(CharkleTheme.text(.caption))
                     .frame(width: 190)
                     .focused($isSubfolderFieldFocused)
                     .onSubmit { commitNewSubfolder(parentID: parentID) }
@@ -2491,9 +2498,9 @@ public struct MainWindowView: View {
             if isTrash && !isFiltered {
                 CharkleEmptyStateVignette(.emptyTrash)
                 Text("废纸篓是空的")
-                    .font(.system(size: 17, weight: .semibold))
+                    .font(CharkleTheme.text(.headline, weight: .semibold))
                 Text("移至废纸篓的素材会暂存在这里，你可以随时放回原处或彻底删除。")
-                    .font(.system(size: 12.5))
+                    .font(CharkleTheme.text(.body))
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
                     .frame(maxWidth: 380)
@@ -2502,9 +2509,9 @@ public struct MainWindowView: View {
                     isFiltered ? .noFilterResults : (isFolder ? .emptyFolder : .emptyLibrary)
                 )
                 Text(isFiltered ? "没有符合筛选条件的素材" : (isFolder ? "当前文件夹还没有素材" : "这里还没有素材"))
-                    .font(.system(size: 17, weight: .semibold))
+                    .font(CharkleTheme.text(.headline, weight: .semibold))
                 Text("直接拖入图片、GIF、视频、PDF、音频、设计文件或 X / 网页链接，或按 ⌥⇧V 粘贴剪贴板内容。")
-                    .font(.system(size: 12.5))
+                    .font(CharkleTheme.text(.body))
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
                     .frame(maxWidth: 400)
@@ -2542,7 +2549,7 @@ public struct MainWindowView: View {
         return CharkleGlassContainer(spacing: isCompactPill ? 6 : 8) {
             HStack(spacing: isCompactPill ? 6 : 8) {
                 Text("已选 \(ids.count) 项")
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(CharkleTheme.text(.caption, weight: .semibold))
                     .monospacedDigit()
                     .lineLimit(1)
                     .padding(.leading, 4)
@@ -2604,7 +2611,7 @@ public struct MainWindowView: View {
                                 .frame(width: 26, height: 26)
                         } else {
                             Label("移动", systemImage: "folder")
-                                .font(.system(size: 12, weight: .medium))
+                                .font(CharkleTheme.text(.caption, weight: .medium))
                                 .padding(.horizontal, 8)
                                 .padding(.vertical, 5)
                         }
@@ -2624,7 +2631,7 @@ public struct MainWindowView: View {
                                 .frame(width: 26, height: 26)
                         } else {
                             Label("加标签", systemImage: "tag")
-                                .font(.system(size: 12, weight: .medium))
+                                .font(CharkleTheme.text(.caption, weight: .medium))
                                 .padding(.horizontal, 8)
                                 .padding(.vertical, 5)
                         }
@@ -2634,7 +2641,7 @@ public struct MainWindowView: View {
                     .popover(isPresented: $showBatchTagPopover) {
                         VStack(alignment: .leading, spacing: 8) {
                             Text("为 \(ids.count) 项素材添加标签")
-                                .font(.system(size: 12, weight: .semibold))
+                                .font(CharkleTheme.text(.caption, weight: .semibold))
                             TextField("输入标签回车…", text: $quickBatchTagDraft)
                                 .textFieldStyle(.roundedBorder)
                                 .frame(width: 200)
@@ -2673,7 +2680,7 @@ public struct MainWindowView: View {
                                 Text("AI 打标")
                             }
                         }
-                        .font(.system(size: 12, weight: .medium))
+                        .font(CharkleTheme.text(.caption, weight: .medium))
                         .padding(.horizontal, isCompactPill && !library.isEnrichingTags ? 0 : 8)
                         .padding(.vertical, isCompactPill && !library.isEnrichingTags ? 0 : 5)
                     }
@@ -2709,7 +2716,7 @@ public struct MainWindowView: View {
                                     .frame(width: 26, height: 26)
                             } else {
                                 Label("提取媒体(\(extractableLinkAssets.count))", systemImage: "square.and.arrow.down.on.square")
-                                    .font(.system(size: 12, weight: .medium))
+                                    .font(CharkleTheme.text(.caption, weight: .medium))
                                     .padding(.horizontal, 8)
                                     .padding(.vertical, 5)
                             }
@@ -2736,7 +2743,7 @@ public struct MainWindowView: View {
                                 .frame(width: 26, height: 26)
                         } else {
                             Label("PureRef", systemImage: "square.grid.2x2")
-                                .font(.system(size: 12, weight: .medium))
+                                .font(CharkleTheme.text(.caption, weight: .medium))
                                 .padding(.horizontal, 8)
                                 .padding(.vertical, 5)
                         }
@@ -2761,7 +2768,7 @@ public struct MainWindowView: View {
                                 .frame(width: 26, height: 26)
                         } else {
                             Label("评分", systemImage: "star")
-                                .font(.system(size: 12, weight: .medium))
+                                .font(CharkleTheme.text(.caption, weight: .medium))
                                 .padding(.horizontal, 8)
                                 .padding(.vertical, 5)
                         }
@@ -2841,10 +2848,10 @@ public struct MainWindowView: View {
                 HStack {
                     VStack(alignment: .leading, spacing: 3) {
                         Text("情绪板创作台")
-                            .font(.system(size: 22, weight: .semibold))
+                            .font(CharkleTheme.text(.title, weight: .semibold))
                             .tracking(-0.3)
                         Text("单源引用素材库 · 无限自由画布与智能灵感策展")
-                            .font(.system(size: 12.5))
+                            .font(CharkleTheme.text(.body))
                             .foregroundStyle(.secondary)
                     }
                     Spacer()
@@ -2884,9 +2891,9 @@ public struct MainWindowView: View {
                     VStack(spacing: 14) {
                         CharkleEmptyStateVignette(.emptyMoodboard)
                         Text("还没有情绪板")
-                            .font(.system(size: 17, weight: .semibold))
+                            .font(CharkleTheme.text(.headline, weight: .semibold))
                         Text("通过灵感词、种子图、主色板或直接框选素材，10 秒生成首张可编辑情绪板。")
-                            .font(.system(size: 12.5))
+                            .font(CharkleTheme.text(.body))
                             .foregroundStyle(.secondary)
                             .multilineTextAlignment(.center)
                             .frame(maxWidth: 400)
@@ -2915,15 +2922,16 @@ public struct MainWindowView: View {
                         Button {
                             coordinator.presentMoodboardGenerator(entry: .prompt)
                         } label: {
+                            let quickCardShape = RoundedRectangle(cornerRadius: CharkleTheme.Radius.popoverOuter, style: .continuous)
                             VStack(spacing: 10) {
                                 Image(systemName: "sparkles.rectangle.stack")
                                     .font(.system(size: 28, weight: .medium))
                                     .symbolVariant(.fill)
                                     .foregroundStyle(activeAccent)
                                 Text("新建灵感情绪板")
-                                    .font(.system(size: 14, weight: .semibold))
+                                    .font(CharkleTheme.text(.body, weight: .semibold))
                                 Text("支持灵感词 / 种子图 / 配色定调 / 框选成板")
-                                    .font(.system(size: 11.5))
+                                    .font(CharkleTheme.text(.caption))
                                     .foregroundStyle(.secondary)
                                     .multilineTextAlignment(.center)
                             }
@@ -2931,10 +2939,10 @@ public struct MainWindowView: View {
                             .padding(18)
                             .background(
                                 CharkleTheme.surfaceElevated(for: colorScheme),
-                                in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                in: quickCardShape
                             )
                             .overlay(
-                                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                quickCardShape
                                     .strokeBorder(activeAccent.opacity(0.35), style: StrokeStyle(lineWidth: 1.25, dash: [6, 5]))
                             )
                         }
@@ -2961,7 +2969,10 @@ public struct MainWindowView: View {
 
     private func moodboardSummaryCard(_ board: MoodboardSummary) -> some View {
         let isActive = coordinator.activeMoodboardID == board.id
-        let cardShape = RoundedRectangle(cornerRadius: 16, style: .continuous)
+        let cardOuterRadius = CharkleTheme.Radius.popoverOuter
+        let cardPadding: CGFloat = 10
+        let mosaicInnerRadius = CharkleTheme.Radius.concentricInner(outer: cardOuterRadius, padding: cardPadding)
+        let cardShape = RoundedRectangle(cornerRadius: cardOuterRadius, style: .continuous)
 
         return Button {
             coordinator.openMoodboard(board.id)
@@ -2985,7 +2996,7 @@ public struct MainWindowView: View {
                                         asset: asset,
                                         loader: library.thumbnailLoader,
                                         tier: .grid520,
-                                        cornerRadius: 4
+                                        cornerRadius: CharkleTheme.Radius.xs
                                     )
                                     .frame(height: 64)
                                 } else {
@@ -2996,13 +3007,13 @@ public struct MainWindowView: View {
                     }
                 }
                 .frame(height: 132)
-                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .clipShape(RoundedRectangle(cornerRadius: mosaicInnerRadius, style: .continuous))
 
                 // Palette Bar
                 if !board.paletteHexes.isEmpty {
                     HStack(spacing: 3) {
                         ForEach(board.paletteHexes.prefix(6), id: \.self) { hex in
-                            RoundedRectangle(cornerRadius: 3, style: .continuous)
+                            RoundedRectangle(cornerRadius: CharkleTheme.Radius.xs, style: .continuous)
                                 .fill(Color(charkleHex: hex))
                                 .frame(height: 8)
                         }
@@ -3012,14 +3023,14 @@ public struct MainWindowView: View {
                 // Meta Row
                 HStack(alignment: .firstTextBaseline) {
                     Text(board.title)
-                        .font(.system(size: 14, weight: .semibold))
+                        .font(CharkleTheme.text(.body, weight: .semibold))
                         .foregroundStyle(.primary)
                         .lineLimit(1)
                     Spacer()
                     if isActive {
                         let pos = CharkleTheme.positive(for: colorScheme)
                         Text("活跃板")
-                            .font(.system(size: 10, weight: .semibold))
+                            .font(CharkleTheme.text(.caption, weight: .semibold))
                             .foregroundStyle(pos)
                             .padding(.horizontal, 6)
                             .padding(.vertical, 2)
@@ -3035,21 +3046,21 @@ public struct MainWindowView: View {
 
                 HStack {
                     Text("\(board.itemCount) 个节点")
-                        .font(.system(size: 11.5))
+                        .font(CharkleTheme.text(.caption))
                         .monospacedDigit()
                         .foregroundStyle(.secondary)
                     Text("·")
                         .foregroundStyle(.tertiary)
                     Text("自由画布")
-                        .font(.system(size: 11.5))
+                        .font(CharkleTheme.text(.caption))
                         .foregroundStyle(.secondary)
                     Spacer()
                     Text(board.updatedAt.formatted(date: .abbreviated, time: .omitted))
-                        .font(.system(size: 11))
+                        .font(CharkleTheme.text(.caption))
                         .foregroundStyle(.tertiary)
                 }
             }
-            .padding(12)
+            .padding(cardPadding)
             .background(CharkleTheme.surfaceElevated(for: colorScheme), in: cardShape)
             .overlay(cardShape.strokeBorder(CharkleTheme.hairline(for: colorScheme), lineWidth: CharkleTheme.hairlineWidth))
             .shadow(color: Color.black.opacity(colorScheme == .dark ? 0.24 : 0.05), radius: 8, y: 3)
@@ -3301,7 +3312,7 @@ public struct MainWindowView: View {
                             .foregroundStyle(coordinator.isInspectorVisible ? activeAccent : CharkleTheme.secondaryInk(for: colorScheme))
                         if galleryViewportWidth >= 520 {
                             Text(coordinator.isInspectorVisible ? "收起候选栏" : "候选替换池")
-                                .font(.system(size: 11.5, weight: .medium))
+                                .font(CharkleTheme.text(.caption, weight: .medium))
                                 .lineLimit(1)
                         }
                     }
@@ -4098,7 +4109,7 @@ private struct FloatingSyncStatusPill: View {
                                 .frame(width: 7, height: 7)
                         }
                         Text(syncPillLabel)
-                            .font(.system(size: 11.5, weight: .medium))
+                            .font(CharkleTheme.text(.caption, weight: .medium))
                             .monospacedDigit()
                             .foregroundStyle(.primary.opacity(0.88))
                             .lineLimit(1)
@@ -4130,7 +4141,7 @@ private struct FloatingSyncStatusPill: View {
                             .frame(width: 7, height: 7)
                     }
                     Text(syncPillLabel)
-                        .font(.system(size: 11.5, weight: .medium))
+                        .font(CharkleTheme.text(.caption, weight: .medium))
                         .monospacedDigit()
                         .lineLimit(1)
                 }
@@ -4217,16 +4228,16 @@ private struct FloatingSyncStatusPill: View {
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 6) {
                         Text(isSyncing ? status.localizedPhaseTitle : (status.pendingOpCount > 0 ? "有 \(status.pendingOpCount) 项待同步" : "云端存储已连接"))
-                            .font(.system(size: 13, weight: .semibold))
+                            .font(CharkleTheme.text(.body, weight: .semibold))
                         if isSyncing, let percentText {
                             Text(percentText)
-                                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                .font(CharkleTheme.text(.caption, weight: .semibold, design: .monospaced))
                                 .monospacedDigit()
                                 .foregroundStyle(activeAccent)
                         }
                     }
                     Text(syncAndAI.syncConfig.activeStorageLocationSummary)
-                        .font(.system(size: 11))
+                        .font(CharkleTheme.text(.caption))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .truncationMode(.middle)
@@ -4247,7 +4258,7 @@ private struct FloatingSyncStatusPill: View {
                     }
                     if let detail = status.currentDetail, !detail.isEmpty {
                         Text(detail)
-                            .font(.system(size: 11))
+                            .font(CharkleTheme.text(.caption))
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                             .truncationMode(.middle)
@@ -4256,7 +4267,7 @@ private struct FloatingSyncStatusPill: View {
             } else if let err = status.lastError, !err.isEmpty {
                 let errColor = CharkleTheme.destructive(for: colorScheme)
                 Text(err)
-                    .font(.system(size: 11))
+                    .font(CharkleTheme.text(.caption))
                     .foregroundStyle(errColor)
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(8)
@@ -4267,31 +4278,31 @@ private struct FloatingSyncStatusPill: View {
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
                     Text("上次同步")
-                        .font(.system(size: 11))
+                        .font(CharkleTheme.text(.caption))
                         .foregroundStyle(.secondary)
                     Spacer()
                     Text(status.lastSyncedAt.map { formatRelativeSyncTime($0) } ?? "尚未同步")
-                        .font(.system(size: 11, weight: .medium))
+                        .font(CharkleTheme.text(.caption, weight: .medium))
                         .monospacedDigit()
                 }
                 HStack {
                     Text("本地待传队列")
-                        .font(.system(size: 11))
+                        .font(CharkleTheme.text(.caption))
                         .foregroundStyle(.secondary)
                     Spacer()
                     Text(status.pendingOpCount > 0 ? "\(status.pendingOpCount) 项" : "已清空")
-                        .font(.system(size: 11, weight: .medium))
+                        .font(CharkleTheme.text(.caption, weight: .medium))
                         .monospacedDigit()
                         .foregroundStyle(status.pendingOpCount > 0 ? CharkleTheme.warning(for: colorScheme) : .secondary)
                 }
                 if let report = syncAndAI.lastSyncReport {
                     HStack {
                         Text("最近同步结果")
-                            .font(.system(size: 11))
+                            .font(CharkleTheme.text(.caption))
                             .foregroundStyle(.secondary)
                         Spacer()
                         Text("↑ \(report.uploadedOps)  ↓ \(report.downloadedOps)  +\(report.discoveredRemoteAssets)")
-                            .font(.system(size: 11, weight: .medium, design: .monospaced))
+                            .font(CharkleTheme.text(.caption, weight: .medium, design: .monospaced))
                             .monospacedDigit()
                     }
                 }
@@ -4355,10 +4366,10 @@ private struct InboxZeroCelebrationView: View {
 
             VStack(spacing: 14) {
                 Text("收件箱已清空")
-                    .font(.system(size: 20, weight: .semibold))
+                    .font(CharkleTheme.text(.title, weight: .semibold))
                     .tracking(-0.2)
                 Text("所有灵感都已妥善归档或进入情绪板。随时拖动文件到 MacBook 刘海或按 \(GlobalHotkeyManager.displayString(for: .captureArea, fallback: "⌥⇧A")) 截图采集。")
-                    .font(.system(size: 13))
+                    .font(CharkleTheme.text(.body))
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
                     .frame(maxWidth: 420)

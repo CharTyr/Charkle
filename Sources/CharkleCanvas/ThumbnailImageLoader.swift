@@ -784,7 +784,7 @@ public struct AssetThumbnailSurface: View {
         asset: AssetRecord,
         loader: ThumbnailImageLoader,
         tier: ThumbnailTier = .grid520,
-        cornerRadius: CGFloat = 12,
+        cornerRadius: CGFloat = CanvasSurface.Radius.cardOuter,
         isHovered: Bool = false,
         crop: NormalizedCropRect? = nil,
         contentMode: ContentMode = .fill,
@@ -1006,11 +1006,11 @@ public struct ProceduralMediaFallbackCard: View {
             Color(charkleHex: hex)
             VStack(alignment: .leading, spacing: 2) {
                 Text(hex.uppercased())
-                    .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                    .font(CanvasSurface.text(.body, weight: .semibold, design: .monospaced))
                     .foregroundStyle(light ? Color.black.opacity(0.84) : Color.white.opacity(0.92))
                 if asset.title.uppercased() != hex.uppercased() {
                     Text(asset.title)
-                        .font(.system(size: 11, weight: .medium))
+                        .font(CanvasSurface.text(.caption, weight: .medium))
                         .foregroundStyle(light ? Color.black.opacity(0.60) : Color.white.opacity(0.70))
                         .lineLimit(1)
                 }
@@ -1062,7 +1062,7 @@ public struct ProceduralMediaFallbackCard: View {
                     .foregroundStyle(.white.opacity(0.9))
                     .shadow(color: .black.opacity(0.25), radius: 6, y: 2)
                 Text("GIF / MOTION")
-                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .font(CanvasSurface.text(.caption, weight: .semibold, design: .monospaced))
                     .foregroundStyle(.white.opacity(0.82))
             }
         }
@@ -1087,7 +1087,7 @@ public struct ProceduralMediaFallbackCard: View {
                         .offset(x: 1)
                 }
                 Text(CanvasFormatters.durationString(asset.durationSeconds))
-                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                    .font(CanvasSurface.text(.caption, weight: .medium, design: .monospaced))
                     .monospacedDigit()
                     .foregroundStyle(.white.opacity(0.78))
             }
@@ -1104,7 +1104,7 @@ public struct ProceduralMediaFallbackCard: View {
                     .foregroundStyle(barColor)
                 Spacer()
                 Text(CanvasFormatters.durationString(asset.durationSeconds))
-                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                    .font(CanvasSurface.text(.caption, weight: .medium, design: .monospaced))
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
             }
@@ -1129,14 +1129,14 @@ public struct ProceduralMediaFallbackCard: View {
             Spacer(minLength: 4)
 
             Text(asset.title)
-                .font(.system(size: 12, weight: .medium))
+                .font(CanvasSurface.text(.caption, weight: .medium))
                 .foregroundStyle(.primary)
                 .lineLimit(1)
         }
         .padding(14)
         .background(CanvasSurface.elevated(for: colorScheme))
         .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            RoundedRectangle(cornerRadius: CanvasSurface.Radius.cardOuter, style: .continuous)
                 .strokeBorder(CanvasSurface.hairline(for: colorScheme), lineWidth: CanvasSurface.hairlineWidth)
         )
     }
@@ -1165,7 +1165,7 @@ public struct ProceduralMediaFallbackCard: View {
                     .fill(accent)
                     .frame(width: 8, height: 8)
                 Text(domain)
-                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                    .font(CanvasSurface.text(.caption, weight: .medium, design: .monospaced))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                 Spacer()
@@ -1177,14 +1177,14 @@ public struct ProceduralMediaFallbackCard: View {
             Spacer(minLength: 4)
 
             Text(asset.title)
-                .font(.system(size: 13, weight: .semibold))
+                .font(CanvasSurface.text(.body, weight: .semibold))
                 .foregroundStyle(.primary)
                 .lineLimit(3)
                 .multilineTextAlignment(.leading)
 
             if !asset.notes.isEmpty {
                 Text(asset.notes)
-                    .font(.system(size: 11))
+                    .font(CanvasSurface.text(.caption))
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
             }
@@ -1199,7 +1199,7 @@ public struct ProceduralMediaFallbackCard: View {
                 .frame(height: 3)
         }
         .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            RoundedRectangle(cornerRadius: CanvasSurface.Radius.cardOuter, style: .continuous)
                 .strokeBorder(CanvasSurface.hairline(for: colorScheme), lineWidth: CanvasSurface.hairlineWidth)
         )
     }
@@ -1209,10 +1209,10 @@ public struct ProceduralMediaFallbackCard: View {
         return VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text(ext)
-                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                    .font(CanvasSurface.text(.caption, weight: .bold, design: .monospaced))
                     .padding(.horizontal, 6)
                     .padding(.vertical, 3)
-                    .background(Color.primary.opacity(0.08), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    .background(Color.primary.opacity(0.08), in: RoundedRectangle(cornerRadius: CanvasSurface.Radius.sm, style: .continuous))
                 Spacer()
                 Image(systemName: "doc.richtext")
                     .font(.system(size: 13))
@@ -1220,13 +1220,13 @@ public struct ProceduralMediaFallbackCard: View {
             }
 
             Text(asset.title)
-                .font(.system(size: 13, weight: .semibold))
+                .font(CanvasSurface.text(.body, weight: .semibold))
                 .foregroundStyle(.primary)
                 .lineLimit(2)
 
             if !asset.notes.isEmpty {
                 Text(asset.notes)
-                    .font(.system(size: 11))
+                    .font(CanvasSurface.text(.caption))
                     .foregroundStyle(.secondary)
                     .lineLimit(4)
             } else {
@@ -1243,7 +1243,7 @@ public struct ProceduralMediaFallbackCard: View {
         .padding(14)
         .background(CanvasSurface.elevated(for: colorScheme))
         .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            RoundedRectangle(cornerRadius: CanvasSurface.Radius.cardOuter, style: .continuous)
                 .strokeBorder(CanvasSurface.hairline(for: colorScheme), lineWidth: CanvasSurface.hairlineWidth)
         )
     }
@@ -1265,20 +1265,20 @@ public struct ProceduralMediaFallbackCard: View {
             }
             VStack(spacing: 8) {
                 Text(ext)
-                    .font(.system(size: 13, weight: .bold, design: .monospaced))
+                    .font(CanvasSurface.text(.body, weight: .bold, design: .monospaced))
                     .foregroundStyle(Color.charkleIsLightHex(primaryHex) ? Color.black.opacity(0.86) : Color.white)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 5)
-                    .background(accent, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    .background(accent, in: RoundedRectangle(cornerRadius: CanvasSurface.Radius.sm, style: .continuous))
                 Text(asset.title)
-                    .font(.system(size: 11, weight: .medium))
+                    .font(CanvasSurface.text(.caption, weight: .medium))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .padding(.horizontal, 10)
             }
         }
         .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            RoundedRectangle(cornerRadius: CanvasSurface.Radius.cardOuter, style: .continuous)
                 .strokeBorder(CanvasSurface.hairline(for: colorScheme), lineWidth: CanvasSurface.hairlineWidth)
         )
     }

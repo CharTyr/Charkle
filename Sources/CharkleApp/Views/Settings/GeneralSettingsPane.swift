@@ -74,9 +74,9 @@ public struct GeneralSettingsPane: View {
                 VStack(alignment: .leading, spacing: 10) {
                     VStack(alignment: .leading, spacing: 2.5) {
                         Text("应用图标")
-                            .font(.system(size: 13, weight: .medium))
+                            .font(CharkleTheme.text(.body, weight: .medium))
                         Text("切换 Charkle 在程序坞与切换器中的图标风格，点击立即生效。")
-                            .font(.system(size: 11.5))
+                            .font(CharkleTheme.text(.caption))
                             .foregroundStyle(.secondary)
                     }
 
@@ -101,7 +101,7 @@ public struct GeneralSettingsPane: View {
                                                 .interpolation(.high)
                                                 .aspectRatio(contentMode: .fit)
                                                 .frame(width: 46, height: 46)
-                                                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                                                .clipShape(RoundedRectangle(cornerRadius: CharkleTheme.Radius.popoverInner, style: .continuous))
                                                 .shadow(color: Color.black.opacity(0.14), radius: 5, y: 2)
                                         }
                                         if selected {
@@ -114,10 +114,10 @@ public struct GeneralSettingsPane: View {
 
                                     VStack(alignment: .leading, spacing: 2) {
                                         Text(variant.title)
-                                            .font(.system(size: 12.5, weight: selected ? .semibold : .medium))
+                                            .font(CharkleTheme.text(.body, weight: selected ? .semibold : .medium))
                                             .foregroundStyle(.primary)
                                         Text(variant.subtitle)
-                                            .font(.system(size: 11))
+                                            .font(CharkleTheme.text(.caption))
                                             .foregroundStyle(.secondary)
                                     }
                                     Spacer(minLength: 0)

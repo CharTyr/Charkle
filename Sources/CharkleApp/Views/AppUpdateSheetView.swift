@@ -61,7 +61,7 @@ public struct AppUpdateSheetView: View {
 
             VStack(alignment: .leading, spacing: 4) {
                 Text(headerTitle)
-                    .font(.system(size: 15.5, weight: .semibold))
+                    .font(CharkleTheme.text(.headline, weight: .semibold))
                     .foregroundStyle(.primary)
 
                 headerSubtitleView
@@ -93,7 +93,7 @@ public struct AppUpdateSheetView: View {
                 .interpolation(.high)
                 .aspectRatio(contentMode: .fit)
                 .frame(width: 44, height: 44)
-                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .clipShape(RoundedRectangle(cornerRadius: CharkleTheme.Radius.popoverInner, style: .continuous))
         } else {
             CharkleBrandMark(size: 38)
                 .frame(width: 44, height: 44)
@@ -128,7 +128,7 @@ public struct AppUpdateSheetView: View {
         if let update = appUpdater.activeUpdate {
             HStack(spacing: 6) {
                 Text("v\(appUpdater.currentVersion.description)")
-                    .font(.system(size: 11.5, weight: .medium, design: .monospaced))
+                    .font(CharkleTheme.text(.caption, weight: .medium, design: .monospaced))
                     .monospacedDigit()
                     .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
 
@@ -137,7 +137,7 @@ public struct AppUpdateSheetView: View {
                     .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
 
                 Text(update.tagName)
-                    .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
+                    .font(CharkleTheme.text(.caption, weight: .semibold, design: .monospaced))
                     .monospacedDigit()
                     .foregroundStyle(activeAccent)
                     .padding(.horizontal, 6)
@@ -149,21 +149,21 @@ public struct AppUpdateSheetView: View {
 
                 if update.assetSizeBytes > 0 {
                     Text("· \(Self.formatBytes(update.assetSizeBytes))")
-                        .font(.system(size: 11.5))
+                        .font(CharkleTheme.text(.caption))
                         .monospacedDigit()
                         .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
                 }
 
                 if let publishedAt = update.publishedAt {
                     Text("· \(Self.formatReleaseDate(publishedAt))")
-                        .font(.system(size: 11.5))
+                        .font(CharkleTheme.text(.caption))
                         .monospacedDigit()
                         .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
                 }
             }
         } else {
             Text("当前版本 v\(appUpdater.currentVersion.description) (\(appUpdater.currentBuildNumber))")
-                .font(.system(size: 11.5, weight: .medium, design: .monospaced))
+                .font(CharkleTheme.text(.caption, weight: .medium, design: .monospaced))
                 .monospacedDigit()
                 .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
         }
@@ -177,11 +177,11 @@ public struct AppUpdateSheetView: View {
             VStack(spacing: 0) {
                 HStack(alignment: .firstTextBaseline) {
                     Text("更新说明")
-                        .font(.system(size: 11.5, weight: .semibold))
+                        .font(CharkleTheme.text(.caption, weight: .semibold))
                         .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
                     Spacer()
                     Text(update.assetName)
-                        .font(.system(size: 11, design: .monospaced))
+                        .font(CharkleTheme.text(.caption, design: .monospaced))
                         .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
                         .lineLimit(1)
                 }
@@ -217,13 +217,13 @@ public struct AppUpdateSheetView: View {
         let trimmed = update.releaseNotes.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty {
             Text("本次更新包含稳定性与性能优化，完整变更日志可在 GitHub Release 页面查看。")
-                .font(.system(size: 13))
+                .font(CharkleTheme.text(.body))
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.top, 4)
         } else {
             StructuredText(markdown: trimmed, baseURL: update.releasePageURL)
-                .font(.system(size: 12.5))
+                .font(CharkleTheme.text(.body))
                 .textual.structuredTextStyle(.gitHub)
                 .textual.inlineStyle(Self.markdownInlineStyle)
                 .textual.overflowMode(.scroll)
@@ -249,11 +249,11 @@ public struct AppUpdateSheetView: View {
             VStack(alignment: .leading, spacing: 7) {
                 HStack(alignment: .firstTextBaseline) {
                     Text("正在下载安装包…")
-                        .font(.system(size: 12.5, weight: .medium))
+                        .font(CharkleTheme.text(.body, weight: .medium))
                         .foregroundStyle(.primary)
                     Spacer()
                     Text(Self.downloadCounterText(downloaded: downloadedBytes, total: totalBytes, progress: progress))
-                        .font(.system(size: 11.5, weight: .medium, design: .monospaced))
+                        .font(CharkleTheme.text(.caption, weight: .medium, design: .monospaced))
                         .monospacedDigit()
                         .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
                 }
@@ -268,12 +268,12 @@ public struct AppUpdateSheetView: View {
                     .controlSize(.small)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("正在校验完整性与签名…")
-                        .font(.system(size: 12.5, weight: .medium))
+                        .font(CharkleTheme.text(.body, weight: .medium))
                         .foregroundStyle(.primary)
                     Text(update.expectedSHA256 != nil
                         ? "核对 SHA-256 校验和、应用标识与严格代码签名"
                         : "核对应用标识与严格代码签名")
-                        .font(.system(size: 11.5))
+                        .font(CharkleTheme.text(.caption))
                         .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
                 }
                 Spacer()
@@ -286,10 +286,10 @@ public struct AppUpdateSheetView: View {
                     .foregroundStyle(CharkleTheme.positive(for: colorScheme))
                 VStack(alignment: .leading, spacing: 2) {
                     Text("SHA-256 校验与代码签名验证通过")
-                        .font(.system(size: 12.5, weight: .semibold))
+                        .font(CharkleTheme.text(.body, weight: .semibold))
                         .foregroundStyle(CharkleTheme.positive(for: colorScheme))
                     Text("点击「重启并安装更新」后，Charkle 将保存当前数据、替换应用包并自动重新打开。")
-                        .font(.system(size: 11.5))
+                        .font(CharkleTheme.text(.caption))
                         .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -301,7 +301,7 @@ public struct AppUpdateSheetView: View {
                 ProgressView()
                     .controlSize(.small)
                 Text("正在保存情绪板数据并替换应用包，即将自动重启…")
-                    .font(.system(size: 12.5, weight: .medium))
+                    .font(CharkleTheme.text(.body, weight: .medium))
                     .foregroundStyle(.primary)
                 Spacer()
             }
@@ -314,11 +314,11 @@ public struct AppUpdateSheetView: View {
                     .padding(.top, 1)
                 VStack(alignment: .leading, spacing: 3) {
                     Text(appUpdater.manualInstallReason ?? "当前运行位置不支持原地替换，请打开已校验的安装包手动拖拽安装。")
-                        .font(.system(size: 12, weight: .medium))
+                        .font(CharkleTheme.text(.caption, weight: .medium))
                         .foregroundStyle(.primary)
                         .fixedSize(horizontal: false, vertical: true)
                     Text("已验证安装包：\(dmgURL.lastPathComponent)")
-                        .font(.system(size: 11, design: .monospaced))
+                        .font(CharkleTheme.text(.caption, design: .monospaced))
                         .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
                 }
                 Spacer(minLength: 0)
@@ -337,10 +337,10 @@ public struct AppUpdateSheetView: View {
                 ProgressView()
                     .controlSize(.regular)
                 Text("正在连接 GitHub Releases 获取最新版本…")
-                    .font(.system(size: 13, weight: .medium))
+                    .font(CharkleTheme.text(.body, weight: .medium))
                     .foregroundStyle(.primary)
                 Text("校验来源：github.com/CharTyr/Charkle")
-                    .font(.system(size: 11.5, design: .monospaced))
+                    .font(CharkleTheme.text(.caption, design: .monospaced))
                     .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
             }
 
@@ -350,10 +350,10 @@ public struct AppUpdateSheetView: View {
                     .font(.system(size: 28))
                     .foregroundStyle(CharkleTheme.positive(for: colorScheme))
                 Text("当前已是最新稳定版本")
-                    .font(.system(size: 14, weight: .semibold))
+                    .font(CharkleTheme.text(.body, weight: .semibold))
                     .foregroundStyle(.primary)
                 Text("上次检查：\(SettingsHelpers.relativeTimeText(checkedAt))")
-                    .font(.system(size: 12))
+                    .font(CharkleTheme.text(.caption))
                     .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
             }
 
@@ -363,13 +363,13 @@ public struct AppUpdateSheetView: View {
                     .font(.system(size: 26))
                     .foregroundStyle(CharkleTheme.warning(for: colorScheme))
                 Text(message)
-                    .font(.system(size: 12.5, weight: .medium))
+                    .font(CharkleTheme.text(.body, weight: .medium))
                     .foregroundStyle(.primary)
                     .multilineTextAlignment(.center)
                     .fixedSize(horizontal: false, vertical: true)
                     .textSelection(.enabled)
                 Text("请检查网络连接，或直接前往 GitHub Releases 页面手动下载。")
-                    .font(.system(size: 11.5))
+                    .font(CharkleTheme.text(.caption))
                     .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
             }
 

@@ -172,7 +172,7 @@ public struct OnboardingView: View {
     }
 
     public var body: some View {
-        let outerShape = RoundedRectangle(cornerRadius: 20, style: .continuous)
+        let outerShape = RoundedRectangle(cornerRadius: CharkleTheme.Radius.dockOuter, style: .continuous)
 
         ZStack {
             CharkleModalBackdrop()
@@ -312,7 +312,7 @@ public struct OnboardingView: View {
             HStack(spacing: 9) {
                 CharkleBrandMark(size: 22)
                 Text("Charkle")
-                    .font(.system(size: 14, weight: .semibold))
+                    .font(CharkleTheme.text(.body, weight: .semibold))
                     .foregroundStyle(.primary)
             }
             .frame(width: 112, alignment: .leading)
@@ -343,7 +343,7 @@ public struct OnboardingView: View {
                                     .frame(width: 5.5, height: 5.5)
                             }
                             Text(step.shortTitle)
-                                .font(.system(size: 11.5, weight: isActive ? .semibold : .medium))
+                                .font(CharkleTheme.text(.caption, weight: isActive ? .semibold : .medium))
                                 .foregroundStyle(isActive ? .primary : .secondary)
                         }
                         .padding(.horizontal, 10)
@@ -379,7 +379,7 @@ public struct OnboardingView: View {
                     } label: {
                         HStack(spacing: 4) {
                             Text("跳过引导")
-                                .font(.system(size: 11.5, weight: .medium))
+                                .font(CharkleTheme.text(.caption, weight: .medium))
                             Image(systemName: "xmark")
                                 .font(.system(size: 9.5, weight: .semibold))
                         }
@@ -418,14 +418,14 @@ public struct OnboardingView: View {
                 .buttonStyle(SettingsSecondaryButtonStyle())
             } else {
                 Text("每一步都可跳过 · 随时可在「设置 (⌘,) → 通用」重新查看")
-                    .font(.system(size: 11.5))
+                    .font(CharkleTheme.text(.caption))
                     .foregroundStyle(.secondary)
             }
 
             Spacer()
 
             Text("\(currentStep.rawValue + 1) / \(Step.allCases.count)")
-                .font(.system(size: 11.5, weight: .medium, design: .monospaced))
+                .font(CharkleTheme.text(.caption, weight: .medium, design: .monospaced))
                 .monospacedDigit()
                 .foregroundStyle(.tertiary)
                 .padding(.trailing, 4)
@@ -537,12 +537,12 @@ public struct OnboardingView: View {
 
                 VStack(spacing: 6) {
                     Text("欢迎使用 Charkle")
-                        .font(.system(size: 27, weight: .bold))
+                        .font(CharkleTheme.text(.title, weight: .bold))
                         .tracking(-0.45)
                         .foregroundStyle(.primary)
 
                     Text("专为视觉创作者打造的 macOS 灵感收集与情绪板工作台。花 1 分钟按需选几项偏好，或直接跳过立即开始。")
-                        .font(.system(size: 13))
+                        .font(CharkleTheme.text(.body))
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
                         .frame(maxWidth: 540)
@@ -604,7 +604,7 @@ public struct OnboardingView: View {
         } label: {
             VStack(alignment: .leading, spacing: 11) {
                 ZStack {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    RoundedRectangle(cornerRadius: CharkleTheme.Radius.settingsInner, style: .continuous)
                         .fill(Color(charkleHex: accentHex).opacity(colorScheme == .dark ? 0.14 : 0.08))
                         .frame(width: 54, height: 54)
                     CharkleIcon(iconName, style: .layered, size: 40)
@@ -615,11 +615,11 @@ public struct OnboardingView: View {
 
                 VStack(alignment: .leading, spacing: 4) {
                     Text(title)
-                        .font(.system(size: 13, weight: .semibold))
+                        .font(CharkleTheme.text(.body, weight: .semibold))
                         .foregroundStyle(.primary)
                         .lineLimit(1)
                     Text(subtitle)
-                        .font(.system(size: 11.5))
+                        .font(CharkleTheme.text(.caption))
                         .foregroundStyle(.secondary)
                         .lineSpacing(2.2)
                         .fixedSize(horizontal: false, vertical: true)
@@ -629,9 +629,9 @@ public struct OnboardingView: View {
             }
             .padding(14)
             .frame(maxWidth: .infinity, minHeight: 162, alignment: .topLeading)
-            .background(cardBackground, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .background(cardBackground, in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.settingsOuter, style: .continuous))
             .overlay(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                RoundedRectangle(cornerRadius: CharkleTheme.Radius.settingsOuter, style: .continuous)
                     .strokeBorder(
                         hovered ? selectedStrokeColor : SettingsPalette.border(for: colorScheme),
                         lineWidth: hovered ? 1.5 : CharkleTheme.hairlineWidth
@@ -705,7 +705,7 @@ public struct OnboardingView: View {
                     } detail: {
                         HStack(spacing: 8) {
                             Text(draftSyncConfig.localLibraryPath.isEmpty ? "~/Pictures/Charkle" : draftSyncConfig.localLibraryPath)
-                                .font(.system(size: 11, design: .monospaced))
+                                .font(CharkleTheme.text(.caption, design: .monospaced))
                                 .foregroundStyle(.secondary)
                                 .lineLimit(1)
                                 .truncationMode(.middle)
@@ -736,7 +736,7 @@ public struct OnboardingView: View {
                                     Spacer()
                                 } else if syncAndAI.hasGoogleOAuthClient {
                                     Text("点击后在浏览器中安全完成 OAuth 登录")
-                                        .font(.system(size: 11))
+                                        .font(CharkleTheme.text(.caption))
                                         .foregroundStyle(.secondary)
                                     Spacer()
                                     Button {
@@ -758,7 +758,7 @@ public struct OnboardingView: View {
                                     .disabled(syncAndAI.isBusy)
                                 } else {
                                     Text(hasGDirect ? "检测到本机 gdirect，可一键导入凭据" : "首次直连需准备个人桌面端 OAuth 凭据")
-                                        .font(.system(size: 11))
+                                        .font(CharkleTheme.text(.caption))
                                         .foregroundStyle(.secondary)
                                     Spacer()
                                     if hasGDirect {
@@ -853,7 +853,7 @@ public struct OnboardingView: View {
                         HStack(spacing: 6) {
                             CharkleIcon("notch", style: .duotone, size: 15)
                             Text("预览顶部真刘海 (\(GlobalHotkeyManager.displayString(for: .toggleNotchShelf, fallback: "⌥⇧S")))")
-                                .font(.system(size: 12, weight: .semibold))
+                                .font(CharkleTheme.text(.caption, weight: .semibold))
                         }
                         .frame(maxWidth: .infinity)
                     }
@@ -862,9 +862,9 @@ public struct OnboardingView: View {
                 }
                 .padding(16)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(pedestalBackground, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .background(pedestalBackground, in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.settingsOuter, style: .continuous))
                 .overlay(
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    RoundedRectangle(cornerRadius: CharkleTheme.Radius.settingsOuter, style: .continuous)
                         .strokeBorder(SettingsPalette.border(for: colorScheme), lineWidth: CharkleTheme.hairlineWidth)
                 )
             },
@@ -881,7 +881,7 @@ public struct OnboardingView: View {
                         VStack(alignment: .leading, spacing: 3) {
                             HStack(spacing: 7) {
                                 Text("屏幕录制权限（区域截图）")
-                                    .font(.system(size: 13, weight: .medium))
+                                    .font(CharkleTheme.text(.body, weight: .medium))
                                     .foregroundStyle(.primary)
                                 SettingsStatusBadge(
                                     hasScreenCapturePermission ? "已授权" : "暂未开启",
@@ -896,7 +896,7 @@ public struct OnboardingView: View {
                                     ? "已就绪 · 可随时按 \(captureKey) 在任意应用中框选截图入库"
                                     : "仅在使用 \(captureKey) 区域截图时需要；纯拖图或收藏剪贴板可直接跳过"
                             )
-                            .font(.system(size: 11.5))
+                            .font(CharkleTheme.text(.caption))
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                         }
@@ -931,9 +931,9 @@ public struct OnboardingView: View {
                         }
                     }
                 }
-                .background(cardBackground, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .background(cardBackground, in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.settingsOuter, style: .continuous))
                 .overlay(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    RoundedRectangle(cornerRadius: CharkleTheme.Radius.settingsOuter, style: .continuous)
                         .strokeBorder(SettingsPalette.border(for: colorScheme), lineWidth: CharkleTheme.hairlineWidth)
                 )
 
@@ -961,10 +961,10 @@ public struct OnboardingView: View {
                     HStack(spacing: 12) {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("默认收纳目标")
-                                .font(.system(size: 13, weight: .medium))
+                                .font(CharkleTheme.text(.body, weight: .medium))
                                 .foregroundStyle(coordinator.notchShelfEnabled ? .primary : .secondary)
                             Text("拖入浮窗或快捷键采集的新灵感默认落入位置")
-                                .font(.system(size: 11.5))
+                                .font(CharkleTheme.text(.caption))
                                 .foregroundStyle(.secondary)
                         }
                         Spacer(minLength: 8)
@@ -1003,9 +1003,9 @@ public struct OnboardingView: View {
                         )
                     )
                 }
-                .background(cardBackground, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .background(cardBackground, in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.settingsOuter, style: .continuous))
                 .overlay(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    RoundedRectangle(cornerRadius: CharkleTheme.Radius.settingsOuter, style: .continuous)
                         .strokeBorder(SettingsPalette.border(for: colorScheme), lineWidth: CharkleTheme.hairlineWidth)
                 )
             }
@@ -1046,7 +1046,7 @@ public struct OnboardingView: View {
         let targetText = coordinator.defaultNotchTargetMode.localizedTitle
         return VStack(spacing: 10) {
             ZStack(alignment: .top) {
-                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                RoundedRectangle(cornerRadius: CharkleTheme.Radius.settingsInner, style: .continuous)
                     .fill(
                         LinearGradient(
                             colors: colorScheme == .dark
@@ -1057,7 +1057,7 @@ public struct OnboardingView: View {
                         )
                     )
                     .overlay(
-                        RoundedRectangle(cornerRadius: 11, style: .continuous)
+                        RoundedRectangle(cornerRadius: CharkleTheme.Radius.settingsInner, style: .continuous)
                             .strokeBorder(SettingsPalette.border(for: colorScheme), lineWidth: CharkleTheme.hairlineWidth)
                     )
 
@@ -1073,7 +1073,7 @@ public struct OnboardingView: View {
                                 .font(.system(size: 11, weight: .semibold))
                                 .foregroundStyle(demoConfirmed ? Color(charkleHex: "#4ADE80") : Color(charkleHex: "#60A5FA"))
                             Text(demoConfirmed ? "已收入\(targetText)" : "松手即存")
-                                .font(.system(size: 10, weight: .semibold))
+                                .font(CharkleTheme.text(.caption, weight: .semibold))
                                 .foregroundStyle(.white.opacity(0.92))
                                 .lineLimit(1)
                         }
@@ -1081,7 +1081,7 @@ public struct OnboardingView: View {
                         .padding(.vertical, 5)
                         .background(
                             (demoConfirmed ? Color(charkleHex: "#3D9970") : Color(charkleHex: "#3B82F6")).opacity(0.22),
-                            in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.sm, style: .continuous)
                         )
                         .transition(.opacity.combined(with: .scale(scale: 0.94, anchor: .top)))
                     }
@@ -1091,15 +1091,15 @@ public struct OnboardingView: View {
                     Color.black,
                     in: UnevenRoundedRectangle(
                         topLeadingRadius: 0,
-                        bottomLeadingRadius: demoNotchExpanded ? 14 : 7,
-                        bottomTrailingRadius: demoNotchExpanded ? 14 : 7,
+                        bottomLeadingRadius: demoNotchExpanded ? CharkleTheme.Radius.cardOuter : CharkleTheme.Radius.sm,
+                        bottomTrailingRadius: demoNotchExpanded ? CharkleTheme.Radius.cardOuter : CharkleTheme.Radius.sm,
                         topTrailingRadius: 0,
                         style: .continuous
                     )
                 )
                 .shadow(color: Color.black.opacity(0.26), radius: 8, y: 4)
 
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                RoundedRectangle(cornerRadius: CharkleTheme.Radius.sm, style: .continuous)
                     .fill(
                         LinearGradient(
                             colors: [Color(charkleHex: "#3B74E8"), Color(charkleHex: "#2A8F9D")],
@@ -1119,12 +1119,12 @@ public struct OnboardingView: View {
                     .opacity(demoConfirmed ? 0.0 : 1.0)
             }
             .frame(height: 146)
-            .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: CharkleTheme.Radius.settingsInner, style: .continuous))
 
             HStack(spacing: 8) {
                 CharkleIcon("notch", style: .layered, size: 32)
                 Text("拖起素材靠近屏幕顶边即展，不抢焦点、不切桌面。")
-                    .font(.system(size: 11.5))
+                    .font(CharkleTheme.text(.caption))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -1147,10 +1147,10 @@ public struct OnboardingView: View {
 
                     VStack(alignment: .leading, spacing: 7) {
                         Text("基础离线能力免费内置")
-                            .font(.system(size: 12, weight: .semibold))
+                            .font(CharkleTheme.text(.caption, weight: .semibold))
                             .foregroundStyle(.primary)
                         Text("无需下载模型 · 数据不出本机")
-                            .font(.system(size: 10.5))
+                            .font(CharkleTheme.text(.caption))
                             .foregroundStyle(.secondary)
                             .padding(.bottom, 2)
                         offlineFeatureBullet("自动配色提取与相近色筛选")
@@ -1160,17 +1160,17 @@ public struct OnboardingView: View {
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(12)
-                    .background(cardBackground, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+                    .background(cardBackground, in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.settingsInner, style: .continuous))
                     .overlay(
-                        RoundedRectangle(cornerRadius: 11, style: .continuous)
+                        RoundedRectangle(cornerRadius: CharkleTheme.Radius.settingsInner, style: .continuous)
                             .strokeBorder(SettingsPalette.border(for: colorScheme), lineWidth: CharkleTheme.hairlineWidth)
                     )
                 }
                 .padding(16)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(pedestalBackground, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .background(pedestalBackground, in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.settingsOuter, style: .continuous))
                 .overlay(
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    RoundedRectangle(cornerRadius: CharkleTheme.Radius.settingsOuter, style: .continuous)
                         .strokeBorder(SettingsPalette.border(for: colorScheme), lineWidth: CharkleTheme.hairlineWidth)
                 )
             },
@@ -1217,7 +1217,7 @@ public struct OnboardingView: View {
                                 Spacer()
                             } else {
                                 Text("通过官方 OAuth 登录，凭据仅存于系统钥匙串")
-                                    .font(.system(size: 11))
+                                    .font(CharkleTheme.text(.caption))
                                     .foregroundStyle(.secondary)
                                 Spacer()
                                 Button {
@@ -1262,7 +1262,7 @@ public struct OnboardingView: View {
                                     Button(preset.label) {
                                         applyAIPreset(preset)
                                     }
-                                    .font(.system(size: 11, weight: active ? .semibold : .medium))
+                                    .font(CharkleTheme.text(.caption, weight: active ? .semibold : .medium))
                                     .foregroundStyle(active ? (colorScheme == .dark ? Color.black : Color.white) : Color.primary.opacity(0.82))
                                     .padding(.horizontal, 9)
                                     .padding(.vertical, 4)
@@ -1315,7 +1315,7 @@ public struct OnboardingView: View {
                 }
 
                 Text("TypeSafe 视觉增强与外部 AI Agent (MCP) 可随时在「设置 → 生态与智能」中按需开启。")
-                    .font(.system(size: 11))
+                    .font(CharkleTheme.text(.caption))
                     .foregroundStyle(.tertiary)
 
                 inlineFeedbackPill
@@ -1333,18 +1333,18 @@ public struct OnboardingView: View {
 
                     galleryLayoutMiniPreview(mode: coordinator.galleryLayoutMode)
                         .padding(12)
-                        .background(cardBackground, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+                        .background(cardBackground, in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.settingsInner, style: .continuous))
                         .overlay(
-                            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                            RoundedRectangle(cornerRadius: CharkleTheme.Radius.settingsInner, style: .continuous)
                                 .strokeBorder(SettingsPalette.border(for: colorScheme), lineWidth: CharkleTheme.hairlineWidth)
                         )
                         .animation(CharkleMotion.accessible(CharkleMotion.moveOnScreen, reduced: reduceMotion), value: coordinator.galleryLayoutMode)
                 }
                 .padding(16)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(pedestalBackground, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .background(pedestalBackground, in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.settingsOuter, style: .continuous))
                 .overlay(
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    RoundedRectangle(cornerRadius: CharkleTheme.Radius.settingsOuter, style: .continuous)
                         .strokeBorder(SettingsPalette.border(for: colorScheme), lineWidth: CharkleTheme.hairlineWidth)
                 )
             },
@@ -1358,7 +1358,7 @@ public struct OnboardingView: View {
                 // 1. App Icon Variant Choice Cards (matching GeneralSettingsPane)
                 VStack(alignment: .leading, spacing: 7) {
                     Text("应用与程序坞图标")
-                        .font(.system(size: 11.5, weight: .medium))
+                        .font(CharkleTheme.text(.caption, weight: .medium))
                         .foregroundStyle(SettingsPalette.sectionLabel(for: colorScheme))
 
                     HStack(spacing: 10) {
@@ -1377,7 +1377,7 @@ public struct OnboardingView: View {
                                                 .interpolation(.high)
                                                 .aspectRatio(contentMode: .fit)
                                                 .frame(width: 46, height: 46)
-                                                .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+                                                .clipShape(RoundedRectangle(cornerRadius: CharkleTheme.Radius.popoverInner, style: .continuous))
                                                 .shadow(color: Color.black.opacity(0.15), radius: 5, y: 2)
                                         }
                                         if selected {
@@ -1392,10 +1392,10 @@ public struct OnboardingView: View {
                                     }
                                     VStack(alignment: .leading, spacing: 2) {
                                         Text(variant.title)
-                                            .font(.system(size: 12.5, weight: selected ? .semibold : .medium))
+                                            .font(CharkleTheme.text(.body, weight: selected ? .semibold : .medium))
                                             .foregroundStyle(.primary)
                                         Text(variant.subtitle)
-                                            .font(.system(size: 11))
+                                            .font(CharkleTheme.text(.caption))
                                             .foregroundStyle(.secondary)
                                     }
                                     Spacer(minLength: 0)
@@ -1403,10 +1403,10 @@ public struct OnboardingView: View {
                                 .padding(12)
                                 .background(
                                     selected ? selectedFillColor : cardBackground,
-                                    in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                    in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.settingsOuter, style: .continuous)
                                 )
                                 .overlay(
-                                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                    RoundedRectangle(cornerRadius: CharkleTheme.Radius.settingsOuter, style: .continuous)
                                         .strokeBorder(
                                             selected ? selectedStrokeColor : SettingsPalette.border(for: colorScheme),
                                             lineWidth: selected ? 1.5 : CharkleTheme.hairlineWidth
@@ -1421,7 +1421,7 @@ public struct OnboardingView: View {
                 // 2. Default Gallery Layout Choice Cards
                 VStack(alignment: .leading, spacing: 7) {
                     Text("画廊默认排布")
-                        .font(.system(size: 11.5, weight: .medium))
+                        .font(CharkleTheme.text(.caption, weight: .medium))
                         .foregroundStyle(SettingsPalette.sectionLabel(for: colorScheme))
 
                     HStack(spacing: 10) {
@@ -1450,9 +1450,9 @@ public struct OnboardingView: View {
                 HStack(spacing: 12) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("启动时默认收起侧边栏为精简图标栏")
-                            .font(.system(size: 12.5, weight: .medium))
+                            .font(CharkleTheme.text(.body, weight: .medium))
                         Text("随时可用 ⌘\\ 一键展开或收起，左侧底部齿轮按钮可随时打开设置")
-                            .font(.system(size: 11))
+                            .font(CharkleTheme.text(.caption))
                             .foregroundStyle(.secondary)
                     }
                     Spacer()
@@ -1466,9 +1466,9 @@ public struct OnboardingView: View {
                 }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 11)
-                .background(cardBackground, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .background(cardBackground, in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.settingsOuter, style: .continuous))
                 .overlay(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    RoundedRectangle(cornerRadius: CharkleTheme.Radius.settingsOuter, style: .continuous)
                         .strokeBorder(SettingsPalette.border(for: colorScheme), lineWidth: CharkleTheme.hairlineWidth)
                 )
             }
@@ -1495,10 +1495,10 @@ public struct OnboardingView: View {
                 }
                 VStack(alignment: .leading, spacing: 2) {
                     Text(title)
-                        .font(.system(size: 12.5, weight: .semibold))
+                        .font(CharkleTheme.text(.body, weight: .semibold))
                         .foregroundStyle(.primary)
                     Text(subtitle)
-                        .font(.system(size: 10.5))
+                        .font(CharkleTheme.text(.caption))
                         .foregroundStyle(.secondary)
                         .lineLimit(2)
                         .fixedSize(horizontal: false, vertical: true)
@@ -1506,9 +1506,9 @@ public struct OnboardingView: View {
             }
             .padding(12)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(selected ? selectedFillColor : cardBackground, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .background(selected ? selectedFillColor : cardBackground, in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.settingsOuter, style: .continuous))
             .overlay(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                RoundedRectangle(cornerRadius: CharkleTheme.Radius.settingsOuter, style: .continuous)
                     .strokeBorder(
                         selected ? selectedStrokeColor : SettingsPalette.border(for: colorScheme),
                         lineWidth: selected ? 1.5 : CharkleTheme.hairlineWidth
@@ -1523,7 +1523,7 @@ public struct OnboardingView: View {
         let tile = Color.primary.opacity(colorScheme == .dark ? 0.14 : 0.09)
         return VStack(alignment: .leading, spacing: 7) {
             Text("视图预览 · \(mode.localizedLabel)")
-                .font(.system(size: 10.5, weight: .semibold))
+                .font(CharkleTheme.text(.caption, weight: .semibold))
                 .foregroundStyle(.secondary)
 
             Group {
@@ -1531,39 +1531,39 @@ public struct OnboardingView: View {
                 case .verticalMasonry:
                     HStack(alignment: .top, spacing: 6) {
                         VStack(spacing: 6) {
-                            RoundedRectangle(cornerRadius: 5, style: .continuous).fill(accent.opacity(0.45)).frame(height: 46)
-                            RoundedRectangle(cornerRadius: 5, style: .continuous).fill(tile).frame(height: 30)
+                            RoundedRectangle(cornerRadius: CharkleTheme.Radius.xs, style: .continuous).fill(accent.opacity(0.45)).frame(height: 46)
+                            RoundedRectangle(cornerRadius: CharkleTheme.Radius.xs, style: .continuous).fill(tile).frame(height: 30)
                         }
                         VStack(spacing: 6) {
-                            RoundedRectangle(cornerRadius: 5, style: .continuous).fill(tile).frame(height: 28)
-                            RoundedRectangle(cornerRadius: 5, style: .continuous).fill(tile).frame(height: 48)
+                            RoundedRectangle(cornerRadius: CharkleTheme.Radius.xs, style: .continuous).fill(tile).frame(height: 28)
+                            RoundedRectangle(cornerRadius: CharkleTheme.Radius.xs, style: .continuous).fill(tile).frame(height: 48)
                         }
                         VStack(spacing: 6) {
-                            RoundedRectangle(cornerRadius: 5, style: .continuous).fill(tile).frame(height: 38)
-                            RoundedRectangle(cornerRadius: 5, style: .continuous).fill(accent.opacity(0.28)).frame(height: 38)
+                            RoundedRectangle(cornerRadius: CharkleTheme.Radius.xs, style: .continuous).fill(tile).frame(height: 38)
+                            RoundedRectangle(cornerRadius: CharkleTheme.Radius.xs, style: .continuous).fill(accent.opacity(0.28)).frame(height: 38)
                         }
                     }
                 case .horizontalJustified:
                     VStack(spacing: 6) {
                         HStack(spacing: 6) {
-                            RoundedRectangle(cornerRadius: 5, style: .continuous).fill(accent.opacity(0.45)).frame(width: 68, height: 37)
-                            RoundedRectangle(cornerRadius: 5, style: .continuous).fill(tile).frame(maxWidth: .infinity, minHeight: 37, maxHeight: 37)
-                            RoundedRectangle(cornerRadius: 5, style: .continuous).fill(tile).frame(width: 38, height: 37)
+                            RoundedRectangle(cornerRadius: CharkleTheme.Radius.xs, style: .continuous).fill(accent.opacity(0.45)).frame(width: 68, height: 37)
+                            RoundedRectangle(cornerRadius: CharkleTheme.Radius.xs, style: .continuous).fill(tile).frame(maxWidth: .infinity, minHeight: 37, maxHeight: 37)
+                            RoundedRectangle(cornerRadius: CharkleTheme.Radius.xs, style: .continuous).fill(tile).frame(width: 38, height: 37)
                         }
                         HStack(spacing: 6) {
-                            RoundedRectangle(cornerRadius: 5, style: .continuous).fill(tile).frame(width: 44, height: 37)
-                            RoundedRectangle(cornerRadius: 5, style: .continuous).fill(accent.opacity(0.28)).frame(maxWidth: .infinity, minHeight: 37, maxHeight: 37)
-                            RoundedRectangle(cornerRadius: 5, style: .continuous).fill(tile).frame(width: 56, height: 37)
+                            RoundedRectangle(cornerRadius: CharkleTheme.Radius.xs, style: .continuous).fill(tile).frame(width: 44, height: 37)
+                            RoundedRectangle(cornerRadius: CharkleTheme.Radius.xs, style: .continuous).fill(accent.opacity(0.28)).frame(maxWidth: .infinity, minHeight: 37, maxHeight: 37)
+                            RoundedRectangle(cornerRadius: CharkleTheme.Radius.xs, style: .continuous).fill(tile).frame(width: 56, height: 37)
                         }
                     }
                 case .galleryFilmstrip:
                     VStack(spacing: 6) {
-                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        RoundedRectangle(cornerRadius: CharkleTheme.Radius.sm, style: .continuous)
                             .fill(accent.opacity(0.42))
                             .frame(height: 58)
                         HStack(spacing: 5) {
                             ForEach(0..<5, id: \.self) { i in
-                                RoundedRectangle(cornerRadius: 3.5, style: .continuous)
+                                RoundedRectangle(cornerRadius: CharkleTheme.Radius.xs, style: .continuous)
                                     .fill(i == 2 ? accent : tile)
                                     .frame(height: 16)
                             }
@@ -1571,19 +1571,19 @@ public struct OnboardingView: View {
                     }
                 case .ringGallery:
                     HStack(alignment: .center, spacing: 6) {
-                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        RoundedRectangle(cornerRadius: CharkleTheme.Radius.xs, style: .continuous)
                             .fill(tile.opacity(0.65))
                             .frame(width: 26, height: 50)
-                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        RoundedRectangle(cornerRadius: CharkleTheme.Radius.sm, style: .continuous)
                             .fill(tile)
                             .frame(width: 34, height: 64)
-                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        RoundedRectangle(cornerRadius: CharkleTheme.Radius.sm, style: .continuous)
                             .fill(accent.opacity(0.45))
                             .frame(width: 44, height: 78)
-                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        RoundedRectangle(cornerRadius: CharkleTheme.Radius.sm, style: .continuous)
                             .fill(tile)
                             .frame(width: 34, height: 64)
-                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        RoundedRectangle(cornerRadius: CharkleTheme.Radius.xs, style: .continuous)
                             .fill(tile.opacity(0.65))
                             .frame(width: 26, height: 50)
                     }
@@ -1658,10 +1658,10 @@ public struct OnboardingView: View {
 
             VStack(spacing: 6) {
                 Text("一切准备就绪")
-                    .font(.system(size: 25, weight: .bold))
+                    .font(CharkleTheme.text(.title, weight: .bold))
                     .tracking(-0.35)
                 Text("点击任意卡片可回头微调，或随时按 ⌘, 打开设置页继续深度定制。")
-                    .font(.system(size: 13))
+                    .font(CharkleTheme.text(.body))
                     .foregroundStyle(.secondary)
             }
 
@@ -1713,7 +1713,7 @@ public struct OnboardingView: View {
         } label: {
             HStack(spacing: 12) {
                 ZStack {
-                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    RoundedRectangle(cornerRadius: CharkleTheme.Radius.settingsInner, style: .continuous)
                         .fill(SettingsPalette.subtleFill(for: colorScheme))
                         .frame(width: 36, height: 36)
                     CharkleIcon(icon, style: .duotone, size: 19, isActive: !skipped)
@@ -1721,11 +1721,11 @@ public struct OnboardingView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 6) {
                         Text(title)
-                            .font(.system(size: 11, weight: .medium))
+                            .font(CharkleTheme.text(.caption, weight: .medium))
                             .foregroundStyle(.secondary)
                         if skipped {
                             Text("已跳过")
-                                .font(.system(size: 9.5, weight: .medium))
+                                .font(CharkleTheme.text(.caption, weight: .medium))
                                 .foregroundStyle(.tertiary)
                                 .padding(.horizontal, 5)
                                 .padding(.vertical, 1)
@@ -1733,7 +1733,7 @@ public struct OnboardingView: View {
                         }
                     }
                     Text(value)
-                        .font(.system(size: 12.5, weight: .semibold))
+                        .font(CharkleTheme.text(.body, weight: .semibold))
                         .foregroundStyle(.primary)
                         .lineLimit(1)
                 }
@@ -1743,9 +1743,9 @@ public struct OnboardingView: View {
                     .foregroundStyle(.tertiary)
             }
             .padding(13)
-            .background(cardBackground, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .background(cardBackground, in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.settingsOuter, style: .continuous))
             .overlay(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                RoundedRectangle(cornerRadius: CharkleTheme.Radius.settingsOuter, style: .continuous)
                     .strokeBorder(SettingsPalette.border(for: colorScheme), lineWidth: CharkleTheme.hairlineWidth)
             )
         }
@@ -1788,14 +1788,14 @@ public struct OnboardingView: View {
             stepHeroIconDisc(iconName: iconName, accentHex: accentHex)
 
             Text(badgeText)
-                .font(.system(size: 11, weight: .semibold))
+                .font(CharkleTheme.text(.caption, weight: .semibold))
                 .foregroundStyle(Color(charkleHex: accentHex))
                 .padding(.horizontal, 10)
                 .padding(.vertical, 4)
                 .background(Color(charkleHex: accentHex).opacity(colorScheme == .dark ? 0.18 : 0.10), in: Capsule(style: .continuous))
 
             Text(caption)
-                .font(.system(size: 12))
+                .font(CharkleTheme.text(.caption))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .lineSpacing(3)
@@ -1804,9 +1804,9 @@ public struct OnboardingView: View {
         }
         .padding(18)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(pedestalBackground, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .background(pedestalBackground, in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.settingsOuter, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
+            RoundedRectangle(cornerRadius: CharkleTheme.Radius.settingsOuter, style: .continuous)
                 .strokeBorder(SettingsPalette.border(for: colorScheme), lineWidth: CharkleTheme.hairlineWidth)
         )
     }
@@ -1838,11 +1838,11 @@ public struct OnboardingView: View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(alignment: .center, spacing: 8) {
                 Text(title)
-                    .font(.system(size: 19, weight: .bold))
+                    .font(CharkleTheme.text(.title, weight: .bold))
                     .tracking(-0.3)
                 if let optionalTag {
                     Text(optionalTag)
-                        .font(.system(size: 10.5, weight: .medium))
+                        .font(CharkleTheme.text(.caption, weight: .medium))
                         .foregroundStyle(SettingsPalette.sectionLabel(for: colorScheme))
                         .padding(.horizontal, 8)
                         .padding(.vertical, 2.5)
@@ -1850,7 +1850,7 @@ public struct OnboardingView: View {
                 }
             }
             Text(subtitle)
-                .font(.system(size: 12.5))
+                .font(CharkleTheme.text(.body))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -1894,7 +1894,7 @@ public struct OnboardingView: View {
             Button(action: action) {
                 HStack(alignment: .center, spacing: 12) {
                     ZStack {
-                        RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        RoundedRectangle(cornerRadius: CharkleTheme.Radius.settingsInner, style: .continuous)
                             .fill(SettingsPalette.subtleFill(for: colorScheme))
                             .frame(width: 34, height: 34)
                         icon()
@@ -1903,14 +1903,14 @@ public struct OnboardingView: View {
                     VStack(alignment: .leading, spacing: 2) {
                         HStack(spacing: 6) {
                             Text(title)
-                                .font(.system(size: 13, weight: .semibold))
+                                .font(CharkleTheme.text(.body, weight: .semibold))
                                 .foregroundStyle(.primary)
                             if let badge {
                                 SettingsStatusBadge(badge, tint: badgeTint)
                             }
                         }
                         Text(subtitle)
-                            .font(.system(size: 11.5))
+                            .font(CharkleTheme.text(.caption))
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -1929,9 +1929,9 @@ public struct OnboardingView: View {
             }
         }
         .padding(13)
-        .background(isSelected ? selectedFillColor : cardBackground, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .background(isSelected ? selectedFillColor : cardBackground, in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.settingsOuter, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            RoundedRectangle(cornerRadius: CharkleTheme.Radius.settingsOuter, style: .continuous)
                 .strokeBorder(
                     isSelected ? selectedStrokeColor : SettingsPalette.border(for: colorScheme),
                     lineWidth: isSelected ? 1.5 : CharkleTheme.hairlineWidth
@@ -1966,10 +1966,10 @@ public struct OnboardingView: View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
-                    .font(.system(size: 13, weight: .medium))
+                    .font(CharkleTheme.text(.body, weight: .medium))
                     .foregroundStyle(disabled ? .secondary : .primary)
                 Text(subtitle)
-                    .font(.system(size: 11.5))
+                    .font(CharkleTheme.text(.caption))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -1991,7 +1991,7 @@ public struct OnboardingView: View {
                 .font(.system(size: 11))
                 .foregroundStyle(SettingsPalette.positiveInk(for: colorScheme))
             Text(text)
-                .font(.system(size: 11))
+                .font(CharkleTheme.text(.caption))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -2008,15 +2008,15 @@ public struct OnboardingView: View {
                     .font(.system(size: 12))
                     .foregroundStyle(tint)
                 Text(hint)
-                    .font(.system(size: 11.5, weight: .medium))
+                    .font(CharkleTheme.text(.caption, weight: .medium))
                     .foregroundStyle(.primary)
                 Spacer(minLength: 0)
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
-            .background(tint.opacity(colorScheme == .dark ? 0.16 : 0.10), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .background(tint.opacity(colorScheme == .dark ? 0.16 : 0.10), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.settingsInner, style: .continuous))
             .overlay(
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                RoundedRectangle(cornerRadius: CharkleTheme.Radius.settingsInner, style: .continuous)
                     .strokeBorder(tint.opacity(0.22), lineWidth: CharkleTheme.hairlineWidth)
             )
             .transition(CharkleMotion.originTransition(anchor: .top, scale: 0.97, reduced: reduceMotion))

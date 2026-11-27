@@ -194,7 +194,7 @@ public struct GalleryRingView: View {
                                     .font(.system(size: 12, weight: .semibold))
                                 if isTuningPanelExpanded {
                                     Text("收起")
-                                        .font(.system(size: 11.5, weight: .medium))
+                                        .font(CharkleTheme.text(.caption, weight: .medium))
                                 }
                             }
                             .foregroundStyle(isTuningPanelExpanded ? Color.accentColor : .primary.opacity(0.84))
@@ -265,14 +265,14 @@ public struct GalleryRingView: View {
 
             VStack(spacing: 1) {
                 Text(asset.title)
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(CharkleTheme.text(.caption, weight: .semibold))
                     .foregroundStyle(.primary)
                     .lineLimit(1)
                     .truncationMode(.middle)
                     .frame(maxWidth: 200)
                 if let idx = activeIndex {
                     Text("\(idx + 1) / \(assets.count)")
-                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        .font(CharkleTheme.text(.caption, weight: .medium, design: .monospaced))
                         .monospacedDigit()
                         .foregroundStyle(.secondary)
                 }
@@ -303,12 +303,12 @@ public struct GalleryRingView: View {
                         Image(systemName: "safari")
                             .font(.system(size: 12, weight: .medium))
                         Text("浏览器打开")
-                            .font(.system(size: 11.5, weight: .medium))
+                            .font(CharkleTheme.text(.caption, weight: .medium))
                             .lineLimit(1)
                     } else {
                         CharkleIcon("quicklook", style: .duotone, size: 13)
                         Text("沉浸预览")
-                            .font(.system(size: 11.5, weight: .medium))
+                            .font(CharkleTheme.text(.caption, weight: .medium))
                             .lineLimit(1)
                     }
                 }
@@ -331,13 +331,13 @@ public struct GalleryRingView: View {
         return VStack(alignment: .leading, spacing: 11) {
             HStack {
                 Text("环形画廊参数")
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(CharkleTheme.text(.caption, weight: .semibold))
                     .foregroundStyle(.primary)
                 Spacer()
                 Button("重置默认") {
                     params = .default
                 }
-                .font(.system(size: 11, weight: .medium))
+                .font(CharkleTheme.text(.caption, weight: .medium))
                 .foregroundStyle(isModified ? Color.accentColor : .secondary)
                 .buttonStyle(.plain)
                 .disabled(!isModified)
@@ -345,7 +345,7 @@ public struct GalleryRingView: View {
 
             Rectangle()
                 .fill(CharkleTheme.hairline(for: colorScheme))
-                .frame(height: 0.75)
+                .frame(height: CharkleTheme.hairlineWidth)
 
             sliderRow(
                 title: "透视距离",
@@ -406,11 +406,11 @@ public struct GalleryRingView: View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
                 Text(title)
-                    .font(.system(size: 11.5, weight: .medium))
+                    .font(CharkleTheme.text(.caption, weight: .medium))
                     .foregroundStyle(.secondary)
                 Spacer()
                 Text(valueText)
-                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                    .font(CharkleTheme.text(.caption, weight: .semibold, design: .monospaced))
                     .monospacedDigit()
                     .foregroundStyle(.primary)
             }

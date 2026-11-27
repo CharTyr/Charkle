@@ -212,7 +212,7 @@ public struct SyncSettingsPane: View {
                                 .font(.system(size: 13))
                                 .foregroundStyle(CharkleTheme.accent(for: colorScheme, source: coordinator.accentSource))
                             Text("添加同步后端…")
-                                .font(.system(size: 12.5, weight: .semibold))
+                                .font(CharkleTheme.text(.body, weight: .semibold))
                             CharkleDropdownChevron(size: 8.5)
                         }
                     }
@@ -224,7 +224,7 @@ public struct SyncSettingsPane: View {
                     Spacer()
 
                     Text("同时启用多个后端时，所有素材、文件夹与情绪板将自动双向镜像到每个后端。")
-                        .font(.system(size: 11))
+                        .font(CharkleTheme.text(.caption))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
@@ -256,7 +256,7 @@ public struct SyncSettingsPane: View {
 
         return HStack(spacing: 11) {
             ZStack {
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                RoundedRectangle(cornerRadius: CharkleTheme.Radius.settingsInner, style: .continuous)
                     .fill(SettingsPalette.subtleFill(for: colorScheme))
                     .frame(width: 34, height: 34)
                 Image(systemName: backendSymbol(for: profile.mode))
@@ -268,7 +268,7 @@ public struct SyncSettingsPane: View {
                 HStack(spacing: 6) {
                     Circle().fill(dotColor).frame(width: 7, height: 7)
                     Text(profile.name)
-                        .font(.system(size: 13, weight: .semibold))
+                        .font(CharkleTheme.text(.body, weight: .semibold))
                     if profile.isPrimary {
                         SettingsStatusBadge("主后端", tint: SettingsPalette.positiveInk(for: colorScheme))
                     } else {
@@ -276,7 +276,7 @@ public struct SyncSettingsPane: View {
                     }
                 }
                 Text(subtitle)
-                    .font(.system(size: 11.5))
+                    .font(CharkleTheme.text(.caption))
                     .foregroundStyle(status?.lastError != nil ? SettingsPalette.destructiveInk(for: colorScheme) : .secondary)
                     .lineLimit(1)
                     .truncationMode(.middle)
@@ -408,16 +408,16 @@ public struct SyncSettingsPane: View {
                     VStack(alignment: .leading, spacing: 2) {
                         HStack(spacing: 6) {
                             Text(isSyncing ? status.localizedPhaseTitle : syncIdleHeadline(status))
-                                .font(.system(size: 13, weight: .medium))
+                                .font(CharkleTheme.text(.body, weight: .medium))
                             if isSyncing, let percentText {
                                 Text(percentText)
-                                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                    .font(CharkleTheme.text(.caption, weight: .semibold, design: .monospaced))
                                     .monospacedDigit()
                                     .foregroundStyle(.secondary)
                             }
                         }
                         Text(syncSubheadline(status: status, isSyncing: isSyncing))
-                            .font(.system(size: 11.5))
+                            .font(CharkleTheme.text(.caption))
                             .foregroundStyle(status.lastError != nil && !isSyncing ? SettingsPalette.destructiveInk(for: colorScheme) : .secondary)
                             .lineLimit(2)
                     }
@@ -455,12 +455,12 @@ public struct SyncSettingsPane: View {
                         status.lastSyncedAt.map { "上次同步：\(SettingsHelpers.relativeTimeText($0))" } ?? "尚未完成首次同步",
                         systemImage: "clock"
                     )
-                    .font(.system(size: 11))
+                    .font(CharkleTheme.text(.caption))
                     .foregroundStyle(.secondary)
 
                     if status.pendingOpCount > 0 {
                         Label("待上传 \(status.pendingOpCount) 项", systemImage: "arrow.up.circle")
-                            .font(.system(size: 11, weight: .medium))
+                            .font(CharkleTheme.text(.caption, weight: .medium))
                             .foregroundStyle(SettingsPalette.warningInk(for: colorScheme))
                             .monospacedDigit()
                     }
@@ -469,7 +469,7 @@ public struct SyncSettingsPane: View {
 
                     if let report = syncAndAI.lastSyncReport {
                         Text("↑ \(report.uploadedOps)  ↓ \(report.downloadedOps)  +\(report.discoveredRemoteAssets) 新发现")
-                            .font(.system(size: 10.5, design: .monospaced))
+                            .font(CharkleTheme.text(.caption, design: .monospaced))
                             .monospacedDigit()
                             .foregroundStyle(.tertiary)
                     }
@@ -544,7 +544,7 @@ public struct SyncSettingsPane: View {
                         VStack(alignment: .leading, spacing: 3) {
                             HStack(spacing: 6) {
                                 Text(activeAccount?.displayName ?? activeAccount?.email ?? "未登录 Google 账号")
-                                    .font(.system(size: 13, weight: .semibold))
+                                    .font(CharkleTheme.text(.body, weight: .semibold))
                                 if directAccount != nil {
                                     SettingsStatusBadge("已直连", tint: SettingsPalette.positiveInk(for: colorScheme))
                                 } else if isUsingGDirectFallback {
@@ -554,11 +554,11 @@ public struct SyncSettingsPane: View {
 
                             if let account = activeAccount, let name = account.displayName, !name.isEmpty {
                                 Text(account.email)
-                                    .font(.system(size: 11.5))
+                                    .font(CharkleTheme.text(.caption))
                                     .foregroundStyle(.secondary)
                             } else {
                                 Text(googleAccountHint(hasOAuth: syncAndAI.hasGoogleOAuthClient, hasGDirect: snap.cliPath != nil, isFallback: isUsingGDirectFallback))
-                                    .font(.system(size: 11.5))
+                                    .font(CharkleTheme.text(.caption))
                                     .foregroundStyle(.secondary)
                                     .fixedSize(horizontal: false, vertical: true)
                             }
@@ -619,11 +619,11 @@ public struct SyncSettingsPane: View {
                         VStack(alignment: .leading, spacing: 5) {
                             HStack {
                                 Text("Google Drive 云端空间")
-                                    .font(.system(size: 11))
+                                    .font(CharkleTheme.text(.caption))
                                     .foregroundStyle(.secondary)
                                 Spacer()
                                 Text("\(ByteCountFormatter.string(fromByteCount: used, countStyle: .file)) / \(ByteCountFormatter.string(fromByteCount: limit, countStyle: .file))")
-                                    .font(.system(size: 11, weight: .medium))
+                                    .font(CharkleTheme.text(.caption, weight: .medium))
                                     .monospacedDigit()
                                     .foregroundStyle(.secondary)
                             }
@@ -693,18 +693,18 @@ public struct SyncSettingsPane: View {
                 HStack(alignment: .center, spacing: 12) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("共享协作目录")
-                            .font(.system(size: 13, weight: .medium))
+                            .font(CharkleTheme.text(.body, weight: .medium))
                         if let sharedID = draftConfig.resolvedSharedFolderID {
                             Text("已启用协作模式（目录 ID：\(String(sharedID.prefix(12)))…）")
-                                .font(.system(size: 11.5))
+                                .font(CharkleTheme.text(.caption))
                                 .foregroundStyle(SettingsPalette.positiveInk(for: colorScheme))
                         } else if !trimmed.isEmpty {
                             Text("链接或 ID 格式无效，请检查是否包含 /folders/…")
-                                .font(.system(size: 11.5))
+                                .font(CharkleTheme.text(.caption))
                                 .foregroundStyle(SettingsPalette.warningInk(for: colorScheme))
                         } else {
                             Text("粘贴 Google Drive「与我共享」目录链接或 ID，多人可共同整理与浏览")
-                                .font(.system(size: 11.5))
+                                .font(CharkleTheme.text(.caption))
                                 .foregroundStyle(.secondary)
                         }
                     }
@@ -735,7 +735,7 @@ public struct SyncSettingsPane: View {
                                     ProgressView().controlSize(.mini)
                                 }
                                 Text("选择与我共享")
-                                    .font(.system(size: 12.5, weight: .medium))
+                                    .font(CharkleTheme.text(.body, weight: .medium))
                                 CharkleDropdownChevron(size: 8.5)
                             }
                         }
@@ -882,9 +882,9 @@ public struct SyncSettingsPane: View {
                     .font(.system(size: 18))
                 VStack(alignment: .leading, spacing: 2) {
                     Text("配置 WebDAV 云盘")
-                        .font(.system(size: 15, weight: .semibold))
+                        .font(CharkleTheme.text(.headline, weight: .semibold))
                     Text("兼容坚果云、Nextcloud、群晖 NAS、Alist 等任意标准 WebDAV 服务")
-                        .font(.system(size: 11.5))
+                        .font(CharkleTheme.text(.caption))
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -967,7 +967,7 @@ public struct SyncSettingsPane: View {
     private func fieldRow<F: View>(_ label: String, @ViewBuilder field: () -> F) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(label)
-                .font(.system(size: 11.5, weight: .medium))
+                .font(CharkleTheme.text(.caption, weight: .medium))
                 .foregroundStyle(.secondary)
             field()
         }
@@ -1068,9 +1068,9 @@ private struct DesktopBackendEditorSheetView: View {
                     .font(.system(size: 18))
                 VStack(alignment: .leading, spacing: 2) {
                     Text(isNew ? "添加同步后端" : "编辑同步后端")
-                        .font(.system(size: 15, weight: .semibold))
+                        .font(CharkleTheme.text(.headline, weight: .semibold))
                     Text("所有已启用的后端会在同步时并行镜像文件夹、原图、缩略图与情绪板")
-                        .font(.system(size: 11.5))
+                        .font(CharkleTheme.text(.caption))
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -1081,7 +1081,7 @@ private struct DesktopBackendEditorSheetView: View {
             VStack(alignment: .leading, spacing: 10) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("后端名称")
-                        .font(.system(size: 11.5, weight: .medium))
+                        .font(CharkleTheme.text(.caption, weight: .medium))
                         .foregroundStyle(.secondary)
                     TextField("例如：iCloud Drive / 家庭 NAS", text: $draft.name)
                         .textFieldStyle(.roundedBorder)
@@ -1090,7 +1090,7 @@ private struct DesktopBackendEditorSheetView: View {
                 if isNew {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("后端类型")
-                            .font(.system(size: 11.5, weight: .medium))
+                            .font(CharkleTheme.text(.caption, weight: .medium))
                             .foregroundStyle(.secondary)
                         Picker("", selection: $draft.mode) {
                             Text("iCloud Drive").tag(DriveTransportMode.iCloudDrive)
@@ -1107,13 +1107,13 @@ private struct DesktopBackendEditorSheetView: View {
                 case .iCloudDrive:
                     VStack(alignment: .leading, spacing: 6) {
                         Text("iCloud Drive 文件夹名（自动映射至 iCloud Drive / 目录名）")
-                            .font(.system(size: 11.5, weight: .medium))
+                            .font(CharkleTheme.text(.caption, weight: .medium))
                             .foregroundStyle(.secondary)
                         TextField("Charkle", text: $draft.iCloudFolderName)
                             .textFieldStyle(.roundedBorder)
 
                         Text("或指定自定义 iCloud Drive 文件夹路径（可选）")
-                            .font(.system(size: 11.5, weight: .medium))
+                            .font(CharkleTheme.text(.caption, weight: .medium))
                             .foregroundStyle(.secondary)
                         HStack(spacing: 8) {
                             TextField("留空自动使用系统 iCloud Drive / \(draft.iCloudFolderName.isEmpty ? "Charkle" : draft.iCloudFolderName)", text: $draft.iCloudCustomFolderPath)
@@ -1134,12 +1134,12 @@ private struct DesktopBackendEditorSheetView: View {
                 case .directAPIWithGDirect, .gdirectMount:
                     VStack(alignment: .leading, spacing: 6) {
                         Text("Google Drive 目录路径")
-                            .font(.system(size: 11.5, weight: .medium))
+                            .font(CharkleTheme.text(.caption, weight: .medium))
                             .foregroundStyle(.secondary)
                         TextField("Charkle 或 Design/Charkle", text: $draft.rootFolderName)
                             .textFieldStyle(.roundedBorder)
                         Text("共享目录链接 / ID（可选）")
-                            .font(.system(size: 11.5, weight: .medium))
+                            .font(CharkleTheme.text(.caption, weight: .medium))
                             .foregroundStyle(.secondary)
                         TextField("https://drive.google.com/drive/folders/…", text: $draft.sharedFolderURLOrID)
                             .textFieldStyle(.roundedBorder)
@@ -1162,7 +1162,7 @@ private struct DesktopBackendEditorSheetView: View {
                 case .localOnly:
                     VStack(alignment: .leading, spacing: 6) {
                         Text("本地镜像文件夹路径")
-                            .font(.system(size: 11.5, weight: .medium))
+                            .font(CharkleTheme.text(.caption, weight: .medium))
                             .foregroundStyle(.secondary)
                         HStack(spacing: 8) {
                             TextField("~/Pictures/Charkle", text: $draft.localLibraryPath)

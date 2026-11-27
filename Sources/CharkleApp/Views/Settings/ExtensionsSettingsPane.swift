@@ -170,9 +170,9 @@ public struct ExtensionsSettingsPane: View {
                         HStack(alignment: .center, spacing: 10) {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text("本机服务地址")
-                                    .font(.system(size: 12, weight: .semibold))
+                                    .font(CharkleTheme.text(.caption, weight: .semibold))
                                 Text(bridge.baseURL)
-                                    .font(.system(size: 11.5, design: .monospaced))
+                                    .font(CharkleTheme.text(.caption, design: .monospaced))
                                     .foregroundStyle(.secondary)
                                     .textSelection(.enabled)
                             }
@@ -193,9 +193,9 @@ public struct ExtensionsSettingsPane: View {
                         HStack(alignment: .center, spacing: 10) {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text("本机访问令牌（仅关闭自动配对或手动调试时需要）")
-                                    .font(.system(size: 12, weight: .semibold))
+                                    .font(CharkleTheme.text(.caption, weight: .semibold))
                                 Text(revealToken ? bridge.accessToken : maskedToken)
-                                    .font(.system(size: 11.5, design: .monospaced))
+                                    .font(CharkleTheme.text(.caption, design: .monospaced))
                                     .foregroundStyle(.secondary)
                                     .textSelection(.enabled)
                             }

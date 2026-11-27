@@ -196,7 +196,7 @@ public struct NotchShelfView: View {
         let expanded = shelfState.isExpanded
         let isFullGallery = shelfState.isFullGalleryExpanded
         let topEar = NotchShelfState.topEarRadius
-        let bottomRadius: CGFloat = expanded ? NotchShelfState.bottomCornerRadius : 14
+        let bottomRadius: CGFloat = expanded ? NotchShelfState.bottomCornerRadius : CharkleTheme.Radius.settingsOuter
         let collapsedWidth = shelfState.physicalNotchWidth + topEar * 2
         let collapsedHeight = max(36, shelfState.topNotchBandHeight)
         let targetWidth = shelfState.expandedShapeWidth
@@ -276,7 +276,8 @@ public struct NotchShelfView: View {
                 HStack(spacing: 7) {
                     CharkleIcon("notch", style: .duotone, size: 17, color: .white.opacity(0.92), isActive: true)
                     Text("Charkle")
-                        .font(.system(size: 12.5, weight: .semibold))
+                        .font(CharkleTheme.text(.body, weight: .semibold))
+                        .lineLimit(1)
                         .foregroundStyle(.white.opacity(0.94))
                     if shelfState.isMinimalCaptureOnly {
                         HStack(spacing: 4) {
@@ -284,7 +285,8 @@ public struct NotchShelfView: View {
                                 .fill(Color(charkleHex: "#34C769"))
                                 .frame(width: 5, height: 5)
                             Text("极简采集")
-                                .font(.system(size: 10, weight: .semibold))
+                                .font(CharkleTheme.text(.caption, weight: .semibold))
+                                .lineLimit(1)
                                 .foregroundStyle(.white.opacity(0.84))
                         }
                         .padding(.horizontal, 7)
@@ -389,7 +391,7 @@ public struct NotchShelfView: View {
                         targetSegment(.activeMoodboard, label: "活跃情绪板")
                     }
                     .padding(2)
-                    .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous))
                     .fixedSize(horizontal: true, vertical: false)
                     .layoutPriority(2)
 
@@ -407,14 +409,15 @@ public struct NotchShelfView: View {
                 VStack(alignment: .leading, spacing: 7) {
                     HStack(spacing: 8) {
                         Text("最近素材")
-                            .font(.system(size: 11, weight: .semibold))
+                            .font(CharkleTheme.text(.caption, weight: .semibold))
+                            .lineLimit(1)
                             .foregroundStyle(.white)
                             .padding(.horizontal, 9)
                             .padding(.vertical, 3.5)
                             .background(Color.white.opacity(0.14), in: Capsule(style: .continuous))
 
                         Text("最近保存与查看 · 拖动可放入其他 App、情绪板或文件夹")
-                            .font(.system(size: 10.5))
+                            .font(CharkleTheme.text(.caption))
                             .foregroundStyle(.white.opacity(0.48))
                             .lineLimit(1)
 
@@ -425,7 +428,8 @@ public struct NotchShelfView: View {
                         } label: {
                             HStack(spacing: 3) {
                                 Text("仅收集")
-                                    .font(.system(size: 10.5, weight: .medium))
+                                    .font(CharkleTheme.text(.caption, weight: .medium))
+                                    .lineLimit(1)
                                 Image(systemName: "chevron.up")
                                     .font(.system(size: 8.5, weight: .bold))
                             }
@@ -443,7 +447,8 @@ public struct NotchShelfView: View {
                             } label: {
                                 HStack(spacing: 4) {
                                     Text("恢复主窗看全部")
-                                        .font(.system(size: 10.5, weight: .semibold))
+                                        .font(CharkleTheme.text(.caption, weight: .semibold))
+                                        .lineLimit(1)
                                     Image(systemName: "arrow.up.forward.app")
                                         .font(.system(size: 9.5, weight: .semibold))
                                 }
@@ -460,8 +465,9 @@ public struct NotchShelfView: View {
                             } label: {
                                 HStack(spacing: 4) {
                                     Text("全部 (\(recentAssets.count))")
-                                        .font(.system(size: 11, weight: .semibold))
+                                        .font(CharkleTheme.text(.caption, weight: .semibold))
                                         .monospacedDigit()
+                                        .lineLimit(1)
                                     Image(systemName: "chevron.down")
                                         .font(.system(size: 9, weight: .bold))
                                 }
@@ -479,7 +485,7 @@ public struct NotchShelfView: View {
                         HStack {
                             Spacer()
                             Text("暂无最近素材，拖入文件或按 ⌥⇧V 粘贴收藏")
-                                .font(.system(size: 11.5))
+                                .font(CharkleTheme.text(.caption))
                                 .foregroundStyle(.white.opacity(0.45))
                             Spacer()
                         }
@@ -506,7 +512,7 @@ public struct NotchShelfView: View {
                             .fill(activeBlue.opacity(0.85))
                             .frame(width: 5, height: 5)
                         Text(targetDropHint)
-                            .font(.system(size: 10.5, weight: .medium))
+                            .font(CharkleTheme.text(.caption, weight: .medium))
                             .foregroundStyle(.white.opacity(0.56))
                             .lineLimit(1)
                     }
@@ -520,8 +526,9 @@ public struct NotchShelfView: View {
                             Image(systemName: "photo.on.rectangle.angled")
                                 .font(.system(size: 9.5, weight: .semibold))
                             Text("展开最近素材 (\(library.recentActivityAssets().count))")
-                                .font(.system(size: 11, weight: .semibold))
+                                .font(CharkleTheme.text(.caption, weight: .semibold))
                                 .monospacedDigit()
+                                .lineLimit(1)
                             Image(systemName: "chevron.down")
                                 .font(.system(size: 8.5, weight: .bold))
                         }
@@ -567,7 +574,8 @@ public struct NotchShelfView: View {
         VStack(spacing: 10) {
             HStack(spacing: 10) {
                 Text("最近素材")
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(CharkleTheme.text(.caption, weight: .semibold))
+                    .lineLimit(1)
                     .foregroundStyle(.white)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 4)
@@ -579,7 +587,7 @@ public struct NotchShelfView: View {
                         .foregroundStyle(.white.opacity(0.55))
                     TextField("搜索最近素材…", text: $waterfallSearchQuery)
                         .textFieldStyle(.plain)
-                        .font(.system(size: 12))
+                        .font(CharkleTheme.text(.caption))
                         .foregroundStyle(.white)
                 }
                 .padding(.horizontal, 10)
@@ -589,14 +597,15 @@ public struct NotchShelfView: View {
 
                 if !notchSelectedIDs.isEmpty {
                     Text("已框选 \(notchSelectedIDs.count) 项 · 可直接拖出")
-                        .font(.system(size: 11, weight: .semibold))
+                        .font(CharkleTheme.text(.caption, weight: .semibold))
+                        .lineLimit(1)
                         .foregroundStyle(activeBlue)
                         .padding(.horizontal, 9)
                         .padding(.vertical, 4)
                         .background(activeBlue.opacity(0.18), in: Capsule(style: .continuous))
                 } else {
                     Text("拖拽空白处框选多选 · 拖出至其他 App / 情绪板 / 文件夹")
-                        .font(.system(size: 11))
+                        .font(CharkleTheme.text(.caption))
                         .foregroundStyle(.white.opacity(0.48))
                         .lineLimit(1)
                 }
@@ -610,7 +619,8 @@ public struct NotchShelfView: View {
                 } label: {
                     HStack(spacing: 4) {
                         Text("收起")
-                            .font(.system(size: 11, weight: .semibold))
+                            .font(CharkleTheme.text(.caption, weight: .semibold))
+                            .lineLimit(1)
                         Image(systemName: "chevron.up")
                             .font(.system(size: 9, weight: .bold))
                     }
@@ -743,7 +753,7 @@ public struct NotchShelfView: View {
                     onResolveDragFileURL: onResolveDragFileURL
                 )
             )
-            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: CharkleTheme.Radius.settingsOuter, style: .continuous))
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
@@ -752,7 +762,7 @@ public struct NotchShelfView: View {
 
     private var dropWellRow: some View {
         ZStack {
-            let wellShape = RoundedRectangle(cornerRadius: 12, style: .continuous)
+            let wellShape = RoundedRectangle(cornerRadius: CharkleTheme.Radius.cardOuter, style: .continuous)
             wellShape
                 .fill(shelfState.isDropTargeted ? activeBlue.opacity(0.24) : Color.white.opacity(0.06))
                 .overlay(
@@ -769,7 +779,7 @@ public struct NotchShelfView: View {
                 HStack(spacing: 10) {
                     ProgressView().controlSize(.small).tint(.white)
                     Text(processing)
-                        .font(.system(size: 12, weight: .semibold))
+                        .font(CharkleTheme.text(.caption, weight: .semibold))
                         .foregroundStyle(.white)
                 }
             } else if let banner = shelfState.statusBanner {
@@ -778,7 +788,7 @@ public struct NotchShelfView: View {
                         .font(.system(size: 15))
                         .foregroundStyle(Color.green)
                     Text(banner)
-                        .font(.system(size: 12.5, weight: .semibold))
+                        .font(CharkleTheme.text(.body, weight: .semibold))
                         .foregroundStyle(.white)
                 }
             } else if shelfState.isDropTargeted {
@@ -788,10 +798,10 @@ public struct NotchShelfView: View {
                         .foregroundStyle(activeBlue)
                     VStack(alignment: .leading, spacing: 1) {
                         Text("松开立即收藏 \(max(1, shelfState.dragItemCount)) 项素材")
-                            .font(.system(size: 12.5, weight: .semibold))
+                            .font(CharkleTheme.text(.body, weight: .semibold))
                             .foregroundStyle(.white)
                         Text(targetDropHint)
-                            .font(.system(size: 10.5))
+                            .font(CharkleTheme.text(.caption))
                             .foregroundStyle(.white.opacity(0.74))
                     }
                 }
@@ -802,12 +812,12 @@ public struct NotchShelfView: View {
                             .font(.system(size: 16, weight: .semibold))
                             .foregroundStyle(activeBlue)
                         Text(detectedLink.notchHintLabel)
-                            .font(.system(size: 12, weight: .medium))
+                            .font(CharkleTheme.text(.caption, weight: .medium))
                             .foregroundStyle(.white)
                             .lineLimit(1)
                         Spacer()
                         Text("保存")
-                            .font(.system(size: 11, weight: .semibold))
+                            .font(CharkleTheme.text(.caption, weight: .semibold))
                             .foregroundStyle(.white)
                             .padding(.horizontal, 10)
                             .padding(.vertical, 4)
@@ -825,7 +835,7 @@ public struct NotchShelfView: View {
                             .font(.system(size: 15, weight: .light))
                             .foregroundStyle(.white.opacity(0.72))
                         Text("拖入文件、整个文件夹或任意网页链接，或按 ⌘V 粘贴")
-                            .font(.system(size: 12, weight: .medium))
+                            .font(CharkleTheme.text(.caption, weight: .medium))
                             .foregroundStyle(.white.opacity(0.84))
                             .lineLimit(1)
                         Spacer()
@@ -867,13 +877,13 @@ public struct NotchShelfView: View {
                 Image(systemName: icon)
                     .font(.system(size: 11.5, weight: .medium))
                 Text(title)
-                    .font(.system(size: 11, weight: .medium))
+                    .font(CharkleTheme.text(.caption, weight: .medium))
                     .lineLimit(1)
             }
             .foregroundStyle(.white.opacity(0.88))
             .padding(.horizontal, 9)
             .padding(.vertical, 5.5)
-            .background(Color.white.opacity(0.09), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .background(Color.white.opacity(0.09), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous))
             .fixedSize(horizontal: true, vertical: false)
         }
         .buttonStyle(CharkleTactileButtonStyle())
@@ -884,13 +894,13 @@ public struct NotchShelfView: View {
         switch shelfState.targetMode {
         case .inbox:
             Text("\(library.inboxCount) 项")
-                .font(.system(size: 10.5, weight: .medium, design: .rounded))
+                .font(CharkleTheme.text(.caption, weight: .medium, design: .rounded))
                 .monospacedDigit()
                 .lineLimit(1)
                 .foregroundStyle(.white.opacity(0.68))
                 .padding(.horizontal, 7)
                 .padding(.vertical, 4)
-                .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.sm, style: .continuous))
                 .fixedSize(horizontal: true, vertical: true)
         case .folder:
             Menu {
@@ -908,7 +918,7 @@ public struct NotchShelfView: View {
             } label: {
                 HStack(spacing: 3) {
                     Text(selectedFolderName)
-                        .font(.system(size: 10.5, weight: .semibold))
+                        .font(CharkleTheme.text(.caption, weight: .semibold))
                         .foregroundStyle(.white.opacity(0.92))
                         .lineLimit(1)
                         .truncationMode(.tail)
@@ -916,7 +926,7 @@ public struct NotchShelfView: View {
                 }
                 .padding(.horizontal, 7)
                 .padding(.vertical, 4)
-                .background(Color.white.opacity(0.11), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                .background(Color.white.opacity(0.11), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.sm, style: .continuous))
             }
             .menuStyle(.button)
             .buttonStyle(CharkleMenuTriggerButtonStyle())
@@ -927,14 +937,14 @@ public struct NotchShelfView: View {
                 HStack(spacing: 4) {
                     Circle().fill(Color.white.opacity(0.38)).frame(width: 5, height: 5)
                     Text("未选择情绪板")
-                        .font(.system(size: 10.5, weight: .medium))
+                        .font(CharkleTheme.text(.caption, weight: .medium))
                         .foregroundStyle(.white.opacity(0.68))
                         .lineLimit(1)
                         .truncationMode(.tail)
                 }
                 .padding(.horizontal, 7)
                 .padding(.vertical, 4)
-                .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.sm, style: .continuous))
                 .fixedSize(horizontal: false, vertical: true)
             } else {
                 Menu {
@@ -953,7 +963,7 @@ public struct NotchShelfView: View {
                     HStack(spacing: 4) {
                         Circle().fill(Color.green).frame(width: 5, height: 5)
                         Text(activeBoardTitle)
-                            .font(.system(size: 10.5, weight: .semibold))
+                            .font(CharkleTheme.text(.caption, weight: .semibold))
                             .foregroundStyle(.white.opacity(0.92))
                             .lineLimit(1)
                             .truncationMode(.tail)
@@ -961,7 +971,7 @@ public struct NotchShelfView: View {
                     }
                     .padding(.horizontal, 7)
                     .padding(.vertical, 4)
-                    .background(Color.white.opacity(0.11), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    .background(Color.white.opacity(0.11), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.sm, style: .continuous))
                 }
                 .menuStyle(.button)
                 .buttonStyle(CharkleMenuTriggerButtonStyle())
@@ -973,6 +983,7 @@ public struct NotchShelfView: View {
 
     private func targetSegment(_ mode: NotchTargetMode, label: String) -> some View {
         let isSelected = shelfState.targetMode == mode
+        let segmentRadius = CharkleTheme.Radius.concentricInner(outer: CharkleTheme.Radius.chip, padding: 2)
         return Button {
             withAnimation(CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion)) {
                 shelfState.targetMode = mode
@@ -985,14 +996,14 @@ public struct NotchShelfView: View {
             }
         } label: {
             Text(label)
-                .font(.system(size: 10.5, weight: isSelected ? .semibold : .medium))
+                .font(CharkleTheme.text(.caption, weight: isSelected ? .semibold : .medium))
                 .lineLimit(1)
                 .foregroundStyle(isSelected ? .white : .white.opacity(0.62))
                 .padding(.horizontal, 7)
                 .padding(.vertical, 3.5)
                 .background {
                     if isSelected {
-                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        RoundedRectangle(cornerRadius: segmentRadius, style: .continuous)
                             .fill(Color.white.opacity(0.18))
                             .matchedGeometryEffect(id: "notch-target-pill", in: targetPillNamespace)
                     }
@@ -1033,11 +1044,11 @@ private struct NotchRecentFilmstripCard: View {
                     asset: asset,
                     loader: loader,
                     tier: .grid520,
-                    cornerRadius: 10
+                    cornerRadius: CharkleTheme.Radius.popoverInner
                 )
                 .frame(width: 96, height: 82)
                 .overlay(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    RoundedRectangle(cornerRadius: CharkleTheme.Radius.popoverInner, style: .continuous)
                         .strokeBorder(
                             Color.white.opacity(isHovered ? 0.38 : 0.12),
                             lineWidth: isHovered ? 1.25 : CharkleTheme.hairlineWidth
@@ -1070,7 +1081,7 @@ private struct NotchRecentFilmstripCard: View {
                     .transition(.opacity)
                 }
             }
-            .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: CharkleTheme.Radius.popoverInner, style: .continuous))
             .onTapGesture {
                 if isMinimalCaptureOnly {
                     onOpenAssetInQuickLook()
@@ -1088,7 +1099,7 @@ private struct NotchRecentFilmstripCard: View {
             .onDrag(makeDragProvider)
 
             Text(asset.title)
-                .font(.system(size: 10, weight: .medium))
+                .font(CharkleTheme.text(.caption, weight: .medium))
                 .foregroundStyle(.white.opacity(0.68))
                 .lineLimit(1)
                 .frame(width: 96, alignment: .leading)

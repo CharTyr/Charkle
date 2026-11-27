@@ -67,11 +67,11 @@ public struct SettingsSection<Content: View>: View {
         VStack(alignment: .leading, spacing: 7) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(title)
-                    .font(.system(size: 11.5, weight: .semibold))
+                    .font(CharkleTheme.text(.caption, weight: .semibold))
                     .foregroundStyle(SettingsPalette.sectionLabel(for: colorScheme))
                 if let caption, !caption.isEmpty {
                     Text(caption)
-                        .font(.system(size: 11))
+                        .font(CharkleTheme.text(.caption))
                         .foregroundStyle(SettingsPalette.sectionLabel(for: colorScheme).opacity(0.78))
                 }
             }
@@ -148,11 +148,11 @@ public struct SettingsRow<Control: View>: View {
         HStack(alignment: .center, spacing: 14) {
             VStack(alignment: .leading, spacing: 2.5) {
                 Text(title)
-                    .font(.system(size: 13, weight: .medium))
+                    .font(CharkleTheme.text(.body, weight: .medium))
                     .foregroundStyle(.primary)
                 if let subtitle, !subtitle.isEmpty {
                     Text(subtitle)
-                        .font(.system(size: 11.5))
+                        .font(CharkleTheme.text(.caption))
                         .foregroundStyle(subtitleColor ?? .secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -197,7 +197,7 @@ public struct InlineGuideDisclosure<Content: View>: View {
                         .rotationEffect(.degrees(isExpanded ? 90 : 0))
                         .frame(width: 10, height: 10)
                     Text(title)
-                        .font(.system(size: 11.5, weight: .medium))
+                        .font(CharkleTheme.text(.caption, weight: .medium))
                     Spacer(minLength: 0)
                 }
                 .foregroundStyle(
@@ -255,7 +255,7 @@ public struct SettingsGuideStep: View {
     public var body: some View {
         HStack(alignment: .top, spacing: 9) {
             Text(number)
-                .font(.system(size: 10.5, weight: .semibold, design: .rounded))
+                .font(CharkleTheme.text(.caption, weight: .semibold, design: .rounded))
                 .monospacedDigit()
                 .foregroundStyle(Color.primary.opacity(0.84))
                 .frame(width: 18, height: 18)
@@ -271,11 +271,11 @@ public struct SettingsGuideStep: View {
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
-                    .font(.system(size: 12, weight: .medium))
+                    .font(CharkleTheme.text(.caption, weight: .medium))
                     .foregroundStyle(.primary)
                 if let detail, !detail.isEmpty {
                     Text(detail)
-                        .font(.system(size: 11.5))
+                        .font(CharkleTheme.text(.caption))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                         .textSelection(.enabled)
@@ -326,7 +326,7 @@ public struct SettingsStatusBadge: View {
                 .fill(tint)
                 .frame(width: 6, height: 6)
             Text(text)
-                .font(.system(size: 10.5, weight: .medium))
+                .font(CharkleTheme.text(.caption, weight: .medium))
                 .foregroundStyle(tint)
         }
         .padding(.horizontal, 7.5)
@@ -367,7 +367,7 @@ public struct SettingsSheetFeedbackBanner: View {
                 .font(.system(size: 12))
                 .foregroundStyle(tint)
             Text(text)
-                .font(.system(size: 11.5, weight: .medium))
+                .font(CharkleTheme.text(.caption, weight: .medium))
                 .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 4)
             Button(action: onDismiss) {
@@ -397,7 +397,7 @@ public struct SettingsCodeSnippet: View {
 
     public var body: some View {
         Text(text)
-            .font(.system(size: 11, design: .monospaced))
+            .font(CharkleTheme.text(.caption, design: .monospaced))
             .foregroundStyle(.secondary)
             .textSelection(.enabled)
             .padding(10)

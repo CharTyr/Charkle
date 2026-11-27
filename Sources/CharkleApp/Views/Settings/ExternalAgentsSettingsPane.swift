@@ -416,9 +416,9 @@ public struct ExternalAgentsSettingsPane: View {
                         HStack(alignment: .top, spacing: 10) {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(item.title)
-                                    .font(.system(size: 11.5, weight: .semibold))
+                                    .font(CharkleTheme.text(.caption, weight: .semibold))
                                 Text("“\(item.prompt)”")
-                                    .font(.system(size: 11))
+                                    .font(CharkleTheme.text(.caption))
                                     .foregroundStyle(.secondary)
                                     .fixedSize(horizontal: false, vertical: true)
                             }
