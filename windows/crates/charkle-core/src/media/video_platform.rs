@@ -17,6 +17,7 @@ use serde_json::{json, Value};
 use url::Url;
 
 use crate::error::{CoreError, CoreResult};
+use crate::media::douyin::{DouyinURLParser, DOUYIN_REFERER};
 use crate::media::resolvers::{ResolvedSocialPost, SocialPostResolver, WebBookmarkResolver};
 use crate::models::core::{
     SocialMediaAttachment, SocialMediaAttachmentKind, SocialPlatform, SocialPostMetadata,
@@ -1148,6 +1149,9 @@ impl VideoPlatformResolver {
             SocialPlatform::Youtube => {
                 Self::resolve_youtube_playback_plan(post, watch_url.as_ref()).await
             }
+            SocialPlatform::Douyin => {
+                Self::resolve_douyin_playback_plan(post, watch_url.as_ref()).await
+            }
             _ => {
                 let mut direct_streams = Vec::new();
                 let mut seen = HashSet::new();
@@ -1192,6 +1196,87 @@ impl VideoPlatformResolver {
                     watch_url: watch_url.map(|u| u.to_string()),
                 }
             }
+        }
+    }
+
+    /// Resolves an inline zero-download streaming plan for Douyin video bookmarks:
+    /// prefers fresh direct CDN streams captured by the extension (with Douyin `Referer`),
+    /// and automatically falls back to `yt-dlp -g` when the stored stream is missing or its
+    /// signed `x-expires` timestamp has expired.
+    async fn resolve_douyin_playback_plan(
+        post: &SocialPostMetadata,
+        watch_url: Option<&Url>,
+    ) -> VideoStreamPlaybackPlan {
+        let mut headers = BTreeMap::new();
+        headers.insert("User-Agent".to_string(), BROWSER_UA.to_string());
+        headers.insert("Referer".to_string(), DOUYIN_REFERER.to_string());
+
+        let now_unix = Utc::now().timestamp();
+        let mut fresh_streams = Vec::new();
+        let mut expired_streams = Vec::new();
+        let mut seen = HashSet::new();
+
+        for att in post.effective_attachments() {
+            if !matches!(
+                att.kind,
+                SocialMediaAttachmentKind::Video | SocialMediaAttachmentKind::Gif
+            ) {
+                continue;
+            }
+            let Ok(u) = Url::parse(att.url.trim()) else {
+                continue;
+            };
+            if !SocialPostResolver::is_safe_public_media_url(&u) {
+                continue;
+            }
+            // Skip canonical watch-page URLs (`/video/<id>`) — those are HTML pages, not streams.
+            if DouyinURLParser::parse(&u).is_some()
+                && !u.path().to_ascii_lowercase().contains("/aweme/v1/play")
+            {
+                continue;
+            }
+            if !seen.insert(u.as_str().to_string()) {
+                continue;
+            }
+            let stream = VideoDirectStream {
+                url: u.to_string(),
+                http_headers: headers.clone(),
+                is_hls: is_hls_url(&u),
+            };
+            if DouyinURLParser::is_stream_url_expired(&u, now_unix) {
+                expired_streams.push(stream);
+            } else {
+                fresh_streams.push(stream);
+            }
+        }
+
+        let mut direct_streams = fresh_streams;
+        if direct_streams.is_empty() {
+            if let Some(page_url) = watch_url {
+                if let Some(mut ytdlp_stream) =
+                    Self::resolve_direct_stream_via_yt_dlp_if_available(page_url.as_str()).await
+                {
+                    ytdlp_stream
+                        .http_headers
+                        .entry("Referer".to_string())
+                        .or_insert_with(|| DOUYIN_REFERER.to_string());
+                    ytdlp_stream
+                        .http_headers
+                        .entry("User-Agent".to_string())
+                        .or_insert_with(|| BROWSER_UA.to_string());
+                    if seen.insert(ytdlp_stream.url.clone()) {
+                        direct_streams.push(ytdlp_stream);
+                    }
+                }
+            }
+        }
+        // Keep any expired URL at the tail as a last-resort fallback in case of local clock skew.
+        direct_streams.extend(expired_streams);
+
+        VideoStreamPlaybackPlan {
+            direct_streams,
+            embed_player: None,
+            watch_url: watch_url.map(|u| u.to_string()),
         }
     }
 
@@ -1861,18 +1946,23 @@ impl VideoPlatformResolver {
         if let Some(direct) = direct_stream_url {
             if SocialPostResolver::is_safe_public_media_url(direct) {
                 let lower = direct.as_str().to_ascii_lowercase();
+                let is_douyin_stream = DouyinURLParser::is_douyin_video_host(direct.host_str())
+                    && (DouyinURLParser::parse(direct).is_none()
+                        || lower.contains("/aweme/v1/play"));
                 let looks_direct = lower.contains(".mp4")
                     || lower.contains(".mov")
                     || lower.contains(".m4v")
                     || lower.contains(".webm")
-                    || lower.contains("video");
+                    || lower.contains("video")
+                    || is_douyin_stream;
+                let referer = if is_douyin_stream {
+                    Some(DOUYIN_REFERER)
+                } else {
+                    Some(page_url)
+                };
                 if looks_direct {
                     if let Some(file) = Self::download_stream_file(
-                        direct,
-                        directory,
-                        base_name,
-                        BROWSER_UA,
-                        Some(page_url),
+                        direct, directory, base_name, BROWSER_UA, referer,
                     )
                     .await
                     {
@@ -2540,6 +2630,8 @@ pub async fn fetch_video_stream_chunk(
         _ => {
             if VideoPlatformURLParser::is_bilibili_media_host(parsed.host_str()) {
                 Some("https://www.bilibili.com/".to_string())
+            } else if DouyinURLParser::is_douyin_video_host(parsed.host_str()) {
+                Some(DOUYIN_REFERER.to_string())
             } else {
                 None
             }
@@ -2595,18 +2687,11 @@ pub async fn fetch_video_stream_chunk(
         )));
     }
 
-    let content_type = resp
+    let raw_content_type = resp
         .headers()
         .get(reqwest::header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
-        .map(str::to_string)
-        .unwrap_or_else(|| {
-            if is_hls_url(&parsed) {
-                "application/vnd.apple.mpegurl".to_string()
-            } else {
-                "video/mp4".to_string()
-            }
-        });
+        .map(str::to_string);
     let content_range = resp
         .headers()
         .get(reqwest::header::CONTENT_RANGE)
@@ -2621,6 +2706,8 @@ pub async fn fetch_video_stream_chunk(
         .unwrap_or(true);
 
     if is_head {
+        let content_type =
+            normalize_video_stream_content_type(raw_content_type.as_deref(), resp.url(), &[]);
         return Ok(VideoStreamProxyResponse {
             status,
             content_type,
@@ -2653,6 +2740,9 @@ pub async fn fetch_video_stream_chunk(
         bytes.extend_from_slice(&chunk);
     }
 
+    let content_type =
+        normalize_video_stream_content_type(raw_content_type.as_deref(), resp.url(), &bytes);
+
     Ok(VideoStreamProxyResponse {
         status,
         content_type,
@@ -2661,6 +2751,37 @@ pub async fn fetch_video_stream_chunk(
         accept_ranges,
         bytes,
     })
+}
+
+/// Normalizes video stream proxy `Content-Type` headers, upgrading generic
+/// `application/octet-stream` payloads (common on Douyin VOD CDNs) to `video/mp4`
+/// when ISO BMFF `ftyp` magic bytes or a known video host is detected.
+pub fn normalize_video_stream_content_type(
+    upstream_ct: Option<&str>,
+    url: &Url,
+    bytes: &[u8],
+) -> String {
+    let trimmed = upstream_ct
+        .map(|s| s.split(';').next().unwrap_or(s).trim())
+        .filter(|s| !s.is_empty());
+    let is_generic_octet = trimmed.is_none_or(|ct| {
+        ct.eq_ignore_ascii_case("application/octet-stream")
+            || ct.eq_ignore_ascii_case("binary/octet-stream")
+    });
+    if !is_generic_octet {
+        if let Some(ct) = upstream_ct.map(str::trim).filter(|s| !s.is_empty()) {
+            return ct.to_string();
+        }
+    }
+    if is_hls_url(url) {
+        return "application/vnd.apple.mpegurl".to_string();
+    }
+    if (bytes.len() >= 12 && &bytes[4..8] == b"ftyp")
+        || DouyinURLParser::is_douyin_video_host(url.host_str())
+    {
+        return "video/mp4".to_string();
+    }
+    "video/mp4".to_string()
 }
 
 /// Crops a full-window PNG preview captured from WebView2 to the requested logical rectangle

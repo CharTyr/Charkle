@@ -1149,9 +1149,7 @@ impl ShelfDropGeometry {
         upward_vy_dip: f64,
         elapsed_since_trigger_secs: f64,
     ) -> bool {
-        if elapsed_since_trigger_secs < 0.0
-            || elapsed_since_trigger_secs > Self::APPROACH_GRACE_SECS
-        {
+        if !(0.0..=Self::APPROACH_GRACE_SECS).contains(&elapsed_since_trigger_secs) {
             return false;
         }
         if upward_vy_dip < Self::APPROACH_GRACE_REVERSAL_SPEED_DIP {

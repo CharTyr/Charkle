@@ -119,8 +119,11 @@ impl MediaArtwork {
         if meta.platform.is_video_platform() {
             return Self::video_platform_card(meta, cover, avatar);
         }
-        if meta.platform == SocialPlatform::Xiaohongshu {
-            return Self::xiaohongshu_post_card(meta, cover, avatar);
+        if matches!(
+            meta.platform,
+            SocialPlatform::Xiaohongshu | SocialPlatform::Douyin
+        ) {
+            return Self::vertical_social_feed_card(meta, cover, avatar);
         }
 
         const W: u32 = 800;
@@ -150,6 +153,8 @@ impl MediaArtwork {
             SocialPlatform::Instagram => "#D93B58",
             SocialPlatform::Youtube => "#FF0000",
             SocialPlatform::Bilibili => "#FB7299",
+            SocialPlatform::Douyin => "#161823",
+            SocialPlatform::Unknown(_) => "#52525B",
         };
 
         let mut handle_parts = Vec::new();
@@ -496,15 +501,40 @@ impl MediaArtwork {
         cover: Option<&DynamicImage>,
         avatar: Option<&DynamicImage>,
     ) -> DynamicImage {
+        Self::vertical_social_feed_card(meta, cover, avatar)
+    }
+
+    /// Renders a native `900×1440` (`0.625` aspect) vertical social feed card for Xiaohongshu & Douyin:
+    /// - With cover: strict `900×1200` (3:4) full-bleed cover on top, optional top-left `N 图`
+    ///   pill (multi-image photo-notes) or centered video play circle + bottom-right `MM:SS`
+    ///   duration pill (when `video_duration_seconds > 0`), `1.5px #EFEFEF` divider, and
+    ///   `900×240` `#FFFFFF` footer with 2-line CJK-wrapped bold title, circular author avatar/monogram,
+    ///   clean nickname, and right-aligned heart + like count.
+    /// - Without cover: clean `900×1440` editorial text-only fallback with `12px` top accent ribbon.
+    pub fn vertical_social_feed_card(
+        meta: &SocialPostMetadata,
+        cover: Option<&DynamicImage>,
+        avatar: Option<&DynamicImage>,
+    ) -> DynamicImage {
         const W: u32 = 900;
         const COVER_H: u32 = 1_200;
         const H: u32 = 1_440;
+
+        let is_douyin = meta.platform == SocialPlatform::Douyin;
+        let fallback_initial = if is_douyin { '抖' } else { '小' };
+        let ribbon_hex = if is_douyin { "#161823" } else { "#FF2442" };
+        let ribbon_rgba = if is_douyin {
+            Rgba([22, 24, 35, 255])
+        } else {
+            Rgba([255, 36, 66, 255])
+        };
+        let heart_hex = if is_douyin { "#FE2C55" } else { "#FF2442" };
 
         let author_name = meta.display_author_name();
         let initial = author_name
             .chars()
             .next()
-            .unwrap_or('小')
+            .unwrap_or(fallback_initial)
             .to_uppercase()
             .to_string();
 
@@ -522,7 +552,11 @@ impl MediaArtwork {
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| meta.body_text.trim());
             let display_title = if raw_title.is_empty() {
-                format!("{author_name} 的小红书笔记")
+                if is_douyin {
+                    format!("{author_name} 的抖音作品")
+                } else {
+                    format!("{author_name} 的小红书笔记")
+                }
             } else {
                 raw_title.to_string()
             };
@@ -546,13 +580,24 @@ impl MediaArtwork {
                 ));
             }
 
-            // Video play badge centered on 3:4 cover
+            // Video play badge centered on 3:4 cover + optional bottom-right MM:SS duration pill
             if meta.has_video {
                 svg.push_str(
                     r##"  <circle cx="450" cy="600" r="44" fill="#000000" fill-opacity="0.58"/>
   <polygon points="438,580 438,620 472,600" fill="#FFFFFF"/>
 "##,
                 );
+                if let Some(dur_label) = meta.formatted_video_duration() {
+                    let pill_w: u32 = if dur_label.len() > 5 { 132 } else { 108 };
+                    let pill_x: u32 = W - 24 - pill_w;
+                    let text_x: u32 = pill_x + pill_w / 2;
+                    svg.push_str(&format!(
+                        r##"  <rect x="{pill_x}" y="1132" width="{pill_w}" height="44" rx="22" ry="22" fill="#111827" fill-opacity="0.72"/>
+  <text x="{text_x}" y="1161" text-anchor="middle" font-family="Segoe UI, Microsoft YaHei UI, sans-serif" font-size="20" font-weight="700" fill="#FFFFFF">{}</text>
+"##,
+                        escape_svg_xml(&dur_label)
+                    ));
+                }
             }
 
             // Hairline divider & crisp paper-white bottom footer
@@ -580,14 +625,14 @@ impl MediaArtwork {
             // Author circular monogram fallback (overlaid with real photo below when available)
             if avatar.is_none() {
                 svg.push_str(&format!(
-                    r##"  <circle cx="55" cy="1385" r="21" fill="#FF2442" fill-opacity="0.14"/>
-  <text x="55" y="1393" text-anchor="middle" font-family="Microsoft YaHei UI, Segoe UI, sans-serif" font-size="20" font-weight="700" fill="#FF2442">{}</text>
+                    r##"  <circle cx="55" cy="1385" r="21" fill="{ribbon_hex}" fill-opacity="0.14"/>
+  <text x="55" y="1393" text-anchor="middle" font-family="Microsoft YaHei UI, Segoe UI, sans-serif" font-size="20" font-weight="700" fill="{ribbon_hex}">{}</text>
 "##,
                     escape_svg_xml(&initial)
                 ));
             }
 
-            // Author nickname + right-aligned #FF2442 ♥ likes
+            // Author nickname + right-aligned ♥ likes
             let author_max_chars = if meta.like_count.is_some() { 20 } else { 30 };
             let author_short = truncate_chars(&author_name, author_max_chars);
             svg.push_str(&format!(
@@ -599,7 +644,7 @@ impl MediaArtwork {
             if let Some(likes) = meta.like_count {
                 let formatted = format_metric_count(likes);
                 svg.push_str(&format!(
-                    r##"  <text x="866" y="1393" text-anchor="end" font-family="Segoe UI, Microsoft YaHei UI, sans-serif" font-size="22" font-weight="500"><tspan fill="#FF2442">♥</tspan><tspan fill="#6B7280"> {}</tspan></text>
+                    r##"  <text x="866" y="1393" text-anchor="end" font-family="Segoe UI, Microsoft YaHei UI, sans-serif" font-size="22" font-weight="500"><tspan fill="{heart_hex}">♥</tspan><tspan fill="#6B7280"> {}</tspan></text>
 "##,
                     escape_svg_xml(&formatted)
                 ));
@@ -633,19 +678,19 @@ impl MediaArtwork {
             return DynamicImage::ImageRgba8(img);
         }
 
-        // Clean 900×1440 text-only editorial fallback with 12px #FF2442 top ribbon
+        // Clean 900×1440 text-only editorial fallback with 12px top accent ribbon
         let mut svg = String::with_capacity(4096);
         svg.push_str(&format!(
             r##"<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" viewBox="0 0 {W} {H}">
   <rect x="0" y="0" width="{W}" height="{H}" fill="#FFFFFF"/>
-  <rect x="0" y="0" width="{W}" height="12" fill="#FF2442"/>
+  <rect x="0" y="0" width="{W}" height="12" fill="{ribbon_hex}"/>
   <rect x="1" y="1" width="898" height="1438" fill="none" stroke="#E5E7EB" stroke-width="2"/>
 "##
         ));
 
         if avatar.is_none() {
             svg.push_str(&format!(
-                r##"  <circle cx="81" cy="89" r="29" fill="#FF2442"/>
+                r##"  <circle cx="81" cy="89" r="29" fill="{ribbon_hex}"/>
   <text x="81" y="99" text-anchor="middle" font-family="Microsoft YaHei UI, Segoe UI, sans-serif" font-size="26" font-weight="700" fill="#FFFFFF">{}</text>
 "##,
                 escape_svg_xml(&initial)
@@ -734,7 +779,7 @@ impl MediaArtwork {
 
         let mut base = Self::render_svg_with_fonts(svg.as_bytes(), H).unwrap_or_else(|| {
             let mut fallback = RgbaImage::from_pixel(W, H, Rgba([255, 255, 255, 255]));
-            fill_rect(&mut fallback, 0, 0, W, 12, Rgba([255, 36, 66, 255]));
+            fill_rect(&mut fallback, 0, 0, W, 12, ribbon_rgba);
             draw_rect_outline(&mut fallback, 0, 0, W, H, 2, Rgba([229, 231, 235, 255]));
             DynamicImage::ImageRgba8(fallback)
         });

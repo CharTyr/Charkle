@@ -3995,7 +3995,7 @@ impl LiveCharkleEngine {
             .rich_metadata
             .as_ref()
             .and_then(|r| r.social_post.as_ref())
-            .map(|p| p.platform);
+            .map(|p| p.platform.clone());
         let parsed_att_url = Url::parse(&trimmed_url).ok();
         let parsed_parent_url = parent
             .source_url
@@ -4013,7 +4013,10 @@ impl LiveCharkleEngine {
             .as_ref()
             .and_then(VideoPlatformURLParser::parse)
             .or_else(|| {
-                if social_platform.is_some_and(SocialPlatform::is_video_platform) {
+                if social_platform
+                    .as_ref()
+                    .is_some_and(SocialPlatform::is_video_platform)
+                {
                     parsed_parent_url
                         .as_ref()
                         .and_then(VideoPlatformURLParser::parse)

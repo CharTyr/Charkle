@@ -57,6 +57,8 @@
       "resources/BrowserExtension/manifest.json": "Resources/BrowserExtension/manifest.json",
       "resources/BrowserExtension/background.js": "Resources/BrowserExtension/background.js",
       "resources/BrowserExtension/content.js": "Resources/BrowserExtension/content.js",
+      "resources/BrowserExtension/page-bridge.js": "Resources/BrowserExtension/page-bridge.js",
+      "resources/BrowserExtension/x-bridge-loader.js": "Resources/BrowserExtension/x-bridge-loader.js",
       "resources/BrowserExtension/popup.html": "Resources/BrowserExtension/popup.html",
       "resources/BrowserExtension/popup.css": "Resources/BrowserExtension/popup.css",
       "resources/BrowserExtension/popup.js": "Resources/BrowserExtension/popup.js",
@@ -71,9 +73,12 @@
       "resources/BrowserExtension/icons/icon-48.png": "Resources/BrowserExtension/icons/icon-48.png",
       "resources/BrowserExtension/icons/icon-128.png": "Resources/BrowserExtension/icons/icon-128.png",
       "resources/BrowserExtension/lib/api.js": "Resources/BrowserExtension/lib/api.js",
+      "resources/BrowserExtension/lib/douyin-parser.js": "Resources/BrowserExtension/lib/douyin-parser.js",
       "resources/BrowserExtension/lib/image-filter.js": "Resources/BrowserExtension/lib/image-filter.js",
+      "resources/BrowserExtension/lib/social-collectors.js": "Resources/BrowserExtension/lib/social-collectors.js",
       "resources/BrowserExtension/lib/storage.js": "Resources/BrowserExtension/lib/storage.js",
       "resources/BrowserExtension/lib/url-detect.js": "Resources/BrowserExtension/lib/url-detect.js",
+      "resources/BrowserExtension/lib/x-author-media.js": "Resources/BrowserExtension/lib/x-author-media.js",
       "resources/BrowserExtension/lib/xhs-parser.js": "Resources/BrowserExtension/lib/xhs-parser.js"
     },
     "windows": {

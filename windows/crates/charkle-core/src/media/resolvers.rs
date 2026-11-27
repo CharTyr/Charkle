@@ -20,6 +20,9 @@ use sha2::{Digest, Sha256};
 use url::Url;
 
 use crate::media::artwork::MediaArtwork;
+use crate::media::douyin::{
+    DouyinPostReference, DouyinPostResolver, DouyinURLParser, DOUYIN_REFERER,
+};
 use crate::media::video_platform::{
     VideoPlatformReference, VideoPlatformResolver, VideoPlatformURLParser,
 };
@@ -582,8 +585,6 @@ impl WebBookmarkResolver {
         for raw in &dom_hero_imgs {
             push_img(raw);
         }
-        drop(push_vid);
-        drop(push_img);
         if !video_candidates.is_empty() {
             is_video_page = true;
         }
@@ -2162,6 +2163,7 @@ impl XPostURLParser {
     /// Strict HTTPS CDN host allowlist for the local `/proxy-social` image cache proxy.
     pub fn is_allowed_social_proxy_host(host: Option<&str>) -> bool {
         if XiaohongshuURLParser::is_xiaohongshu_media_host(host)
+            || DouyinURLParser::is_douyin_image_host(host)
             || Self::is_x_media_host(host)
             || Self::is_pixiv_media_host(host)
             || Self::is_instagram_media_host(host)
@@ -2290,6 +2292,7 @@ pub enum SocialPostReference {
         canonical_url: String,
     },
     Xiaohongshu(XiaohongshuNoteReference),
+    Douyin(DouyinPostReference),
     Pixiv {
         illust_id: String,
         canonical_url: String,
@@ -2308,6 +2311,7 @@ impl SocialPostReference {
             Self::Threads { .. } => SocialPlatform::Threads,
             Self::Bluesky { .. } => SocialPlatform::Bluesky,
             Self::Xiaohongshu(_) => SocialPlatform::Xiaohongshu,
+            Self::Douyin(_) => SocialPlatform::Douyin,
             Self::Pixiv { .. } => SocialPlatform::Pixiv,
             Self::Instagram { .. } => SocialPlatform::Instagram,
             Self::Video(v) => v.platform(),
@@ -2320,6 +2324,7 @@ impl SocialPostReference {
             Self::Threads { canonical_url, .. } => canonical_url.clone(),
             Self::Bluesky { canonical_url, .. } => canonical_url.clone(),
             Self::Xiaohongshu(r) => r.canonical_url(),
+            Self::Douyin(r) => r.canonical_url(),
             Self::Pixiv { canonical_url, .. } => canonical_url.clone(),
             Self::Instagram { canonical_url, .. } => canonical_url.clone(),
             Self::Video(v) => v.canonical_url().to_string(),
@@ -2335,6 +2340,7 @@ impl SocialPostReference {
                 format!("bsky:{}:{rkey}", handle.to_ascii_lowercase())
             }
             Self::Xiaohongshu(r) => r.dedup_key(),
+            Self::Douyin(r) => r.dedup_key(),
             Self::Pixiv { illust_id, .. } => format!("pixiv:{illust_id}"),
             Self::Instagram { shortcode, .. } => format!("ig:{shortcode}"),
             Self::Video(v) => v.dedup_key(),
@@ -2365,6 +2371,9 @@ impl SocialPostURLParser {
         }
         if let Some(xhs_ref) = XiaohongshuURLParser::parse(url) {
             return Some(SocialPostReference::Xiaohongshu(xhs_ref));
+        }
+        if let Some(dy_ref) = DouyinURLParser::parse(url) {
+            return Some(SocialPostReference::Douyin(dy_ref));
         }
         if let Some(vid_ref) = VideoPlatformURLParser::parse(url) {
             return Some(SocialPostReference::Video(vid_ref));
@@ -2492,10 +2501,13 @@ impl SocialPostURLParser {
         None
     }
 
-    /// Extracts the first X/Threads/Bluesky/Xiaohongshu/YouTube/Bilibili URL embedded in plain text or share copy.
+    /// Extracts the first X/Threads/Bluesky/Xiaohongshu/Douyin/YouTube/Bilibili URL embedded in plain text or share copy.
     pub fn extract_post_url(raw: &str) -> Option<Url> {
         if let Some(xhs_url) = XiaohongshuURLParser::extract_note_url(raw) {
             return Some(xhs_url);
+        }
+        if let Some(dy_url) = DouyinURLParser::extract_post_url(raw) {
+            return Some(dy_url);
         }
         if let Some(web_url) = WebURLParser::extract_web_url(raw, true) {
             if VideoPlatformURLParser::parse(&web_url).is_some() {
@@ -2555,7 +2567,10 @@ impl ResolvedSocialPost {
             }
             return self.metadata.platform.display_name().to_string();
         }
-        let author_prefix = if self.metadata.platform == SocialPlatform::Xiaohongshu {
+        let author_prefix = if matches!(
+            self.metadata.platform,
+            SocialPlatform::Xiaohongshu | SocialPlatform::Douyin
+        ) {
             self.metadata.display_author_name()
         } else {
             format!("@{}", self.metadata.author_handle)
@@ -2787,6 +2802,7 @@ impl SocialPostResolver {
             SocialPostReference::Xiaohongshu(xhs_ref) => {
                 XiaohongshuPostResolver::resolve(xhs_ref).await
             }
+            SocialPostReference::Douyin(dy_ref) => DouyinPostResolver::resolve(dy_ref).await,
             SocialPostReference::Pixiv {
                 illust_id,
                 canonical_url,
@@ -2829,6 +2845,9 @@ impl SocialPostResolver {
         }
         if XiaohongshuURLParser::is_xiaohongshu_media_host(host) {
             return Some(XIAOHONGSHU_REFERER);
+        }
+        if DouyinURLParser::is_douyin_media_host(host) {
+            return Some(DOUYIN_REFERER);
         }
         if let Some(h) = host.map(|s| s.trim().to_ascii_lowercase()) {
             if h == "hdslb.com"
@@ -2948,7 +2967,12 @@ impl SocialPostResolver {
                                     && bytes.len() <= max_bytes
                                     && is_acceptable_media_response(mime.as_deref(), &bytes, kind)
                                 {
-                                    let ext = resolve_media_extension(&url, mime.as_deref(), kind);
+                                    let ext = resolve_media_extension(
+                                        &url,
+                                        mime.as_deref(),
+                                        &bytes,
+                                        kind,
+                                    );
                                     return Some((bytes.to_vec(), ext));
                                 }
                                 break;
@@ -4127,6 +4151,9 @@ fn sniff_social_media_content_type(bytes: &[u8], url_str: &str) -> &'static str 
         if brand == b"avif" || brand == b"avis" {
             return "image/avif";
         }
+        if matches!(brand, b"heic" | b"heix" | b"mif1" | b"msf1") {
+            return "image/heic";
+        }
         return "video/mp4";
     }
     let lower = url_str.to_ascii_lowercase();
@@ -4493,9 +4520,10 @@ fn extract_fx_attachments(block: Option<&FxMediaBlock>) -> Vec<SocialMediaAttach
     out
 }
 
-fn resolve_media_extension(
+pub fn resolve_media_extension(
     url: &Url,
     mime_type: Option<&str>,
+    bytes: &[u8],
     kind: SocialMediaAttachmentKind,
 ) -> String {
     if let Some(mime) = mime_type.map(str::to_ascii_lowercase) {
@@ -4517,16 +4545,48 @@ fn resolve_media_extension(
         if mime.contains("webp") {
             return "webp".to_string();
         }
+        if mime.contains("avif") {
+            return "avif".to_string();
+        }
+        if mime.contains("heic") || mime.contains("heif") {
+            return "heic".to_string();
+        }
         if mime.contains("jpeg") || mime.contains("jpg") {
             return "jpg".to_string();
         }
+    }
+    // Sniff magic bytes (critical when Douyin CDN serves `application/octet-stream` without an extension).
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return "png".to_string();
+    }
+    if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        return "jpg".to_string();
+    }
+    if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        return "webp".to_string();
+    }
+    if bytes.starts_with(b"GIF8") {
+        return "gif".to_string();
+    }
+    if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" {
+        let brand = &bytes[8..12];
+        if brand == b"avif" || brand == b"avis" {
+            return "avif".to_string();
+        }
+        if matches!(brand, b"heic" | b"heix" | b"mif1" | b"msf1") {
+            return "heic".to_string();
+        }
+        return "mp4".to_string();
     }
     if let Some((_, fmt)) = url
         .query_pairs()
         .find(|(k, _)| k.eq_ignore_ascii_case("format"))
     {
         let lower = fmt.trim().to_ascii_lowercase();
-        if matches!(lower.as_str(), "jpg" | "jpeg" | "png" | "webp" | "gif") {
+        if matches!(
+            lower.as_str(),
+            "jpg" | "jpeg" | "png" | "webp" | "gif" | "avif" | "heic"
+        ) {
             return if lower == "jpeg" {
                 "jpg".to_string()
             } else {
@@ -4541,7 +4601,7 @@ fn resolve_media_extension(
     {
         if matches!(
             ext.as_str(),
-            "jpg" | "jpeg" | "png" | "webp" | "gif" | "mp4" | "mov" | "webm"
+            "jpg" | "jpeg" | "png" | "webp" | "gif" | "avif" | "heic" | "mp4" | "mov" | "webm"
         ) {
             return if ext == "jpeg" {
                 "jpg".to_string()
@@ -5101,7 +5161,7 @@ mod tests {
         let fmt_url =
             Url::parse("https://pbs.twimg.com/media/ABC123?format=png&name=orig").unwrap();
         assert_eq!(
-            resolve_media_extension(&fmt_url, None, SocialMediaAttachmentKind::Photo),
+            resolve_media_extension(&fmt_url, None, &[], SocialMediaAttachmentKind::Photo),
             "png"
         );
 

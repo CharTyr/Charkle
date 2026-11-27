@@ -23,6 +23,7 @@ use crate::media::artwork::{
 };
 use crate::media::audio::analyze_audio;
 use crate::media::color::ColorExtractor;
+use crate::media::douyin::{douyin_classification_tag, DouyinURLParser};
 use crate::media::metadata::ImageMetadataExtractor;
 use crate::media::resolvers::{
     GitHubRepoResolver, GitHubRepoURLParser, ResolvedSocialPost, SocialPostResolver,
@@ -447,6 +448,7 @@ impl MediaPipeline {
                 notes: supplied_notes,
             } => {
                 let parsed = XiaohongshuURLParser::extract_note_url(&raw_url)
+                    .or_else(|| DouyinURLParser::extract_post_url(&raw_url))
                     .or_else(|| WebURLParser::parse(&raw_url))
                     .or_else(|| Url::parse(raw_url.trim()).ok())
                     .ok_or_else(|| CoreError::Media(format!("Invalid bookmark URL `{raw_url}`")))?;
@@ -462,28 +464,54 @@ impl MediaPipeline {
                 notes = supplied_notes.unwrap_or_default();
                 forced_media_kind = Some(MediaKind::WebBookmark);
 
-                // Social Post (X / Threads / Bluesky / Xiaohongshu) — Cohesive Storage Invariant:
-                // ALWAYS 1 asset with mediaKind = webBookmark + richMetadata.socialPost
+                // Social Post (X / Threads / Bluesky / Xiaohongshu / Douyin / YouTube / Bilibili) —
+                // Cohesive Storage Invariant: ALWAYS 1 asset with mediaKind = webBookmark + richMetadata.socialPost
                 if let Some(social_ref) = SocialPostURLParser::parse(&parsed) {
                     let is_xhs_short_link = matches!(
                         &social_ref,
                         crate::media::resolvers::SocialPostReference::Xiaohongshu(r)
                             if r.is_short_link
                     );
+                    let is_douyin_short_link = matches!(
+                        &social_ref,
+                        crate::media::resolvers::SocialPostReference::Douyin(r) if r.is_short_link
+                    );
                     let resolved = SocialPostResolver::resolve(&social_ref).await;
                     if let Some(mut post) = resolved {
                         let platform_tag = post.metadata.platform.display_name().to_string();
                         extra_tags.push(platform_tag);
-                        for tag in post.extracted_tags.iter().take(12) {
+                        if post.metadata.platform == SocialPlatform::Douyin {
+                            extra_tags.push(
+                                douyin_classification_tag(post.metadata.has_video).to_string(),
+                            );
+                        }
+                        let mut added_tags = 0usize;
+                        for tag in &post.extracted_tags {
                             let clean = tag.trim();
-                            if !clean.is_empty() {
-                                extra_tags.push(clean.to_string());
+                            if clean.is_empty()
+                                || extra_tags.iter().any(|t| t.eq_ignore_ascii_case(clean))
+                            {
+                                continue;
+                            }
+                            extra_tags.push(clean.to_string());
+                            added_tags += 1;
+                            if added_tags >= 12 {
+                                break;
                             }
                         }
                         if is_xhs_short_link {
                             if let Ok(resolved_url) = Url::parse(&post.metadata.original_url) {
                                 if XiaohongshuURLParser::parse(&resolved_url)
                                     .is_some_and(|r| r.note_id.is_some())
+                                {
+                                    source_url = Some(resolved_url);
+                                }
+                            }
+                        }
+                        if is_douyin_short_link {
+                            if let Ok(resolved_url) = Url::parse(&post.metadata.original_url) {
+                                if DouyinURLParser::parse(&resolved_url)
+                                    .is_some_and(|r| r.aweme_id.is_some())
                                 {
                                     source_url = Some(resolved_url);
                                 }
@@ -498,6 +526,10 @@ impl MediaPipeline {
                             }
                         }
                         let is_video_platform = post.metadata.platform.is_video_platform();
+                        let skip_eager_video_download = post
+                            .metadata
+                            .platform
+                            .prefers_zero_download_video_bookmark();
                         if notes.trim().is_empty() {
                             if is_video_platform {
                                 let mut note_blocks = Vec::new();
@@ -529,9 +561,9 @@ impl MediaPipeline {
                                 kind,
                                 SocialMediaAttachmentKind::Video | SocialMediaAttachmentKind::Gif
                             ) {
-                                // Zero-download default contract for YouTube / Bilibili bookmarks:
+                                // Zero-download default contract for YouTube / Bilibili / Douyin bookmarks:
                                 // never download the full MP4 unless the user explicitly asks to extract it.
-                                if !is_video_platform {
+                                if !skip_eager_video_download {
                                     downloaded_video =
                                         SocialPostResolver::download_media_bytes(dl_url, kind)
                                             .await;
@@ -809,10 +841,14 @@ impl MediaPipeline {
                             || meta.video_duration_seconds.is_none()
                             || meta.effective_attachments().is_empty()
                     }
+                    SocialPlatform::Douyin => {
+                        meta.effective_attachments().is_empty() && meta.body_text.trim().is_empty()
+                    }
                     SocialPlatform::Threads
                     | SocialPlatform::Bluesky
                     | SocialPlatform::Pixiv
-                    | SocialPlatform::Instagram => false,
+                    | SocialPlatform::Instagram
+                    | SocialPlatform::Unknown(_) => false,
                 };
 
                 let mut live_extracted_tags = Vec::new();
@@ -821,7 +857,10 @@ impl MediaPipeline {
                     if let Ok(parsed_orig) = Url::parse(&meta.original_url) {
                         if let Some(social_ref) = SocialPostURLParser::parse(&parsed_orig) {
                             if let Some(live) = SocialPostResolver::resolve(&social_ref).await {
-                                if !live.metadata.platform.is_video_platform()
+                                if !live
+                                    .metadata
+                                    .platform
+                                    .prefers_zero_download_video_bookmark()
                                     && matches!(
                                         live.primary_media_kind,
                                         Some(
@@ -845,12 +884,24 @@ impl MediaPipeline {
                     }
                 }
                 let is_video_platform = meta.platform.is_video_platform();
+                let skip_eager_video_download =
+                    meta.platform.prefers_zero_download_video_bookmark();
 
                 extra_tags.push(meta.platform.display_name().to_string());
-                for tag in tags.into_iter().chain(live_extracted_tags).take(16) {
+                if meta.platform == SocialPlatform::Douyin {
+                    extra_tags.push(douyin_classification_tag(meta.has_video).to_string());
+                }
+                let mut added_tags = 0usize;
+                for tag in tags.into_iter().chain(live_extracted_tags) {
                     let clean = tag.trim();
-                    if !clean.is_empty() {
-                        extra_tags.push(clean.to_string());
+                    if clean.is_empty() || extra_tags.iter().any(|t| t.eq_ignore_ascii_case(clean))
+                    {
+                        continue;
+                    }
+                    extra_tags.push(clean.to_string());
+                    added_tags += 1;
+                    if added_tags >= 16 {
+                        break;
                     }
                 }
 
@@ -898,7 +949,7 @@ impl MediaPipeline {
 
                 let mut downloaded_video: Option<(Vec<u8>, String)> = None;
                 let video_candidate = resolved_video_url.or_else(|| meta.video_url.clone());
-                if meta.has_video && !is_video_platform {
+                if meta.has_video && !skip_eager_video_download {
                     if let Some(ref v_url) = video_candidate {
                         downloaded_video = SocialPostResolver::download_media_bytes(
                             v_url,

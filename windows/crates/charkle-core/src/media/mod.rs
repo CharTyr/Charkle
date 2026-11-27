@@ -5,6 +5,7 @@ pub mod artwork;
 pub mod audio;
 pub mod color;
 pub mod dedup;
+pub mod douyin;
 pub mod eaglepack;
 pub mod metadata;
 pub mod pipeline;
@@ -23,6 +24,10 @@ pub use dedup::{
     DeduplicationSensitivity, DuplicateAssetCandidate, DuplicateDisposalMode, DuplicateGroup,
     DuplicateMatchKind, IndexedMediaAsset, SmartDeduplicator,
 };
+pub use douyin::{
+    douyin_classification_tag, DouyinPostReference, DouyinPostResolver, DouyinURLParser,
+    DOUYIN_PHOTO_NOTE_TAG, DOUYIN_REFERER, DOUYIN_VIDEO_TAG,
+};
 pub use eaglepack::{
     EaglePackImporter, MaterialPackageImportResult, ParsedEagleAsset, ParsedEagleFolder,
     ParsedEaglePackage, StagingDirGuard,
@@ -37,17 +42,18 @@ pub use pureref::{
     PureRefImageFormat, PureRefImagePlacement, PureRefImportResult, PureRefScene, PureRefTextNote,
 };
 pub use resolvers::{
-    canonical_dedup_key, fetch_or_cache_social_media, social_proxy_cache_key,
-    validate_social_proxy_url, GitHubRepoReference, GitHubRepoResolver, GitHubRepoURLParser,
-    ParsedWebHtml, ResolvedSocialPost, ResolvedWebBookmark, SocialPostReference,
-    SocialPostResolver, SocialPostURLParser, WebBookmarkResolver, WebURLParser, XPostReference,
-    XPostURLParser,
+    canonical_dedup_key, fetch_or_cache_social_media, resolve_media_extension,
+    social_proxy_cache_key, validate_social_proxy_url, GitHubRepoReference, GitHubRepoResolver,
+    GitHubRepoURLParser, ParsedWebHtml, ResolvedSocialPost, ResolvedWebBookmark,
+    SocialPostReference, SocialPostResolver, SocialPostURLParser, WebBookmarkResolver,
+    WebURLParser, XPostReference, XPostURLParser,
 };
 pub use video_platform::{
     compute_bounded_upstream_range, crop_png_region_to_jpeg, fetch_video_stream_chunk,
-    VideoDirectStream, VideoEmbedPlayer, VideoPlatformReference, VideoPlatformResolver,
-    VideoPlatformURLParser, VideoStreamPlaybackPlan, VideoStreamProxyError,
-    VideoStreamProxyResponse, STREAM_ANDROID_YOUTUBE_UA, STREAM_BROWSER_UA, STREAM_IOS_YOUTUBE_UA,
+    normalize_video_stream_content_type, VideoDirectStream, VideoEmbedPlayer,
+    VideoPlatformReference, VideoPlatformResolver, VideoPlatformURLParser, VideoStreamPlaybackPlan,
+    VideoStreamProxyError, VideoStreamProxyResponse, STREAM_ANDROID_YOUTUBE_UA, STREAM_BROWSER_UA,
+    STREAM_IOS_YOUTUBE_UA,
 };
 pub use visual_fingerprint::LocalVisualDescriptor;
 pub use xiaohongshu::{
