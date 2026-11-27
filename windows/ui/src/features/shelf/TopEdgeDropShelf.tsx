@@ -196,19 +196,29 @@ function formatClipboardUrlPrompt(clip: ClipboardPreview): string {
         .filter(Boolean)
     : [];
 
-  if (clip.isSocialOrGithubUrl || host === 'xiaohongshu.com' || host.endsWith('.xiaohongshu.com') || host === 'xhslink.com' || host.endsWith('.xhslink.com')) {
+  const isXhsHost =
+    host === 'xiaohongshu.com' ||
+    host.endsWith('.xiaohongshu.com') ||
+    host === 'xhslink.com' ||
+    host.endsWith('.xhslink.com');
+  const isDouyinHost =
+    host === 'douyin.com' ||
+    host.endsWith('.douyin.com') ||
+    host === 'iesdouyin.com' ||
+    host.endsWith('.iesdouyin.com');
+
+  if (clip.isSocialOrGithubUrl || isXhsHost || isDouyinHost) {
     if (host === 'github.com' && pathSegments.length >= 2) {
       const repo = pathSegments[1].replace(/\.git$/i, '');
       return `检测到 GitHub 仓库链接 · ${pathSegments[0]}/${repo}`;
     }
-    if (
-      host === 'xiaohongshu.com' ||
-      host.endsWith('.xiaohongshu.com') ||
-      host === 'xhslink.com' ||
-      host.endsWith('.xhslink.com')
-    ) {
+    if (isXhsHost) {
       const compact = rawUrl.replace(/^https?:\/\/(www\.)?/i, '');
       return `检测到小红书链接 · ${compact || clip.label}`;
+    }
+    if (isDouyinHost) {
+      const compact = rawUrl.replace(/^https?:\/\/(www\.)?/i, '');
+      return `检测到抖音链接 · ${compact || clip.label}`;
     }
     const compact = rawUrl.replace(/^https?:\/\/(www\.)?/i, '');
     return `检测到推文链接 · ${compact || clip.label}`;

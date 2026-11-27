@@ -198,7 +198,11 @@ function parseStandaloneWebUrl(raw: string): string | null {
   } else if (
     lower.startsWith('xiaohongshu.com/') ||
     lower.startsWith('m.xiaohongshu.com/') ||
-    lower.startsWith('xhslink.com/')
+    lower.startsWith('xhslink.com/') ||
+    lower.startsWith('douyin.com/') ||
+    lower.startsWith('m.douyin.com/') ||
+    lower.startsWith('v.douyin.com/') ||
+    lower.startsWith('iesdouyin.com/')
   ) {
     normalized = `https://${cleaned}`;
   } else {
@@ -235,13 +239,13 @@ export function extractWebUrlFromPaste(text: string): string | null {
 
   const lineCount = trimmed.split(/\r\n|\r|\n/).length;
 
-  // Recognize Xiaohongshu web & mobile share copy (including `xhslink.com` short links & note URLs)
+  // Recognize Xiaohongshu & Douyin web/mobile share copy (including `xhslink.com` & `v.douyin.com` short links)
   if (trimmed.length <= 800 && lineCount <= 12) {
-    const xhsMatches = trimmed.match(
-      /(?:https?:\/\/)?(?:(?:www|m)\.)?(?:xiaohongshu\.com\/(?:explore|discovery\/item|user\/profile)\/[^\s\u3000"'<>（）【】「」《》“”]+|xhslink\.com\/[^\s\u3000"'<>（）【】「」《》“”]+)/gi,
+    const shareMatches = trimmed.match(
+      /(?:https?:\/\/)?(?:(?:www|m|v)\.)?(?:xiaohongshu\.com\/(?:explore|discovery\/item|user\/profile)\/[^\s\u3000"'<>（）【】「」《》“”]+|xhslink\.com\/[^\s\u3000"'<>（）【】「」《》“”]+|douyin\.com\/(?:video|note|user|share)\/[^\s\u3000"'<>（）【】「」《》“”]+|douyin\.com\/[^\s\u3000"'<>（）【】「」《》“”]*modal_id=\d+[^\s\u3000"'<>（）【】「」《》“”]*|iesdouyin\.com\/share\/[^\s\u3000"'<>（）【】「」《》“”]+|v\.douyin\.com\/[^\s\u3000"'<>（）【】「」《》“”]+)/gi,
     );
-    if (xhsMatches) {
-      for (const candidate of xhsMatches) {
+    if (shareMatches) {
+      for (const candidate of shareMatches) {
         const parsed = parseStandaloneWebUrl(candidate);
         if (parsed) return parsed;
       }

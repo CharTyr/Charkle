@@ -1048,6 +1048,11 @@ export const QuickLookOverlay: React.FC = () => {
                     小红书
                   </span>
                 )}
+                {asset.richMetadata?.socialPost?.platform === 'douyin' && (
+                  <span className="px-2 py-0.5 rounded-[var(--win-radius-control)] bg-[#161823] border border-white/18 text-white text-[10.5px] font-semibold shrink-0">
+                    抖音
+                  </span>
+                )}
                 <h2 className="text-[14px] font-semibold text-white/95 truncate">{asset.title}</h2>
                 <span className="text-[11.5px] charkle-mono text-white/62 charkle-tabular shrink-0">
                   {asset.pixelWidth > 0 && asset.pixelHeight > 0
@@ -1055,9 +1060,11 @@ export const QuickLookOverlay: React.FC = () => {
                     : ''}
                   {asset.richMetadata?.socialPost?.platform === 'xiaohongshu'
                     ? '小红书笔记'
-                    : asset.richMetadata?.githubRepo
-                      ? 'GitHub 仓库'
-                      : mediaKindLabel(asset.mediaKind)}
+                    : asset.richMetadata?.socialPost?.platform === 'douyin'
+                      ? '抖音作品'
+                      : asset.richMetadata?.githubRepo
+                        ? 'GitHub 仓库'
+                        : mediaKindLabel(asset.mediaKind)}
                   {canStep ? ` · ${activeIndex + 1} / ${assets.length}` : ''}
                 </span>
               </div>

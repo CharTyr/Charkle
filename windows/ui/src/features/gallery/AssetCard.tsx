@@ -80,8 +80,12 @@ function resolveMediaBadgeText(asset: AssetRecord): string | null {
     case 'webBookmark':
       if (asset.richMetadata?.githubRepo) return 'GITHUB';
       if (asset.richMetadata?.socialPost) {
-        if (asset.richMetadata.socialPost.platform === 'xiaohongshu') return '小红书';
-        return asset.richMetadata.socialPost.platform.toUpperCase();
+        const platform = asset.richMetadata.socialPost.platform;
+        if (platform === 'xiaohongshu') return '小红书';
+        if (platform === 'douyin') return '抖音';
+        return typeof platform === 'string' && platform.trim()
+          ? platform.trim().toUpperCase()
+          : 'SOCIAL';
       }
       return 'WEB';
     case 'document':
@@ -213,6 +217,8 @@ export const AssetCard: React.FC<AssetCardProps> = React.memo(({
   const social = asset.richMetadata?.socialPost;
   const webPage = asset.richMetadata?.webPage;
   const isXiaohongshu = social?.platform === 'xiaohongshu';
+  const isDouyin = social?.platform === 'douyin';
+  const isVerticalSocialFeed = isXiaohongshu || isDouyin;
   const isSwatch = asset.fileName.toLowerCase().endsWith('.swatch');
   const isAudio = asset.mediaKind === 'audio';
   const isMarkdownDoc = asset.mediaKind === 'document' && Boolean(asset.richMetadata?.textExcerpt);
@@ -646,13 +652,18 @@ export const AssetCard: React.FC<AssetCardProps> = React.memo(({
                 className="w-full h-full object-cover charkle-media-zoom"
               />
             </div>
-          ) : isXiaohongshu ? (
+          ) : isVerticalSocialFeed ? (
             (() => {
               const avatarSrc = resolveSocialMediaUrl(social.authorAvatarURL, isTauriRuntime());
               const displayHandle = formatSocialDisplayHandle(social);
+              const accentBarBg = isDouyin ? '#161823' : '#FF2442';
+              const monogramFallback = isDouyin ? '抖' : '小';
               return (
                 <div className="w-full h-full relative p-3.5 flex flex-col justify-between bg-[var(--bg-elevated)]">
-                  <div className="absolute inset-x-0 top-0 h-[3px] bg-[#FF2442]" />
+                  <div
+                    className="absolute inset-x-0 top-0 h-[3px]"
+                    style={{ backgroundColor: accentBarBg }}
+                  />
                   <div className="flex items-center justify-between gap-2 pt-0.5">
                     <div className="flex items-center gap-1.5 min-w-0">
                       {avatarSrc ? (
@@ -664,8 +675,11 @@ export const AssetCard: React.FC<AssetCardProps> = React.memo(({
                           className="h-5 w-5 rounded-full object-cover shrink-0 bg-[var(--bg-subtle)]"
                         />
                       ) : (
-                        <span className="h-5 w-5 rounded-full bg-[#FF2442] text-white text-[10px] font-bold inline-flex items-center justify-center shrink-0">
-                          {(social.authorName || '小').slice(0, 1).toUpperCase()}
+                        <span
+                          style={{ backgroundColor: accentBarBg }}
+                          className="h-5 w-5 rounded-full text-white text-[10px] font-bold inline-flex items-center justify-center shrink-0"
+                        >
+                          {(social.authorName || monogramFallback).slice(0, 1).toUpperCase()}
                         </span>
                       )}
                       <span className="text-[12px] font-semibold text-[var(--text-primary)] truncate">
@@ -686,7 +700,12 @@ export const AssetCard: React.FC<AssetCardProps> = React.memo(({
                   <div className="flex items-center justify-between gap-2 text-[11px] text-[var(--text-tertiary)] charkle-tabular">
                     <span className="truncate">{displayHandle ?? social.authorName}</span>
                     {social.likeCount != null && (
-                      <span className="shrink-0 font-medium text-[#FF2442]/90">
+                      <span
+                        className={[
+                          'shrink-0 font-medium',
+                          isDouyin ? 'text-[#FE2C55]/90' : 'text-[#FF2442]/90',
+                        ].join(' ')}
+                      >
                         ♥ {social.likeCount.toLocaleString()}
                       </span>
                     )}
@@ -928,7 +947,9 @@ export const AssetCard: React.FC<AssetCardProps> = React.memo(({
                   'h-5 px-1.5 rounded-[var(--win-radius-control)] text-[10px] font-semibold charkle-tabular inline-flex items-center gap-0.5',
                   isXiaohongshu
                     ? 'bg-[#FF2442] text-white shadow-[0_1px_4px_rgba(255,36,66,0.35)]'
-                    : 'bg-black/56 text-white/95 charkle-mono',
+                    : isDouyin
+                      ? 'bg-[#161823]/92 text-white border border-white/15 shadow-[0_1px_4px_rgba(0,0,0,0.32)]'
+                      : 'bg-black/56 text-white/95 charkle-mono',
                 ].join(' ')}
               >
                 {asset.mediaKind === 'model3D' && <Cube16Regular className="w-2.5 h-2.5" />}

@@ -64,6 +64,8 @@ import {
 } from '../../stores';
 import {
   formatSocialDisplayHandle,
+  isVideoSocialPlatform,
+  isZeroDownloadVideoBookmark,
   mediaKindLabel,
   resolveSocialMediaUrl,
   type AIGenerationMetadata,
@@ -122,6 +124,9 @@ function displayTypeLabel(asset: AssetRecord): string {
     if (p === 'instagram') return 'Instagram 贴文';
     if (p === 'youtube') return 'YouTube 视频';
     if (p === 'bilibili') return 'Bilibili 视频';
+    if (p === 'douyin') return '抖音作品';
+    if (typeof p === 'string' && p.trim()) return `${p.trim()} 动态`;
+    return '社交动态';
   }
   if (asset.richMetadata?.webPage?.hasVideo) return '视频网页';
   const lower = asset.fileName.toLowerCase();
@@ -513,8 +518,10 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
     if (!asset) return [];
     const exif = asset.richMetadata?.photoExif;
     const aiGen = asset.richMetadata?.aiGeneration;
+    const socialPost = asset.richMetadata?.socialPost;
     const hasSocialMedia =
-      getEffectiveSocialAttachments(asset.richMetadata?.socialPost).length > 0;
+      getEffectiveSocialAttachments(socialPost).length > 0 ||
+      isZeroDownloadVideoBookmark(socialPost);
     return inspectorCardOrder.filter((section) => {
       switch (section) {
         case 'previewIdentity':
@@ -2085,64 +2092,78 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
       }
 
       const attachments = getEffectiveSocialAttachments(post);
-      const isVideoPlatform = Boolean(
-        post && (post.platform === 'youtube' || post.platform === 'bilibili'),
-      );
-      if (!post || (!isVideoPlatform && attachments.length === 0)) return null;
+      const isVideoPlatform = isVideoSocialPlatform(post?.platform);
+      const isStreamingVideoBookmark = isZeroDownloadVideoBookmark(post);
+      if (!post || (!isStreamingVideoBookmark && attachments.length === 0)) return null;
 
       const inTauri = isTauriRuntime();
       const isXhs = post.platform === 'xiaohongshu';
+      const isDouyin = post.platform === 'douyin';
       const postNoun =
         post.platform === 'xiaohongshu'
           ? '笔记'
           : isVideoPlatform
             ? '视频'
-            : post.platform === 'pixiv'
+            : post.platform === 'douyin' || post.platform === 'pixiv'
               ? '作品'
               : post.platform === 'x'
                 ? '推文'
-                : '贴文';
+                : post.platform === 'threads' ||
+                    post.platform === 'bluesky' ||
+                    post.platform === 'instagram'
+                  ? '贴文'
+                  : '动态';
       const platformLabel =
         post.platform === 'xiaohongshu'
           ? '小红书'
-          : post.platform === 'youtube'
-            ? 'YouTube'
-            : post.platform === 'bilibili'
-              ? 'Bilibili'
-              : post.platform === 'pixiv'
-                ? 'Pixiv'
-                : post.platform === 'instagram'
-                  ? 'Instagram'
-                  : post.platform === 'threads'
-                    ? 'Threads'
-                    : post.platform === 'bluesky'
-                      ? 'Bluesky'
-                      : 'X';
+          : post.platform === 'douyin'
+            ? '抖音'
+            : post.platform === 'youtube'
+              ? 'YouTube'
+              : post.platform === 'bilibili'
+                ? 'Bilibili'
+                : post.platform === 'pixiv'
+                  ? 'Pixiv'
+                  : post.platform === 'instagram'
+                    ? 'Instagram'
+                    : post.platform === 'threads'
+                      ? 'Threads'
+                      : post.platform === 'bluesky'
+                        ? 'Bluesky'
+                        : post.platform === 'x'
+                          ? 'X'
+                          : typeof post.platform === 'string' && post.platform.trim()
+                            ? post.platform.trim()
+                            : '社交动态';
       const platformBg =
         post.platform === 'xiaohongshu'
           ? '#FF2442'
-          : post.platform === 'youtube'
-            ? '#FF0033'
-            : post.platform === 'bilibili'
-              ? '#FB7299'
-              : post.platform === 'pixiv'
-                ? '#0096FA'
-                : post.platform === 'instagram'
-                  ? '#D93B58'
-                  : post.platform === 'bluesky'
-                    ? '#0284C7'
-                    : post.platform === 'threads'
-                      ? '#27272A'
-                      : '#18181B';
+          : post.platform === 'douyin'
+            ? '#161823'
+            : post.platform === 'youtube'
+              ? '#FF0033'
+              : post.platform === 'bilibili'
+                ? '#FB7299'
+                : post.platform === 'pixiv'
+                  ? '#0096FA'
+                  : post.platform === 'instagram'
+                    ? '#D93B58'
+                    : post.platform === 'bluesky'
+                      ? '#0284C7'
+                      : post.platform === 'threads'
+                        ? '#27272A'
+                        : post.platform === 'x'
+                          ? '#18181B'
+                          : '#52525B';
       const avatarSrc = resolveSocialMediaUrl(post.authorAvatarURL, inTauri);
       const displayHandle = formatSocialDisplayHandle(post);
       const effectiveExtractItems: SocialMediaAttachment[] =
-        isVideoPlatform && attachments.length === 0
+        isStreamingVideoBookmark && attachments.length === 0
           ? [
               {
                 id: 'video-bookmark-0',
                 kind: 'video',
-                url: post.originalURL,
+                url: post.videoURL?.trim() || post.originalURL,
                 thumbnailURL: post.mediaThumbnailURLs?.[0] ?? post.mediaURLs?.[0] ?? null,
               },
             ]
@@ -2193,7 +2214,17 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
         <InspectorSectionCard
           key="socialMediaExtract"
           cardId="socialMediaExtract"
-          title={isVideoPlatform ? '视频书签与摘要' : isXhs ? '笔记媒体提取' : '推文媒体提取'}
+          title={
+            isVideoPlatform
+              ? '视频书签与摘要'
+              : isStreamingVideoBookmark
+                ? '视频作品保存'
+                : isXhs
+                  ? '笔记媒体提取'
+                  : isDouyin
+                    ? '作品媒体提取'
+                    : '推文媒体提取'
+          }
           icon={<ImageMultiple16Regular className="w-3.5 h-3.5" />}
           trailing={
             <div className="inline-flex items-center gap-1.5">
@@ -2203,7 +2234,7 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
               >
                 {platformLabel}
               </span>
-              {!isVideoPlatform && (
+              {!isStreamingVideoBookmark && (
                 <span className="text-[10px] font-medium text-[var(--text-tertiary)] charkle-tabular">
                   {effectiveExtractItems.length} 项
                 </span>
@@ -2261,10 +2292,12 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
             <p className="text-[11px] leading-relaxed text-[var(--text-secondary)]">
               {isVideoPlatform
                 ? '默认仅保存封面、元信息与视频摘要；可按需下载 MP4 保存为本地独立视频素材。'
-                : `可将${postNoun}里的图片或视频单独存为素材，并自动保留原${postNoun}作者、正文与链接。`}
+                : isStreamingVideoBookmark
+                  ? '默认仅保存封面与作品信息，不占用本地空间；可按需保存视频为本地独立素材。'
+                  : `可将${postNoun}里的图片或视频单独存为素材，并自动保留原${postNoun}作者、正文与链接。`}
             </p>
 
-            {!isVideoPlatform && effectiveExtractItems.length > 1 && (
+            {!isStreamingVideoBookmark && effectiveExtractItems.length > 1 && (
               <button
                 type="button"
                 disabled={extractingKey !== null}
@@ -2310,7 +2343,7 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
                     <Image16Regular className="w-3.5 h-3.5 shrink-0" />
                   )}
                   <span className="truncate">
-                    {isVideoPlatform
+                    {isStreamingVideoBookmark
                       ? extractingKey === key
                         ? '正在保存视频…'
                         : '保存视频为独立素材'

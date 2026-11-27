@@ -83,9 +83,11 @@ const FilmstripThumbVisual: React.FC<{ item: AssetRecord; src: string }> = ({ it
   }
 
   if (failed) {
-    const isXhs = item.richMetadata?.socialPost?.platform === 'xiaohongshu';
-    const bg = isXhs ? '#FF2442' : (item.dominantColors[0]?.hex ?? '#2B2F36');
-    const light = isXhs ? false : isLightHex(bg);
+    const platform = item.richMetadata?.socialPost?.platform;
+    const isXhs = platform === 'xiaohongshu';
+    const isDouyin = platform === 'douyin';
+    const bg = isXhs ? '#FF2442' : isDouyin ? '#161823' : (item.dominantColors[0]?.hex ?? '#2B2F36');
+    const light = isXhs || isDouyin ? false : isLightHex(bg);
     return (
       <div
         className="w-full h-full flex items-center justify-center px-1 text-center"
@@ -97,7 +99,7 @@ const FilmstripThumbVisual: React.FC<{ item: AssetRecord; src: string }> = ({ it
             light ? 'text-black/80' : 'text-white/90',
           ].join(' ')}
         >
-          {isXhs ? '小红书' : item.title}
+          {isXhs ? '小红书' : isDouyin ? '抖音' : item.title}
         </span>
       </div>
     );
@@ -951,6 +953,11 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({
             {activeAsset.richMetadata?.socialPost?.platform === 'xiaohongshu' && (
               <span className="px-2 py-0.5 rounded-[var(--win-radius-control)] bg-[#FF2442] text-white text-[10.5px] font-semibold shrink-0">
                 小红书
+              </span>
+            )}
+            {activeAsset.richMetadata?.socialPost?.platform === 'douyin' && (
+              <span className="px-2 py-0.5 rounded-[var(--win-radius-control)] bg-[#161823] border border-white/15 text-white text-[10.5px] font-semibold shrink-0">
+                抖音
               </span>
             )}
             <span className="font-semibold text-[var(--text-primary)] max-w-[260px] truncate">

@@ -20,7 +20,8 @@ import { buildFolderTree, flattenFolderTree } from '../../types/domain';
 type CaptureTab = 'files' | 'url' | 'text' | 'swatch';
 
 const HEX_COLOR_RE = /^#?[0-9a-fA-F]{3}([0-9a-fA-F]{3})?$/;
-const URL_IN_TEXT_RE = /(?:https?:\/\/|www\.)[^\s<>"']+/i;
+const URL_IN_TEXT_RE =
+  /(?:https?:\/\/|www\.|(?:(?:m|v)\.)?(?:douyin|iesdouyin|xiaohongshu|xhslink)\.com\/)[^\s<>"']+/i;
 const TRAILING_PUNCT_RE = /[),.;:!?\]}，。、；：！？】》」』'"“”‘’]+$/;
 
 function extractCapturableUrl(raw: string): string | null {
@@ -317,7 +318,7 @@ export const QuickCaptureModal: React.FC = () => {
             <button type="submit" className="hidden" aria-hidden="true" />
             <div className="flex flex-col gap-1">
               <label className="text-[12px] font-medium text-[var(--text-secondary)]">
-                链接地址（支持任意网页、YouTube / B 站视频、小红书、推文及 GitHub 仓库）
+                链接地址（支持任意网页、YouTube / B 站 / 抖音、小红书、推文及 GitHub 仓库）
               </label>
               <input
                 ref={urlInputRef}
@@ -329,7 +330,7 @@ export const QuickCaptureModal: React.FC = () => {
                   setUrl(e.target.value);
                   setSubmitError(null);
                 }}
-                placeholder="https://... 或直接粘贴 YouTube / B 站 / 小红书 / 推文 / 网页链接"
+                placeholder="https://... 或直接粘贴 YouTube / B 站 / 抖音 / 小红书 / 推文 / 网页链接"
                 className="win-input-elevation h-9 px-3 rounded-[var(--win-radius-control)] text-[13px] text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] outline-none"
               />
               {urlHasInput && extractedUrl && extractedUrl !== url.trim() && (

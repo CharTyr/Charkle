@@ -6,6 +6,7 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
 import {
   backendLocationSummary,
+  isZeroDownloadVideoBookmark,
   matchesSmartFolderRule,
   msToCocoaSeconds,
   resolveBackends,
@@ -1953,6 +1954,74 @@ export class InMemoryMockTransport implements CharkleTransport {
       this.assets = [asset, ...this.assets];
       return [asset];
     }
+    const isDouyin = /(?:^|\/\/)(?:[^/]*\.)?(?:douyin\.com|iesdouyin\.com)\b/i.test(url);
+    if (isDouyin) {
+      const isPhotoNote = /\/note\/\d+/i.test(url);
+      const idMatch = url.match(/(?:\/(?:video|note)\/|modal_id=)(\d{15,22})/);
+      const awemeId = idMatch?.[1] ?? '7412345678901234567';
+      const postTitle = title?.trim() || (isPhotoNote ? '抖音图文灵感合集' : '抖音视觉短片作品');
+      const coverUrl = makeSvgDataUrl('#F8F5F1', '#161823', postTitle, 900, 1200);
+      const asset: AssetRecord = {
+        id,
+        contentHash: id,
+        folderID: targetFolderId ?? null,
+        mediaKind: 'webBookmark',
+        mimeType: 'text/uri-list',
+        title: postTitle,
+        fileName: 'douyin-post.url',
+        notes: notes ?? '',
+        tags: ['抖音'],
+        suggestedTags: [],
+        rating: 0,
+        pixelWidth: 900,
+        pixelHeight: 1440,
+        durationSeconds: isPhotoNote ? undefined : 42,
+        fileSizeBytes: 512,
+        dominantColors: [{ hex: '#161823', l: 10, a: 1, b: -5, proportion: 0.45 }],
+        waveformPeaks: [],
+        sourceURL: url,
+        sourceDomain: 'www.douyin.com',
+        richMetadata: {
+          socialPost: {
+            platform: 'douyin',
+            authorName: '抖音创作者',
+            authorHandle: 'dy_studio',
+            articleTitle: postTitle,
+            bodyText: notes?.trim() || '已通过链接采集的抖音作品。',
+            mediaURLs: [coverUrl],
+            mediaThumbnailURLs: [coverUrl],
+            attachments: isPhotoNote
+              ? [
+                  { id: `${id}-img-0`, kind: 'photo', url: coverUrl, thumbnailURL: coverUrl },
+                  { id: `${id}-img-1`, kind: 'photo', url: coverUrl, thumbnailURL: coverUrl },
+                ]
+              : [
+                  {
+                    id: `${id}-vid-0`,
+                    kind: 'video',
+                    url: `https://v26-web.douyinvod.com/mock/${awemeId}.mp4`,
+                    thumbnailURL: coverUrl,
+                  },
+                ],
+            hasVideo: !isPhotoNote,
+            videoURL: isPhotoNote ? null : `https://v26-web.douyinvod.com/mock/${awemeId}.mp4`,
+            videoDurationSeconds: isPhotoNote ? null : 42,
+            videoID: awemeId,
+            likeCount: 2560,
+            originalURL: url,
+          },
+        },
+        pinnedOffline: false,
+        isLocalOriginalCached: true,
+        isTrashed: false,
+        createdAt: now,
+        updatedAt: now,
+        updatedHLC: 11,
+      };
+      this.thumbs.set(id, makeSvgDataUrl('#FFFFFF', '#161823', postTitle, 900, 1440));
+      this.assets = [asset, ...this.assets];
+      return [asset];
+    }
     const asset: AssetRecord = {
       id,
       contentHash: id,
@@ -3761,8 +3830,15 @@ export class InMemoryMockTransport implements CharkleTransport {
         ? post.attachments
         : web?.attachments?.length
           ? web.attachments
-          : post && (post.platform === 'youtube' || post.platform === 'bilibili')
-            ? [{ id: 'vid-0', kind: 'video' as const, url: post.originalURL, thumbnailURL: null }]
+          : post && isZeroDownloadVideoBookmark(post)
+            ? [
+                {
+                  id: 'vid-0',
+                  kind: 'video' as const,
+                  url: post.videoURL?.trim() || post.originalURL,
+                  thumbnailURL: null,
+                },
+              ]
             : [];
       if (!parent || atts.length === 0) {
         skippedCount += 1;
@@ -4342,6 +4418,27 @@ export class InMemoryMockTransport implements CharkleTransport {
           useIframeWrapper: true,
           embedHtml: `<iframe src="${embedUrl}" referrerpolicy="strict-origin-when-cross-origin"></iframe>`,
         },
+        watchUrl: rawUrl,
+      };
+    }
+    if (post?.platform === 'douyin' && post.hasVideo) {
+      const candidateUrls: string[] = [];
+      for (const att of post.attachments ?? []) {
+        if ((att.kind === 'video' || att.kind === 'gif') && att.url.trim()) {
+          candidateUrls.push(att.url.trim());
+        }
+      }
+      if (post.videoURL?.trim() && !candidateUrls.includes(post.videoURL.trim())) {
+        candidateUrls.push(post.videoURL.trim());
+      }
+      const directStreams = candidateUrls.map((url) => ({
+        url,
+        httpHeaders: { Referer: 'https://www.douyin.com/' },
+        isHls: /\.m3u8(\?|$)/i.test(url),
+      }));
+      return {
+        directStreams,
+        embedPlayer: null,
         watchUrl: rawUrl,
       };
     }

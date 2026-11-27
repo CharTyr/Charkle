@@ -159,13 +159,25 @@ export function floorDiv(a: number, b: number): number {
   return Math.floor(a / b);
 }
 
-function isXiaohongshuAsset(asset: AssetRecord): boolean {
+function isVerticalSocialFeedAsset(asset: AssetRecord): boolean {
   const platform = asset.richMetadata?.socialPost?.platform as string | undefined;
-  if (platform === 'xiaohongshu') return true;
+  if (platform === 'xiaohongshu' || platform === 'douyin') return true;
   const domain = (asset.sourceDomain ?? '').toLowerCase();
-  if (domain.includes('xiaohongshu.com') || domain.includes('xhslink.com')) return true;
+  if (
+    domain.includes('xiaohongshu.com') ||
+    domain.includes('xhslink.com') ||
+    domain.includes('douyin.com') ||
+    domain.includes('iesdouyin.com')
+  ) {
+    return true;
+  }
   const url = (asset.sourceURL ?? '').toLowerCase();
-  return url.includes('xiaohongshu.com') || url.includes('xhslink.com');
+  return (
+    url.includes('xiaohongshu.com') ||
+    url.includes('xhslink.com') ||
+    url.includes('douyin.com') ||
+    url.includes('iesdouyin.com')
+  );
 }
 
 /** Natural aspect ratio per asset matching Horizontal Justified Masonry (zero landscape cropping). */
@@ -192,7 +204,7 @@ export function ringEffectiveAspectRatio(
     case 'webBookmark':
       if (hasPixels) {
         raw = natural;
-      } else if (isXiaohongshuAsset(asset)) {
+      } else if (isVerticalSocialFeedAsset(asset)) {
         raw = 0.625;
       } else if (hasDecoded) {
         raw = decodedAspectFallback;

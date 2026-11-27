@@ -158,15 +158,22 @@ export function effectiveAspectRatio(
       break;
     case 'webBookmark': {
       const social = asset.richMetadata?.socialPost;
-      const isXhs =
+      const lowerDomain = (asset.sourceDomain ?? '').toLowerCase();
+      const lowerUrl = (asset.sourceURL ?? '').toLowerCase();
+      const isVerticalSocialFeed =
         social?.platform === 'xiaohongshu' ||
-        (asset.sourceDomain ?? '').toLowerCase().includes('xiaohongshu') ||
-        (asset.sourceDomain ?? '').toLowerCase().includes('xhslink') ||
-        (asset.sourceURL ?? '').toLowerCase().includes('xiaohongshu') ||
-        (asset.sourceURL ?? '').toLowerCase().includes('xhslink');
+        social?.platform === 'douyin' ||
+        lowerDomain.includes('xiaohongshu') ||
+        lowerDomain.includes('xhslink') ||
+        lowerDomain.includes('douyin.com') ||
+        lowerDomain.includes('iesdouyin.com') ||
+        lowerUrl.includes('xiaohongshu') ||
+        lowerUrl.includes('xhslink') ||
+        lowerUrl.includes('douyin.com') ||
+        lowerUrl.includes('iesdouyin.com');
       if (hasPixels) {
         rawRatio = natural;
-      } else if (isXhs) {
+      } else if (isVerticalSocialFeed) {
         rawRatio = 0.625;
       } else if (social) {
         rawRatio = 1.12;
