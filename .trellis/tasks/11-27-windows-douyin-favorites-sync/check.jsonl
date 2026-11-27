@@ -1,0 +1,7 @@
+{"file": ".trellis/spec/cross-platform/index.md", "reason": "Verify /.charkle/ wire compatibility, dedup keys, local-pair security, and repository purity"}
+{"file": ".trellis/spec/windows/index.md", "reason": "Verify Windows Rust/Tauri contracts, zero-Base64 media streaming, and pre-commit gates"}
+{"file": ".trellis/spec/windows/fluent2-design-system.md", "reason": "Verify Fluent 2 tokens, Light/Dark parity, Reduced Motion/Transparency, and zero transition:all"}
+{"file": "windows/AGENTS.md", "reason": "Verify Windows native/UI guardrails and regression invariants"}
+{"file": "AGENTS.md", "reason": "Verify platform scope isolation, zero external product/author mentions, and zero personal paths/secrets"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "Verify reuse of v1.5.1 streaming playback, frame-to-cover, and passive bridge patterns"}
+{"file": ".trellis/tasks/11-27-windows-douyin-favorites-sync/research/codebase-and-compatibility-audit.md", "reason": "Cross-check implementation against verified file:line anchors and baseline blocker fixes"}
