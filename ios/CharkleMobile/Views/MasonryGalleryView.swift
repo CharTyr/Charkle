@@ -124,6 +124,7 @@ struct MasonryGalleryView: View {
 
     @State private var isFilterSheetPresented = false
     @State private var isBatchFolderSheetPresented = false
+    @State private var singleMoveAsset: AssetRecord?
     @State private var isBatchBoardSheetPresented = false
     @State private var confirmPermanentDelete = false
     @State private var singleDeleteAssetID: UUID?
@@ -268,6 +269,9 @@ struct MasonryGalleryView: View {
                                             onSelectMultiple: {
                                                 store.isMultiSelectMode = true
                                                 store.selectedAssetIDs.insert(item.id)
+                                            },
+                                            onOpenFolderPicker: {
+                                                singleMoveAsset = item.asset
                                             }
                                         )
                                         .frame(width: item.rect.width, height: item.rect.height)
@@ -357,10 +361,15 @@ struct MasonryGalleryView: View {
             .presentationDetents([.medium, .large])
         }
         .sheet(isPresented: $isBatchFolderSheetPresented) {
+            let selectedAssets = displayedAssets.filter { store.selectedAssetIDs.contains($0.id) }
+            let distinctFolderIDs = Set(selectedAssets.map(\.folderID))
+            let sharedCurrentFolderID: UUID? = distinctFolderIDs.count == 1 ? (distinctFolderIDs.first ?? nil) : nil
             NavigationStack {
-                BatchFolderPickerSheet(
-                    folders: store.flattenedFolders,
-                    onPick: { folderID in
+                HierarchicalFolderPickerSheet(
+                    title: "移动到文件夹",
+                    folderTree: store.folderTree,
+                    currentFolderID: sharedCurrentFolderID,
+                    onPick: { folderID, folderName in
                         let ids = Array(store.selectedAssetIDs)
                         isBatchFolderSheetPresented = false
                         store.isMultiSelectMode = false
@@ -371,7 +380,32 @@ struct MasonryGalleryView: View {
                                     assetIDs: ids,
                                     folderAssignment: folderID.map { .folder($0) } ?? .inbox
                                 ),
-                                successToast: "已移动 \(ids.count) 项素材"
+                                successToast: folderID == nil
+                                    ? "已将 \(ids.count) 项移回收件箱"
+                                    : "已将 \(ids.count) 项归档到「\(folderName)」"
+                            )
+                        }
+                    }
+                )
+            }
+            .presentationDetents([.medium, .large])
+        }
+        .sheet(item: $singleMoveAsset) { target in
+            NavigationStack {
+                HierarchicalFolderPickerSheet(
+                    title: "移动到文件夹",
+                    folderTree: store.folderTree,
+                    currentFolderID: target.folderID,
+                    onPick: { folderID, folderName in
+                        let id = target.id
+                        singleMoveAsset = nil
+                        Task {
+                            await store.patchAssets(
+                                AssetBatchPatch(
+                                    assetIDs: [id],
+                                    folderAssignment: folderID.map { .folder($0) } ?? .inbox
+                                ),
+                                successToast: folderID == nil ? "已移回收件箱" : "已归档到「\(folderName)」"
                             )
                         }
                     }
@@ -1069,6 +1103,7 @@ struct GalleryCardView: View {
     let onShareOriginal: () -> Void
     let onRequestPermanentDelete: () -> Void
     let onSelectMultiple: () -> Void
+    var onOpenFolderPicker: (() -> Void)? = nil
 
     @Environment(\.colorScheme) private var colorScheme
     @State private var image: UIImage?
@@ -1314,22 +1349,23 @@ struct GalleryCardView: View {
                         systemImage: "tray"
                     )
                 }
-                if !store.flattenedFolders.isEmpty {
+                if !store.folderTree.isEmpty {
                     Divider()
-                    ForEach(store.flattenedFolders) { node in
-                        let isCurrent = asset.folderID == node.folder.id
-                        Button {
-                            Task {
-                                await store.patchAssets(
-                                    AssetBatchPatch(assetIDs: [asset.id], folderAssignment: .folder(node.folder.id)),
-                                    successToast: "已归档到「\(node.folder.name)」"
-                                )
-                            }
-                        } label: {
-                            Label(
-                                String(repeating: "  ", count: min(node.depth, 3)) + node.folder.name + (isCurrent ? "  ✓" : ""),
-                                systemImage: isCurrent ? "folder.fill" : "folder"
+                    HierarchicalFolderMenuContent(
+                        nodes: store.folderTree,
+                        currentFolderID: asset.folderID
+                    ) { folderID, folderName in
+                        Task {
+                            await store.patchAssets(
+                                AssetBatchPatch(assetIDs: [asset.id], folderAssignment: .folder(folderID)),
+                                successToast: "已归档到「\(folderName)」"
                             )
+                        }
+                    }
+                    if let onOpenFolderPicker {
+                        Divider()
+                        Button(action: onOpenFolderPicker) {
+                            Label("按层级浏览并搜索…", systemImage: "list.bullet.indent")
                         }
                     }
                 }
@@ -1453,44 +1489,7 @@ struct GalleryCardView: View {
     }
 }
 
-// MARK: - Batch Folder & Moodboard Pickers
-
-private struct BatchFolderPickerSheet: View {
-    let folders: [FolderHierarchyNode]
-    let onPick: (UUID?) -> Void
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        List {
-            Button {
-                onPick(nil)
-            } label: {
-                Label("收件箱", systemImage: "tray")
-            }
-            Section("文件夹") {
-                ForEach(folders) { node in
-                    Button {
-                        onPick(node.folder.id)
-                    } label: {
-                        HStack(spacing: 10) {
-                            Image(systemName: "folder.fill")
-                                .foregroundStyle(node.folder.colorHex.map { Color(charkleHex: $0) } ?? .accentColor)
-                            Text(node.folder.name)
-                        }
-                        .padding(.leading, CGFloat(min(node.depth, 4)) * 14)
-                    }
-                }
-            }
-        }
-        .navigationTitle("移动到")
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .cancellationAction) {
-                Button("取消") { dismiss() }
-            }
-        }
-    }
-}
+// MARK: - Batch Moodboard Picker
 
 private struct BatchBoardPickerSheet: View {
     @Bindable var store: MobileAppStore

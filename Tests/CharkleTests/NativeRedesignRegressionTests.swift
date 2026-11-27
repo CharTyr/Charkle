@@ -438,4 +438,36 @@ struct NativeRedesignRegressionTests {
         #expect(macMain.contains("extractMediaFromSelectedLinks"))
         #expect(iosGallery.contains("extractMediaFromSelectedLinks"))
     }
+
+    @Test("iOS preview uses native UIScrollView zoom coordination and hierarchical folder pickers")
+    func iOSPreviewZoomAndHierarchicalFolderPickerContracts() throws {
+        let iosDetail = try readSource("ios/CharkleMobile/Views/AssetDetailView.swift")
+        let iosGallery = try readSource("ios/CharkleMobile/Views/MasonryGalleryView.swift")
+        let iosInbox = try readSource("ios/CharkleMobile/Views/InboxTriageView.swift")
+        let iosCapture = try readSource("ios/CharkleMobile/Views/CaptureSheetView.swift")
+        let iosPinterest = try readSource("ios/CharkleMobile/Views/PinterestExploreMobileView.swift")
+        let iosFolderPicker = try readSource("ios/CharkleMobile/Views/HierarchicalFolderPicker.swift")
+
+        // Preview zoom must use native UIScrollView + modal zoom-transition dismiss coordination
+        // so pinching out after zooming in shrinks the photo instead of dismissing fullScreenCover.
+        #expect(iosDetail.contains("ZoomablePhotoScrollView"))
+        #expect(iosDetail.contains("ZoomDismissCoordinatorBridge"))
+        #expect(iosDetail.contains("attachPinchPriorityToModalTransitionIfNeeded"))
+        #expect(iosDetail.contains("interactiveDismissDisabled(isCurrentAssetZoomed)"))
+        #expect(!iosDetail.contains("MagnificationGesture()"))
+
+        // Move-to-folder sheets and menus must preserve collapsible/cascading folder hierarchy
+        // instead of dumping all nested folders flat.
+        #expect(iosFolderPicker.contains("struct HierarchicalFolderPickerSheet"))
+        #expect(iosFolderPicker.contains("struct HierarchicalFolderMenuContent"))
+        #expect(iosFolderPicker.contains("expandedFolderIDs"))
+        #expect(iosFolderPicker.contains("ancestorPathIDs"))
+        #expect(iosGallery.contains("HierarchicalFolderPickerSheet"))
+        #expect(iosGallery.contains("HierarchicalFolderMenuContent"))
+        #expect(!iosGallery.contains("ForEach(store.flattenedFolders)"))
+        #expect(!iosDetail.contains("ForEach(store.flattenedFolders)"))
+        #expect(!iosInbox.contains("ForEach(store.flattenedFolders)"))
+        #expect(!iosCapture.contains("ForEach(store.flattenedFolders)"))
+        #expect(!iosPinterest.contains("ForEach(store.flattenedFolders)"))
+    }
 }

@@ -1184,14 +1184,14 @@ private struct PinterestTraySheetMobile: View {
                                 } label: {
                                     Label("收件箱（默认）", systemImage: "tray")
                                 }
-                                if !store.flattenedFolders.isEmpty {
+                                if !store.folderTree.isEmpty {
                                     Divider()
-                                    ForEach(store.flattenedFolders) { node in
-                                        Button {
-                                            targetFolderID = node.folder.id
-                                        } label: {
-                                            Text(String(repeating: "  ", count: min(node.depth, 4)) + node.folder.name)
-                                        }
+                                    HierarchicalFolderMenuContent(
+                                        nodes: store.folderTree,
+                                        currentFolderID: targetFolderID,
+                                        selectSelfPrefix: "存入"
+                                    ) { folderID, _ in
+                                        targetFolderID = folderID
                                     }
                                 }
                             } label: {
@@ -1572,13 +1572,35 @@ private struct PinterestBoardImportSheetMobile: View {
                     .disabled(controller.isImportingBoards)
 
                     if destinationMode == 2 {
-                        Picker("父文件夹", selection: $customParentFolderID) {
-                            ForEach(store.flattenedFolders) { node in
-                                Text(String(repeating: "  ", count: min(node.depth, 4)) + node.folder.name)
-                                    .tag(Optional(node.folder.id))
+                        let parentLabel: String = {
+                            if let id = customParentFolderID,
+                               let path = FolderHierarchyNode.breadcrumbPath(for: id, in: store.folderTree) {
+                                return path
                             }
+                            return store.folderTree.isEmpty ? "尚无文件夹" : "选择父文件夹"
+                        }()
+                        HStack {
+                            Text("父文件夹")
+                            Spacer()
+                            Menu {
+                                HierarchicalFolderMenuContent(
+                                    nodes: store.folderTree,
+                                    currentFolderID: customParentFolderID,
+                                    selectSelfPrefix: "选定"
+                                ) { folderID, _ in
+                                    customParentFolderID = folderID
+                                }
+                            } label: {
+                                HStack(spacing: 4) {
+                                    Text(parentLabel)
+                                        .lineLimit(1)
+                                    Image(systemName: "chevron.up.chevron.down")
+                                        .font(.system(size: 10))
+                                }
+                                .foregroundStyle(accent)
+                            }
+                            .disabled(controller.isImportingBoards || store.folderTree.isEmpty)
                         }
-                        .disabled(controller.isImportingBoards || store.flattenedFolders.isEmpty)
                     }
 
                     Toggle("跳过已存在的 Pin（增量同步）", isOn: $skipDuplicates)

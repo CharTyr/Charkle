@@ -21,6 +21,7 @@ struct InboxTriageView: View {
     @State private var currentIndex: Int = 0
     @State private var previewImage: UIImage?
     @State private var suggestion: FolderSuggestion?
+    @State private var isFolderPickerPresented: Bool = false
 
     private var inboxAssets: [AssetRecord] {
         store.inboxAssets
@@ -191,19 +192,33 @@ struct InboxTriageView: View {
                     .buttonStyle(MobileTactileButtonStyle())
                 }
 
-                // 1-tap folder pills
+                // 1-tap root folders + hierarchical picker for nested subfolders
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("一键分进文件夹")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
+                    HStack {
+                        Text("一键分进文件夹")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
+                        Spacer()
+                        if !store.folderTree.isEmpty {
+                            Button {
+                                MobileHaptics.light()
+                                isFolderPickerPresented = true
+                            } label: {
+                                Label("层级目录", systemImage: "list.bullet.indent")
+                                    .font(.system(size: 12, weight: .medium))
+                                    .foregroundStyle(MobileTheme.accent(for: colorScheme))
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
 
-                    if store.flattenedFolders.isEmpty {
+                    if store.folderTree.isEmpty {
                         Text("还没有文件夹，先在侧边栏新建文件夹即可快速归档。")
                             .font(.system(size: 13))
                             .foregroundStyle(MobileTheme.tertiaryInk(for: colorScheme))
                     } else {
                         LazyVGrid(columns: [GridItem(.adaptive(minimum: 118), spacing: 8)], spacing: 8) {
-                            ForEach(store.flattenedFolders) { node in
+                            ForEach(store.folderTree) { node in
                                 Button {
                                     fileAsset(asset, to: node.folder.id, folderName: node.folder.name)
                                 } label: {
@@ -216,6 +231,11 @@ struct InboxTriageView: View {
                                             .foregroundStyle(.primary)
                                             .lineLimit(1)
                                         Spacer(minLength: 0)
+                                        if node.hasChildren {
+                                            Text("+\(node.children.count)")
+                                                .font(.system(size: 10, weight: .semibold).monospacedDigit())
+                                                .foregroundStyle(MobileTheme.tertiaryInk(for: colorScheme))
+                                        }
                                     }
                                     .padding(.horizontal, 12)
                                     .padding(.vertical, 10)
@@ -232,6 +252,23 @@ struct InboxTriageView: View {
                             }
                         }
                     }
+                }
+                .sheet(isPresented: $isFolderPickerPresented) {
+                    NavigationStack {
+                        HierarchicalFolderPickerSheet(
+                            title: "归档到文件夹",
+                            folderTree: store.folderTree,
+                            currentFolderID: nil,
+                            allowInbox: false,
+                            onPick: { folderID, folderName in
+                                isFolderPickerPresented = false
+                                if let folderID {
+                                    fileAsset(asset, to: folderID, folderName: folderName)
+                                }
+                            }
+                        )
+                    }
+                    .presentationDetents([.medium, .large])
                 }
 
                 // Quick actions row

@@ -19,24 +19,58 @@ struct CaptureSheetView: View {
     @State private var isFileImporterPresented = false
     @State private var isCameraPresented = false
     @State private var autoExtractSocialMedia = false
+    @State private var isFolderPickerPresented = false
 
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
-                    // 1. Target destination picker
+                    // 1. Target destination picker (top-level roots + hierarchical picker sheet)
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("存入位置")
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
+                        HStack {
+                            Text("存入位置")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
+                            Spacer()
+                            if !store.folderTree.isEmpty {
+                                Button {
+                                    MobileHaptics.light()
+                                    isFolderPickerPresented = true
+                                } label: {
+                                    Label("按层级选择", systemImage: "list.bullet.indent")
+                                        .font(.system(size: 12, weight: .medium))
+                                        .foregroundStyle(MobileTheme.accent(for: colorScheme))
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
                         ScrollView(.horizontal, showsIndicators: false) {
                             HStack(spacing: 8) {
                                 destinationPill(title: "收件箱", id: nil)
-                                ForEach(store.flattenedFolders) { node in
+                                if let selectedFolderID,
+                                   !store.folderTree.contains(where: { $0.folder.id == selectedFolderID }),
+                                   let path = FolderHierarchyNode.breadcrumbPath(for: selectedFolderID, in: store.folderTree) {
+                                    destinationPill(title: path, id: selectedFolderID)
+                                }
+                                ForEach(store.folderTree) { node in
                                     destinationPill(title: node.folder.name, id: node.folder.id)
                                 }
                             }
                         }
+                    }
+                    .sheet(isPresented: $isFolderPickerPresented) {
+                        NavigationStack {
+                            HierarchicalFolderPickerSheet(
+                                title: "选择存入文件夹",
+                                folderTree: store.folderTree,
+                                currentFolderID: selectedFolderID,
+                                onPick: { folderID, _ in
+                                    selectedFolderID = folderID
+                                    isFolderPickerPresented = false
+                                }
+                            )
+                        }
+                        .presentationDetents([.medium, .large])
                     }
 
                     // 2. Quick capture sources grid

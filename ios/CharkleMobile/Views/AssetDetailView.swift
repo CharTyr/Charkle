@@ -89,6 +89,8 @@ struct AssetDetailView: View {
     @State private var isChromeVisible: Bool = true
     @State private var activeUtilityDrawer: ActiveUtilityDrawer? = nil
     @State private var confirmPermanentDelete: Bool = false
+    @State private var isCurrentAssetZoomed: Bool = false
+    @State private var isMoveFolderSheetPresented: Bool = false
 
     init(
         store: MobileAppStore,
@@ -211,6 +213,31 @@ struct AssetDetailView: View {
             }
         }
         .statusBarHidden(!isChromeVisible)
+        .interactiveDismissDisabled(isCurrentAssetZoomed)
+        .background(ZoomDismissCoordinatorBridge(isZoomedOrZooming: isCurrentAssetZoomed))
+        .sheet(isPresented: $isMoveFolderSheetPresented) {
+            NavigationStack {
+                HierarchicalFolderPickerSheet(
+                    title: "移动到文件夹",
+                    folderTree: store.folderTree,
+                    currentFolderID: currentAsset.folderID,
+                    onPick: { folderID, folderName in
+                        let id = currentAsset.id
+                        isMoveFolderSheetPresented = false
+                        Task {
+                            await store.patchAssets(
+                                AssetBatchPatch(
+                                    assetIDs: [id],
+                                    folderAssignment: folderID.map { .folder($0) } ?? .inbox
+                                ),
+                                successToast: folderID == nil ? "已移回收件箱" : "已归档到「\(folderName)」"
+                            )
+                        }
+                    }
+                )
+            }
+            .presentationDetents([.medium, .large])
+        }
         .sheet(isPresented: $isCompactInspectorPresented) {
             NavigationStack {
                 DetailInspectorPanel(
@@ -268,6 +295,7 @@ struct AssetDetailView: View {
         }
         .onChange(of: currentAssetID) { _, nextID in
             previewTransform.reset()
+            isCurrentAssetZoomed = false
             onCurrentAssetChanged(nextID)
         }
         .task(id: currentAssetID) {
@@ -334,22 +362,37 @@ struct AssetDetailView: View {
                 }
 
                 Menu("移动到文件夹", systemImage: "folder.badge.plus") {
-                    Button("收件箱") {
+                    Button {
                         Task {
                             await store.patchAssets(
                                 AssetBatchPatch(assetIDs: [currentAsset.id], folderAssignment: .inbox),
                                 successToast: "已移回收件箱"
                             )
                         }
+                    } label: {
+                        Label(
+                            currentAsset.folderID == nil ? "收件箱  ✓" : "收件箱",
+                            systemImage: "tray"
+                        )
                     }
-                    ForEach(store.flattenedFolders) { node in
-                        Button(String(repeating: "  ", count: min(node.depth, 3)) + node.folder.name) {
+                    if !store.folderTree.isEmpty {
+                        Divider()
+                        HierarchicalFolderMenuContent(
+                            nodes: store.folderTree,
+                            currentFolderID: currentAsset.folderID
+                        ) { folderID, folderName in
                             Task {
                                 await store.patchAssets(
-                                    AssetBatchPatch(assetIDs: [currentAsset.id], folderAssignment: .folder(node.folder.id)),
-                                    successToast: "已归档到「\(node.folder.name)」"
+                                    AssetBatchPatch(assetIDs: [currentAsset.id], folderAssignment: .folder(folderID)),
+                                    successToast: "已归档到「\(folderName)」"
                                 )
                             }
+                        }
+                        Divider()
+                        Button {
+                            isMoveFolderSheetPresented = true
+                        } label: {
+                            Label("按层级浏览并搜索…", systemImage: "list.bullet.indent")
                         }
                     }
                 }
@@ -775,6 +818,12 @@ struct AssetDetailView: View {
                     store: store,
                     asset: asset,
                     transform: asset.id == currentAssetID ? previewTransform : PreviewTransformState(),
+                    isActivePage: asset.id == currentAssetID,
+                    onZoomInteractionChanged: { zoomed in
+                        if asset.id == currentAssetID {
+                            isCurrentAssetZoomed = zoomed
+                        }
+                    },
                     onSingleTap: {
                         withAnimation(MobileMotion.accessible(MobileMotion.enterSm, reduced: reduceMotion)) {
                             isChromeVisible.toggle()
@@ -889,6 +938,8 @@ private struct AssetStageContentView: View {
     @Bindable var store: MobileAppStore
     let asset: AssetRecord
     let transform: PreviewTransformState
+    let isActivePage: Bool
+    let onZoomInteractionChanged: (Bool) -> Void
     let onSingleTap: () -> Void
 
     @Environment(\.colorScheme) private var colorScheme
@@ -919,6 +970,8 @@ private struct AssetStageContentView: View {
                         ZoomableImageView(
                             image: image,
                             transform: transform,
+                            isActivePage: isActivePage,
+                            onZoomInteractionChanged: onZoomInteractionChanged,
                             onSingleTap: onSingleTap
                         )
                     } else {
@@ -1413,82 +1466,418 @@ private struct AssetStageContentView: View {
     }
 }
 
-// MARK: - Pinch, Double-Tap, Rotation & Mirror Zoomable Image Canvas
+// MARK: - Native UIScrollView Pinch, Double-Tap, Rotation & Mirror Zoomable Image Canvas
 
-private struct ZoomableImageView: View {
+/// Uses a native `UIScrollView` (matching Apple Photos) instead of SwiftUI `MagnificationGesture`
+/// so pinch-to-zoom-in / pinch-to-zoom-out, finger-anchored scaling, bounded inertial panning,
+/// and `TabView(.page)` horizontal swipes cooperate cleanly without triggering `.navigationTransition(.zoom)`
+/// interactive dismissal while shrinking a zoomed-in photo back down to 1.0x.
+private struct ZoomableImageView: UIViewRepresentable {
     let image: UIImage
     let transform: PreviewTransformState
+    let isActivePage: Bool
+    let onZoomInteractionChanged: (Bool) -> Void
     let onSingleTap: () -> Void
 
-    @State private var scale: CGFloat = 1.0
-    @State private var lastScale: CGFloat = 1.0
-    @State private var offset: CGSize = .zero
-    @State private var lastOffset: CGSize = .zero
+    func makeCoordinator() -> Coordinator {
+        Coordinator(
+            onZoomInteractionChanged: onZoomInteractionChanged,
+            onSingleTap: onSingleTap
+        )
+    }
 
-    var body: some View {
-        GeometryReader { proxy in
-            let fitScale = transform.quarterTurnFitScale(for: image.size, in: proxy.size)
-            Image(uiImage: image)
-                .resizable()
-                .scaledToFit()
-                .frame(width: proxy.size.width, height: proxy.size.height)
-                .rotationEffect(.degrees(transform.rotationDegrees))
-                .scaleEffect(
-                    x: transform.flipHorizontal ? -1 : 1,
-                    y: transform.flipVertical ? -1 : 1
-                )
-                .scaleEffect(scale * fitScale)
-                .offset(offset)
-                .contentShape(Rectangle())
-                .gesture(
-                    MagnificationGesture()
-                        .onChanged { value in
-                            scale = max(1.0, min(6.0, lastScale * value))
-                        }
-                        .onEnded { _ in
-                            if scale <= 1.05 {
-                                withAnimation(MobileMotion.gestureSpring) {
-                                    scale = 1.0
-                                    offset = .zero
-                                    lastScale = 1.0
-                                    lastOffset = .zero
-                                }
-                            } else {
-                                lastScale = scale
-                            }
-                        }
-                )
-                .simultaneousGesture(
-                    DragGesture()
-                        .onChanged { value in
-                            guard scale > 1.01 else { return }
-                            offset = CGSize(
-                                width: lastOffset.width + value.translation.width,
-                                height: lastOffset.height + value.translation.height
-                            )
-                        }
-                        .onEnded { _ in
-                            guard scale > 1.01 else { return }
-                            lastOffset = offset
-                        },
-                    including: scale > 1.01 ? .all : .subviews
-                )
-                .onTapGesture(count: 2) {
-                    withAnimation(MobileMotion.gestureSpring) {
-                        if scale > 1.2 {
-                            scale = 1.0
-                            lastScale = 1.0
-                            offset = .zero
-                            lastOffset = .zero
-                        } else {
-                            scale = 2.4
-                            lastScale = 2.4
-                        }
-                    }
+    func makeUIView(context: Context) -> ZoomablePhotoScrollView {
+        let scrollView = ZoomablePhotoScrollView()
+        scrollView.delegate = context.coordinator
+        scrollView.minimumZoomScale = 1.0
+        scrollView.maximumZoomScale = 6.0
+        scrollView.bouncesZoom = true
+        scrollView.alwaysBounceHorizontal = false
+        scrollView.alwaysBounceVertical = false
+        scrollView.showsHorizontalScrollIndicator = false
+        scrollView.showsVerticalScrollIndicator = false
+        scrollView.contentInsetAdjustmentBehavior = .never
+        scrollView.decelerationRate = .fast
+        scrollView.backgroundColor = .clear
+
+        let doubleTap = UITapGestureRecognizer(
+            target: context.coordinator,
+            action: #selector(Coordinator.handleDoubleTap(_:))
+        )
+        doubleTap.numberOfTapsRequired = 2
+        scrollView.addGestureRecognizer(doubleTap)
+
+        let singleTap = UITapGestureRecognizer(
+            target: context.coordinator,
+            action: #selector(Coordinator.handleSingleTap(_:))
+        )
+        singleTap.numberOfTapsRequired = 1
+        singleTap.require(toFail: doubleTap)
+        scrollView.addGestureRecognizer(singleTap)
+
+        context.coordinator.scrollView = scrollView
+        scrollView.configure(image: image, transform: transform)
+        return scrollView
+    }
+
+    func updateUIView(_ scrollView: ZoomablePhotoScrollView, context: Context) {
+        context.coordinator.onZoomInteractionChanged = onZoomInteractionChanged
+        context.coordinator.onSingleTap = onSingleTap
+        scrollView.configure(image: image, transform: transform)
+        scrollView.attachPinchPriorityToModalTransitionIfNeeded()
+
+        if !isActivePage && scrollView.zoomScale > 1.01 {
+            scrollView.setZoomScale(1.0, animated: false)
+            scrollView.centerContent()
+            context.coordinator.reportZoomState(false)
+        }
+    }
+
+    @MainActor
+    final class Coordinator: NSObject, UIScrollViewDelegate {
+        weak var scrollView: ZoomablePhotoScrollView?
+        var onZoomInteractionChanged: (Bool) -> Void
+        var onSingleTap: () -> Void
+        private var lastReportedZoomActive = false
+
+        init(
+            onZoomInteractionChanged: @escaping (Bool) -> Void,
+            onSingleTap: @escaping () -> Void
+        ) {
+            self.onZoomInteractionChanged = onZoomInteractionChanged
+            self.onSingleTap = onSingleTap
+        }
+
+        func reportZoomState(_ active: Bool) {
+            guard active != lastReportedZoomActive else { return }
+            lastReportedZoomActive = active
+            onZoomInteractionChanged(active)
+        }
+
+        func viewForZooming(in scrollView: UIScrollView) -> UIView? {
+            (scrollView as? ZoomablePhotoScrollView)?.contentContainerView
+        }
+
+        func scrollViewWillBeginZooming(_ scrollView: UIScrollView, with view: UIView?) {
+            reportZoomState(true)
+        }
+
+        func scrollViewDidZoom(_ scrollView: UIScrollView) {
+            (scrollView as? ZoomablePhotoScrollView)?.centerContent()
+            let active = scrollView.zoomScale > 1.01 || scrollView.isZooming || scrollView.isZoomBouncing
+            reportZoomState(active)
+        }
+
+        func scrollViewDidEndZooming(_ scrollView: UIScrollView, with view: UIView?, atScale scale: CGFloat) {
+            (scrollView as? ZoomablePhotoScrollView)?.centerContent()
+            if scale <= 1.03 {
+                if abs(scrollView.zoomScale - 1.0) > 0.001 {
+                    scrollView.setZoomScale(1.0, animated: true)
                 }
-                .onTapGesture(count: 1) {
-                    onSingleTap()
+                reportZoomState(false)
+            } else {
+                reportZoomState(true)
+            }
+        }
+
+        @objc func handleDoubleTap(_ gesture: UITapGestureRecognizer) {
+            guard let scrollView else { return }
+            if scrollView.zoomScale > 1.05 {
+                scrollView.setZoomScale(1.0, animated: true)
+                reportZoomState(false)
+            } else {
+                let targetScale: CGFloat = 2.5
+                let tapPoint = gesture.location(in: scrollView.contentContainerView)
+                let width = scrollView.bounds.width / targetScale
+                let height = scrollView.bounds.height / targetScale
+                let rect = CGRect(
+                    x: tapPoint.x - width / 2,
+                    y: tapPoint.y - height / 2,
+                    width: width,
+                    height: height
+                )
+                reportZoomState(true)
+                scrollView.zoom(to: rect, animated: true)
+            }
+        }
+
+        @objc func handleSingleTap(_ gesture: UITapGestureRecognizer) {
+            onSingleTap()
+        }
+    }
+}
+
+/// Native `UIScrollView` container that computes pixel-accurate aspect-fit layout (including 90°/270°
+/// rotation and horizontal/vertical mirror transforms) and ensures modal zoom-transition pinch
+/// recognizers defer to photo zooming.
+private final class ZoomablePhotoScrollView: UIScrollView {
+    let contentContainerView = UIView()
+    private let imageView = UIImageView()
+
+    private var lastBoundsSize: CGSize = .zero
+    private var lastImageSize: CGSize = .zero
+    private var currentTransform = PreviewTransformState()
+    private var configuredTransitionGestures = NSHashTable<UIGestureRecognizer>.weakObjects()
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        contentContainerView.backgroundColor = .clear
+        imageView.contentMode = .scaleAspectFit
+        imageView.clipsToBounds = false
+        contentContainerView.addSubview(imageView)
+        addSubview(contentContainerView)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        if window != nil {
+            attachPinchPriorityToModalTransitionIfNeeded()
+        }
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        guard bounds.width > 1, bounds.height > 1 else { return }
+        if lastBoundsSize != bounds.size {
+            lastBoundsSize = bounds.size
+            if zoomScale <= 1.01 {
+                updateFittedLayout()
+            } else {
+                centerContent()
+            }
+        } else {
+            centerContent()
+        }
+    }
+
+    func configure(image: UIImage, transform: PreviewTransformState) {
+        let imageChanged = imageView.image !== image
+        let imageSizeChanged = lastImageSize != image.size
+        let transformChanged = currentTransform != transform
+
+        if imageChanged {
+            imageView.image = image
+            lastImageSize = image.size
+        }
+        currentTransform = transform
+
+        if imageSizeChanged || transformChanged || contentContainerView.bounds.size == .zero {
+            if zoomScale > 1.01 && transformChanged {
+                setZoomScale(1.0, animated: false)
+            }
+            if zoomScale <= 1.01 {
+                updateFittedLayout()
+            } else {
+                applyImageTransformOnly()
+                centerContent()
+            }
+        }
+    }
+
+    func updateFittedLayout() {
+        guard bounds.width > 1, bounds.height > 1 else { return }
+        let rawSize = imageView.image?.size ?? CGSize(width: 1, height: 1)
+        let isQuarterTurn = currentTransform.displayRotationDegrees == 90 || currentTransform.displayRotationDegrees == 270
+        let visualAspect = isQuarterTurn
+            ? (rawSize.width > 0 ? rawSize.height / rawSize.width : 1.0)
+            : (rawSize.height > 0 ? rawSize.width / rawSize.height : 1.0)
+
+        let availW = bounds.width
+        let availH = bounds.height
+        let fittedSize: CGSize
+        if availW / availH > visualAspect {
+            fittedSize = CGSize(width: availH * visualAspect, height: availH)
+        } else {
+            fittedSize = CGSize(width: availW, height: availW / max(0.0001, visualAspect))
+        }
+
+        contentContainerView.transform = .identity
+        contentContainerView.frame = CGRect(origin: .zero, size: fittedSize)
+        contentSize = fittedSize
+        applyImageTransformOnly()
+        centerContent()
+    }
+
+    private func applyImageTransformOnly() {
+        let baseSize = contentContainerView.bounds.size
+        let isQuarterTurn = currentTransform.displayRotationDegrees == 90 || currentTransform.displayRotationDegrees == 270
+        let imageBoundsSize = isQuarterTurn
+            ? CGSize(width: baseSize.height, height: baseSize.width)
+            : baseSize
+
+        imageView.transform = .identity
+        imageView.bounds = CGRect(origin: .zero, size: imageBoundsSize)
+        imageView.center = CGPoint(x: baseSize.width / 2, y: baseSize.height / 2)
+
+        let radians = CGFloat(currentTransform.rotationDegrees) * .pi / 180.0
+        let flipX: CGFloat = currentTransform.flipHorizontal ? -1 : 1
+        let flipY: CGFloat = currentTransform.flipVertical ? -1 : 1
+        imageView.transform = CGAffineTransform(rotationAngle: radians)
+            .concatenating(CGAffineTransform(scaleX: flipX, y: flipY))
+    }
+
+    func centerContent() {
+        let boundsSize = bounds.size
+        let contentFrame = contentContainerView.frame
+        let horizontalInset = max(0, (boundsSize.width - contentFrame.width) * 0.5)
+        let verticalInset = max(0, (boundsSize.height - contentFrame.height) * 0.5)
+        let targetInset = UIEdgeInsets(
+            top: verticalInset,
+            left: horizontalInset,
+            bottom: verticalInset,
+            right: horizontalInset
+        )
+        if contentInset != targetInset {
+            contentInset = targetInset
+        }
+    }
+
+    /// Ensures any pinch-to-dismiss gesture attached to the presented `.navigationTransition(.zoom)`
+    /// modal defers to `UIScrollView.pinchGestureRecognizer` whenever two fingers are pinching a photo.
+    func attachPinchPriorityToModalTransitionIfNeeded() {
+        guard let scrollPinch = pinchGestureRecognizer,
+              let modalVC = ZoomDismissTransitionLookup.presentedModalViewController(from: self) else {
+            return
+        }
+        for recognizer in ZoomDismissTransitionLookup.modalTransitionDismissRecognizers(for: modalVC) {
+            guard !configuredTransitionGestures.contains(recognizer) else { continue }
+            let typeName = String(describing: type(of: recognizer))
+            if recognizer is UIPinchGestureRecognizer
+                || typeName.localizedCaseInsensitiveContains("Pinch")
+                || (typeName.localizedCaseInsensitiveContains("Zoom") && !(recognizer is UIPanGestureRecognizer)) {
+                recognizer.require(toFail: scrollPinch)
+                configuredTransitionGestures.add(recognizer)
+            }
+        }
+    }
+}
+
+/// Shared modal zoom-transition recognizer discovery helper. Strictly scopes to the presented
+/// `fullScreenCover` view controller and its own presentation container, never touching
+/// SwiftUI's internal button/hosting recognizers or child `UIScrollView`s.
+@MainActor
+private enum ZoomDismissTransitionLookup {
+    static func presentedModalViewController(from responder: UIResponder) -> UIViewController? {
+        var current: UIResponder? = responder
+        var foundVC: UIViewController?
+        while let next = current {
+            if let vc = next as? UIViewController {
+                foundVC = vc
+                break
+            }
+            current = next.next
+        }
+        guard var vc = foundVC else { return nil }
+        while let parent = vc.parent, vc.presentingViewController == nil {
+            vc = parent
+        }
+        return vc.presentingViewController != nil ? vc : nil
+    }
+
+    static func modalTransitionDismissRecognizers(for modalVC: UIViewController) -> [UIGestureRecognizer] {
+        let excludedView = modalVC.presentingViewController?.view
+        var hostViews: [UIView] = []
+        var seenViews = Set<ObjectIdentifier>()
+
+        for candidate in [modalVC.view, modalVC.view?.superview, modalVC.presentationController?.containerView] {
+            guard let view = candidate, view !== excludedView else { continue }
+            if seenViews.insert(ObjectIdentifier(view)).inserted {
+                hostViews.append(view)
+            }
+        }
+
+        var matches: [UIGestureRecognizer] = []
+        var seenRecognizers = Set<ObjectIdentifier>()
+        for view in hostViews {
+            for recognizer in view.gestureRecognizers ?? [] {
+                guard seenRecognizers.insert(ObjectIdentifier(recognizer)).inserted else { continue }
+                if isZoomTransitionDismissRecognizer(recognizer) {
+                    matches.append(recognizer)
                 }
+            }
+        }
+        return matches
+    }
+
+    private static func isZoomTransitionDismissRecognizer(_ recognizer: UIGestureRecognizer) -> Bool {
+        if recognizer.view is UIScrollView { return false }
+        if recognizer is UITapGestureRecognizer || recognizer is UILongPressGestureRecognizer {
+            return false
+        }
+        let typeName = String(describing: type(of: recognizer))
+        // Never disable SwiftUI's own hosting gesture recognizers (buttons, menus, taps).
+        if typeName.contains("SwiftUI") { return false }
+        if recognizer is UIPinchGestureRecognizer || recognizer is UIPanGestureRecognizer {
+            return true
+        }
+        return typeName.localizedCaseInsensitiveContains("Zoom")
+            || typeName.localizedCaseInsensitiveContains("Dismiss")
+            || typeName.localizedCaseInsensitiveContains("Transition")
+    }
+}
+
+/// Temporarily disables `.navigationTransition(.zoom)`'s interactive dismiss recognizers while the
+/// currently displayed photo is zoomed in (`zoomScale > 1.01`) or actively pinching/bouncing back
+/// to `1.0x`, restoring them immediately once settled back at `1.0x` so swipe-down-to-dismiss
+/// remains effortless at resting scale.
+private struct ZoomDismissCoordinatorBridge: UIViewControllerRepresentable {
+    let isZoomedOrZooming: Bool
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    func makeUIViewController(context: Context) -> UIViewController {
+        let vc = UIViewController()
+        vc.view.isUserInteractionEnabled = false
+        vc.view.backgroundColor = .clear
+        return vc
+    }
+
+    func updateUIViewController(_ uiViewController: UIViewController, context: Context) {
+        context.coordinator.apply(isZoomedOrZooming: isZoomedOrZooming, from: uiViewController)
+    }
+
+    static func dismantleUIViewController(_ uiViewController: UIViewController, coordinator: Coordinator) {
+        coordinator.restoreAll()
+    }
+
+    @MainActor
+    final class Coordinator {
+        private var disabledRecognizers: [WeakGestureBox] = []
+
+        private final class WeakGestureBox {
+            weak var recognizer: UIGestureRecognizer?
+            init(_ recognizer: UIGestureRecognizer) {
+                self.recognizer = recognizer
+            }
+        }
+
+        func apply(isZoomedOrZooming: Bool, from viewController: UIViewController) {
+            if isZoomedOrZooming {
+                guard let modalVC = ZoomDismissTransitionLookup.presentedModalViewController(from: viewController) else {
+                    return
+                }
+                for recognizer in ZoomDismissTransitionLookup.modalTransitionDismissRecognizers(for: modalVC) {
+                    guard recognizer.isEnabled else { continue }
+                    recognizer.isEnabled = false
+                    disabledRecognizers.append(WeakGestureBox(recognizer))
+                }
+            } else {
+                restoreAll()
+            }
+        }
+
+        func restoreAll() {
+            for box in disabledRecognizers {
+                box.recognizer?.isEnabled = true
+            }
+            disabledRecognizers.removeAll()
         }
     }
 }
@@ -1508,6 +1897,7 @@ private struct DetailInspectorPanel: View {
     @State private var titleDraft: String = ""
     @State private var notesDraft: String = ""
     @State private var newTagText: String = ""
+    @State private var isInspectorFolderPickerPresented: Bool = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1578,33 +1968,72 @@ private struct DetailInspectorPanel: View {
                             .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
                         Spacer()
                         Menu {
-                            Button("收件箱") {
+                            Button {
                                 Task {
                                     await store.patchAssets(
                                         AssetBatchPatch(assetIDs: [asset.id], folderAssignment: .inbox),
                                         successToast: "已移回收件箱"
                                     )
                                 }
+                            } label: {
+                                Label(
+                                    asset.folderID == nil ? "收件箱  ✓" : "收件箱",
+                                    systemImage: "tray"
+                                )
                             }
-                            ForEach(store.flattenedFolders) { node in
-                                Button(String(repeating: "  ", count: min(node.depth, 3)) + node.folder.name) {
+                            if !store.folderTree.isEmpty {
+                                Divider()
+                                HierarchicalFolderMenuContent(
+                                    nodes: store.folderTree,
+                                    currentFolderID: asset.folderID
+                                ) { folderID, folderName in
                                     Task {
                                         await store.patchAssets(
-                                            AssetBatchPatch(assetIDs: [asset.id], folderAssignment: .folder(node.folder.id)),
-                                            successToast: "已归档到「\(node.folder.name)」"
+                                            AssetBatchPatch(assetIDs: [asset.id], folderAssignment: .folder(folderID)),
+                                            successToast: "已归档到「\(folderName)」"
                                         )
                                     }
+                                }
+                                Divider()
+                                Button {
+                                    isInspectorFolderPickerPresented = true
+                                } label: {
+                                    Label("按层级浏览并搜索…", systemImage: "list.bullet.indent")
                                 }
                             }
                         } label: {
                             HStack(spacing: 4) {
                                 Text(folderName)
                                     .font(.system(size: 13, weight: .medium))
+                                    .lineLimit(1)
                                 Image(systemName: "chevron.up.chevron.down")
                                     .font(.system(size: 10))
                             }
                             .foregroundStyle(MobileTheme.accent(for: colorScheme))
                         }
+                    }
+                    .sheet(isPresented: $isInspectorFolderPickerPresented) {
+                        NavigationStack {
+                            HierarchicalFolderPickerSheet(
+                                title: "选择文件夹",
+                                folderTree: store.folderTree,
+                                currentFolderID: asset.folderID,
+                                onPick: { folderID, pickedName in
+                                    let id = asset.id
+                                    isInspectorFolderPickerPresented = false
+                                    Task {
+                                        await store.patchAssets(
+                                            AssetBatchPatch(
+                                                assetIDs: [id],
+                                                folderAssignment: folderID.map { .folder($0) } ?? .inbox
+                                            ),
+                                            successToast: folderID == nil ? "已移回收件箱" : "已归档到「\(pickedName)」"
+                                        )
+                                    }
+                                }
+                            )
+                        }
+                        .presentationDetents([.medium, .large])
                     }
 
                     Toggle("离线置顶原图", isOn: Binding(
@@ -1951,7 +2380,9 @@ private struct DetailInspectorPanel: View {
 
     private var folderName: String {
         guard let fid = asset.folderID else { return "收件箱" }
-        return store.folders.first(where: { $0.id == fid })?.name ?? "文件夹"
+        return FolderHierarchyNode.breadcrumbPath(for: fid, in: store.folderTree)
+            ?? store.folders.first(where: { $0.id == fid })?.name
+            ?? "文件夹"
     }
 
     private func saveTitle() {
