@@ -247,6 +247,14 @@ public struct TypeSafeExperimentalConfig: Codable, Hashable, Sendable {
     public var enableInboxSmartTriage: Bool
     /// Phase 2: Multi-dimensional Score visual reranking in Moodboard curator & candidate pool.
     public var enableCuratorVisualRerank: Bool
+    /// Phase 3: Zero-hallucination closed-set auto-tagging via parallel Noul fan-out over existing library tags.
+    public var enableClosedSetTagging: Bool
+    /// When enabled, closed-set tag matches meeting `highConfidenceTagThreshold` are promoted directly into formal `tags`.
+    public var autoApplyHighConfidenceTags: Bool
+    /// Minimum calibrated Noul probability (`0.60...0.98`) to treat a closed-set tag as high-confidence.
+    public var highConfidenceTagThreshold: Double
+    /// Minimum calibrated Noul probability (`0.30...0.85`) to include a closed-set tag in `suggestedTags`.
+    public var suggestedTagThreshold: Double
 
     public init(
         enabled: Bool = false,
@@ -261,7 +269,11 @@ public struct TypeSafeExperimentalConfig: Codable, Hashable, Sendable {
         enablePinpointAnnotations: Bool = true,
         enableSemanticSearch: Bool = true,
         enableInboxSmartTriage: Bool = true,
-        enableCuratorVisualRerank: Bool = true
+        enableCuratorVisualRerank: Bool = true,
+        enableClosedSetTagging: Bool = true,
+        autoApplyHighConfidenceTags: Bool = false,
+        highConfidenceTagThreshold: Double = 0.82,
+        suggestedTagThreshold: Double = 0.52
     ) {
         self.enabled = enabled
         self.baseURL = baseURL
@@ -276,12 +288,17 @@ public struct TypeSafeExperimentalConfig: Codable, Hashable, Sendable {
         self.enableSemanticSearch = enableSemanticSearch
         self.enableInboxSmartTriage = enableInboxSmartTriage
         self.enableCuratorVisualRerank = enableCuratorVisualRerank
+        self.enableClosedSetTagging = enableClosedSetTagging
+        self.autoApplyHighConfidenceTags = autoApplyHighConfidenceTags
+        self.highConfidenceTagThreshold = highConfidenceTagThreshold
+        self.suggestedTagThreshold = suggestedTagThreshold
     }
 
     private enum CodingKeys: String, CodingKey {
         case enabled, baseURL, model, minConfidence, lowConfidencePadding, minPresenceProbability
         case enableMoodboardFocusCrop, enableAutoCleanCrop, enableSubjectPalette, enablePinpointAnnotations
         case enableSemanticSearch, enableInboxSmartTriage, enableCuratorVisualRerank
+        case enableClosedSetTagging, autoApplyHighConfidenceTags, highConfidenceTagThreshold, suggestedTagThreshold
     }
 
     public init(from decoder: any Decoder) throws {
@@ -299,6 +316,55 @@ public struct TypeSafeExperimentalConfig: Codable, Hashable, Sendable {
         enableSemanticSearch = try c.decodeIfPresent(Bool.self, forKey: .enableSemanticSearch) ?? true
         enableInboxSmartTriage = try c.decodeIfPresent(Bool.self, forKey: .enableInboxSmartTriage) ?? true
         enableCuratorVisualRerank = try c.decodeIfPresent(Bool.self, forKey: .enableCuratorVisualRerank) ?? true
+        enableClosedSetTagging = try c.decodeIfPresent(Bool.self, forKey: .enableClosedSetTagging) ?? true
+        autoApplyHighConfidenceTags = try c.decodeIfPresent(Bool.self, forKey: .autoApplyHighConfidenceTags) ?? false
+        highConfidenceTagThreshold = try c.decodeIfPresent(Double.self, forKey: .highConfidenceTagThreshold) ?? 0.82
+        suggestedTagThreshold = try c.decodeIfPresent(Double.self, forKey: .suggestedTagThreshold) ?? 0.52
+    }
+}
+
+public nonisolated struct ClosedSetTagOption: Hashable, Sendable {
+    public let name: String
+    public let aliases: [String]
+    public let contextHints: [String]
+
+    public init(name: String, aliases: [String] = [], contextHints: [String] = []) {
+        self.name = name
+        self.aliases = aliases
+        self.contextHints = contextHints
+    }
+}
+
+public nonisolated struct ClosedSetTagMatch: Codable, Hashable, Sendable {
+    public let tag: String
+    public let probability: Double
+
+    public init(tag: String, probability: Double) {
+        self.tag = tag
+        self.probability = probability
+    }
+}
+
+public nonisolated struct ClosedSetTaggingResult: Codable, Hashable, Sendable {
+    public let confirmedTags: [ClosedSetTagMatch]
+    public let suggestedTags: [ClosedSetTagMatch]
+    public let evaluatedTagCount: Int
+    public let model: String?
+
+    public init(
+        confirmedTags: [ClosedSetTagMatch],
+        suggestedTags: [ClosedSetTagMatch],
+        evaluatedTagCount: Int,
+        model: String? = nil
+    ) {
+        self.confirmedTags = confirmedTags
+        self.suggestedTags = suggestedTags
+        self.evaluatedTagCount = evaluatedTagCount
+        self.model = model
+    }
+
+    public var allMatchedTagNames: [String] {
+        (confirmedTags + suggestedTags).map(\.tag)
     }
 }
 

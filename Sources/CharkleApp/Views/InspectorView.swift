@@ -920,7 +920,7 @@ public struct InspectorView: View {
                             }
                             .buttonStyle(.plain)
                             .disabled(isRetaggingThis)
-                            .help("使用云端 AI 按当前语言格式重新生成建议标签，并优先合并已有标签（保留已采纳标签）")
+                            .help("使用 Jev 闭集打标或云端 AI 重新生成标签（优先零幻觉复用已有规范标签，保留已采纳标签）")
                         }
                     }
 
@@ -1759,10 +1759,11 @@ public struct InspectorView: View {
                                 if library.isEnrichingTags {
                                     HStack(spacing: 8) {
                                         ProgressView().controlSize(.mini)
-                                        Text("正在重新打标 (\(library.enrichCompletedCount)/\(max(1, library.enrichTotalCount)))…")
+                                        Text("\(library.enrichEngineLabel.isEmpty ? "正在重新打标" : library.enrichEngineLabel) (\(library.enrichCompletedCount)/\(max(1, library.enrichTotalCount)))…")
                                             .font(CharkleTheme.text(.caption, weight: .medium))
                                             .foregroundStyle(.secondary)
                                             .monospacedDigit()
+                                            .lineLimit(1)
                                         Spacer()
                                         Button("停止") {
                                             library.cancelRetagging()
@@ -2591,7 +2592,7 @@ public struct InspectorView: View {
             let outcome = await library.retagAssetsWithCloudAI(ids: ids)
             switch outcome {
             case .aiDisabled:
-                coordinator.showToast("请先在「设置 → 智能与搜索」中开启云端增强智能", icon: "sparkles", tone: .warning)
+                coordinator.showToast("请先在「设置 → 智能与搜索」中开启云端增强智能或进阶视觉定位闭集打标", icon: "sparkles", tone: .warning)
             case .cancelled(let completed, let total):
                 coordinator.showToast("已停止重新打标（已完成 \(completed)/\(total) 项）", icon: "stop.circle")
             case .finished(let succeeded, let failed, let total, let firstError):

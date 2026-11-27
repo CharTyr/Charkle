@@ -1,0 +1,9 @@
+{
+  "id": "11-28-windows-web-jev-closed-set-tagging",
+  "title": "Windows & Web Parity: Jev Zero-Hallucination Closed-Set Auto-Tagging, Phase 1 Flag Gating & Batch Acceleration",
+  "status": "open",
+  "priority": "P1",
+  "platforms": ["windows", "web"],
+  "canonicalReferencePlatform": "macos",
+  "createdAt": "2026-11-28"
+}

@@ -675,4 +675,272 @@ struct TypeSafeVisualGroundingTests {
         print("[LIVE] Inbox Triage: folder=\(triage.folderID == fBrowser ? "Web & UI Screenshots" : (triage.folderID == nil ? "Inbox" : "Food")) fit=\(triage.fitProbability) conf=\(triage.confidence)")
         #expect(triage.folderID == fBrowser)
     }
+
+    // MARK: - Phase 3: Zero-Hallucination Closed-Set Auto-Tagging & Phase 1 Flag Gating
+
+    @Test("Closed-set multi-Noul tagging evaluates canonical tags in 1 request with dual-threshold split and zero hallucinations")
+    func closedSetTaggingMultiNoulFanOut() async throws {
+        var requestCount = 0
+        var capturedBody = ""
+
+        TypeSafeMockURLProtocol.handler = { req in
+            requestCount += 1
+            capturedBody = String(decoding: readHTTPBody(req), as: UTF8.self)
+            let json = """
+            {
+              "model": "jev-1.15.0",
+              "answers": {
+                "t_0": {"type": "noul", "noul": 0.93},
+                "t_1": {"type": "noul", "noul": 0.67},
+                "t_2": {"type": "noul", "noul": 0.21},
+                "hallucinated_extra": {"type": "noul", "noul": 0.99}
+              },
+              "usage": {"input_tokens": 310, "output_tokens": 18}
+            }
+            """
+            let resp = HTTPURLResponse(url: req.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            return (resp, Data(json.utf8))
+        }
+
+        let engine = VisualGroundingEngine(session: makeMockSession())
+        let config = TypeSafeExperimentalConfig(
+            enabled: true,
+            enableClosedSetTagging: true,
+            autoApplyHighConfidenceTags: true,
+            highConfidenceTagThreshold: 0.82,
+            suggestedTagThreshold: 0.52
+        )
+
+        let res = try await engine.classifyClosedSetTags(
+            assetTitle: "glass-card.png",
+            existingTags: ["UI设计"],
+            assetNotes: "",
+            imageData: Data([0xFF, 0xD8, 0xFF, 0xE0]),
+            candidateTags: [
+                ClosedSetTagOption(name: "UI设计"), // Already on asset -> must be skipped
+                ClosedSetTagOption(name: "毛玻璃", aliases: ["液态玻璃"], contextHints: ["移动端", "暗黑模式"]),
+                ClosedSetTagOption(name: "暗黑模式", contextHints: ["UI设计"]),
+                ClosedSetTagOption(name: "水彩插画", contextHints: ["插画"])
+            ],
+            config: config,
+            apiKey: "test-key"
+        )
+
+        #expect(requestCount == 1)
+        #expect(capturedBody.contains("液态玻璃"))
+        #expect(capturedBody.contains("移动端"))
+        #expect(!capturedBody.contains("\"criteria\"")) // Lean multi-Noul prompt omits repetitive true/false criteria boilerplate
+        #expect(res.evaluatedTagCount == 3)
+        #expect(res.confirmedTags.map(\.tag) == ["毛玻璃"])
+        #expect(res.suggestedTags.map(\.tag) == ["暗黑模式"])
+        #expect(!res.allMatchedTagNames.contains("水彩插画"))
+        #expect(!res.allMatchedTagNames.contains("UI设计"))
+    }
+
+    @Test("ClosedSetTagFunnel drops singleton noise, folds taxonomy aliases, synthesizes context hints, and prioritizes folder priors")
+    func closedSetTagFunnelHygieneAndPrioritization() throws {
+        let parentFolder = FolderRecord(name: "插画")
+        let childFolder = FolderRecord(name: "赛博插画", parentID: parentFolder.id)
+        let otherFolder = FolderRecord(name: "服装摄影")
+
+        var assets: [AssetRecord] = []
+        // Create 14 repeated canonical tags (>= 12 repeated -> enables anti-singleton filter)
+        for idx in 0..<14 {
+            let tag = "核心标签\(idx)"
+            assets.append(AssetRecord(title: "baseA-\(idx)", fileName: "a\(idx).png", folderID: otherFolder.id, tags: [tag]))
+            assets.append(AssetRecord(title: "baseB-\(idx)", fileName: "b\(idx).png", folderID: otherFolder.id, tags: [tag]))
+        }
+        // Add alias-folded tags inside childFolder & parentFolder
+        assets.append(AssetRecord(title: "c1", fileName: "c1.png", folderID: childFolder.id, tags: ["手绘插画", "霓虹配色"]))
+        assets.append(AssetRecord(title: "c2", fileName: "c2.png", folderID: childFolder.id, tags: ["手绘风", "霓虹配色"]))
+        assets.append(AssetRecord(title: "p1", fileName: "p1.png", folderID: parentFolder.id, tags: ["透视构图", "手绘风"]))
+        assets.append(AssetRecord(title: "p2", fileName: "p2.png", folderID: parentFolder.id, tags: ["透视构图"]))
+
+        // Add 20 one-off singleton noise tags (should be filtered out!)
+        for idx in 0..<20 {
+            assets.append(AssetRecord(title: "noise-\(idx)", fileName: "n\(idx).png", folderID: otherFolder.id, tags: ["一次性孤儿词\(idx)"]))
+        }
+
+        let target = AssetRecord(title: "new-art", fileName: "new.png", folderID: childFolder.id, tags: ["霓虹配色"])
+        assets.append(target)
+
+        let taxonomy = LibraryTaxonomyPolicy(tagAliases: ["手绘插画": "手绘风"])
+        let funnel = ClosedSetTagFunnel(
+            activeAssets: assets,
+            folders: [parentFolder, childFolder, otherFolder],
+            featurePrints: [:],
+            taxonomy: taxonomy
+        )
+
+        let candidates = funnel.selectCandidates(for: target, maxCandidates: 8)
+        let names = candidates.map(\.name)
+        #expect(candidates.count == 8)
+        // Must exclude tag already on target & must exclude singleton noise tags & folded alias
+        #expect(!names.contains("霓虹配色"))
+        #expect(!names.contains("手绘插画"))
+        #expect(names.allSatisfy { !$0.hasPrefix("一次性孤儿词") })
+        // Folder + parent folder priors ("手绘风", "透视构图") must rise to top!
+        #expect(names.prefix(2).contains("手绘风"))
+        #expect(names.prefix(2).contains("透视构图"))
+        let handDrawn = try #require(candidates.first(where: { $0.name == "手绘风" }))
+        #expect(handDrawn.aliases.contains("手绘插画"))
+        #expect(handDrawn.contextHints.contains("赛博插画") || handDrawn.contextHints.contains("插画"))
+    }
+
+    @Test("LiveCharkleEngine runs Jev-only closed-set enrichment (suggested vs auto-apply), gates Phase 1 flags, and fans out suggestFolders")
+    func liveEngineJevClosedSetAndFlagGating() async throws {
+        // Legacy JSON backward-compatibility check for new closed-set fields
+        let legacyJSON = #"{"enabled":true,"model":"jev-latest"}"#
+        let decodedLegacy = try JSONDecoder().decode(TypeSafeExperimentalConfig.self, from: Data(legacyJSON.utf8))
+        #expect(decodedLegacy.enableClosedSetTagging == true)
+        #expect(decodedLegacy.autoApplyHighConfidenceTags == false)
+        #expect(abs(decodedLegacy.highConfidenceTagThreshold - 0.82) < 0.001)
+        #expect(abs(decodedLegacy.suggestedTagThreshold - 0.52) < 0.001)
+
+        let tempDir = FileManager.default.temporaryDirectory
+            .appending(path: "charkle-jev-closedset-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let keychain = KeychainStore(service: "com.charkle.test.\(UUID().uuidString)")
+        defer { try? keychain.delete(IntelligenceEngine.typeSafeKey) }
+
+        let media = try MediaPipeline(directory: tempDir)
+        let db = try LibraryDatabase(url: tempDir.appending(path: "Library.sqlite3"))
+        let grounding = VisualGroundingEngine(session: makeMockSession())
+        let intelligence = IntelligenceEngine(keychain: keychain, grounding: grounding)
+        let engine = LiveCharkleEngine(database: db, media: media, intelligence: intelligence)
+
+        // Create 3 distinct synthetic PNG assets on disk & ingest them
+        let cg1 = try makeSyntheticSubjectImage(width: 320, height: 320)
+        let cg2 = try makeSyntheticSubjectImage(width: 322, height: 320)
+        let cg3 = try makeSyntheticSubjectImage(width: 324, height: 320)
+        let img1URL = tempDir.appending(path: "sample1.png")
+        let img2URL = tempDir.appending(path: "sample2.png")
+        let img3URL = tempDir.appending(path: "sample3.png")
+        try #require(NSBitmapImageRep(cgImage: cg1).representation(using: .png, properties: [:])).write(to: img1URL)
+        try #require(NSBitmapImageRep(cgImage: cg2).representation(using: .png, properties: [:])).write(to: img2URL)
+        try #require(NSBitmapImageRep(cgImage: cg3).representation(using: .png, properties: [:])).write(to: img3URL)
+
+        let folder = try await engine.createFolder(name: "动漫插画库", parentID: nil)
+        let seeded = try await engine.ingest([.fileURL(img1URL)], targetFolderID: folder.id, targetBoardID: nil)
+        let seedAsset = try #require(seeded.first)
+        _ = try await engine.updateAssets(AssetBatchPatch(
+            assetIDs: [seedAsset.id],
+            addTags: ["动漫插画", "极简构图", "夏日晴空"]
+        ))
+
+        let imported = try await engine.ingest([.fileURL(img2URL)], targetFolderID: folder.id, targetBoardID: nil)
+        let targetAsset = try #require(imported.first)
+
+        // Ensure ordinary Cloud AI provider is DISABLED (pure Jev mode!)
+        try await engine.saveAIConfig(AIProviderConfig(provider: .disabled), apiKey: nil)
+
+        // Save TypeSafe config with autoApplyHighConfidenceTags = false first
+        try await engine.saveTypeSafeConfig(
+            TypeSafeExperimentalConfig(
+                enabled: true,
+                enableAutoCleanCrop: false,
+                enableSubjectPalette: false,
+                enableClosedSetTagging: true,
+                autoApplyHighConfidenceTags: false,
+                highConfidenceTagThreshold: 0.82,
+                suggestedTagThreshold: 0.52
+            ),
+            apiKey: "test-jev-key"
+        )
+
+        var httpCallCount = 0
+        TypeSafeMockURLProtocol.handler = { req in
+            httpCallCount += 1
+            let body = String(decoding: readHTTPBody(req), as: UTF8.self)
+            // Return answers matching whatever t_0..t_2 keys were sent
+            if body.contains("\"fits_any\"") {
+                let json = """
+                {
+                  "model": "jev-1.15.0",
+                  "answers": {
+                    "fits_any": {"type": "noul", "noul": 0.90},
+                    "folder": {"type": "choice", "choice": "f_0", "confidence": 0.88, "probabilities": {"f_0": 0.88}}
+                  }
+                }
+                """
+                let resp = HTTPURLResponse(url: req.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+                return (resp, Data(json.utf8))
+            }
+            let json = """
+            {
+              "model": "jev-1.15.0",
+              "answers": {
+                "t_0": {"type": "noul", "noul": 0.92},
+                "t_1": {"type": "noul", "noul": 0.65},
+                "t_2": {"type": "noul", "noul": 0.15}
+              }
+            }
+            """
+            let resp = HTTPURLResponse(url: req.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            return (resp, Data(json.utf8))
+        }
+
+        // 1. Phase 1 flag gating: enableAutoCleanCrop=false & enableSubjectPalette=false MUST NOT call Jev!
+        let cleanOffline = try await engine.detectCleanContentBounds(assetID: targetAsset.id)
+        #expect(cleanOffline.source == .appleVisionSaliency)
+        let paletteOffline = try await engine.extractSubjectPalette(assetID: targetAsset.id, query: nil)
+        #expect(paletteOffline.subjectRegion.source == .appleVisionSaliency)
+        #expect(httpCallCount == 0)
+
+        // 2. Pure Jev closed-set tagging with autoApplyHighConfidenceTags = false -> goes to suggestedTags only
+        let enrichedSuggested = try await engine.enrichAssetsWithCloudAI(ids: [targetAsset.id])
+        let updated1 = try #require(enrichedSuggested.first)
+        #expect(httpCallCount == 1)
+        #expect(updated1.tags.isEmpty)
+        #expect(updated1.suggestedTags.count == 2)
+        #expect(Set(updated1.suggestedTags).isSubset(of: Set(["动漫插画", "极简构图", "夏日晴空"])))
+
+        // 3. Turn ON autoApplyHighConfidenceTags = true -> t_0 (>= 0.82) promotes directly to formal tags!
+        try await engine.saveTypeSafeConfig(
+            TypeSafeExperimentalConfig(
+                enabled: true,
+                enableClosedSetTagging: true,
+                autoApplyHighConfidenceTags: true,
+                highConfidenceTagThreshold: 0.82,
+                suggestedTagThreshold: 0.52
+            ),
+            apiKey: nil
+        )
+        let enrichedAuto = try await engine.enrichAssetsWithCloudAI(ids: [targetAsset.id])
+        let updated2 = try #require(enrichedAuto.first)
+        #expect(updated2.tags.count == 1)
+        #expect(updated2.suggestedTags.count == 1)
+        #expect(Set(updated2.tags).isDisjoint(with: Set(updated2.suggestedTags)))
+        #expect(Set(updated2.tags + updated2.suggestedTags).isSubset(of: Set(["动漫插画", "极简构图", "夏日晴空"])))
+
+        // 4. Skip redundant slow generative VLM when asset already has aiDescription & Jev closed-set is active!
+        try await db.transaction { store in
+            if var described = try store.asset(id: targetAsset.id) {
+                described.aiDescription = "已有的画面描述"
+                _ = try store.saveAssetLocally(described)
+            }
+        }
+        // Configure an unreachable OpenAI-compatible VLM endpoint — if VLM were called it would fail/stall.
+        try await engine.saveAIConfig(
+            AIProviderConfig(
+                provider: .openAICompatible,
+                baseURL: "http://127.0.0.1:1",
+                chatModel: "fake-slow-vlm"
+            ),
+            apiKey: "unused-vlm-key"
+        )
+        let beforeJevCount = httpCallCount
+        let fastJevOnly = try await engine.enrichAssetsWithCloudAI(ids: [targetAsset.id])
+        #expect(fastJevOnly.count == 1)
+        #expect(fastJevOnly.first?.aiDescription == "已有的画面描述")
+        #expect(httpCallCount == beforeJevCount + 1)
+
+        // 5. Concurrent suggestFolders(for:) works cleanly for Inbox items
+        let inboxBatch = try await engine.ingest([.fileURL(img3URL)], targetFolderID: nil, targetBoardID: nil)
+        let inboxAsset = try #require(inboxBatch.first)
+        let suggestions = try await engine.suggestFolders(for: [inboxAsset.id])
+        #expect(suggestions[inboxAsset.id]?.folderID == folder.id)
+    }
 }

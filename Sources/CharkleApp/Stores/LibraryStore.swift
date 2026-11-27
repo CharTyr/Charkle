@@ -101,6 +101,7 @@ public final class LibraryStore {
     public var enrichingAssetIDs: Set<UUID> = []
     public var enrichCompletedCount: Int = 0
     public var enrichTotalCount: Int = 0
+    public var enrichEngineLabel: String = ""
     public var isEnrichingTags: Bool { !enrichingAssetIDs.isEmpty }
     public var lastError: String?
 
@@ -2248,9 +2249,23 @@ public final class LibraryStore {
         }
 
         let aiConfig = await engine.aiConfig()
-        guard aiConfig.provider != .disabled else {
+        let tsConfig = await engine.typeSafeConfig()
+        let hasTSKey = await engine.hasStoredTypeSafeKey()
+        let canUseJevClosedSet = tsConfig.enabled && tsConfig.enableClosedSetTagging && hasTSKey
+        guard aiConfig.provider != .disabled || canUseJevClosedSet else {
             return .aiDisabled
         }
+
+        let needsAnyVLMDescription = aiConfig.provider != .disabled && targets.contains { id in
+            let desc = allAssetsByID[id]?.aiDescription?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return desc.isEmpty
+        }
+        let resolvedEngineLabel: String = {
+            if canUseJevClosedSet {
+                return needsAnyVLMDescription ? "Jev 闭集 + 云端描述" : "Jev 闭集打标"
+            }
+            return "云端 AI 打标"
+        }()
 
         retagTask?.cancel()
         let batchID = UUID()
@@ -2260,18 +2275,21 @@ public final class LibraryStore {
             enrichingAssetIDs = Set(targets)
             enrichCompletedCount = 0
             enrichTotalCount = total
+            enrichEngineLabel = resolvedEngineLabel
             defer {
                 if activeRetagBatchID == batchID {
                     enrichingAssetIDs.removeAll()
                     enrichCompletedCount = 0
                     enrichTotalCount = 0
+                    enrichEngineLabel = ""
                     retagTask = nil
                     activeRetagBatchID = nil
                 }
             }
 
             let engine = self.engine
-            let concurrency = min(3, total)
+            // Jev System One closed-set decisions are lightweight and handle higher concurrency cleanly.
+            let concurrency = min(canUseJevClosedSet ? 6 : 3, total)
             var succeeded = 0
             var failed = 0
             var firstError: String?

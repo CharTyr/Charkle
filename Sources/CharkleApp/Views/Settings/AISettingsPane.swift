@@ -316,13 +316,14 @@ public struct AISettingsPane: View {
             draftTypeSafeConfig.enableSubjectPalette,
             draftTypeSafeConfig.enableSemanticSearch,
             draftTypeSafeConfig.enableInboxSmartTriage,
-            draftTypeSafeConfig.enableCuratorVisualRerank
+            draftTypeSafeConfig.enableCuratorVisualRerank,
+            draftTypeSafeConfig.enableClosedSetTagging
         ].filter { $0 }.count
 
         return SettingsSection("进阶视觉定位（实验性）") {
             SettingsRow(
                 title: "精准画面定位与智能分拣",
-                subtitle: "用于语义裁切、截图去噪与收件箱归类，未开启时回退 Apple Vision"
+                subtitle: "用于语义裁切、截图去噪、收件箱归类与闭集自动打标，未开启时回退 Apple Vision"
             ) {
                 Toggle("", isOn: $draftTypeSafeConfig.enabled)
                     .labelsHidden()
@@ -339,8 +340,8 @@ public struct AISettingsPane: View {
                 SettingsRow(
                     title: "TypeSafe 视觉定位引擎",
                     subtitle: syncAndAI.hasStoredTypeSafeKey
-                        ? "已配置密钥，模型 \(draftTypeSafeConfig.model)（已启用 \(enabledCapabilitiesCount)/6 项）"
-                        : "尚未配置 TypeSafe API 密钥，填写后启用视觉定位与精排",
+                        ? "已配置密钥，模型 \(draftTypeSafeConfig.model)（已启用 \(enabledCapabilitiesCount)/7 项）"
+                        : "尚未配置 TypeSafe API 密钥，填写后启用视觉定位、精排与闭集打标",
                     subtitleColor: syncAndAI.hasStoredTypeSafeKey
                         ? SettingsPalette.positiveInk(for: colorScheme)
                         : SettingsPalette.warningInk(for: colorScheme)
@@ -859,6 +860,33 @@ public struct AISettingsPane: View {
                         subtitle: "对候选池进行视觉相关度精排，并支持细节特写生板模式",
                         isOn: $draftTypeSafeConfig.enableCuratorVisualRerank
                     )
+                    SettingsCardDivider()
+                    scenarioToggle(
+                        title: "零幻觉闭集自动打标",
+                        subtitle: "单次看图并行核对你已有的规范标签词表（过滤一次性孤儿词），杜绝 AI 编造同义新词",
+                        isOn: $draftTypeSafeConfig.enableClosedSetTagging
+                    )
+                    if draftTypeSafeConfig.enableClosedSetTagging {
+                        SettingsCardDivider()
+                        scenarioToggle(
+                            title: "高置信闭集标签自动落库（≥ \(Int((draftTypeSafeConfig.highConfidenceTagThreshold * 100).rounded()))%）",
+                            subtitle: "开启后高置信命中直接写入正式标签并跨设备同步，边界命中继续留在建议标签中待确认",
+                            isOn: $draftTypeSafeConfig.autoApplyHighConfidenceTags
+                        )
+                        if draftTypeSafeConfig.autoApplyHighConfidenceTags {
+                            HStack(spacing: 10) {
+                                Text("自动落库概率门槛")
+                                    .font(CharkleTheme.text(.caption))
+                                    .foregroundStyle(.secondary)
+                                Slider(value: $draftTypeSafeConfig.highConfidenceTagThreshold, in: 0.70...0.95, step: 0.02)
+                                Text("\(Int((draftTypeSafeConfig.highConfidenceTagThreshold * 100).rounded()))%")
+                                    .font(CharkleTheme.text(.caption, weight: .semibold).monospacedDigit())
+                                    .frame(width: 38, alignment: .trailing)
+                            }
+                            .padding(.horizontal, 12)
+                            .padding(.bottom, 10)
+                        }
+                    }
                 }
                 .background(
                     SettingsPalette.subtleFill(for: colorScheme),
@@ -870,7 +898,7 @@ public struct AISettingsPane: View {
                 )
                 .charkleCleanScrollbars(hidden: false)
             }
-            .frame(maxHeight: 240)
+            .frame(maxHeight: 290)
 
             CharkleDisclosureGroup(isExpanded: $showTypeSafeEndpoint) {
                 sheetField("自定义服务地址（默认 https://api.typesafe.ai）") {

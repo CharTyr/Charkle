@@ -2436,20 +2436,17 @@ public struct MainWindowView: View {
 
     private func triggerAIRetagging(for ids: [UUID]) {
         guard !ids.isEmpty else { return }
-        if ids.count > 1 {
-            coordinator.showToast("正在为 \(ids.count) 项素材重新生成标签…", icon: "sparkles")
-        }
         Task {
             let outcome = await library.retagAssetsWithCloudAI(ids: ids)
             switch outcome {
             case .aiDisabled:
-                coordinator.showToast("请先在「设置 → 智能与搜索」中开启云端增强智能", icon: "sparkles", tone: .warning)
+                coordinator.showToast("请先在「设置 → 智能与搜索」中开启云端增强智能或进阶视觉定位闭集打标", icon: "sparkles", tone: .warning)
             case .cancelled(let completed, let total):
                 coordinator.showToast("已停止重新打标（已完成 \(completed)/\(total) 项）", icon: "stop.circle")
             case .finished(let succeeded, let failed, let total, let firstError):
                 if succeeded > 0 && failed == 0 {
                     coordinator.showToast(
-                        total == 1 ? "已按当前格式重新生成建议标签" : "已完成 \(succeeded) 项 AI 重新打标",
+                        total == 1 ? "已重新生成标签" : "已完成 \(succeeded) 项重新打标",
                         icon: "sparkles"
                     )
                 } else if succeeded > 0 && failed > 0 {
@@ -2460,7 +2457,7 @@ public struct MainWindowView: View {
                     )
                 } else {
                     coordinator.showToast(
-                        firstError ?? "重新打标失败，请检查云端增强智能配置",
+                        firstError ?? "重新打标失败，请检查云端增强智能或 TypeSafe 配置",
                         icon: "exclamationmark.triangle",
                         tone: .warning
                     )
@@ -2670,7 +2667,8 @@ public struct MainWindowView: View {
                         HStack(spacing: 4) {
                             if library.isEnrichingTags {
                                 ProgressView().controlSize(.mini)
-                                Text("\(library.enrichCompletedCount)/\(max(1, library.enrichTotalCount))")
+                                let prefix = library.enrichEngineLabel.isEmpty ? "" : "\(library.enrichEngineLabel) "
+                                Text("\(prefix)\(library.enrichCompletedCount)/\(max(1, library.enrichTotalCount))")
                                     .monospacedDigit()
                             } else if isCompactPill {
                                 Image(systemName: "sparkles")

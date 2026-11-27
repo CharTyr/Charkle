@@ -23,6 +23,7 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
     private var backgroundEnrichmentTasks: [UUID: Task<Void, Never>] = [:]
     private var cachedGDirectEndpoints: (endpoints: [GDirectEndpoint], fetchedAt: ContinuousClock.Instant)?
     private var cachedGDirectAccounts: (accounts: [String], defaultAccount: String?, fetchedAt: ContinuousClock.Instant)?
+    private var cachedClosedSetFunnel: (funnel: ClosedSetTagFunnel, builtAt: ContinuousClock.Instant)?
     private var seeding = false
     private var isMigrating = false
     private var isUpgradingXHSCovers = false
@@ -1207,7 +1208,10 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
                 }
                 guard !Task.isCancelled else { return }
                 let ai = await self.aiConfig()
-                if ai.autoAnalyzeOnImport, ai.provider != .disabled, !Task.isCancelled,
+                let ts = await self.typeSafeConfig()
+                let canAutoEnrich = ai.provider != .disabled
+                    || (ts.enabled && ts.enableClosedSetTagging && self.intelligence.storedTypeSafeAPIKey() != nil)
+                if ai.autoAnalyzeOnImport, canAutoEnrich, !Task.isCancelled,
                    let enriched = try? await self.enrichAssetsWithCloudAI(ids: committedIDs), !enriched.isEmpty {
                     didChange = true
                 }
@@ -2221,6 +2225,9 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
             }
             return changed
         }
+        if !patch.addTags.isEmpty || !patch.removeTags.isEmpty || patch.acceptSuggestedTags {
+            cachedClosedSetFunnel = nil
+        }
         if patch.pinnedOffline == true {
             await warmOfflinePins(result.filter(\.pinnedOffline).map(\.id))
             return try await database.transaction { store in try result.compactMap { try store.asset(id: $0.id) } }
@@ -2274,6 +2281,9 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
                 }
             }
             return changed
+        }
+        if patches.contains(where: { !$0.addTags.isEmpty || !$0.removeTags.isEmpty || $0.acceptSuggestedTags }) {
+            cachedClosedSetFunnel = nil
         }
         let pinnedIDs = result.filter(\.pinnedOffline).map(\.id)
         if patches.contains(where: { $0.pinnedOffline == true }), !pinnedIDs.isEmpty {
@@ -2827,12 +2837,69 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
     }
 
     public func suggestFolders(for assetIDs: [UUID]) async throws -> [UUID: FolderSuggestion] {
+        guard !assetIDs.isEmpty else { return [:] }
         let tsConfig = await typeSafeConfig()
-        if tsConfig.enabled, tsConfig.enableInboxSmartTriage, intelligence.storedTypeSafeAPIKey() != nil {
+        if tsConfig.enabled, tsConfig.enableInboxSmartTriage,
+           let apiKey = intelligence.storedTypeSafeAPIKey(), !apiKey.isEmpty {
+            let folders = try await database.fetchFolders()
+            guard !folders.isEmpty else { return [:] }
+            let allOptions = try await buildFolderOptions(folders: folders)
+            let folderByID = Dictionary(uniqueKeysWithValues: folders.map { ($0.id, $0) })
+
+            var workItems: [(asset: AssetRecord, jpeg: Data?, options: [FolderOptionInput])] = []
+            var seen = Set<UUID>()
+            for id in assetIDs where seen.insert(id).inserted {
+                guard let asset = try await database.asset(id: id), !asset.isTrashed else { continue }
+                let eligible = allOptions.filter { $0.id != asset.folderID }
+                guard !eligible.isEmpty else { continue }
+                let jpeg = try? await loadVisualGroundingPayload(for: id, targetLongSide: 448).data
+                workItems.append((asset, jpeg, eligible))
+            }
+            guard !workItems.isEmpty else { return [:] }
+
+            let grounding = intelligence.grounding
             var out: [UUID: FolderSuggestion] = [:]
-            for id in assetIDs {
-                if let suggestion = try await suggestFolder(for: id) {
-                    out[id] = suggestion
+            let workerCount = min(4, workItems.count)
+            var nextIdx = 0
+
+            await withTaskGroup(of: (UUID, FolderSuggestion?).self) { group in
+                func enqueue(_ item: (asset: AssetRecord, jpeg: Data?, options: [FolderOptionInput])) {
+                    group.addTask {
+                        guard !Task.isCancelled else { return (item.asset.id, nil) }
+                        guard let res = try? await grounding.classifyIntoFolders(
+                            assetTitle: item.asset.title,
+                            assetTags: item.asset.tags + item.asset.suggestedTags,
+                            assetNotes: [item.asset.notes, item.asset.aiDescription ?? ""].joined(separator: " "),
+                            imageData: item.jpeg,
+                            imageFormat: "jpg",
+                            folders: item.options,
+                            config: tsConfig,
+                            apiKey: apiKey
+                        ) else {
+                            return (item.asset.id, nil)
+                        }
+                        if let folderID = res.folderID, let matched = folderByID[folderID] {
+                            return (item.asset.id, FolderSuggestion(
+                                folderID: matched.id,
+                                folderName: matched.name,
+                                confidence: res.confidence,
+                                reason: res.reason
+                            ))
+                        }
+                        return (item.asset.id, nil)
+                    }
+                }
+
+                for _ in 0..<workerCount {
+                    enqueue(workItems[nextIdx])
+                    nextIdx += 1
+                }
+                for await (id, suggestion) in group {
+                    if let suggestion { out[id] = suggestion }
+                    if nextIdx < workItems.count, !Task.isCancelled {
+                        enqueue(workItems[nextIdx])
+                        nextIdx += 1
+                    }
                 }
             }
             return out
@@ -3118,37 +3185,251 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         ImageMetadataExtractor.extract(from: url)
     }
 
+    private func resolveClosedSetFunnel() async -> ClosedSetTagFunnel? {
+        let now = ContinuousClock.now
+        if let cached = cachedClosedSetFunnel, cached.builtAt.duration(to: now) < .seconds(45) {
+            return cached.funnel.eligibleTagCount >= 2 ? cached.funnel : nil
+        }
+        let activeAssets = (try? await database.fetchAssets(matching: FilterCriteria(includeTrashed: false))) ?? []
+        let folders = (try? await database.fetchFolders()) ?? []
+        let featurePrints = (try? await database.featurePrints()) ?? [:]
+        let taxonomy = await ExternalAgentStateStore.loadTaxonomy(from: database)
+        let funnel = await Self.buildClosedSetFunnelOffActor(
+            activeAssets: activeAssets,
+            folders: folders,
+            featurePrints: featurePrints,
+            taxonomy: taxonomy
+        )
+        cachedClosedSetFunnel = (funnel, ContinuousClock.now)
+        return funnel.eligibleTagCount >= 2 ? funnel : nil
+    }
+
+    @concurrent
+    private static func buildClosedSetFunnelOffActor(
+        activeAssets: [AssetRecord],
+        folders: [FolderRecord],
+        featurePrints: [UUID: Data],
+        taxonomy: LibraryTaxonomyPolicy
+    ) async -> ClosedSetTagFunnel {
+        ClosedSetTagFunnel(
+            activeAssets: activeAssets,
+            folders: folders,
+            featurePrints: featurePrints,
+            taxonomy: taxonomy
+        )
+    }
+
+    @concurrent
+    private static func selectClosedSetCandidatesOffActor(
+        funnel: ClosedSetTagFunnel,
+        asset: AssetRecord,
+        maxCandidates: Int
+    ) async -> [ClosedSetTagOption] {
+        funnel.selectCandidates(for: asset, maxCandidates: maxCandidates)
+    }
+
     public func enrichAssetsWithCloudAI(ids: [UUID]) async throws -> [AssetRecord] {
         let config = await aiConfig()
-        guard let provider = try intelligence.provider(for: config) else { return [] }
+        let tsConfig = await typeSafeConfig()
+        let tsKey = intelligence.storedTypeSafeAPIKey()
+        let canUseJevClosedSet = tsConfig.enabled && tsConfig.enableClosedSetTagging && !(tsKey?.isEmpty ?? true)
+
+        let provider: (any CloudAIProvider)?
+        if config.provider != .disabled {
+            do {
+                provider = try intelligence.provider(for: config)
+            } catch {
+                if !canUseJevClosedSet { throw error }
+                provider = nil
+            }
+        } else {
+            provider = nil
+        }
+
+        guard provider != nil || canUseJevClosedSet else { return [] }
+
         let sync = await syncConfig()
-        let existingLibraryTags = ((try? await database.fetchTagCounts()) ?? []).map(\.name)
+        let closedSetFunnel: ClosedSetTagFunnel? = canUseJevClosedSet ? await resolveClosedSetFunnel() : nil
+        // Lazily load existingLibraryTags only if a generative VLM call is actually needed.
+        var cachedLibraryTagNames: [String]? = nil
+
+        let grounding = intelligence.grounding
         var visited = Set<UUID>()
         var result: [AssetRecord] = []
+
         for id in ids where visited.insert(id).inserted {
+            try Task.checkCancellation()
             guard let before = try await database.asset(id: id) else { continue }
-            let thumbnail = config.sendThumbnailsToCloud ? media.thumbnailURL(for: id, tier: .grid520) : nil
-            let enrichment = try await intelligence.enrich(
-                before,
-                thumbnailURL: thumbnail,
-                provider: provider,
-                existingLibraryTags: existingLibraryTags
-            )
+
+            let candidateTags: [ClosedSetTagOption]
+            if let closedSetFunnel {
+                candidateTags = await Self.selectClosedSetCandidatesOffActor(
+                    funnel: closedSetFunnel,
+                    asset: before,
+                    maxCandidates: 20
+                )
+            } else {
+                candidateTags = []
+            }
+            let shouldRunJev = canUseJevClosedSet && !candidateTags.isEmpty
+            let hasExistingDescription = !(before.aiDescription?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+            // When Jev closed-set tagging is active and the asset already has an AI description,
+            // skip calling the slow generative VLM completely (zero redundant LLM cost & much higher throughput).
+            let shouldRunVLM = provider != nil && (!shouldRunJev || !hasExistingDescription)
+
+            let jevPayload: Data? = shouldRunJev
+                ? (try? await loadVisualGroundingPayload(for: id, targetLongSide: 320).data)
+                : nil
+            let thumbnailURL = (shouldRunVLM && config.sendThumbnailsToCloud)
+                ? media.thumbnailURL(for: id, tier: .grid520)
+                : nil
+            let vlmExistingTags: [String]
+            if shouldRunVLM {
+                if let existing = cachedLibraryTagNames {
+                    vlmExistingTags = existing
+                } else {
+                    let fetched = ((try? await database.fetchTagCounts()) ?? []).map(\.name)
+                    cachedLibraryTagNames = fetched
+                    vlmExistingTags = fetched
+                }
+            } else {
+                vlmExistingTags = []
+            }
+
+            var enrichment: CloudEnrichmentResult? = nil
+            var jevResult: ClosedSetTaggingResult? = nil
+
+            if shouldRunVLM, let provider, shouldRunJev, let tsKey {
+                // Brand-new asset missing description: run generative VLM (description + embedding) and Jev closed-set tagging in parallel.
+                async let vlmTask: Result<CloudEnrichmentResult, Error> = {
+                    do {
+                        return .success(try await self.intelligence.enrich(
+                            before,
+                            thumbnailURL: thumbnailURL,
+                            provider: provider,
+                            existingLibraryTags: vlmExistingTags
+                        ))
+                    } catch {
+                        return .failure(error)
+                    }
+                }()
+                async let jevTask: Result<ClosedSetTaggingResult, Error> = {
+                    do {
+                        return .success(try await grounding.classifyClosedSetTags(
+                            assetTitle: before.title,
+                            existingTags: before.tags,
+                            assetNotes: [before.notes, before.aiDescription ?? ""].joined(separator: " "),
+                            imageData: jevPayload,
+                            imageFormat: "jpg",
+                            candidateTags: candidateTags,
+                            config: tsConfig,
+                            apiKey: tsKey,
+                            maxCandidateTags: 20
+                        ))
+                    } catch {
+                        return .failure(error)
+                    }
+                }()
+
+                let (vlmOutcome, jevOutcome) = await (vlmTask, jevTask)
+                switch vlmOutcome {
+                case .success(let val): enrichment = val
+                case .failure(let err):
+                    if case .failure = jevOutcome { throw err }
+                }
+                if case .success(let val) = jevOutcome {
+                    jevResult = val
+                }
+            } else if shouldRunJev, let tsKey {
+                jevResult = try await grounding.classifyClosedSetTags(
+                    assetTitle: before.title,
+                    existingTags: before.tags,
+                    assetNotes: [before.notes, before.aiDescription ?? ""].joined(separator: " "),
+                    imageData: jevPayload,
+                    imageFormat: "jpg",
+                    candidateTags: candidateTags,
+                    config: tsConfig,
+                    apiKey: tsKey,
+                    maxCandidateTags: 20
+                )
+            } else if shouldRunVLM, let provider {
+                enrichment = try await intelligence.enrich(
+                    before,
+                    thumbnailURL: thumbnailURL,
+                    provider: provider,
+                    existingLibraryTags: vlmExistingTags
+                )
+            } else {
+                continue
+            }
+
+            let finalEnrichment = enrichment
+            let finalJevResult = jevResult
+            guard finalEnrichment != nil || finalJevResult != nil else { continue }
+
             let persisted = try await database.transaction { store -> AssetRecord? in
                 guard var asset = try store.asset(id: id), asset.contentHash == before.contentHash else { return nil }
-                asset.aiDescription = enrichment.description
-                let latestLibraryTags = ((try? store.fetchTagCounts()) ?? []).map(\.name)
-                asset.suggestedTags = CloudTagNormalizer.canonicalizeSuggestedTags(
-                    enrichment.suggestedTags,
-                    existingLibraryTags: latestLibraryTags.isEmpty ? existingLibraryTags : latestLibraryTags,
-                    existingAssetTags: asset.tags,
-                    maxCount: 6
-                )
-                if let embedding = enrichment.embedding {
-                    let vector = AssetVector(embedding: embedding, embeddingModel: provider.embeddingIdentity)
-                    if sync.syncEmbeddings { try store.record(.vector(id, vector)) }
-                    else { try store.saveVector(vector, for: id) }
+
+                if let finalEnrichment {
+                    asset.aiDescription = finalEnrichment.description
+                    if let embedding = finalEnrichment.embedding {
+                        let vector = AssetVector(embedding: embedding, embeddingModel: provider?.embeddingIdentity ?? config.embeddingModel)
+                        if sync.syncEmbeddings { try store.record(.vector(id, vector)) }
+                        else { try store.saveVector(vector, for: id) }
+                    }
                 }
+
+                if let finalJevResult, finalJevResult.evaluatedTagCount > 0 {
+                    // Strict Zero-Hallucination Closed-Set Tagging: every tag is guaranteed canonical.
+                    var existingNorm = Set(asset.tags.map(SearchText.normalize))
+                    let confirmedNames = finalJevResult.confirmedTags.map(\.tag)
+                    let borderlineNames = finalJevResult.suggestedTags.map(\.tag)
+
+                    if tsConfig.autoApplyHighConfidenceTags && !confirmedNames.isEmpty {
+                        var mergedTags = asset.tags
+                        for tag in confirmedNames {
+                            let norm = SearchText.normalize(tag)
+                            if existingNorm.insert(norm).inserted {
+                                mergedTags.append(tag)
+                            }
+                        }
+                        asset.tags = mergedTags.sorted()
+                        var seenSug = Set<String>()
+                        asset.suggestedTags = borderlineNames.filter {
+                            let norm = SearchText.normalize($0)
+                            return !existingNorm.contains(norm) && seenSug.insert(norm).inserted
+                        }
+                    } else {
+                        var seenSug = Set<String>()
+                        asset.suggestedTags = Array((confirmedNames + borderlineNames).filter {
+                            let norm = SearchText.normalize($0)
+                            return !existingNorm.contains(norm) && seenSug.insert(norm).inserted
+                        }.prefix(6))
+                    }
+
+                    // Cold-start safety: only fall back to VLM open-set tags if vocabulary had < 3 candidates AND Jev matched nothing.
+                    if finalJevResult.evaluatedTagCount < 3,
+                       finalJevResult.allMatchedTagNames.isEmpty,
+                       let finalEnrichment,
+                       !finalEnrichment.suggestedTags.isEmpty {
+                        let latestLibraryTags = ((try? store.fetchTagCounts()) ?? []).map(\.name)
+                        asset.suggestedTags = CloudTagNormalizer.canonicalizeSuggestedTags(
+                            finalEnrichment.suggestedTags,
+                            existingLibraryTags: latestLibraryTags.isEmpty ? vlmExistingTags : latestLibraryTags,
+                            existingAssetTags: asset.tags,
+                            maxCount: 6
+                        )
+                    }
+                } else if let finalEnrichment {
+                    let latestLibraryTags = ((try? store.fetchTagCounts()) ?? []).map(\.name)
+                    asset.suggestedTags = CloudTagNormalizer.canonicalizeSuggestedTags(
+                        finalEnrichment.suggestedTags,
+                        existingLibraryTags: latestLibraryTags.isEmpty ? vlmExistingTags : latestLibraryTags,
+                        existingAssetTags: asset.tags,
+                        maxCount: 6
+                    )
+                }
+
                 return try store.saveAssetLocally(asset)
             }
             if let persisted { result.append(persisted) }
@@ -3362,9 +3643,13 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         if sanitized.baseURL.isEmpty { sanitized.baseURL = "https://api.typesafe.ai" }
         sanitized.model = config.model.trimmingCharacters(in: .whitespacesAndNewlines)
         if sanitized.model.isEmpty { sanitized.model = "jev-latest" }
-        sanitized.minConfidence = max(0.05, min(0.95, config.minConfidence))
-        sanitized.lowConfidencePadding = max(0.0, min(0.25, config.lowConfidencePadding))
-        sanitized.minPresenceProbability = max(0.05, min(0.95, config.minPresenceProbability))
+        sanitized.minConfidence = max(0.05, min(0.95, config.minConfidence.isFinite ? config.minConfidence : 0.60))
+        sanitized.lowConfidencePadding = max(0.0, min(0.25, config.lowConfidencePadding.isFinite ? config.lowConfidencePadding : 0.05))
+        sanitized.minPresenceProbability = max(0.05, min(0.95, config.minPresenceProbability.isFinite ? config.minPresenceProbability : 0.45))
+        let safeHighTag = config.highConfidenceTagThreshold.isFinite ? config.highConfidenceTagThreshold : 0.82
+        sanitized.highConfidenceTagThreshold = max(0.60, min(0.98, safeHighTag))
+        let safeSugTag = config.suggestedTagThreshold.isFinite ? config.suggestedTagThreshold : 0.52
+        sanitized.suggestedTagThreshold = max(0.30, min(sanitized.highConfidenceTagThreshold, safeSugTag))
 
         if let apiKey {
             let trimmed = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -3400,7 +3685,8 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
 
     public func locateVisualRegion(assetID: UUID, query: String?) async throws -> VisualRegionResult {
         let payload = try await loadVisualGroundingPayload(for: assetID, targetLongSide: 768)
-        let config = await typeSafeConfig()
+        var config = await typeSafeConfig()
+        config.enabled = config.enabled && (config.enableMoodboardFocusCrop || config.enablePinpointAnnotations)
         let apiKey = intelligence.storedTypeSafeAPIKey()
         return try await intelligence.grounding.locateRegion(
             query: query,
@@ -3415,7 +3701,8 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
     public func locateVisualMatch(referenceAssetID: UUID, in targetAssetID: UUID) async throws -> VisualRegionResult {
         let refPayload = try await loadVisualGroundingPayload(for: referenceAssetID, targetLongSide: 512)
         let targetPayload = try await loadVisualGroundingPayload(for: targetAssetID, targetLongSide: 768)
-        let config = await typeSafeConfig()
+        var config = await typeSafeConfig()
+        config.enabled = config.enabled && config.enableMoodboardFocusCrop
         let apiKey = intelligence.storedTypeSafeAPIKey()
         return try await intelligence.grounding.locateVisualMatch(
             referenceImageData: refPayload.data,
@@ -3429,7 +3716,8 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
 
     public func detectCleanContentBounds(assetID: UUID) async throws -> CleanBoundsResult {
         let payload = try await loadVisualGroundingPayload(for: assetID, targetLongSide: 768)
-        let config = await typeSafeConfig()
+        var config = await typeSafeConfig()
+        config.enabled = config.enabled && config.enableAutoCleanCrop
         let apiKey = intelligence.storedTypeSafeAPIKey()
         return try await intelligence.grounding.detectCleanContentBounds(
             imageData: payload.data,
@@ -3448,7 +3736,8 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         guard let cgImage = payload.cgImage else {
             throw LibraryDatabaseError("该素材暂无可供提色的像素图像。")
         }
-        let config = await typeSafeConfig()
+        var config = await typeSafeConfig()
+        config.enabled = config.enabled && config.enableSubjectPalette
         let apiKey = intelligence.storedTypeSafeAPIKey()
         let (colors, region) = try await intelligence.grounding.extractSubjectPalette(
             query: query,
@@ -4773,7 +5062,10 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
 
             if !aggregated.discoveredAssetIDs.isEmpty {
                 let ai = await self.aiConfig()
-                if ai.autoAnalyzeOnImport, ai.provider != .disabled {
+                let ts = await self.typeSafeConfig()
+                let canAutoEnrich = ai.provider != .disabled
+                    || (ts.enabled && ts.enableClosedSetTagging && self.intelligence.storedTypeSafeAPIKey() != nil)
+                if ai.autoAnalyzeOnImport, canAutoEnrich {
                     let discoveredIDs = aggregated.discoveredAssetIDs
                     let bgTaskID = UUID()
                     let bgTask = Task { [weak engine = self] in

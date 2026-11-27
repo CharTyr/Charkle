@@ -391,7 +391,7 @@ public nonisolated struct MoodboardAgentHarness: Sendable {
         let query = request.prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard request.autoFocusDetailCrop,
               !query.isEmpty,
-              let tsCfg = typeSafeConfig, tsCfg.enabled,
+              let tsCfg = typeSafeConfig, tsCfg.enabled, tsCfg.enableMoodboardFocusCrop,
               let tsKey = typeSafeAPIKey, !tsKey.isEmpty,
               let grounding else {
             return document

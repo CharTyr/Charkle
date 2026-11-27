@@ -851,6 +851,144 @@ public nonisolated struct VisualGroundingEngine: Sendable {
         )
     }
 
+    // MARK: - Phase 3: Zero-Hallucination Closed-Set Auto-Tagging (Single-Image Multi-Noul Fan-Out)
+
+    /// Evaluates an asset against a bounded closed set of canonical library tags in a **single**
+    /// TypeSafe System One request (1 image upload + up to `maxCandidateTags` parallel `Noul` questions).
+    ///
+    /// Physically incapable of hallucinating tags outside `candidateTags`: every returned tag is an
+    /// exact member of the caller's canonical vocabulary, split cleanly into high-confidence
+    /// `confirmedTags` (`>= highConfidenceTagThreshold`) and borderline `suggestedTags` (`>= suggestedTagThreshold`).
+    public func classifyClosedSetTags(
+        assetTitle: String,
+        existingTags: [String],
+        assetNotes: String,
+        imageData: Data?,
+        imageFormat: String = "jpg",
+        candidateTags: [ClosedSetTagOption],
+        config: TypeSafeExperimentalConfig,
+        apiKey: String?,
+        maxCandidateTags: Int = 20,
+        maxConfirmedTags: Int = 5,
+        maxSuggestedTags: Int = 6
+    ) async throws -> ClosedSetTaggingResult {
+        guard config.enabled,
+              config.enableClosedSetTagging,
+              let key = apiKey?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !key.isEmpty else {
+            return ClosedSetTaggingResult(confirmedTags: [], suggestedTags: [], evaluatedTagCount: 0, model: nil)
+        }
+
+        let existingNorm = Set(existingTags.map(SearchText.normalize))
+        var dedupedNorm = Set<String>()
+        var cappedCandidates: [ClosedSetTagOption] = []
+        cappedCandidates.reserveCapacity(min(candidateTags.count, max(1, maxCandidateTags)))
+        for option in candidateTags {
+            let trimmed = option.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            let norm = SearchText.normalize(trimmed)
+            guard !norm.isEmpty, !existingNorm.contains(norm), dedupedNorm.insert(norm).inserted else { continue }
+            cappedCandidates.append(ClosedSetTagOption(
+                name: trimmed,
+                aliases: option.aliases,
+                contextHints: option.contextHints
+            ))
+            if cappedCandidates.count >= max(1, min(32, maxCandidateTags)) {
+                break
+            }
+        }
+        guard !cappedCandidates.isEmpty else {
+            return ClosedSetTaggingResult(confirmedTags: [], suggestedTags: [], evaluatedTagCount: 0, model: nil)
+        }
+
+        let client = try TypeSafeSystemOneClient(baseURL: config.baseURL, apiKey: key, session: session)
+
+        var state: [String: Any] = [
+            "title": String(assetTitle.prefix(80))
+        ]
+        if !existingTags.isEmpty {
+            state["tags"] = Array(existingTags.prefix(8))
+        }
+        let trimmedNotes = assetNotes.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedNotes.isEmpty {
+            state["notes"] = String(trimmedNotes.prefix(140))
+        }
+
+        var attachments: [TypeSafeImageAttachment] = []
+        let hasImage = !(imageData?.isEmpty ?? true)
+        if let imageData, !imageData.isEmpty {
+            let photoRef = "tagimg-\(UUID().uuidString.lowercased())"
+            state["photo"] = photoRef
+            attachments.append(TypeSafeImageAttachment(
+                referenceKey: photoRef,
+                partName: "photo",
+                format: imageFormat,
+                data: imageData
+            ))
+        }
+
+        let subject = hasImage ? "`photo`" : "this asset"
+        var questions: [String: TypeSafeQuestion] = [:]
+        var keyToTagName: [String: String] = [:]
+        for (idx, option) in cappedCandidates.enumerated() {
+            let keyName = "t_\(idx)"
+            keyToTagName[keyName] = option.name
+
+            var hintParts: [String] = []
+            if !option.aliases.isEmpty {
+                hintParts.append(contentsOf: option.aliases.prefix(2))
+            }
+            if !option.contextHints.isEmpty {
+                hintParts.append(contentsOf: option.contextHints.prefix(2))
+            }
+            let contextClause = hintParts.isEmpty ? "" : " (\(hintParts.joined(separator: "/")))"
+
+            questions[keyName] = .noul(
+                instructions: "Does \(subject) fit tag \"\(option.name)\"\(contextClause)?"
+            )
+        }
+
+        let response = try await client.systemOne(
+            model: config.model,
+            state: state,
+            questions: questions,
+            images: attachments
+        )
+
+        let rawHigh = config.highConfidenceTagThreshold.isFinite ? config.highConfidenceTagThreshold : 0.82
+        let highThreshold = max(0.60, min(0.98, rawHigh))
+        let rawSug = config.suggestedTagThreshold.isFinite ? config.suggestedTagThreshold : 0.52
+        let suggestedThreshold = max(0.30, min(highThreshold, rawSug))
+
+        var confirmed: [ClosedSetTagMatch] = []
+        var suggested: [ClosedSetTagMatch] = []
+        for (keyName, tagName) in keyToTagName {
+            guard let rawProb = response.answers[keyName]?.noulProbability, rawProb.isFinite else { continue }
+            let prob = max(0.0, min(1.0, rawProb))
+            if prob >= highThreshold {
+                confirmed.append(ClosedSetTagMatch(tag: tagName, probability: prob))
+            } else if prob >= suggestedThreshold {
+                suggested.append(ClosedSetTagMatch(tag: tagName, probability: prob))
+            }
+        }
+
+        func sortMatches(_ items: [ClosedSetTagMatch]) -> [ClosedSetTagMatch] {
+            items.sorted { lhs, rhs in
+                if abs(lhs.probability - rhs.probability) > 0.001 {
+                    return lhs.probability > rhs.probability
+                }
+                return lhs.tag.localizedStandardCompare(rhs.tag) == .orderedAscending
+            }
+        }
+
+        return ClosedSetTaggingResult(
+            confirmedTags: Array(sortMatches(confirmed).prefix(max(1, maxConfirmedTags))),
+            suggestedTags: Array(sortMatches(suggested).prefix(max(1, maxSuggestedTags))),
+            evaluatedTagCount: cappedCandidates.count,
+            model: response.model
+        )
+    }
+
     private static func safePercent(_ value: Double) -> Int {
         guard value.isFinite else { return 0 }
         return Int((max(0.0, min(1.0, value)) * 100.0).rounded())
