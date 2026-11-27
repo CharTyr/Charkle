@@ -307,7 +307,7 @@ public struct CharkleLiquidGlassModifier<S: InsettableShape>: ViewModifier {
                                 startPoint: .top,
                                 endPoint: .bottom
                             ),
-                            lineWidth: 0.75
+                            lineWidth: CharkleTheme.hairlineWidth
                         )
                     )
                     .shadow(color: Color.black.opacity(0.18), radius: 6, y: 2)
@@ -323,7 +323,7 @@ public struct CharkleLiquidGlassModifier<S: InsettableShape>: ViewModifier {
                                 startPoint: .top,
                                 endPoint: .bottom
                             ),
-                            lineWidth: 0.75
+                            lineWidth: CharkleTheme.hairlineWidth
                         )
                     )
                     .shadow(color: Color.black.opacity(0.22), radius: 6, y: 2)
@@ -354,7 +354,7 @@ public struct CharkleLiquidGlassModifier<S: InsettableShape>: ViewModifier {
                             startPoint: .topLeading,
                             endPoint: .bottomTrailing
                         ),
-                        lineWidth: 0.75
+                        lineWidth: CharkleTheme.hairlineWidth
                     )
                 }
                 .shadow(color: Color.black.opacity(colorScheme == .dark ? 0.36 : 0.10), radius: 16, y: 6)

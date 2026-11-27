@@ -96,13 +96,13 @@ public struct CharkleEmptyStateVignette: View {
                             path.addLine(to: CGPoint(x: x + size.height, y: 0))
                             x += step
                         }
-                        ctx.stroke(path, with: .color(hatchStroke), lineWidth: 1)
+                        ctx.stroke(path, with: .color(hatchStroke), lineWidth: CharkleTheme.hairlineWidth)
                     }
                     .clipShape(RoundedRectangle(cornerRadius: 18 * scale, style: .continuous))
                 }
                 .overlay(
                     RoundedRectangle(cornerRadius: 18 * scale, style: .continuous)
-                        .strokeBorder(baseBorder, lineWidth: 1)
+                        .strokeBorder(baseBorder, lineWidth: CharkleTheme.hairlineWidth)
                 )
 
             sceneContent
@@ -160,7 +160,7 @@ public struct CharkleEmptyStateVignette: View {
             // Folder back tab
             RoundedRectangle(cornerRadius: 6, style: .continuous)
                 .fill(cardBackFill)
-                .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).strokeBorder(cardBorder, lineWidth: 1))
+                .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).strokeBorder(cardBorder, lineWidth: CharkleTheme.hairlineWidth))
                 .frame(width: 42, height: 18)
                 .offset(x: 0, y: -6)
 
@@ -182,7 +182,7 @@ public struct CharkleEmptyStateVignette: View {
             }
             .padding(10)
             .background(cardFill, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous).strokeBorder(cardBorder, lineWidth: 1))
+            .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous).strokeBorder(cardBorder, lineWidth: CharkleTheme.hairlineWidth))
             .shadow(color: cardShadow, radius: 5, y: 4)
         }
         .offset(y: 4)
@@ -202,13 +202,13 @@ public struct CharkleEmptyStateVignette: View {
             .padding(.horizontal, 9)
             .frame(width: 114, height: 24)
             .background(cardFill, in: Capsule(style: .continuous))
-            .overlay(Capsule(style: .continuous).strokeBorder(cardBorder, lineWidth: 1))
+            .overlay(Capsule(style: .continuous).strokeBorder(cardBorder, lineWidth: CharkleTheme.hairlineWidth))
             .shadow(color: cardShadow, radius: 4, y: 3)
 
             HStack(spacing: 7) {
                 ForEach(0..<3, id: \.self) { _ in
                     RoundedRectangle(cornerRadius: 7, style: .continuous)
-                        .strokeBorder(style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
+                        .strokeBorder(style: StrokeStyle(lineWidth: CharkleTheme.hairlineWidth, dash: [3, 3]))
                         .foregroundStyle(barStrong.opacity(0.65))
                         .frame(width: 33, height: 36)
                 }
@@ -221,7 +221,7 @@ public struct CharkleEmptyStateVignette: View {
         ZStack {
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .fill(cardBackFill)
-                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(cardBorder, lineWidth: 1))
+                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(cardBorder, lineWidth: CharkleTheme.hairlineWidth))
                 .frame(width: 96, height: 58)
                 .offset(y: -5)
 
@@ -233,7 +233,7 @@ public struct CharkleEmptyStateVignette: View {
             }
             .frame(width: 104, height: 60)
             .background(cardFill, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous).strokeBorder(cardBorder, lineWidth: 1))
+            .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous).strokeBorder(cardBorder, lineWidth: CharkleTheme.hairlineWidth))
             .shadow(color: cardShadow, radius: 5, y: 4)
             .offset(y: 4)
         }
@@ -244,7 +244,7 @@ public struct CharkleEmptyStateVignette: View {
         ZStack {
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .fill(cardBackFill)
-                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(cardBorder, lineWidth: 1))
+                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(cardBorder, lineWidth: CharkleTheme.hairlineWidth))
                 .frame(width: 92, height: 52)
                 .offset(y: -10)
 
@@ -268,7 +268,7 @@ public struct CharkleEmptyStateVignette: View {
             .padding(.horizontal, 12)
             .frame(width: 114, height: 56)
             .background(cardFill, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(cardBorder, lineWidth: 1))
+            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(cardBorder, lineWidth: CharkleTheme.hairlineWidth))
             .shadow(color: cardShadow, radius: 5, y: 4)
             .offset(y: 4)
         }
@@ -279,7 +279,7 @@ public struct CharkleEmptyStateVignette: View {
         ZStack {
             RoundedRectangle(cornerRadius: 9, style: .continuous)
                 .fill(cardFill)
-                .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).strokeBorder(cardBorder, lineWidth: 1))
+                .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).strokeBorder(cardBorder, lineWidth: CharkleTheme.hairlineWidth))
                 .frame(width: 54, height: 64)
                 .overlay(
                     RoundedRectangle(cornerRadius: 5, style: .continuous)
@@ -291,7 +291,7 @@ public struct CharkleEmptyStateVignette: View {
 
             RoundedRectangle(cornerRadius: 9, style: .continuous)
                 .fill(cardFill)
-                .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).strokeBorder(cardBorder, lineWidth: 1))
+                .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).strokeBorder(cardBorder, lineWidth: CharkleTheme.hairlineWidth))
                 .frame(width: 50, height: 34)
                 .overlay(
                     VStack(alignment: .leading, spacing: 4) {
@@ -314,7 +314,7 @@ public struct CharkleEmptyStateVignette: View {
         HStack(spacing: 8) {
             RoundedRectangle(cornerRadius: 9, style: .continuous)
                 .fill(cardBackFill)
-                .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).strokeBorder(cardBorder, lineWidth: 1))
+                .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).strokeBorder(cardBorder, lineWidth: CharkleTheme.hairlineWidth))
                 .frame(width: 44, height: 62)
                 .overlay(
                     RoundedRectangle(cornerRadius: 5, style: .continuous)
@@ -335,7 +335,7 @@ public struct CharkleEmptyStateVignette: View {
             .padding(9)
             .frame(width: 68, height: 62, alignment: .leading)
             .background(cardFill, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(cardBorder, lineWidth: 1))
+            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(cardBorder, lineWidth: CharkleTheme.hairlineWidth))
             .shadow(color: cardShadow, radius: 4, y: 3)
         }
     }
@@ -345,7 +345,7 @@ public struct CharkleEmptyStateVignette: View {
             .fill(isBack ? cardBackFill : cardFill)
             .overlay(
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .strokeBorder(cardBorder, lineWidth: 1)
+                    .strokeBorder(cardBorder, lineWidth: CharkleTheme.hairlineWidth)
             )
             .shadow(color: isBack ? .clear : cardShadow, radius: 4, y: 3)
             .frame(width: width, height: height)
@@ -362,7 +362,7 @@ public struct CharkleEmptyStateVignette: View {
             RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                 .fill(accentColor.opacity(colorScheme == .dark ? 0.22 : 0.12))
             RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                .strokeBorder(accentColor.opacity(colorScheme == .dark ? 0.45 : 0.30), lineWidth: 1)
+                .strokeBorder(accentColor.opacity(colorScheme == .dark ? 0.45 : 0.30), lineWidth: CharkleTheme.hairlineWidth)
             Image(systemName: systemImage)
                 .font(.system(size: iconSize, weight: .semibold))
                 .foregroundStyle(accentColor)

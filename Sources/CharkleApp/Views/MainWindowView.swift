@@ -1245,7 +1245,8 @@ public struct MainWindowView: View {
                 )
                 .contentShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
         }
-        .menuStyle(.borderlessButton)
+        .menuStyle(.button)
+        .buttonStyle(CharkleMenuTriggerButtonStyle())
         .menuIndicator(.hidden)
         .fixedSize()
         .help("上级路径：\(fullAncestorPath)")
@@ -1473,7 +1474,8 @@ public struct MainWindowView: View {
                         .frame(width: 26, height: 24)
                         .contentShape(Rectangle())
                 }
-                .menuStyle(.borderlessButton)
+                .menuStyle(.button)
+                .buttonStyle(CharkleMenuTriggerButtonStyle())
                 .menuIndicator(.hidden)
                 .fixedSize()
                 .help("切换视图与缩放密度（也支持双指捏合或 ⌘+滚轮）")
@@ -1520,6 +1522,7 @@ public struct MainWindowView: View {
                             .font(.system(size: 11.5, weight: .medium))
                             .foregroundStyle(.primary.opacity(0.88))
                             .lineLimit(1)
+                        CharkleDropdownChevron(size: 8)
                     }
                     .padding(.horizontal, 4)
                     .frame(height: 24)
@@ -1532,8 +1535,9 @@ public struct MainWindowView: View {
                         .contentShape(Rectangle())
                 }
             }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(showSortLabel ? .automatic : .hidden)
+            .menuStyle(.button)
+            .buttonStyle(CharkleMenuTriggerButtonStyle())
+            .menuIndicator(.hidden)
             .fixedSize()
             .help("排序方式：\(library.filter.sortBy.localizedLabel)")
 
@@ -1599,7 +1603,8 @@ public struct MainWindowView: View {
                             .frame(width: 24, height: 24)
                             .contentShape(Rectangle())
                     }
-                    .menuStyle(.borderlessButton)
+                    .menuStyle(.button)
+                    .buttonStyle(CharkleMenuTriggerButtonStyle())
                     .menuIndicator(.hidden)
                     .fixedSize()
                     .help("调整卡片密度（也支持双指捏合或 ⌘+滚轮）")
@@ -2191,19 +2196,21 @@ public struct MainWindowView: View {
                                 }
                             }
                         } label: {
-                            HStack(spacing: 3) {
+                            HStack(spacing: 4) {
                                 Image(systemName: "folder")
                                     .font(.system(size: 10, weight: .medium))
                                 Text("全部目录")
                                     .font(.system(size: 11, weight: .medium))
                                     .lineLimit(1)
+                                CharkleDropdownChevron(size: 8)
                             }
                             .foregroundStyle(.secondary)
                             .padding(.horizontal, 8)
                             .padding(.vertical, 4)
                             .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
                         }
-                        .menuStyle(.borderlessButton)
+                        .menuStyle(.button)
+                        .buttonStyle(CharkleMenuTriggerButtonStyle())
                         .menuIndicator(.hidden)
                         .fixedSize()
                     }
@@ -2229,20 +2236,23 @@ public struct MainWindowView: View {
                     coordinator.presentMoodboardGenerator(entry: .selection)
                 }
             } label: {
-                HStack(spacing: 4) {
+                HStack(spacing: 5) {
                     Image(systemName: "sparkles.rectangle.stack")
                         .font(.system(size: 12, weight: .medium))
                         .symbolVariant(.fill)
                         .foregroundStyle(activeAccent)
                     Text(isNarrowBar ? "收入板" : "一键收入情绪板")
                         .font(.system(size: 11.5, weight: .semibold))
+                        .foregroundStyle(.primary.opacity(0.90))
                         .lineLimit(1)
+                    CharkleDropdownChevron(size: 8)
                 }
                 .padding(.horizontal, 10)
                 .padding(.vertical, 5)
                 .background(Color.primary.opacity(0.07), in: Capsule(style: .continuous))
             }
-            .menuStyle(.borderlessButton)
+            .menuStyle(.button)
+            .buttonStyle(CharkleMenuTriggerButtonStyle())
             .menuIndicator(.hidden)
             .fixedSize()
         }
@@ -2599,7 +2609,8 @@ public struct MainWindowView: View {
                                 .padding(.vertical, 5)
                         }
                     }
-                    .menuStyle(.borderlessButton)
+                    .menuStyle(.button)
+                    .buttonStyle(CharkleMenuTriggerButtonStyle())
                     .menuIndicator(.hidden)
                     .fixedSize()
                     .help("移动到文件夹")
@@ -2730,7 +2741,8 @@ public struct MainWindowView: View {
                                 .padding(.vertical, 5)
                         }
                     }
-                    .menuStyle(.borderlessButton)
+                    .menuStyle(.button)
+                    .buttonStyle(CharkleMenuTriggerButtonStyle())
                     .menuIndicator(.hidden)
                     .fixedSize()
                     .help("将所选素材自动排板并在 PureRef 中打开或导出为 .pur 文件")
@@ -2754,7 +2766,8 @@ public struct MainWindowView: View {
                                 .padding(.vertical, 5)
                         }
                     }
-                    .menuStyle(.borderlessButton)
+                    .menuStyle(.button)
+                    .buttonStyle(CharkleMenuTriggerButtonStyle())
                     .menuIndicator(.hidden)
                     .fixedSize()
                     .help("批量评分")
@@ -3038,7 +3051,7 @@ public struct MainWindowView: View {
             }
             .padding(12)
             .background(CharkleTheme.surfaceElevated(for: colorScheme), in: cardShape)
-            .overlay(cardShape.strokeBorder(CharkleTheme.hairline(for: colorScheme), lineWidth: 0.75))
+            .overlay(cardShape.strokeBorder(CharkleTheme.hairline(for: colorScheme), lineWidth: CharkleTheme.hairlineWidth))
             .shadow(color: Color.black.opacity(colorScheme == .dark ? 0.24 : 0.05), radius: 8, y: 3)
         }
         .buttonStyle(CharkleTactileButtonStyle())

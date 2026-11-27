@@ -111,7 +111,10 @@ public struct BoardPaletteHeaderStrip: View {
                                 .frame(width: 14, height: 14)
                                 .overlay(
                                     RoundedRectangle(cornerRadius: 4, style: .continuous)
-                                        .strokeBorder(isLight ? Color.black.opacity(0.14) : Color.white.opacity(0.22), lineWidth: 0.75)
+                                        .strokeBorder(
+                                            isLight ? Color.black.opacity(0.14) : Color.white.opacity(0.22),
+                                            lineWidth: CanvasSurface.hairlineWidth
+                                        )
                                 )
                             Text(copiedHex == hex ? "已复制" : hex)
                                 .font(.system(size: 10.5, weight: .medium, design: .monospaced))
@@ -125,7 +128,7 @@ public struct BoardPaletteHeaderStrip: View {
                         )
                         .overlay(
                             RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .strokeBorder(CanvasSurface.hairline(for: colorScheme), lineWidth: 0.75)
+                                .strokeBorder(CanvasSurface.hairline(for: colorScheme), lineWidth: CanvasSurface.hairlineWidth)
                         )
                     }
                     .buttonStyle(.plain)
@@ -333,7 +336,7 @@ struct BoardAssetNodeView: View {
             } else if isSelected {
                 shape.strokeBorder(Color.accentColor, lineWidth: 2.5)
             } else {
-                shape.strokeBorder(CanvasSurface.hairline(for: colorScheme), lineWidth: 0.75)
+                shape.strokeBorder(CanvasSurface.hairline(for: colorScheme), lineWidth: CanvasSurface.hairlineWidth)
             }
         }
         .shadow(
@@ -539,7 +542,7 @@ struct BoardNoteNodeView: View {
                                         Circle()
                                             .strokeBorder(
                                                 candidate == style ? Color.accentColor : c.foreground.opacity(0.3),
-                                                lineWidth: candidate == style ? 1.5 : 0.75
+                                                lineWidth: candidate == style ? 1.5 : CanvasSurface.hairlineWidth
                                             )
                                     )
                             }
@@ -573,7 +576,10 @@ struct BoardNoteNodeView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(palette.background, in: shape)
         .overlay(
-            shape.strokeBorder(isSelected ? Color.accentColor : palette.border, lineWidth: isSelected ? 2 : 1)
+            shape.strokeBorder(
+                isSelected ? Color.accentColor : palette.border,
+                lineWidth: isSelected ? 2 : CanvasSurface.hairlineWidth
+            )
         )
         .shadow(color: Color.black.opacity(0.08), radius: 8, y: 3)
         .onAppear {
@@ -887,7 +893,7 @@ struct BoardPaletteStripNodeView: View {
         .overlay(
             shape.strokeBorder(
                 isSelected ? Color.accentColor : CanvasSurface.hairline(for: colorScheme),
-                lineWidth: isSelected ? 2.5 : 1
+                lineWidth: isSelected ? 2.5 : CanvasSurface.hairlineWidth
             )
         )
         .shadow(color: Color.black.opacity(0.08), radius: 8, y: 3)

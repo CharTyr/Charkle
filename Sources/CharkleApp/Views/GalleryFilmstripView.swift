@@ -638,7 +638,7 @@ public struct GalleryFilmstripView: View {
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .strokeBorder(CharkleTheme.hairline(for: colorScheme), lineWidth: 0.75)
+                .strokeBorder(CharkleTheme.hairline(for: colorScheme), lineWidth: CharkleTheme.hairlineWidth)
         )
         .shadow(color: .black.opacity(colorScheme == .dark ? 0.34 : 0.10), radius: 20, y: 8)
     }
@@ -1256,7 +1256,7 @@ private struct FilmstripScrubberBar<ContextMenuContent: View>: View {
             RoundedRectangle(cornerRadius: 7, style: .continuous)
                 .strokeBorder(
                     isFocused ? Color.accentColor : (isSelected ? Color.accentColor.opacity(0.65) : Color.primary.opacity(0.12)),
-                    lineWidth: isFocused ? 2.5 : (isSelected ? 1.5 : 0.75)
+                    lineWidth: isFocused ? 2.5 : (isSelected ? 1.5 : CharkleTheme.hairlineWidth)
                 )
         )
         .scaleEffect(isFocused && !reduceMotion ? 1.04 : 1.0)

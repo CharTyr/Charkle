@@ -236,7 +236,7 @@ public struct MoodboardGeneratorSheet: View {
                                     .background(CharkleTheme.surfaceElevated(for: colorScheme), in: Capsule(style: .continuous))
                                     .overlay(
                                         Capsule(style: .continuous)
-                                            .strokeBorder(CharkleTheme.hairline(for: colorScheme), lineWidth: 0.75)
+                                            .strokeBorder(CharkleTheme.hairline(for: colorScheme), lineWidth: CharkleTheme.hairlineWidth)
                                     )
                             }
                             .buttonStyle(CharkleTactileButtonStyle())
@@ -358,7 +358,10 @@ public struct MoodboardGeneratorSheet: View {
                                         .frame(width: 28, height: 28)
                                         .overlay(
                                             RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                                .strokeBorder(active ? Color.accentColor : Color.primary.opacity(0.14), lineWidth: active ? 2.2 : 0.75)
+                                                .strokeBorder(
+                                                    active ? Color.accentColor : Color.primary.opacity(0.14),
+                                                    lineWidth: active ? 2 : CharkleTheme.hairlineWidth
+                                                )
                                         )
                                 }
                                 .buttonStyle(CharkleTactileButtonStyle())
@@ -627,7 +630,7 @@ public struct MoodboardGeneratorSheet: View {
         .background(CharkleTheme.surfaceElevated(for: colorScheme), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 11, style: .continuous)
-                .strokeBorder(CharkleTheme.hairline(for: colorScheme), lineWidth: 0.75)
+                .strokeBorder(CharkleTheme.hairline(for: colorScheme), lineWidth: CharkleTheme.hairlineWidth)
         )
     }
 
@@ -665,7 +668,7 @@ public struct MoodboardGeneratorSheet: View {
                             .frame(height: 22)
                             .overlay(
                                 RoundedRectangle(cornerRadius: 5, style: .continuous)
-                                    .strokeBorder(Color.primary.opacity(0.10), lineWidth: 0.5)
+                                    .strokeBorder(Color.primary.opacity(0.10), lineWidth: CharkleTheme.hairlineWidth)
                             )
                             .help(swatch.hex)
                     }
@@ -688,7 +691,7 @@ public struct MoodboardGeneratorSheet: View {
         .background(CharkleTheme.surfaceElevated(for: colorScheme), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(CharkleTheme.hairline(for: colorScheme), lineWidth: 0.75)
+                .strokeBorder(CharkleTheme.hairline(for: colorScheme), lineWidth: CharkleTheme.hairlineWidth)
         )
 
         if prop.primaryMatches.isEmpty {
@@ -768,7 +771,7 @@ public struct MoodboardGeneratorSheet: View {
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
                     .strokeBorder(
                         isLocked ? Color.accentColor : CharkleTheme.hairline(for: colorScheme),
-                        lineWidth: isLocked ? 2 : 0.75
+                        lineWidth: isLocked ? 2 : CharkleTheme.hairlineWidth
                     )
             )
 

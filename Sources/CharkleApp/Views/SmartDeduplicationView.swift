@@ -308,18 +308,15 @@ public struct SmartDeduplicationView: View {
                     HStack(spacing: 5) {
                         Image(systemName: "folder")
                             .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(.secondary)
                         Text(scopeLabel)
                             .font(.system(size: 12, weight: .medium))
                             .lineLimit(1)
-                        Image(systemName: "chevron.up.chevron.down")
-                            .font(.system(size: 9, weight: .semibold))
-                            .foregroundStyle(.secondary)
+                        CharkleDropdownChevron(size: 8.5)
                     }
-                    .padding(.horizontal, 10)
-                    .frame(height: 28)
-                    .background(SettingsPalette.subtleFill(for: colorScheme), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
                 }
-                .menuStyle(.borderlessButton)
+                .menuStyle(.button)
+                .buttonStyle(CharkleButtonStyle(.standard, size: .sm))
                 .menuIndicator(.hidden)
                 .fixedSize()
 

@@ -806,7 +806,8 @@ public struct SidebarView: View {
                                     .frame(width: 20, height: 22)
                                     .contentShape(Rectangle())
                             }
-                            .menuStyle(.borderlessButton)
+                            .menuStyle(.button)
+                            .buttonStyle(CharkleMenuTriggerButtonStyle())
                             .menuIndicator(.hidden)
                             .fixedSize()
                             .frame(width: 20)

@@ -166,7 +166,7 @@ struct QuickLookGitHubRepoCard: View {
                     .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                     .overlay(
                         RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.75)
+                            .strokeBorder(Color.primary.opacity(0.08), lineWidth: CharkleTheme.hairlineWidth)
                     )
                 }
 
@@ -203,7 +203,7 @@ struct QuickLookGitHubRepoCard: View {
         }
         .overlay(
             cardShape
-                .strokeBorder(Color.white.opacity(colorScheme == .dark ? 0.10 : 0.45), lineWidth: 0.75)
+                .strokeBorder(Color.white.opacity(colorScheme == .dark ? 0.10 : 0.45), lineWidth: CharkleTheme.hairlineWidth)
         )
     }
 
@@ -373,7 +373,7 @@ struct QuickLookSocialPostCard: View {
                     .background(Color.accentColor.opacity(0.07), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                     .overlay(
                         RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .strokeBorder(Color.accentColor.opacity(0.18), lineWidth: 0.75)
+                            .strokeBorder(Color.accentColor.opacity(0.18), lineWidth: CharkleTheme.hairlineWidth)
                     )
                 }
 
@@ -407,7 +407,7 @@ struct QuickLookSocialPostCard: View {
                     .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                     .overlay(
                         RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .strokeBorder(Color.primary.opacity(0.10), lineWidth: 0.75)
+                            .strokeBorder(Color.primary.opacity(0.10), lineWidth: CharkleTheme.hairlineWidth)
                     )
                 }
 
@@ -547,7 +547,7 @@ struct QuickLookSocialPostCard: View {
         }
         .overlay(
             cardShape
-                .strokeBorder(Color.primary.opacity(0.10), lineWidth: 0.75)
+                .strokeBorder(Color.primary.opacity(0.10), lineWidth: CharkleTheme.hairlineWidth)
         )
     }
 
@@ -588,7 +588,7 @@ struct QuickLookSocialPostCard: View {
                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                 .overlay(
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .strokeBorder(Color.primary.opacity(0.10), lineWidth: 0.6)
+                        .strokeBorder(Color.primary.opacity(0.10), lineWidth: CharkleTheme.hairlineWidth)
                 )
 
                 HStack {
@@ -610,7 +610,7 @@ struct QuickLookSocialPostCard: View {
                         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                         .overlay(
                             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                .strokeBorder(Color.primary.opacity(0.10), lineWidth: 0.6)
+                                .strokeBorder(Color.primary.opacity(0.10), lineWidth: CharkleTheme.hairlineWidth)
                         )
                 } else {
                     mediaFailedPlaceholder
@@ -981,7 +981,7 @@ struct QuickLookStreamingVideoView: View {
                         .padding(.horizontal, 14)
                         .padding(.vertical, 8)
                         .background(.black.opacity(0.68), in: Capsule(style: .continuous))
-                        .overlay(Capsule().strokeBorder(.white.opacity(0.22), lineWidth: 0.75))
+                        .overlay(Capsule().strokeBorder(.white.opacity(0.22), lineWidth: CharkleTheme.hairlineWidth))
                     }
             } else if plan?.hasPlayableSource == false {
                 coverSurface
@@ -1041,7 +1041,7 @@ struct QuickLookStreamingVideoView: View {
                                 .padding(.horizontal, 10)
                                 .padding(.vertical, 5)
                                 .background(.black.opacity(0.62), in: Capsule(style: .continuous))
-                                .overlay(Capsule().strokeBorder(.white.opacity(0.22), lineWidth: 0.75))
+                                .overlay(Capsule().strokeBorder(.white.opacity(0.22), lineWidth: CharkleTheme.hairlineWidth))
                             }
                             .buttonStyle(.plain)
                             .disabled(isCapturingCover)
@@ -1060,7 +1060,7 @@ struct QuickLookStreamingVideoView: View {
                                 .padding(.horizontal, 10)
                                 .padding(.vertical, 5)
                                 .background(.black.opacity(0.62), in: Capsule(style: .continuous))
-                                .overlay(Capsule().strokeBorder(.white.opacity(0.22), lineWidth: 0.75))
+                                .overlay(Capsule().strokeBorder(.white.opacity(0.22), lineWidth: CharkleTheme.hairlineWidth))
                             }
                             .buttonStyle(.plain)
                         }

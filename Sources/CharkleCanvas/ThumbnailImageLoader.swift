@@ -1045,7 +1045,7 @@ public struct ProceduralMediaFallbackCard: View {
                             Circle()
                                 .fill(Color(charkleHex: swatch.hex))
                                 .frame(width: 8, height: 8)
-                                .overlay(Circle().strokeBorder(Color.white.opacity(0.45), lineWidth: 0.5))
+                                .overlay(Circle().strokeBorder(Color.white.opacity(0.45), lineWidth: CanvasSurface.hairlineWidth))
                         }
                     }
                 }
@@ -1080,7 +1080,7 @@ public struct ProceduralMediaFallbackCard: View {
                     Circle()
                         .fill(Color.black.opacity(0.42))
                         .frame(width: 38, height: 38)
-                        .overlay(Circle().strokeBorder(Color.white.opacity(0.28), lineWidth: 0.75))
+                        .overlay(Circle().strokeBorder(Color.white.opacity(0.28), lineWidth: CanvasSurface.hairlineWidth))
                     Image(systemName: "play.fill")
                         .font(.system(size: 14, weight: .semibold))
                         .foregroundStyle(.white)
@@ -1137,7 +1137,7 @@ public struct ProceduralMediaFallbackCard: View {
         .background(CanvasSurface.elevated(for: colorScheme))
         .overlay(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(CanvasSurface.hairline(for: colorScheme), lineWidth: 1)
+                .strokeBorder(CanvasSurface.hairline(for: colorScheme), lineWidth: CanvasSurface.hairlineWidth)
         )
     }
 
@@ -1200,7 +1200,7 @@ public struct ProceduralMediaFallbackCard: View {
         }
         .overlay(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(CanvasSurface.hairline(for: colorScheme), lineWidth: 1)
+                .strokeBorder(CanvasSurface.hairline(for: colorScheme), lineWidth: CanvasSurface.hairlineWidth)
         )
     }
 
@@ -1244,7 +1244,7 @@ public struct ProceduralMediaFallbackCard: View {
         .background(CanvasSurface.elevated(for: colorScheme))
         .overlay(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(CanvasSurface.hairline(for: colorScheme), lineWidth: 1)
+                .strokeBorder(CanvasSurface.hairline(for: colorScheme), lineWidth: CanvasSurface.hairlineWidth)
         )
     }
 
@@ -1261,7 +1261,7 @@ public struct ProceduralMediaFallbackCard: View {
                     path.move(to: CGPoint(x: 12, y: geo.size.height * 0.5))
                     path.addLine(to: CGPoint(x: geo.size.width - 12, y: geo.size.height * 0.5))
                 }
-                .stroke(Color.primary.opacity(0.05), style: StrokeStyle(lineWidth: 0.75, dash: [3, 4]))
+                .stroke(Color.primary.opacity(0.05), style: StrokeStyle(lineWidth: CanvasSurface.hairlineWidth, dash: [3, 4]))
             }
             VStack(spacing: 8) {
                 Text(ext)
@@ -1279,7 +1279,7 @@ public struct ProceduralMediaFallbackCard: View {
         }
         .overlay(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(CanvasSurface.hairline(for: colorScheme), lineWidth: 1)
+                .strokeBorder(CanvasSurface.hairline(for: colorScheme), lineWidth: CanvasSurface.hairlineWidth)
         )
     }
 }

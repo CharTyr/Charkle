@@ -799,10 +799,11 @@ public struct AISettingsPane: View {
                                     }
                                 }
                             } label: {
-                                Image(systemName: "chevron.up.chevron.down")
-                                    .font(.system(size: 10.5, weight: .semibold))
+                                CharkleDropdownChevron(size: 10)
+                                    .frame(width: 24, height: 24)
                             }
-                            .menuStyle(.borderlessButton)
+                            .menuStyle(.button)
+                            .buttonStyle(CharkleMenuTriggerButtonStyle())
                             .menuIndicator(.hidden)
                             .fixedSize()
                             .frame(width: 24)

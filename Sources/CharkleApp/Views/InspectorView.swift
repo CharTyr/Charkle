@@ -743,9 +743,10 @@ public struct InspectorView: View {
                                 coordinator.presentMoodboardGenerator(entry: .seedAssets)
                             }
                         } label: {
-                            inspectorStandardMenuLabel(title: "加入情绪板", systemImage: "rectangle.3.group")
+                            inspectorStandardMenuLabel(title: "加入情绪板", systemImage: "rectangle.3.group", showsChevron: true)
                         }
-                        .menuStyle(.borderlessButton)
+                        .menuStyle(.button)
+                        .buttonStyle(CharkleButtonStyle(.standard, size: .sm, fullWidth: true))
                         .menuIndicator(.hidden)
 
                         Menu {
@@ -759,9 +760,10 @@ public struct InspectorView: View {
                                 Task { await library.moveAssets([asset.id], toFolderID: folderID) }
                             }
                         } label: {
-                            inspectorStandardMenuLabel(title: folderName(for: asset.folderID), systemImage: "folder")
+                            inspectorStandardMenuLabel(title: folderName(for: asset.folderID), systemImage: "folder", showsChevron: true)
                         }
-                        .menuStyle(.borderlessButton)
+                        .menuStyle(.button)
+                        .buttonStyle(CharkleButtonStyle(.standard, size: .sm, fullWidth: true))
                         .menuIndicator(.hidden)
                         .help(asset.folderID.map { "当前所在：\(library.folderDisplayPath(for: $0))" } ?? "当前所在：收件箱")
                     }
@@ -1731,7 +1733,8 @@ public struct InspectorView: View {
                                         showsChevron: true
                                     )
                                 }
-                                .menuStyle(.borderlessButton)
+                                .menuStyle(.button)
+                                .buttonStyle(CharkleButtonStyle(.standard, size: .sm, fullWidth: true))
                                 .menuIndicator(.hidden)
                             }
 
@@ -2533,17 +2536,7 @@ public struct InspectorView: View {
         systemImage: String,
         showsChevron: Bool = false
     ) -> some View {
-        let shape = RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous)
-        let fill: Color = if colorScheme == .dark {
-            reduceTransparency ? Color(charkleHex: "#252830") : Color.white.opacity(0.075)
-        } else {
-            CharkleTheme.surfaceElevated(for: .light)
-        }
-        let strokeColor: Color = reduceTransparency
-            ? (colorScheme == .dark ? Color.white.opacity(0.22) : Color.black.opacity(0.18))
-            : Color.primary.opacity(colorScheme == .dark ? 0.12 : 0.11)
-
-        return HStack(spacing: 5) {
+        HStack(spacing: 5) {
             Image(systemName: systemImage)
                 .font(.system(size: 11.5, weight: .medium))
                 .foregroundStyle(.secondary)
@@ -2552,16 +2545,9 @@ public struct InspectorView: View {
                 .foregroundStyle(Color.primary.opacity(0.92))
                 .lineLimit(1)
             if showsChevron {
-                Spacer(minLength: 4)
-                Image(systemName: "chevron.up.chevron.down")
-                    .font(.system(size: 9.5, weight: .semibold))
-                    .foregroundStyle(.secondary)
+                CharkleDropdownChevron(size: 8.5)
             }
         }
-        .padding(.horizontal, 9)
-        .frame(maxWidth: .infinity, minHeight: 28)
-        .background(fill, in: shape)
-        .overlay(shape.strokeBorder(strokeColor, lineWidth: reduceTransparency ? 1.0 : 0.75))
     }
 
     private func inspectorTextField(
@@ -2587,7 +2573,7 @@ public struct InspectorView: View {
         .background(CharkleTheme.inspectorFieldSurface(for: colorScheme), in: shape)
         .overlay {
             if reduceTransparency {
-                shape.strokeBorder(CharkleTheme.hairline(for: colorScheme), lineWidth: 0.75)
+                shape.strokeBorder(CharkleTheme.hairline(for: colorScheme), lineWidth: 1.0)
             }
         }
     }

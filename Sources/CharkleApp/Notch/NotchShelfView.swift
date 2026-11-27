@@ -238,7 +238,7 @@ public struct NotchShelfView: View {
                             startPoint: .top,
                             endPoint: .bottom
                         ),
-                        lineWidth: 0.75
+                        lineWidth: CharkleTheme.hairlineWidth
                     )
                     .allowsHitTesting(false)
             )
@@ -759,7 +759,7 @@ public struct NotchShelfView: View {
                     wellShape.strokeBorder(
                         shelfState.isDropTargeted ? activeBlue.opacity(0.92) : Color.white.opacity(0.14),
                         style: StrokeStyle(
-                            lineWidth: shelfState.isDropTargeted ? 1.5 : 1,
+                            lineWidth: shelfState.isDropTargeted ? 1.5 : CharkleTheme.hairlineWidth,
                             dash: shelfState.isDropTargeted ? [] : [5, 4]
                         )
                     )
@@ -912,15 +912,14 @@ public struct NotchShelfView: View {
                         .foregroundStyle(.white.opacity(0.92))
                         .lineLimit(1)
                         .truncationMode(.tail)
-                    Image(systemName: "chevron.up.chevron.down")
-                        .font(.system(size: 8))
-                        .foregroundStyle(.white.opacity(0.55))
+                    CharkleDropdownChevron(size: 8, color: .white.opacity(0.62))
                 }
                 .padding(.horizontal, 7)
                 .padding(.vertical, 4)
                 .background(Color.white.opacity(0.11), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
             }
-            .menuStyle(.borderlessButton)
+            .menuStyle(.button)
+            .buttonStyle(CharkleMenuTriggerButtonStyle())
             .menuIndicator(.hidden)
             .fixedSize(horizontal: false, vertical: true)
         case .activeMoodboard:
@@ -958,15 +957,14 @@ public struct NotchShelfView: View {
                             .foregroundStyle(.white.opacity(0.92))
                             .lineLimit(1)
                             .truncationMode(.tail)
-                        Image(systemName: "chevron.up.chevron.down")
-                            .font(.system(size: 8))
-                            .foregroundStyle(.white.opacity(0.55))
+                        CharkleDropdownChevron(size: 8, color: .white.opacity(0.62))
                     }
                     .padding(.horizontal, 7)
                     .padding(.vertical, 4)
                     .background(Color.white.opacity(0.11), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
                 }
-                .menuStyle(.borderlessButton)
+                .menuStyle(.button)
+                .buttonStyle(CharkleMenuTriggerButtonStyle())
                 .menuIndicator(.hidden)
                 .fixedSize(horizontal: false, vertical: true)
             }
@@ -1040,7 +1038,10 @@ private struct NotchRecentFilmstripCard: View {
                 .frame(width: 96, height: 82)
                 .overlay(
                     RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .strokeBorder(Color.white.opacity(isHovered ? 0.38 : 0.12), lineWidth: isHovered ? 1.25 : 0.75)
+                        .strokeBorder(
+                            Color.white.opacity(isHovered ? 0.38 : 0.12),
+                            lineWidth: isHovered ? 1.25 : CharkleTheme.hairlineWidth
+                        )
                 )
 
                 if isHovered {

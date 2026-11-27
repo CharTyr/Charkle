@@ -159,7 +159,10 @@ public struct FolderCustomizationPopover: View {
                             )
                             .overlay(
                                 Circle()
-                                    .strokeBorder(active ? accentColor : Color.black.opacity(0.1), lineWidth: active ? 2 : 0.75)
+                                    .strokeBorder(
+                                        active ? accentColor : Color.black.opacity(0.1),
+                                        lineWidth: active ? 2 : CharkleTheme.hairlineWidth
+                                    )
                             )
                     }
                     .buttonStyle(.plain)

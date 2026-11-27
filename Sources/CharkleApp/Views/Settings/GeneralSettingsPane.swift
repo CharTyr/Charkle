@@ -133,7 +133,7 @@ public struct GeneralSettingsPane: View {
                                 .overlay(
                                     tileShape.strokeBorder(
                                         selected ? accentBorder : Color.clear,
-                                        lineWidth: 0.75
+                                        lineWidth: CharkleTheme.hairlineWidth
                                     )
                                 )
                                 .contentShape(tileShape)

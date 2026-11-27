@@ -1264,7 +1264,7 @@ private enum MasonryStaticLayerAssets {
             NSColor.black.withAlphaComponent(0.44).setFill()
             oval.fill()
             NSColor.white.withAlphaComponent(0.20).setStroke()
-            oval.lineWidth = 0.5
+            oval.lineWidth = CanvasSurface.hairlineWidth
             oval.stroke()
 
             if let sym = NSImage(systemSymbolName: "arrow.down.circle.fill", accessibilityDescription: nil)?

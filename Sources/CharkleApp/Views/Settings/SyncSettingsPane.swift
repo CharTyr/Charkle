@@ -210,11 +210,15 @@ public struct SyncSettingsPane: View {
                         HStack(spacing: 5) {
                             Image(systemName: "plus.circle.fill")
                                 .font(.system(size: 13))
+                                .foregroundStyle(CharkleTheme.accent(for: colorScheme, source: coordinator.accentSource))
                             Text("添加同步后端…")
                                 .font(.system(size: 12.5, weight: .semibold))
+                            CharkleDropdownChevron(size: 8.5)
                         }
                     }
-                    .menuStyle(.borderlessButton)
+                    .menuStyle(.button)
+                    .buttonStyle(CharkleButtonStyle(.standard, size: .sm))
+                    .menuIndicator(.hidden)
                     .fixedSize()
 
                     Spacer()
@@ -321,7 +325,8 @@ public struct SyncSettingsPane: View {
                     .font(.system(size: 15))
                     .foregroundStyle(.secondary)
             }
-            .menuStyle(.borderlessButton)
+            .menuStyle(.button)
+            .buttonStyle(CharkleMenuTriggerButtonStyle())
             .menuIndicator(.hidden)
             .fixedSize()
         }
@@ -731,20 +736,12 @@ public struct SyncSettingsPane: View {
                                 }
                                 Text("选择与我共享")
                                     .font(.system(size: 12.5, weight: .medium))
+                                CharkleDropdownChevron(size: 8.5)
                             }
                         }
-                        .menuStyle(.borderlessButton)
+                        .menuStyle(.button)
+                        .buttonStyle(CharkleButtonStyle(.standard, size: .sm))
                         .menuIndicator(.hidden)
-                        .padding(.horizontal, 11)
-                        .frame(minHeight: 28)
-                        .background(
-                            SettingsPalette.subtleFill(for: colorScheme),
-                            in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.settingsInner, style: .continuous)
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: CharkleTheme.Radius.settingsInner, style: .continuous)
-                                .strokeBorder(SettingsPalette.border(for: colorScheme), lineWidth: CharkleTheme.hairlineWidth)
-                        )
                         .fixedSize()
                         .task(id: isSignedIn) {
                             if isSignedIn && syncAndAI.sharedFolders.isEmpty && !syncAndAI.isLoadingSharedFolders {

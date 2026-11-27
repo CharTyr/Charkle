@@ -705,7 +705,7 @@ public struct QuickLookOverlayView: View {
                         .frame(width: targetWidth)
                         .clipShape(shape)
                         .overlay(
-                            shape.strokeBorder(Color.white.opacity(0.10), lineWidth: 0.75)
+                            shape.strokeBorder(Color.white.opacity(0.10), lineWidth: CharkleTheme.hairlineWidth)
                         )
                 }
                 .padding(.vertical, 8)
@@ -1206,7 +1206,8 @@ public struct QuickLookOverlayView: View {
                             .frame(width: 28, height: 28)
                             .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                     }
-                    .menuStyle(.borderlessButton)
+                    .menuStyle(.button)
+                    .buttonStyle(CharkleMenuTriggerButtonStyle())
                     .menuIndicator(.hidden)
                     .fixedSize()
                     .help("加入情绪板")

@@ -198,7 +198,7 @@ public struct SmartFolderEditorSheet: View {
                                                 Circle()
                                                     .strokeBorder(
                                                         active ? Color.accentColor : Color.primary.opacity(0.18),
-                                                        lineWidth: active ? 2.5 : 1
+                                                        lineWidth: active ? 2 : CharkleTheme.hairlineWidth
                                                     )
                                             )
                                             .overlay {
@@ -385,7 +385,7 @@ public struct SmartFolderEditorSheet: View {
         )
         .overlay(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .strokeBorder(CharkleTheme.hairline(for: colorScheme), lineWidth: 0.75)
+                .strokeBorder(CharkleTheme.hairline(for: colorScheme), lineWidth: CharkleTheme.hairlineWidth)
         )
     }
 

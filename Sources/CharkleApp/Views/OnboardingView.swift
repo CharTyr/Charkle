@@ -220,7 +220,7 @@ public struct OnboardingView: View {
                 .overlay(
                     outerShape.strokeBorder(
                         colorScheme == .dark ? Color.white.opacity(0.12) : Color.black.opacity(0.08),
-                        lineWidth: 0.75
+                        lineWidth: CharkleTheme.hairlineWidth
                     )
                 )
                 .scaleEffect(heroEntered ? 1.0 : (reduceMotion ? 1.0 : 0.97))
@@ -354,7 +354,7 @@ public struct OnboardingView: View {
                                     .fill(cardBackground)
                                     .overlay(
                                         Capsule(style: .continuous)
-                                            .strokeBorder(SettingsPalette.border(for: colorScheme), lineWidth: 0.75)
+                                            .strokeBorder(SettingsPalette.border(for: colorScheme), lineWidth: CharkleTheme.hairlineWidth)
                                     )
                                     .shadow(color: Color.black.opacity(colorScheme == .dark ? 0.30 : 0.06), radius: 3, y: 1)
                                     .matchedGeometryEffect(id: "onboarding-step-pill", in: stepPillNamespace)
@@ -634,7 +634,7 @@ public struct OnboardingView: View {
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
                     .strokeBorder(
                         hovered ? selectedStrokeColor : SettingsPalette.border(for: colorScheme),
-                        lineWidth: hovered ? 1.1 : 0.75
+                        lineWidth: hovered ? 1.5 : CharkleTheme.hairlineWidth
                     )
             )
             .shadow(
@@ -865,7 +865,7 @@ public struct OnboardingView: View {
                 .background(pedestalBackground, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
                 .overlay(
                     RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .strokeBorder(SettingsPalette.border(for: colorScheme), lineWidth: 0.75)
+                        .strokeBorder(SettingsPalette.border(for: colorScheme), lineWidth: CharkleTheme.hairlineWidth)
                 )
             },
             content: {
@@ -934,7 +934,7 @@ public struct OnboardingView: View {
                 .background(cardBackground, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                 .overlay(
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .strokeBorder(SettingsPalette.border(for: colorScheme), lineWidth: 0.75)
+                        .strokeBorder(SettingsPalette.border(for: colorScheme), lineWidth: CharkleTheme.hairlineWidth)
                 )
 
                 // 2. Notch Shelf & Default Target & Hotkeys Card (aligned with NotchShelfSettingsPane)
@@ -1006,7 +1006,7 @@ public struct OnboardingView: View {
                 .background(cardBackground, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                 .overlay(
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .strokeBorder(SettingsPalette.border(for: colorScheme), lineWidth: 0.75)
+                        .strokeBorder(SettingsPalette.border(for: colorScheme), lineWidth: CharkleTheme.hairlineWidth)
                 )
             }
         )
@@ -1058,7 +1058,7 @@ public struct OnboardingView: View {
                     )
                     .overlay(
                         RoundedRectangle(cornerRadius: 11, style: .continuous)
-                            .strokeBorder(SettingsPalette.border(for: colorScheme), lineWidth: 0.75)
+                            .strokeBorder(SettingsPalette.border(for: colorScheme), lineWidth: CharkleTheme.hairlineWidth)
                     )
 
                 VStack(spacing: 6) {
@@ -1163,7 +1163,7 @@ public struct OnboardingView: View {
                     .background(cardBackground, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
                     .overlay(
                         RoundedRectangle(cornerRadius: 11, style: .continuous)
-                            .strokeBorder(SettingsPalette.border(for: colorScheme), lineWidth: 0.75)
+                            .strokeBorder(SettingsPalette.border(for: colorScheme), lineWidth: CharkleTheme.hairlineWidth)
                     )
                 }
                 .padding(16)
@@ -1171,7 +1171,7 @@ public struct OnboardingView: View {
                 .background(pedestalBackground, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
                 .overlay(
                     RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .strokeBorder(SettingsPalette.border(for: colorScheme), lineWidth: 0.75)
+                        .strokeBorder(SettingsPalette.border(for: colorScheme), lineWidth: CharkleTheme.hairlineWidth)
                 )
             },
             content: {
@@ -1336,7 +1336,7 @@ public struct OnboardingView: View {
                         .background(cardBackground, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
                         .overlay(
                             RoundedRectangle(cornerRadius: 11, style: .continuous)
-                                .strokeBorder(SettingsPalette.border(for: colorScheme), lineWidth: 0.75)
+                                .strokeBorder(SettingsPalette.border(for: colorScheme), lineWidth: CharkleTheme.hairlineWidth)
                         )
                         .animation(CharkleMotion.accessible(CharkleMotion.moveOnScreen, reduced: reduceMotion), value: coordinator.galleryLayoutMode)
                 }
@@ -1345,7 +1345,7 @@ public struct OnboardingView: View {
                 .background(pedestalBackground, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
                 .overlay(
                     RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .strokeBorder(SettingsPalette.border(for: colorScheme), lineWidth: 0.75)
+                        .strokeBorder(SettingsPalette.border(for: colorScheme), lineWidth: CharkleTheme.hairlineWidth)
                 )
             },
             content: {
@@ -1409,7 +1409,7 @@ public struct OnboardingView: View {
                                     RoundedRectangle(cornerRadius: 12, style: .continuous)
                                         .strokeBorder(
                                             selected ? selectedStrokeColor : SettingsPalette.border(for: colorScheme),
-                                            lineWidth: selected ? 1.35 : 0.75
+                                            lineWidth: selected ? 1.5 : CharkleTheme.hairlineWidth
                                         )
                                 )
                             }
@@ -1469,7 +1469,7 @@ public struct OnboardingView: View {
                 .background(cardBackground, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                 .overlay(
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .strokeBorder(SettingsPalette.border(for: colorScheme), lineWidth: 0.75)
+                        .strokeBorder(SettingsPalette.border(for: colorScheme), lineWidth: CharkleTheme.hairlineWidth)
                 )
             }
         )
@@ -1511,7 +1511,7 @@ public struct OnboardingView: View {
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .strokeBorder(
                         selected ? selectedStrokeColor : SettingsPalette.border(for: colorScheme),
-                        lineWidth: selected ? 1.35 : 0.75
+                        lineWidth: selected ? 1.5 : CharkleTheme.hairlineWidth
                     )
             )
         }
@@ -1746,7 +1746,7 @@ public struct OnboardingView: View {
             .background(cardBackground, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .strokeBorder(SettingsPalette.border(for: colorScheme), lineWidth: 0.75)
+                    .strokeBorder(SettingsPalette.border(for: colorScheme), lineWidth: CharkleTheme.hairlineWidth)
             )
         }
         .buttonStyle(CharkleTactileButtonStyle())
@@ -1807,7 +1807,7 @@ public struct OnboardingView: View {
         .background(pedestalBackground, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .strokeBorder(SettingsPalette.border(for: colorScheme), lineWidth: 0.75)
+                .strokeBorder(SettingsPalette.border(for: colorScheme), lineWidth: CharkleTheme.hairlineWidth)
         )
     }
 
@@ -1934,7 +1934,7 @@ public struct OnboardingView: View {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .strokeBorder(
                     isSelected ? selectedStrokeColor : SettingsPalette.border(for: colorScheme),
-                    lineWidth: isSelected ? 1.35 : 0.75
+                    lineWidth: isSelected ? 1.5 : CharkleTheme.hairlineWidth
                 )
         )
         .animation(CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion), value: isSelected)
@@ -2017,7 +2017,7 @@ public struct OnboardingView: View {
             .background(tint.opacity(colorScheme == .dark ? 0.16 : 0.10), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .strokeBorder(tint.opacity(0.22), lineWidth: 0.75)
+                    .strokeBorder(tint.opacity(0.22), lineWidth: CharkleTheme.hairlineWidth)
             )
             .transition(CharkleMotion.originTransition(anchor: .top, scale: 0.97, reduced: reduceMotion))
         }

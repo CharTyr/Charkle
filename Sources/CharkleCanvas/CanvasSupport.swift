@@ -518,6 +518,9 @@ public extension Color {
 // MARK: - Gallery-First Neutral Canvas Surfaces & Restrained Liquid Glass
 
 public enum CanvasSurface {
+    /// Standard Retina 1px hairline border/divider thickness (`0.5pt`), mirroring `CharkleTheme.hairlineWidth`.
+    public nonisolated static let hairlineWidth: CGFloat = 0.5
+
     public static func ground(for scheme: ColorScheme) -> Color {
         scheme == .dark ? Color(charkleHex: "#141517") : Color(charkleHex: "#F6F6F5")
     }
@@ -532,6 +535,33 @@ public enum CanvasSurface {
 
     public static func hairline(for scheme: ColorScheme) -> Color {
         scheme == .dark ? Color.white.opacity(0.09) : Color.black.opacity(0.08)
+    }
+}
+
+/// Clean SwiftUI trigger button style paired with `.menuStyle(.button)` + `.menuIndicator(.hidden)`
+/// inside `CharkleCanvas` so floating canvas menus preserve their custom capsule styling without
+/// AppKit borderless popup tinting or dangling chevrons.
+public struct CanvasMenuTriggerButtonStyle: ButtonStyle {
+    public init() {}
+
+    public func makeBody(configuration: Configuration) -> some View {
+        TriggerBody(configuration: configuration)
+    }
+
+    private struct TriggerBody: View {
+        @Environment(\.accessibilityReduceMotion) private var reduceMotion
+        @Environment(\.isEnabled) private var isEnabled
+
+        let configuration: Configuration
+
+        var body: some View {
+            let pressed = configuration.isPressed && isEnabled
+            configuration.label
+                .opacity(isEnabled ? (pressed ? 0.76 : 1.0) : 0.42)
+                .scaleEffect(pressed && !reduceMotion ? 0.98 : 1.0)
+                .contentShape(Rectangle())
+                .animation(CanvasMotion.accessible(CanvasMotion.hoverPress, reduced: reduceMotion), value: pressed)
+        }
     }
 }
 
@@ -590,7 +620,7 @@ public struct CanvasLiquidGlassModifier<S: InsettableShape>: ViewModifier {
                             startPoint: .topLeading,
                             endPoint: .bottomTrailing
                         ),
-                        lineWidth: 0.75
+                        lineWidth: CanvasSurface.hairlineWidth
                     )
                 }
                 .shadow(color: Color.black.opacity(colorScheme == .dark ? 0.36 : 0.10), radius: 16, y: 6)

@@ -345,22 +345,23 @@ public struct PinterestExploreWorkspaceView: View {
                             Label("批量导入收藏（按画板分目录）…", systemImage: "square.and.arrow.down.on.square")
                         }
                     } label: {
-                        HStack(spacing: 6) {
+                        HStack(spacing: 5) {
                             Image(systemName: "sparkles")
                                 .font(.system(size: 12, weight: .semibold))
                                 .foregroundStyle(activeAccent)
                             Text(controller.feedSource.displayTitle)
                                 .font(.system(size: 12.5, weight: .semibold))
+                                .foregroundStyle(.primary.opacity(0.92))
                                 .lineLimit(1)
+                                .truncationMode(.tail)
                                 .frame(maxWidth: 160, alignment: .leading)
-                            Image(systemName: "chevron.down")
-                                .font(.system(size: 9.5, weight: .semibold))
-                                .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
+                            CharkleDropdownChevron(size: 8.5)
                         }
                         .padding(.horizontal, 11)
                         .frame(height: 30)
                     }
-                    .menuStyle(.borderlessButton)
+                    .menuStyle(.button)
+                    .buttonStyle(CharkleMenuTriggerButtonStyle())
                     .menuIndicator(.hidden)
                     .fixedSize()
                 }
@@ -495,6 +496,7 @@ public struct PinterestExploreWorkspaceView: View {
                         if let account = controller.account {
                             Text(account.displayName)
                                 .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(.primary.opacity(0.92))
                                 .lineLimit(1)
                                 .frame(maxWidth: 96, alignment: .leading)
                         }
@@ -502,7 +504,8 @@ public struct PinterestExploreWorkspaceView: View {
                     .padding(.horizontal, 10)
                     .frame(height: 36)
                 }
-                .menuStyle(.borderlessButton)
+                .menuStyle(.button)
+                .buttonStyle(CharkleMenuTriggerButtonStyle())
                 .menuIndicator(.hidden)
                 .fixedSize()
                 .charkleLiquidGlass(.regular, in: Capsule(style: .continuous), interactive: true)
@@ -734,16 +737,16 @@ public struct PinterestExploreWorkspaceView: View {
                                 .foregroundStyle(activeAccent)
                             Text(selectedTrayFolderTitle)
                                 .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(.primary.opacity(0.92))
                                 .lineLimit(1)
-                            Image(systemName: "chevron.up.chevron.down")
-                                .font(.system(size: 9, weight: .semibold))
-                                .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
+                            CharkleDropdownChevron(size: 8.5)
                         }
                         .padding(.horizontal, 10)
                         .frame(height: 30)
                         .background(CharkleTheme.surfaceSubtle(for: colorScheme), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                     }
-                    .menuStyle(.borderlessButton)
+                    .menuStyle(.button)
+                    .buttonStyle(CharkleMenuTriggerButtonStyle())
                     .menuIndicator(.hidden)
                     .fixedSize()
 
@@ -820,7 +823,10 @@ public struct PinterestExploreWorkspaceView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                     .overlay(
                         RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .strokeBorder(isSelected ? activeAccent : Color.primary.opacity(0.10), lineWidth: isSelected ? 2 : 0.75)
+                            .strokeBorder(
+                                isSelected ? activeAccent : Color.primary.opacity(0.10),
+                                lineWidth: isSelected ? 2 : CharkleTheme.hairlineWidth
+                            )
                     )
                 }
                 .buttonStyle(.plain)
@@ -963,7 +969,7 @@ public struct PinterestExploreWorkspaceView: View {
                     .fill(CharkleTheme.surfaceElevated(for: colorScheme))
                     .overlay(
                         RoundedRectangle(cornerRadius: 24, style: .continuous)
-                            .strokeBorder(CharkleTheme.hairline(for: colorScheme), lineWidth: 1)
+                            .strokeBorder(CharkleTheme.hairline(for: colorScheme), lineWidth: CharkleTheme.hairlineWidth)
                     )
             )
             .shadow(color: Color.black.opacity(colorScheme == .dark ? 0.35 : 0.08), radius: 24, y: 10)
@@ -1214,7 +1220,7 @@ private struct PinterestPinDetailOverlayMac: View {
                 )
                 .overlay(
                     RoundedRectangle(cornerRadius: 20, style: .continuous)
-                        .strokeBorder(CharkleTheme.hairline(for: colorScheme), lineWidth: 1)
+                        .strokeBorder(CharkleTheme.hairline(for: colorScheme), lineWidth: CharkleTheme.hairlineWidth)
                 )
                 .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
                 .shadow(color: Color.black.opacity(colorScheme == .dark ? 0.50 : 0.22), radius: 36, y: 14)
@@ -1255,7 +1261,7 @@ private struct PinterestPinDetailOverlayMac: View {
                     .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
                     .overlay(
                         RoundedRectangle(cornerRadius: 13, style: .continuous)
-                            .strokeBorder(CharkleTheme.hairline(for: colorScheme), lineWidth: 0.75)
+                            .strokeBorder(CharkleTheme.hairline(for: colorScheme), lineWidth: CharkleTheme.hairlineWidth)
                     )
 
                     if pin.isVideo {
@@ -1474,7 +1480,10 @@ private struct PinterestPinDetailOverlayMac: View {
                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                 .overlay(
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .strokeBorder(inTray ? accent : CharkleTheme.hairline(for: colorScheme), lineWidth: inTray ? 2 : 0.75)
+                        .strokeBorder(
+                            inTray ? accent : CharkleTheme.hairline(for: colorScheme),
+                            lineWidth: inTray ? 2 : CharkleTheme.hairlineWidth
+                        )
                 )
             }
             .buttonStyle(.plain)
@@ -1487,7 +1496,7 @@ private struct PinterestPinDetailOverlayMac: View {
                     .foregroundStyle(.white)
                     .frame(width: 26, height: 26)
                     .background(inTray ? accent : Color.black.opacity(0.60), in: Circle())
-                    .overlay(Circle().strokeBorder(Color.white.opacity(0.35), lineWidth: 0.75))
+                    .overlay(Circle().strokeBorder(Color.white.opacity(0.35), lineWidth: CharkleTheme.hairlineWidth))
             }
             .buttonStyle(.plain)
             .padding(7)
@@ -1668,15 +1677,15 @@ private struct PinterestBoardImportSheetMac: View {
                                     .foregroundStyle(accent)
                                 Text(selectedCustomParentName)
                                     .font(.system(size: 12, weight: .medium))
-                                Image(systemName: "chevron.up.chevron.down")
-                                    .font(.system(size: 9.5))
-                                    .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
+                                    .foregroundStyle(.primary.opacity(0.92))
+                                CharkleDropdownChevron(size: 8.5)
                             }
                             .padding(.horizontal, 10)
                             .frame(height: 30)
                             .background(CharkleTheme.surfaceSubtle(for: colorScheme), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                         }
-                        .menuStyle(.borderlessButton)
+                        .menuStyle(.button)
+                        .buttonStyle(CharkleMenuTriggerButtonStyle())
                         .menuIndicator(.hidden)
                         .fixedSize()
                         .disabled(controller.isImportingBoards || folders.isEmpty)

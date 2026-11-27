@@ -102,7 +102,7 @@ public struct GoogleOAuthSetupSheet: View {
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .strokeBorder(SettingsPalette.border(for: colorScheme), lineWidth: 0.75)
+                    .strokeBorder(SettingsPalette.border(for: colorScheme), lineWidth: CharkleTheme.hairlineWidth)
             )
 
             VStack(alignment: .leading, spacing: 10) {

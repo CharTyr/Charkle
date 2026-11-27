@@ -246,16 +246,16 @@ public struct CharkleButtonStyle: ButtonStyle {
                 let opacity: Double = colorScheme == .dark
                     ? (hovered ? 0.16 : 0.12)
                     : (hovered ? 0.15 : 0.11)
-                return (Color.primary.opacity(opacity), 0.75)
+                return (Color.primary.opacity(opacity), hairline)
             case .subtle:
                 if reduceTransparency && hovered {
-                    return (CharkleTheme.hairline(for: colorScheme), 0.75)
+                    return (CharkleTheme.hairline(for: colorScheme), 1.0)
                 }
                 return nil
             case .destructive:
                 let ink = CharkleTheme.destructive(for: colorScheme)
                 let opacity: Double = reduceTransparency ? 0.45 : (hovered ? 0.34 : 0.22)
-                return (ink.opacity(opacity), reduceTransparency ? 1.0 : 0.75)
+                return (ink.opacity(opacity), reduceTransparency ? 1.0 : hairline)
             }
         }
 
@@ -281,6 +281,61 @@ public extension ButtonStyle where Self == CharkleButtonStyle {
             cornerRadius: cornerRadius,
             iconDimension: iconDimension
         )
+    }
+}
+
+// MARK: - Unified macOS Native Menu Trigger & Dropdown Indicator
+
+/// Clean SwiftUI button style paired with `.menuStyle(.button)` + `.menuIndicator(.hidden)`
+/// for icon-only, pill, capsule, and inline `Menu` triggers.
+///
+/// Using `.menuStyle(.button)` + `CharkleMenuTriggerButtonStyle()` avoids AppKit's legacy
+/// `BorderlessButtonMenuStyle` (`NSPopUpButton`) hijack on macOS 15–27+, which otherwise
+/// strips custom pill backgrounds, forces accent-blue tint onto neutral labels, and leaks a
+/// dangling system downward chevron (`⌄`).
+public struct CharkleMenuTriggerButtonStyle: ButtonStyle {
+    public init() {}
+
+    public func makeBody(configuration: Configuration) -> some View {
+        TriggerBody(configuration: configuration)
+    }
+
+    private struct TriggerBody: View {
+        @Environment(\.accessibilityReduceMotion) private var reduceMotion
+        @Environment(\.isEnabled) private var isEnabled
+
+        let configuration: Configuration
+
+        var body: some View {
+            let pressed = configuration.isPressed && isEnabled
+            configuration.label
+                .opacity(isEnabled ? (pressed ? 0.76 : 1.0) : 0.42)
+                .scaleEffect(pressed && !reduceMotion ? 0.98 : 1.0)
+                .contentShape(Rectangle())
+                .animation(CharkleMotion.accessible(CharkleMotion.hoverPress, reduced: reduceMotion), value: pressed)
+        }
+    }
+}
+
+/// Canonical macOS pop-up / dropdown selector indicator (`chevron.up.chevron.down`).
+/// Sits snugly beside label text rather than floating across an empty wide button gap
+/// or using a lone thin downward chevron (`chevron.down`).
+public struct CharkleDropdownChevron: View {
+    @Environment(\.colorScheme) private var colorScheme
+
+    public let size: CGFloat
+    public let color: Color?
+
+    public init(size: CGFloat = 8.5, color: Color? = nil) {
+        self.size = size
+        self.color = color
+    }
+
+    public var body: some View {
+        Image(systemName: "chevron.up.chevron.down")
+            .font(.system(size: size, weight: .semibold))
+            .foregroundStyle(color ?? CharkleTheme.secondaryInk(for: colorScheme))
+            .accessibilityHidden(true)
     }
 }
 
@@ -481,7 +536,7 @@ public struct CharkleSegmentedControl<Option: Hashable>: View {
         .overlay {
             if reduceTransparency {
                 trackShape
-                    .strokeBorder(CharkleTheme.hairline(for: colorScheme), lineWidth: 0.75)
+                    .strokeBorder(CharkleTheme.hairline(for: colorScheme), lineWidth: 1.0)
                     .allowsHitTesting(false)
             }
         }
@@ -827,7 +882,10 @@ public struct CharkleInspectorSection<HeaderTrailing: View, Content: View>: View
         .background(CharkleTheme.surfaceElevated(for: colorScheme), in: Capsule(style: .continuous))
         .overlay(
             Capsule(style: .continuous)
-                .strokeBorder(CharkleTheme.accentBorder(for: colorScheme, source: accentSource), lineWidth: 0.75)
+                .strokeBorder(
+                    CharkleTheme.accentBorder(for: colorScheme, source: accentSource),
+                    lineWidth: CharkleTheme.hairlineWidth
+                )
         )
     }
 }
@@ -1462,7 +1520,7 @@ public struct CharkleColorFilterPopover: View {
                                 .overlay(
                                     Circle().strokeBorder(
                                         isSelected ? accent : Color.primary.opacity(0.18),
-                                        lineWidth: isSelected ? 2.25 : 0.75
+                                        lineWidth: isSelected ? 2 : CharkleTheme.hairlineWidth
                                     )
                                 )
                             if isSelected {
@@ -1536,7 +1594,7 @@ public struct CharkleColorFilterPopover: View {
                 )
                 .overlay(
                     RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous)
-                        .strokeBorder(CharkleTheme.hairline(for: colorScheme), lineWidth: 0.75)
+                        .strokeBorder(CharkleTheme.hairline(for: colorScheme), lineWidth: CharkleTheme.hairlineWidth)
                 )
             }
 

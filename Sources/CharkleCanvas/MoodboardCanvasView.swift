@@ -2004,7 +2004,7 @@ public struct MoodboardCanvasView: View {
                         .overlay(
                             Circle().strokeBorder(
                                 inkColorHex == swatch.hex ? Color.accentColor : Color.white.opacity(0.45),
-                                lineWidth: inkColorHex == swatch.hex ? 2 : 0.75
+                                lineWidth: inkColorHex == swatch.hex ? 2 : CanvasSurface.hairlineWidth
                             )
                         )
                 }
@@ -2186,7 +2186,8 @@ public struct MoodboardCanvasView: View {
                     .padding(.vertical, compact ? 5 : 6)
                     .background(Color.primary.opacity(0.08), in: RoundedRectangle(cornerRadius: compact ? 8 : 10, style: .continuous))
                 }
-                .menuStyle(.borderlessButton)
+                .menuStyle(.button)
+                .buttonStyle(CanvasMenuTriggerButtonStyle())
                 .menuIndicator(.hidden)
                 .fixedSize()
                 .help("导出情绪板或复制到 Figma")
@@ -3930,14 +3931,14 @@ private struct FreeformVectorOverlay: View {
                         var path = Path()
                         path.move(to: CGPoint(x: sx, y: 0))
                         path.addLine(to: CGPoint(x: sx, y: size.height))
-                        context.stroke(path, with: .color(guideColor), style: StrokeStyle(lineWidth: 0.75, dash: [4, 4]))
+                        context.stroke(path, with: .color(guideColor), style: StrokeStyle(lineWidth: CanvasSurface.hairlineWidth, dash: [4, 4]))
                     }
                     for wy in snapGuidesY {
                         let sy = toScreen(CGPoint(x: 0, y: wy)).y
                         var path = Path()
                         path.move(to: CGPoint(x: 0, y: sy))
                         path.addLine(to: CGPoint(x: size.width, y: sy))
-                        context.stroke(path, with: .color(guideColor), style: StrokeStyle(lineWidth: 0.75, dash: [4, 4]))
+                        context.stroke(path, with: .color(guideColor), style: StrokeStyle(lineWidth: CanvasSurface.hairlineWidth, dash: [4, 4]))
                     }
                 }
 
@@ -4251,7 +4252,10 @@ private struct FreeformConnectorLabelsLayer: View {
                             .background(CanvasSurface.elevated(for: colorScheme), in: Capsule(style: .continuous))
                             .overlay(
                                 Capsule(style: .continuous)
-                                    .strokeBorder(isSel ? Color.accentColor : CanvasSurface.hairline(for: colorScheme), lineWidth: isSel ? 1.5 : 0.75)
+                                    .strokeBorder(
+                                        isSel ? Color.accentColor : CanvasSurface.hairline(for: colorScheme),
+                                        lineWidth: isSel ? 1.5 : CanvasSurface.hairlineWidth
+                                    )
                             )
                     } else {
                         Circle()

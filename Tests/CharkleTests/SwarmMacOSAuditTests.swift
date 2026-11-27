@@ -325,4 +325,56 @@ struct SwarmMacOSAuditTests {
         #expect(settings.contains("title: \"托盘展开形态\""))
         #expect(settings.contains("coordinator.notchPresentationMode"))
     }
+
+    @Test("macOS P0 polish: zero borderlessButton menu chevron leaks and unified 0.5pt hairline strokes")
+    @MainActor
+    func macOSP0DropdownAndHairlineContracts() throws {
+        let appFiles = try allAppSwiftFiles()
+        let canvasRoot = Self.repoRoot.appendingPathComponent("Sources/CharkleCanvas", isDirectory: true)
+        var canvasFiles: [URL] = []
+        if let enumerator = FileManager.default.enumerator(
+            at: canvasRoot,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) {
+            for case let url as URL in enumerator where url.pathExtension == "swift" {
+                canvasFiles.append(url)
+            }
+        }
+        let uiFiles = (appFiles + canvasFiles).sorted { $0.path < $1.path }
+        #expect(!uiFiles.isEmpty)
+
+        var violations: [String] = []
+        let nonHairlinePattern = try NSRegularExpression(pattern: #"lineWidth:\s*(?:[^,\n]*:\s*)?(?:0\.75|0\.6)\b"#)
+
+        for file in uiFiles {
+            let content = try String(contentsOf: file, encoding: .utf8)
+            if content.contains(".menuStyle(.borderlessButton)") {
+                violations.append("borderlessButton MenuStyle in \(file.lastPathComponent)")
+            }
+            if content.contains(".menuIndicator(.automatic)") {
+                violations.append("automatic menuIndicator in \(file.lastPathComponent)")
+            }
+            let nsContent = content as NSString
+            let range = NSRange(location: 0, length: nsContent.length)
+            if nonHairlinePattern.firstMatch(in: content, range: range) != nil {
+                violations.append("non-hairline 0.75/0.6 lineWidth in \(file.lastPathComponent)")
+            }
+        }
+        #expect(violations.isEmpty, "P0 dropdown/hairline violations: \(violations.joined(separator: "; "))")
+
+        let controls = try readSource("Sources/CharkleApp/DesignSystem/CharkleControls.swift")
+        let canvasSupport = try readSource("Sources/CharkleCanvas/CanvasSupport.swift")
+        let inspector = try readSource("Sources/CharkleApp/Views/InspectorView.swift")
+        let pinterest = try readSource("Sources/CharkleApp/Views/Pinterest/PinterestExploreWorkspaceView.swift")
+        let syncPane = try readSource("Sources/CharkleApp/Views/Settings/SyncSettingsPane.swift")
+
+        #expect(controls.contains("struct CharkleMenuTriggerButtonStyle"))
+        #expect(controls.contains("struct CharkleDropdownChevron"))
+        #expect(CanvasSurface.hairlineWidth == 0.5)
+        #expect(canvasSupport.contains("struct CanvasMenuTriggerButtonStyle"))
+        #expect(inspector.contains("CharkleDropdownChevron("))
+        #expect(pinterest.contains("CharkleDropdownChevron("))
+        #expect(syncPane.contains("CharkleDropdownChevron("))
+    }
 }
