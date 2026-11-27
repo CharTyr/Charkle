@@ -220,6 +220,7 @@ struct LiquidGlassMorphingTabBar: View {
             if !expanded {
                 isScopeMenuOpen = false
                 isSearchFieldFocused = false
+                MobileKeyboard.dismiss()
             }
         }
     }
@@ -291,6 +292,9 @@ struct LiquidGlassMorphingTabBar: View {
                         .contentShape(Rectangle())
                         .accessibilityAddTraits(isHighlighted ? [.isButton, .isSelected] : .isButton)
                         .accessibilityLabel(tab.title)
+                        .accessibilityAction {
+                            activatePrimaryTab(tab)
+                        }
                     }
                 }
                 .padding(.horizontal, inset)
@@ -325,7 +329,7 @@ struct LiquidGlassMorphingTabBar: View {
                             isScrubbing = true
                             scrubCenterX = loc.x
                             scrubHoverTab = MobilePrimaryTab(rawValue: startIdx)
-                            MobileHaptics.light()
+                            MobileHaptics.selection()
                         }
 
                         if isScrubbing {
@@ -333,7 +337,7 @@ struct LiquidGlassMorphingTabBar: View {
                             let idx = tabIndex(at: loc.x, totalWidth: proxy.size.width, inset: inset)
                             if let hovered = MobilePrimaryTab(rawValue: idx), hovered != scrubHoverTab {
                                 scrubHoverTab = hovered
-                                MobileHaptics.light()
+                                MobileHaptics.selection()
                             }
                         }
                     }
@@ -356,22 +360,31 @@ struct LiquidGlassMorphingTabBar: View {
                             return
                         }
 
-                        let targetCompactTab: CompactTab = switch chosen {
-                        case .library: .library
-                        case .inbox: .inbox
-                        case .moodboards: .moodboards
-                        }
-                        if activeTab != targetCompactTab {
-                            MobileHaptics.light()
-                            activeTab = targetCompactTab
-                        }
-                        lastPrimaryTab = chosen
+                        activatePrimaryTab(chosen, allowLibraryRetapDrawer: false)
                     }
             )
         }
         .frame(height: 60)
         .frame(maxWidth: .infinity)
         .charkleFloatingCapsule(interactive: true)
+    }
+
+    private func activatePrimaryTab(_ chosen: MobilePrimaryTab, allowLibraryRetapDrawer: Bool = true) {
+        if allowLibraryRetapDrawer && chosen == .library && activeTab == .library {
+            MobileHaptics.light()
+            onOpenDirectoryAndFilters()
+            return
+        }
+        let targetCompactTab: CompactTab = switch chosen {
+        case .library: .library
+        case .inbox: .inbox
+        case .moodboards: .moodboards
+        }
+        if activeTab != targetCompactTab {
+            MobileHaptics.light()
+            activeTab = targetCompactTab
+        }
+        lastPrimaryTab = chosen
     }
 
     @ViewBuilder
@@ -448,13 +461,14 @@ struct LiquidGlassMorphingTabBar: View {
 
             Button {
                 MobileHaptics.light()
+                let focusToken = MobileKeyboard.dismissSequence
                 withAnimation(morphAnimation) {
                     isSearchExpanded = true
                     activeTab = .search
                 }
                 if searchScopeMode != .pinterest {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.16) {
-                        if isSearchExpanded {
+                        if isSearchExpanded && MobileKeyboard.dismissSequence == focusToken {
                             isSearchFieldFocused = true
                         }
                     }
@@ -484,6 +498,7 @@ struct LiquidGlassMorphingTabBar: View {
         Button {
             MobileHaptics.light()
             isSearchFieldFocused = false
+            MobileKeyboard.dismiss()
             withAnimation(morphAnimation) {
                 isScopeMenuOpen = false
                 isSearchExpanded = false
@@ -509,6 +524,7 @@ struct LiquidGlassMorphingTabBar: View {
         Button {
             MobileHaptics.light()
             isSearchFieldFocused = false
+            MobileKeyboard.dismiss()
             withAnimation(morphAnimation) {
                 isScopeMenuOpen = false
                 isSearchExpanded = false
@@ -583,6 +599,7 @@ struct LiquidGlassMorphingTabBar: View {
             Button {
                 MobileHaptics.light()
                 isSearchFieldFocused = false
+                MobileKeyboard.dismiss()
                 withAnimation(popoverAnimation) {
                     isScopeMenuOpen.toggle()
                 }

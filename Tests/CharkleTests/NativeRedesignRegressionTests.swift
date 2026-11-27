@@ -585,4 +585,61 @@ struct NativeRedesignRegressionTests {
         #expect(iosDetail.contains("takeSnapshot(configuration:"))
         #expect(iosDetail.contains("thumbnails.revision"))
     }
+
+    @Test("iOS scroll views dismiss keyboard across sibling search overlays and gallery uses continuous Photos-style pinch zoom")
+    func iosKeyboardDismissAndContinuousGalleryPinchContracts() throws {
+        let iosTheme = try readSource("ios/CharkleMobile/DesignSystem/MobileTheme.swift")
+        let iosTabBar = try readSource("ios/CharkleMobile/Views/LiquidGlassMorphingTabBar.swift")
+        let iosFilter = try readSource("ios/CharkleMobile/Views/FilterBarView.swift")
+        let iosSidebar = try readSource("ios/CharkleMobile/Views/SidebarNavigationView.swift")
+        let iosFolderPicker = try readSource("ios/CharkleMobile/Views/HierarchicalFolderPicker.swift")
+        let iosCapture = try readSource("ios/CharkleMobile/Views/CaptureSheetView.swift")
+        let iosGallery = try readSource("ios/CharkleMobile/Views/MasonryGalleryView.swift")
+        let iosPinterest = try readSource("ios/CharkleMobile/Views/PinterestExploreMobileView.swift")
+
+        // 1. Global sibling-safe keyboard dismissal on ScrollPhase.interacting + auto-focus race guard
+        #expect(iosTheme.contains("enum MobileKeyboard"))
+        #expect(iosTheme.contains("UIResponder.resignFirstResponder"))
+        #expect(iosTheme.contains(".scrollDismissesKeyboard(.immediately)"))
+        #expect(iosTheme.contains(".onScrollPhaseChange"))
+        #expect(iosTheme.contains("func charkleDismissKeyboardOnScroll()"))
+        #expect(iosTabBar.contains("MobileKeyboard.dismissSequence"))
+        #expect(iosFilter.contains(".charkleDismissKeyboardOnScroll()"))
+        #expect(iosSidebar.contains(".charkleDismissKeyboardOnScroll()"))
+        #expect(iosFolderPicker.contains(".charkleDismissKeyboardOnScroll()"))
+        #expect(iosCapture.contains(".charkleDismissKeyboardOnScroll()"))
+        #expect(iosGallery.contains(".charkleDismissKeyboardOnScroll()"))
+        #expect(iosPinterest.contains("MobileKeyboard.dismiss()"))
+
+        // 2. Continuous 120Hz Photos-style pinch zoom with O(1) snapshot cache & native UIScrollView bridge
+        //    (never applying viewport-normalized .scaleEffect to the entire multi-thousand-point ZStack)
+        #expect(iosGallery.contains("class MasonryLayoutCache"))
+        #expect(iosGallery.contains("class MasonryPinchZoomController"))
+        #expect(iosGallery.contains("struct GalleryScrollPinchBridge"))
+        #expect(iosGallery.contains("UIPinchGestureRecognizer"))
+        #expect(iosGallery.contains("CADisplayLink"))
+        #expect(iosGallery.contains("geo.visibleRect.minY"))
+        #expect(iosGallery.contains("log2(Double(safeScale))"))
+        #expect(iosGallery.contains("shouldRequireFailureOf"))
+        #expect(iosGallery.contains("struct GalleryViewportBucket"))
+        #expect(!iosGallery.contains(".scaleEffect(livePinchRubberScale"))
+        #expect(!iosFilter.contains(".scaleEffect(livePinchRubberScale"))
+
+        // 3. 120Hz iOS gallery scroll & preview horizontal swipe performance contracts
+        let iosThumbCache = try readSource("ios/CharkleMobile/Stores/MobileThumbnailCache.swift")
+        let iosDetail = try readSource("ios/CharkleMobile/Views/AssetDetailView.swift")
+        let iosRoot = try readSource("ios/CharkleMobile/Views/RootShellView.swift")
+
+        #expect(iosThumbCache.contains("actor ThumbnailDecodeGate"))
+        #expect(iosThumbCache.contains("preparingForDisplay()"))
+        #expect(iosThumbCache.contains("func prefetch("))
+        #expect(iosThumbCache.contains("originalCache"))
+        #expect(iosDetail.contains("LazyHStack(spacing: 0)"))
+        #expect(iosDetail.contains(".scrollTargetBehavior(.paging)"))
+        #expect(iosDetail.contains("prefetchAdjacentPreviews"))
+        #expect(iosDetail.contains("bestCachedPreviewImage"))
+        #expect(iosDetail.contains("func syncPanEnabledForCurrentZoom"))
+        #expect(iosRoot.contains("struct DetailPresentation"))
+        #expect(iosRoot.contains("struct DetailCoverTransitionHost"))
+    }
 }

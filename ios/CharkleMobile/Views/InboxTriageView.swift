@@ -17,11 +17,14 @@ struct InboxTriageView: View {
 
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var mode: Mode = .triage
     @State private var currentIndex: Int = 0
     @State private var previewImage: UIImage?
     @State private var suggestion: FolderSuggestion?
     @State private var isFolderPickerPresented: Bool = false
+    @State private var swipeDragX: CGFloat = 0
+    @State private var didCrossSwipeThreshold: Bool = false
 
     private var inboxAssets: [AssetRecord] {
         store.inboxAssets
@@ -92,12 +95,26 @@ struct InboxTriageView: View {
                 suggestion = nil
                 return
             }
+            // Immediately swap to cached preview (or placeholder) and clear stale suggestion
+            // so switching cards never flashes the previous card's image or recommended folder.
+            previewImage = store.thumbnails.bestCachedPreviewImage(for: asset.id)
+            suggestion = nil
+            swipeDragX = 0
+            didCrossSwipeThreshold = false
+
+            let loadedPreview: UIImage?
             if let preview = await store.thumbnails.loadImage(for: asset.id, tier: .preview1400) {
-                previewImage = preview
+                loadedPreview = preview
             } else {
-                previewImage = await store.thumbnails.loadImage(for: asset.id, tier: .grid520)
+                loadedPreview = await store.thumbnails.loadImage(for: asset.id, tier: .grid520)
             }
-            suggestion = try? await store.engine.suggestFolder(for: asset.id)
+            guard !Task.isCancelled else { return }
+            if let loadedPreview {
+                previewImage = loadedPreview
+            }
+            let suggested = try? await store.engine.suggestFolder(for: asset.id)
+            guard !Task.isCancelled else { return }
+            suggestion = suggested
         }
     }
 
@@ -148,8 +165,68 @@ struct InboxTriageView: View {
                         RoundedRectangle(cornerRadius: 16, style: .continuous)
                             .strokeBorder(MobileTheme.hairline(for: colorScheme), lineWidth: 0.75)
                     )
+                    .overlay(alignment: swipeDragX >= 0 ? .topLeading : .topTrailing) {
+                        if abs(swipeDragX) > 26 {
+                            let isRight = swipeDragX > 0
+                            let labelText = isRight
+                                ? (suggestion.map { "归档 → \($0.folderName)" } ?? "下一张")
+                                : "跳过"
+                            let iconName = isRight
+                                ? (suggestion != nil ? "sparkles" : "arrow.right")
+                                : "forward.end"
+                            Label(labelText, systemImage: iconName)
+                                .font(.system(size: 12.5, weight: .semibold))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 7)
+                                .background(
+                                    (isRight && suggestion != nil
+                                        ? MobileTheme.accentButtonFill(for: colorScheme)
+                                        : Color.black.opacity(0.68)),
+                                    in: Capsule()
+                                )
+                                .padding(12)
+                                .opacity(min(1, Double(abs(swipeDragX) - 26) / 64.0))
+                        }
+                    }
                 }
                 .buttonStyle(MobileTactileButtonStyle())
+                .offset(x: swipeDragX)
+                .rotationEffect(.degrees(Double(swipeDragX) / 28.0))
+                .highPriorityGesture(
+                    DragGesture(minimumDistance: 18)
+                        .onChanged { value in
+                            // Let vertical ScrollView own vertical drags
+                            guard abs(value.translation.width) > abs(value.translation.height) * 1.1 else { return }
+                            swipeDragX = value.translation.width * 0.75
+                            let crossed = abs(swipeDragX) >= 92
+                            if crossed != didCrossSwipeThreshold {
+                                didCrossSwipeThreshold = crossed
+                                if crossed {
+                                    MobileHaptics.selection()
+                                }
+                            }
+                        }
+                        .onEnded { value in
+                            let threshold: CGFloat = 92
+                            let dx = swipeDragX
+                            withAnimation(MobileMotion.accessible(MobileMotion.settleStrong, reduced: reduceMotion)) {
+                                swipeDragX = 0
+                                didCrossSwipeThreshold = false
+                            }
+                            if dx >= threshold {
+                                if let sug = suggestion {
+                                    fileAsset(asset, to: sug.folderID, folderName: sug.folderName)
+                                } else {
+                                    MobileHaptics.light()
+                                    advanceIndex()
+                                }
+                            } else if dx <= -threshold {
+                                MobileHaptics.light()
+                                advanceIndex()
+                            }
+                        }
+                )
                 .matchedTransitionSource(
                     id: PreviewZoomSourceID(origin: .inboxTriage, assetID: asset.id),
                     in: zoomNamespace
@@ -274,12 +351,23 @@ struct InboxTriageView: View {
                 // Quick actions row
                 HStack(spacing: 12) {
                     Button(role: .destructive) {
+                        let targetID = asset.id
+                        MobileHaptics.light()
                         Task {
                             await store.patchAssets(
-                                AssetBatchPatch(assetIDs: [asset.id], isTrashed: true),
-                                successToast: "已移入回收站"
+                                AssetBatchPatch(assetIDs: [targetID], isTrashed: true),
+                                successToast: "已移入回收站",
+                                actionTitle: "撤销",
+                                onAction: {
+                                    Task {
+                                        await store.patchAssets(
+                                            AssetBatchPatch(assetIDs: [targetID], isTrashed: false),
+                                            successToast: "已撤销移入回收站"
+                                        )
+                                    }
+                                }
                             )
-                            advanceIndex()
+                            currentIndex = min(currentIndex, max(0, store.inboxAssets.count - 1))
                         }
                     } label: {
                         Label("移至回收站", systemImage: "trash")
@@ -291,6 +379,7 @@ struct InboxTriageView: View {
                     .buttonStyle(MobileTactileButtonStyle())
 
                     Button {
+                        MobileHaptics.light()
                         advanceIndex()
                     } label: {
                         Label("跳过下一张", systemImage: "arrow.right")
@@ -311,14 +400,22 @@ struct InboxTriageView: View {
 
     private func fileAsset(_ asset: AssetRecord, to folderID: UUID, folderName: String) {
         MobileHaptics.success()
+        let targetID = asset.id
         Task {
             await store.patchAssets(
-                AssetBatchPatch(assetIDs: [asset.id], folderAssignment: .folder(folderID)),
-                successToast: "已归档到「\(folderName)」"
+                AssetBatchPatch(assetIDs: [targetID], folderAssignment: .folder(folderID)),
+                successToast: "已归档到「\(folderName)」",
+                actionTitle: "撤销",
+                onAction: {
+                    Task {
+                        await store.patchAssets(
+                            AssetBatchPatch(assetIDs: [targetID], folderAssignment: .inbox),
+                            successToast: "已移回收件箱"
+                        )
+                    }
+                }
             )
-            if currentIndex >= store.inboxAssets.count {
-                currentIndex = max(0, store.inboxAssets.count - 1)
-            }
+            currentIndex = min(currentIndex, max(0, store.inboxAssets.count - 1))
         }
     }
 

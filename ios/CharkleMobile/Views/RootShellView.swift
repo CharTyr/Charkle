@@ -51,14 +51,21 @@ struct RootShellView: View {
     @State private var isFolderDrawerPresented = false
     @State private var isCreateBoardSheetPresented = false
 
-    @State private var detailAsset: AssetRecord?
-    @State private var detailOrigin: PreviewZoomOrigin = .library
-    @State private var detailInitialTab: AssetDetailView.DetailInspectorTab = .info
-    @State private var detailOpenInspectorImmediately: Bool = false
-    @State private var activeDetailAssetID: UUID?
+    private struct DetailPresentation: Identifiable {
+        let id: UUID
+        let initialAsset: AssetRecord
+        let allAssets: [AssetRecord]
+        let origin: PreviewZoomOrigin
+        let initialInspectorTab: AssetDetailView.DetailInspectorTab
+        let openInspectorImmediately: Bool
+    }
+
+    @State private var detailPresentation: DetailPresentation?
 
     @State private var showNewFolderAlert = false
+    @State private var showDrawerNewFolderAlert = false
     @State private var newFolderName = ""
+    @State private var iPadSearchFocusTrigger: UInt64 = 0
 
     private var showsCompactBottomBar: Bool {
         guard horizontalSizeClass != .regular else { return false }
@@ -125,7 +132,7 @@ struct RootShellView: View {
                         openCompactSettings(jumpToSync: false)
                     },
                     onCreateFolder: {
-                        showNewFolderAlert = true
+                        showDrawerNewFolderAlert = true
                     },
                     onCreateMoodboard: {
                         isFolderDrawerPresented = false
@@ -139,50 +146,43 @@ struct RootShellView: View {
                         Button("完成") { isFolderDrawerPresented = false }
                     }
                 }
+                .alert("新建文件夹", isPresented: $showDrawerNewFolderAlert) {
+                    TextField("文件夹名称", text: $newFolderName)
+                    Button("取消", role: .cancel) { newFolderName = "" }
+                    Button("创建") {
+                        let name = newFolderName.trimmingCharacters(in: .whitespacesAndNewlines)
+                        newFolderName = ""
+                        guard !name.isEmpty else { return }
+                        let parentID = store.activeFolderIDForCapture
+                        Task { await store.createFolder(name: name, parentID: parentID) }
+                    }
+                } message: {
+                    Text("新建文件夹将通过已连接的云端后端双向同步到 Mac 与 Windows。")
+                }
             }
             .presentationDetents([.medium, .large])
         }
-        .fullScreenCover(item: $detailAsset) { asset in
-            let contextAssets: [AssetRecord] = {
-                if (detailOrigin == .inboxTriage || detailOrigin == .inboxGrid),
-                   store.inboxAssets.contains(where: { $0.id == asset.id }) {
-                    return store.inboxAssets
-                }
-                if store.assets.contains(where: { $0.id == asset.id }) {
-                    return store.assets
-                }
-                return [asset]
-            }()
-            AssetDetailView(
+        .fullScreenCover(item: $detailPresentation) { presentation in
+            DetailCoverTransitionHost(
                 store: store,
-                initialAsset: asset,
-                allAssets: contextAssets,
-                initialInspectorTab: detailInitialTab,
-                openInspectorImmediately: detailOpenInspectorImmediately,
-                onCurrentAssetChanged: { nextID in
-                    activeDetailAssetID = nextID
-                },
+                initialAsset: presentation.initialAsset,
+                allAssets: presentation.allAssets,
+                origin: presentation.origin,
+                initialInspectorTab: presentation.initialInspectorTab,
+                openInspectorImmediately: presentation.openInspectorImmediately,
+                zoomNamespace: previewZoomNamespace,
                 onFilterByColor: { hex in
-                    detailAsset = nil
+                    detailPresentation = nil
                     store.setColorFilter(hex)
                 },
                 onFilterByTag: { tag in
-                    detailAsset = nil
+                    detailPresentation = nil
                     store.selectScope(.tag(tag))
                     if horizontalSizeClass != .regular {
                         isBottomSearchExpanded = false
                         compactTab = .library
                     }
                 }
-            )
-            .navigationTransition(
-                .zoom(
-                    sourceID: PreviewZoomSourceID(
-                        origin: detailOrigin,
-                        assetID: activeDetailAssetID ?? asset.id
-                    ),
-                    in: previewZoomNamespace
-                )
             )
         }
         .alert("新建文件夹", isPresented: $showNewFolderAlert) {
@@ -259,6 +259,7 @@ struct RootShellView: View {
                             store: store,
                             isCompact: false,
                             showPhotosFloatingHeader: false,
+                            focusSearchTrigger: iPadSearchFocusTrigger,
                             zoomNamespace: previewZoomNamespace,
                             zoomOrigin: .library,
                             onOpenAsset: { openAsset($0, from: .library) },
@@ -274,6 +275,13 @@ struct RootShellView: View {
                 .toolbar {
                     if !isMoodboardScope(store.scope) && store.scope != .pinterest {
                         ToolbarItemGroup(placement: .topBarTrailing) {
+                            Button {
+                                iPadSearchFocusTrigger &+= 1
+                            } label: {
+                                Label("搜索素材", systemImage: "magnifyingglass")
+                            }
+                            .keyboardShortcut("f", modifiers: .command)
+
                             Button {
                                 Task { await store.captureFromPasteboard() }
                             } label: {
@@ -330,6 +338,7 @@ struct RootShellView: View {
                         store: store,
                         isCompact: true,
                         showPhotosFloatingHeader: true,
+                        isTabActive: compactTab == .library,
                         zoomNamespace: previewZoomNamespace,
                         zoomOrigin: .library,
                         onOpenAsset: { openAsset($0, from: .library) },
@@ -398,6 +407,7 @@ struct RootShellView: View {
                                 PinterestExploreMobileView(
                                     store: store,
                                     controller: store.pinterestController,
+                                    isTabActive: compactTab == .search && searchTabIsPinterest,
                                     onSwitchToLibrarySearch: {
                                         searchTabIsPinterest = false
                                         searchScopeMode = .all
@@ -408,6 +418,7 @@ struct RootShellView: View {
                             } else {
                                 VisualSearchTabView(
                                     store: store,
+                                    isTabActive: compactTab == .search && !searchTabIsPinterest,
                                     zoomNamespace: previewZoomNamespace,
                                     onOpenAsset: { openAsset($0, from: .visualSearch) },
                                     onFindSimilar: { openAsset($0, from: .visualSearch, inspectorTab: .similar, openInspector: true) },
@@ -626,11 +637,23 @@ struct RootShellView: View {
             UIApplication.shared.open(url)
             return
         }
-        detailOrigin = origin
-        detailInitialTab = inspectorTab
-        detailOpenInspectorImmediately = openInspector
-        activeDetailAssetID = asset.id
-        detailAsset = asset
+        let contextAssets: [AssetRecord]
+        if (origin == .inboxTriage || origin == .inboxGrid),
+           store.inboxAssets.contains(where: { $0.id == asset.id }) {
+            contextAssets = store.inboxAssets
+        } else if store.assets.contains(where: { $0.id == asset.id }) {
+            contextAssets = store.assets
+        } else {
+            contextAssets = [asset]
+        }
+        detailPresentation = DetailPresentation(
+            id: asset.id,
+            initialAsset: asset,
+            allAssets: contextAssets,
+            origin: origin,
+            initialInspectorTab: inspectorTab,
+            openInspectorImmediately: openInspector
+        )
     }
 
     // MARK: - Toast Overlay
@@ -664,7 +687,7 @@ struct RootShellView: View {
             if let actionTitle = toast.actionTitle, let onAction = toast.onAction {
                 Button(actionTitle) {
                     MobileHaptics.light()
-                    store.toast = nil
+                    store.dismissToast()
                     onAction()
                 }
                 .font(.system(size: 12.5, weight: .semibold))
@@ -678,5 +701,68 @@ struct RootShellView: View {
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
         .charkleFloatingCapsule(interactive: toast.actionTitle != nil)
+    }
+}
+
+/// Isolates the active preview asset ID inside the presented `fullScreenCover` so swiping
+/// left/right in `AssetDetailView` keeps `.navigationTransition(.zoom)` dismissal synced
+/// without re-rendering `RootShellView` or the underlying `MasonryGalleryView` on every swipe.
+private struct DetailCoverTransitionHost: View {
+    @Bindable var store: MobileAppStore
+    let initialAsset: AssetRecord
+    let allAssets: [AssetRecord]
+    let origin: PreviewZoomOrigin
+    let initialInspectorTab: AssetDetailView.DetailInspectorTab
+    let openInspectorImmediately: Bool
+    let zoomNamespace: Namespace.ID
+    let onFilterByColor: (String) -> Void
+    let onFilterByTag: (String) -> Void
+
+    @State private var activeAssetID: UUID
+
+    init(
+        store: MobileAppStore,
+        initialAsset: AssetRecord,
+        allAssets: [AssetRecord],
+        origin: PreviewZoomOrigin,
+        initialInspectorTab: AssetDetailView.DetailInspectorTab,
+        openInspectorImmediately: Bool,
+        zoomNamespace: Namespace.ID,
+        onFilterByColor: @escaping (String) -> Void,
+        onFilterByTag: @escaping (String) -> Void
+    ) {
+        self.store = store
+        self.initialAsset = initialAsset
+        self.allAssets = allAssets
+        self.origin = origin
+        self.initialInspectorTab = initialInspectorTab
+        self.openInspectorImmediately = openInspectorImmediately
+        self.zoomNamespace = zoomNamespace
+        self.onFilterByColor = onFilterByColor
+        self.onFilterByTag = onFilterByTag
+        _activeAssetID = State(initialValue: initialAsset.id)
+    }
+
+    var body: some View {
+        AssetDetailView(
+            store: store,
+            initialAsset: initialAsset,
+            allAssets: allAssets,
+            initialInspectorTab: initialInspectorTab,
+            openInspectorImmediately: openInspectorImmediately,
+            onCurrentAssetChanged: { nextID in
+                if activeAssetID != nextID {
+                    activeAssetID = nextID
+                }
+            },
+            onFilterByColor: onFilterByColor,
+            onFilterByTag: onFilterByTag
+        )
+        .navigationTransition(
+            .zoom(
+                sourceID: PreviewZoomSourceID(origin: origin, assetID: activeAssetID),
+                in: zoomNamespace
+            )
+        )
     }
 }

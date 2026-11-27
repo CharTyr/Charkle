@@ -59,6 +59,22 @@ struct PinterestInfiniteCanvasMobile: UIViewRepresentable {
         )
         uiView.handleCameraCommand(cameraCommand)
     }
+
+    static func dismantleUIView(_ uiView: PinterestSpatialUIView, coordinator: ()) {
+        uiView.teardown()
+    }
+}
+
+private final class PinterestDisplayLinkProxy: NSObject {
+    weak var target: PinterestSpatialUIView?
+
+    init(target: PinterestSpatialUIView) {
+        self.target = target
+    }
+
+    @objc func tick(_ link: CADisplayLink) {
+        target?.handleDisplayLink(link)
+    }
 }
 
 // MARK: - UIKit 120Hz Infinite 2D Canvas Host
@@ -75,10 +91,17 @@ final class PinterestSpatialUIView: UIView, UIGestureRecognizerDelegate {
             }
         }
     }
-    var isInteractionSuspended: Bool = false
+    var isInteractionSuspended: Bool = false {
+        didSet {
+            if isInteractionSuspended && !oldValue {
+                stopAnimationLoop()
+            }
+        }
+    }
     var excludedGlobalRects: [CGRect] = []
 
     private var cards: [PinterestSpatialCard] = []
+    private var firstCardID: String?
     private var lastLayoutRevision: Int = -1
     private var trayPinIDs: Set<String> = []
     private var importedPinIDs: Set<String> = []
@@ -126,9 +149,14 @@ final class PinterestSpatialUIView: UIView, UIGestureRecognizerDelegate {
     override func willMove(toWindow newWindow: UIWindow?) {
         super.willMove(toWindow: newWindow)
         if newWindow == nil {
-            displayLink?.invalidate()
-            displayLink = nil
+            teardown()
         }
+    }
+
+    func teardown() {
+        stopAnimationLoop()
+        displayLink?.invalidate()
+        displayLink = nil
     }
 
     deinit {
@@ -186,8 +214,11 @@ final class PinterestSpatialUIView: UIView, UIGestureRecognizerDelegate {
         let badgesChanged = (self.trayPinIDs != trayPinIDs) || (self.importedPinIDs != importedPinIDs)
 
         if cardsChanged {
-            let wasReset = cards.count < self.cards.count || (cards.isEmpty && !self.cards.isEmpty)
+            let nextFirstID = cards.first?.id
+            let sourceSwitched = (firstCardID != nil && nextFirstID != nil && nextFirstID != firstCardID)
+            let wasReset = cards.count < self.cards.count || (cards.isEmpty && !self.cards.isEmpty) || sourceSwitched
             self.cards = cards
+            self.firstCardID = nextFirstID
             self.lastLayoutRevision = layoutRevision
             if wasReset && bounds.width > 40 && bounds.height > 40 {
                 stopAnimationLoop()
@@ -479,7 +510,8 @@ final class PinterestSpatialUIView: UIView, UIGestureRecognizerDelegate {
 
     private func ensureDisplayLinkRunning() {
         if displayLink == nil {
-            let link = CADisplayLink(target: self, selector: #selector(handleDisplayLink(_:)))
+            let proxy = PinterestDisplayLinkProxy(target: self)
+            let link = CADisplayLink(target: proxy, selector: #selector(PinterestDisplayLinkProxy.tick(_:)))
             if #available(iOS 15.0, *) {
                 link.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 120, preferred: 120)
             }
@@ -496,7 +528,7 @@ final class PinterestSpatialUIView: UIView, UIGestureRecognizerDelegate {
         displayLink?.isPaused = true
     }
 
-    @objc private func handleDisplayLink(_ link: CADisplayLink) {
+    fileprivate func handleDisplayLink(_ link: CADisplayLink) {
         let now = CACurrentMediaTime()
 
         if let start = cameraAnimStart, let target = cameraAnimTarget {
@@ -552,6 +584,7 @@ private final class PinterestSpatialTileUIView: UIView {
     private let videoIcon = UIImageView()
 
     private var loadedURL: URL?
+    private var inFlightURL: URL?
     private var imageLoadTask: Task<Void, Never>?
     private var isDark: Bool = false
     private var accentColor: UIColor = UIColor(red: 0.165, green: 0.376, blue: 0.878, alpha: 1)
@@ -612,6 +645,7 @@ private final class PinterestSpatialTileUIView: UIView {
         imageLoadTask = nil
         pin = nil
         loadedURL = nil
+        inFlightURL = nil
         imageView.image = nil
         imageView.alpha = 0
     }
@@ -619,6 +653,7 @@ private final class PinterestSpatialTileUIView: UIView {
     func configure(pin: PinterestPin) {
         self.pin = pin
         self.loadedURL = nil
+        self.inFlightURL = nil
         self.imageLoadTask?.cancel()
         self.imageLoadTask = nil
         imageView.image = nil
@@ -695,7 +730,7 @@ private final class PinterestSpatialTileUIView: UIView {
         }
 
         let desiredURL = pin.imageURL(forRenderedWidth: renderedWidth)
-        if desiredURL != loadedURL {
+        if desiredURL != loadedURL && desiredURL != inFlightURL {
             loadImageIfNeeded(url: desiredURL, pinID: pin.id, maxPixels: renderedWidth > 360 ? 1200 : 680)
         }
     }
@@ -717,6 +752,9 @@ private final class PinterestSpatialTileUIView: UIView {
 
     private func loadImageIfNeeded(url: URL, pinID: String, maxPixels: Int) {
         if let cached = PinterestImageCache.shared.cachedImage(for: url) {
+            imageLoadTask?.cancel()
+            imageLoadTask = nil
+            inFlightURL = nil
             loadedURL = url
             imageView.image = cached
             imageView.alpha = 1
@@ -724,10 +762,14 @@ private final class PinterestSpatialTileUIView: UIView {
         }
 
         imageLoadTask?.cancel()
+        inFlightURL = url
         imageLoadTask = Task { @MainActor [weak self] in
-            guard let img = await PinterestImageCache.shared.image(for: url, maxPixelSize: maxPixels),
-                  let self,
-                  self.pin?.id == pinID else {
+            let img = await PinterestImageCache.shared.image(for: url, maxPixelSize: maxPixels)
+            guard let self else { return }
+            if self.inFlightURL == url {
+                self.inFlightURL = nil
+            }
+            guard !Task.isCancelled, let img, self.pin?.id == pinID else {
                 return
             }
             self.loadedURL = url

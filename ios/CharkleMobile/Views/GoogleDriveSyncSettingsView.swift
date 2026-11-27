@@ -23,6 +23,7 @@ struct GoogleDriveSyncSettingsView: View {
 
     @State private var editingBackend: SyncBackendProfile? = nil
     @State private var isAddingNewBackend: Bool = false
+    @State private var isHydratingFromStore: Bool = true
 
     private var hasGoogleBackend: Bool {
         store.syncConfig.resolvedBackends.contains { $0.mode == .directAPIWithGDirect || $0.mode == .gdirectMount }
@@ -550,15 +551,26 @@ struct GoogleDriveSyncSettingsView: View {
     }
 
     private func populateFromStore() {
+        isHydratingFromStore = true
         let cfg = store.syncConfig
         autoSyncInterval = cfg.autoSyncIntervalSeconds
         syncThumbnails = cfg.syncThumbnails
         syncEmbeddings = cfg.syncEmbeddings
         cacheBudgetGB = max(1.0, min(16.0, Double(store.cacheStats.budgetBytes) / 1_073_741_824.0))
+        Task { @MainActor in
+            isHydratingFromStore = false
+        }
     }
 
     private func savePreferences() {
-        var next = store.syncConfig
+        guard !isHydratingFromStore else { return }
+        let current = store.syncConfig
+        guard autoSyncInterval != current.autoSyncIntervalSeconds
+                || syncThumbnails != current.syncThumbnails
+                || syncEmbeddings != current.syncEmbeddings else {
+            return
+        }
+        var next = current
         next.autoSyncIntervalSeconds = autoSyncInterval
         next.syncThumbnails = syncThumbnails
         next.syncEmbeddings = syncEmbeddings

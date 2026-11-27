@@ -182,6 +182,7 @@ struct SidebarNavigationView: View {
             .padding(.top, 8)
             .padding(.bottom, 16)
         }
+        .charkleDismissKeyboardOnScroll()
         .background(MobileTheme.sidebarBackground(for: colorScheme))
         .safeAreaInset(edge: .top, spacing: 0) {
             quickFilterHeader

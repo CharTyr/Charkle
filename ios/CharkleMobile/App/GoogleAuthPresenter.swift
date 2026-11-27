@@ -9,12 +9,15 @@ final class GoogleAuthPresenter: NSObject, ASWebAuthenticationPresentationContex
     private var activeSession: ASWebAuthenticationSession?
 
     func present(authURL: URL, callbackScheme: String) async throws -> URL {
-        try await withCheckedThrowingContinuation { continuation in
+        guard Self.resolvePresentationAnchor() != nil else {
+            throw DriveTransportError.authenticationRequired("当前没有可用的应用窗口，请切回前台后重试。")
+        }
+        return try await withCheckedThrowingContinuation { continuation in
             let session = ASWebAuthenticationSession(
                 url: authURL,
                 callbackURLScheme: callbackScheme
             ) { [weak self] callbackURL, error in
-                MainActor.assumeIsolated {
+                Task { @MainActor [weak self] in
                     self?.activeSession = nil
                 }
                 if let callbackURL {
@@ -40,6 +43,13 @@ final class GoogleAuthPresenter: NSObject, ASWebAuthenticationPresentationContex
     }
 
     func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
+        if let anchor = Self.resolvePresentationAnchor() {
+            return anchor
+        }
+        preconditionFailure("No active UIWindowScene available for ASWebAuthenticationSession.")
+    }
+
+    private static func resolvePresentationAnchor() -> ASPresentationAnchor? {
         let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
         if let activeScene = scenes.first(where: { $0.activationState == .foregroundActive }),
            let keyWindow = activeScene.windows.first(where: \.isKeyWindow) ?? activeScene.windows.first {
@@ -51,6 +61,6 @@ final class GoogleAuthPresenter: NSObject, ASWebAuthenticationPresentationContex
         if let anyScene = scenes.first {
             return UIWindow(windowScene: anyScene)
         }
-        fatalError("No active UIWindowScene available for ASWebAuthenticationSession.")
+        return nil
     }
 }

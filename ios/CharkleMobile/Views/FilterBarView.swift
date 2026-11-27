@@ -69,6 +69,7 @@ struct MobileColorFilterPanel: View {
 
                     if activeHex != nil {
                         Button("清除色彩") {
+                            MobileKeyboard.dismiss()
                             store.setColorFilter(nil)
                         }
                         .font(.system(size: 12, weight: .semibold))
@@ -86,6 +87,7 @@ struct MobileColorFilterPanel: View {
                 ForEach(MobileTheme.filterSwatches, id: \.self) { hex in
                     let isSelected = activeHex?.caseInsensitiveCompare(hex) == .orderedSame
                     Button {
+                        MobileKeyboard.dismiss()
                         store.toggleColorFilter(hex)
                     } label: {
                         ZStack {
@@ -243,6 +245,7 @@ struct MobileColorFilterPanel: View {
     }
 
     private func commitHexDraft() {
+        MobileKeyboard.dismiss()
         let trimmed = hexDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty {
             store.setColorFilter(nil)
@@ -361,9 +364,11 @@ struct MobileActiveFilterTokensRow: View {
 struct FilterBarView: View {
     @Bindable var store: MobileAppStore
     let isCompact: Bool
+    var focusSearchTrigger: UInt64 = 0
     let onOpenFilterSheet: () -> Void
 
     @Environment(\.colorScheme) private var colorScheme
+    @FocusState private var isSearchFieldFocused: Bool
     @State private var showColorPanel = false
 
     var body: some View {
@@ -394,8 +399,12 @@ struct FilterBarView: View {
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                     .submitLabel(.search)
+                    .focused($isSearchFieldFocused)
                     .onSubmit {
                         store.submitSearch()
+                    }
+                    .onChange(of: focusSearchTrigger) { _, _ in
+                        isSearchFieldFocused = true
                     }
 
                     if !store.criteria.searchQuery.isEmpty {
@@ -651,6 +660,7 @@ struct FilterOptionsSheet: View {
                 }
             }
         }
+        .scrollDismissesKeyboard(.immediately)
         .navigationTitle("筛选与排序")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -669,6 +679,7 @@ struct FilterOptionsSheet: View {
 
 struct VisualSearchTabView: View {
     @Bindable var store: MobileAppStore
+    var isTabActive: Bool = true
     let zoomNamespace: Namespace.ID
     let onOpenAsset: (AssetRecord) -> Void
     let onFindSimilar: (AssetRecord) -> Void
@@ -687,10 +698,11 @@ struct VisualSearchTabView: View {
     @State private var isVisualFilterExpanded: Bool = false
     @State private var shareAssetURL: URL?
     @State private var singleDeleteAssetID: UUID?
+    @State private var singleMoveAsset: AssetRecord?
 
-    // Two-finger pinch zoom state matching MasonryGalleryView
+    // Two-finger pinch zoom state
     @State private var pinchBaselineScale: CGFloat = 1.0
-    @State private var livePinchRubberScale: CGFloat = 1.0
+    @State private var didDismissKeyboardForPinch: Bool = false
     @State private var activePinchLabel: String?
     @State private var pinchBadgeDismissTask: Task<Void, Never>?
 
@@ -711,7 +723,9 @@ struct VisualSearchTabView: View {
             let spacing = MobileMasonryLayout.adaptiveSpacing(for: colCount, isCompact: true)
             let cardCornerRadius = MobileMasonryLayout.adaptiveCornerRadius(for: colCount)
             let horizontalPadding: CGFloat = colCount >= 4 ? (colCount >= 5 ? 2 : 5) : 12
-            let columns = MobileMasonryLayout.distributeIntoColumns(store.assets, count: colCount)
+            let columns = isTabActive
+                ? MobileMasonryLayout.distributeIntoColumns(store.assets, count: colCount)
+                : Array(repeating: [AssetRecord](), count: colCount)
 
             ZStack(alignment: .top) {
                 ScrollView {
@@ -726,6 +740,7 @@ struct VisualSearchTabView: View {
                                     .background(MobileTheme.accentButtonFill(for: colorScheme), in: Capsule())
 
                                 Button {
+                                    MobileKeyboard.dismiss()
                                     MobileHaptics.light()
                                     onOpenPinterestSpace()
                                 } label: {
@@ -827,7 +842,10 @@ struct VisualSearchTabView: View {
                                 .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
                             Spacer()
                             if store.hasActiveFilters {
-                                Button("重置") { store.clearFilters() }
+                                Button("重置") {
+                                    MobileKeyboard.dismiss()
+                                    store.clearFilters()
+                                }
                                     .font(.system(size: 12.5, weight: .semibold))
                                     .foregroundStyle(MobileTheme.accent(for: colorScheme))
                             }
@@ -859,8 +877,14 @@ struct VisualSearchTabView: View {
                                                 isDenseOverview: colCount >= 4,
                                                 isMultiSelect: false,
                                                 isSelected: false,
-                                                onTap: { onOpenAsset(asset) },
-                                                onFindSimilar: { onFindSimilar(asset) },
+                                                onTap: {
+                                                    MobileKeyboard.dismiss()
+                                                    onOpenAsset(asset)
+                                                },
+                                                onFindSimilar: {
+                                                    MobileKeyboard.dismiss()
+                                                    onFindSimilar(asset)
+                                                },
                                                 onShareOriginal: {
                                                     Task { await shareAsset(asset) }
                                                 },
@@ -868,9 +892,14 @@ struct VisualSearchTabView: View {
                                                     singleDeleteAssetID = asset.id
                                                 },
                                                 onSelectMultiple: {
+                                                    MobileKeyboard.dismiss()
                                                     store.isMultiSelectMode = true
                                                     store.selectedAssetIDs.insert(asset.id)
-                                                    onNavigateToScope(.allItems)
+                                                    onNavigateToScope(store.scope)
+                                                },
+                                                onOpenFolderPicker: {
+                                                    MobileKeyboard.dismiss()
+                                                    singleMoveAsset = asset
                                                 }
                                             )
                                         }
@@ -878,12 +907,16 @@ struct VisualSearchTabView: View {
                                 }
                             }
                             .padding(.horizontal, horizontalPadding)
-                            .scaleEffect(livePinchRubberScale, anchor: .center)
+                            .animation(
+                                MobileMotion.accessible(MobileMotion.gestureSpring, reduced: reduceMotion),
+                                value: colCount
+                            )
                         }
                     }
                     .padding(.top, 10)
                     .padding(.bottom, 40)
                 }
+                .charkleDismissKeyboardOnScroll()
                 .background(MobileTheme.galleryGround(for: colorScheme))
                 .charkleScrollEdgeSoft(for: .bottom)
                 .simultaneousGesture(pinchColumnZoomGesture(currentWidth: proxy.size.width))
@@ -907,6 +940,29 @@ struct VisualSearchTabView: View {
                     isColorPanelExpanded = true
                 }
             }
+        }
+        .sheet(item: $singleMoveAsset) { target in
+            NavigationStack {
+                HierarchicalFolderPickerSheet(
+                    title: "移动到文件夹",
+                    folderTree: store.folderTree,
+                    currentFolderID: target.folderID,
+                    onPick: { folderID, folderName in
+                        let id = target.id
+                        singleMoveAsset = nil
+                        Task {
+                            await store.patchAssets(
+                                AssetBatchPatch(
+                                    assetIDs: [id],
+                                    folderAssignment: folderID.map { .folder($0) } ?? .inbox
+                                ),
+                                successToast: folderID == nil ? "已移回收件箱" : "已归档到「\(folderName)」"
+                            )
+                        }
+                    }
+                )
+            }
+            .presentationDetents([.medium, .large])
         }
         .sheet(isPresented: Binding(
             get: { shareAssetURL != nil },
@@ -997,6 +1053,7 @@ struct VisualSearchTabView: View {
         return ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
                 Button {
+                    MobileKeyboard.dismiss()
                     withAnimation(MobileMotion.accessible(MobileMotion.settleStrong, reduced: reduceMotion)) {
                         isColorPanelExpanded.toggle()
                     }
@@ -1034,6 +1091,7 @@ struct VisualSearchTabView: View {
                 .buttonStyle(MobileTactileButtonStyle())
 
                 Button {
+                    MobileKeyboard.dismiss()
                     withAnimation(MobileMotion.accessible(MobileMotion.settleStrong, reduced: reduceMotion)) {
                         isVisualFilterExpanded.toggle()
                     }
@@ -1065,6 +1123,7 @@ struct VisualSearchTabView: View {
                 Menu {
                     ForEach(SortOrder.allCases, id: \.self) { order in
                         Button {
+                            MobileKeyboard.dismiss()
                             store.criteria.sortBy = order
                             Task { await store.reloadAssets() }
                         } label: {
@@ -1090,6 +1149,7 @@ struct VisualSearchTabView: View {
                 }
             }
         }
+        .charkleDismissKeyboardOnScroll()
     }
 
     // MARK: - Inline Desktop-Parity Visual Filters Card
@@ -1249,6 +1309,7 @@ struct VisualSearchTabView: View {
                 HStack(spacing: 8) {
                     ForEach(store.quickJumpMatches) { match in
                         Button {
+                            MobileKeyboard.dismiss()
                             MobileHaptics.light()
                             switch match.kind {
                             case .folder:
@@ -1299,6 +1360,7 @@ struct VisualSearchTabView: View {
                     ForEach(store.tagCounts.prefix(16)) { item in
                         let active = store.criteria.tags.contains(item.name)
                         Button {
+                            MobileKeyboard.dismiss()
                             MobileHaptics.light()
                             if active {
                                 store.criteria.tags.remove(item.name)
@@ -1323,6 +1385,7 @@ struct VisualSearchTabView: View {
                     }
                 }
             }
+            .charkleDismissKeyboardOnScroll()
         }
     }
 
@@ -1340,9 +1403,11 @@ struct VisualSearchTabView: View {
     private func pinchColumnZoomGesture(currentWidth: CGFloat) -> some Gesture {
         MagnifyGesture()
             .onChanged { value in
+                if !didDismissKeyboardForPinch {
+                    didDismissKeyboardForPinch = true
+                    MobileKeyboard.dismiss()
+                }
                 let relative = value.magnification / max(0.01, pinchBaselineScale)
-                let rubber = 1.0 + (relative - 1.0) * 0.14
-                livePinchRubberScale = max(0.92, min(1.08, rubber))
 
                 let current = MobileMasonryLayout.resolvedColumnCount(
                     for: currentWidth,
@@ -1350,27 +1415,27 @@ struct VisualSearchTabView: View {
                     override: store.columnCountOverride
                 )
 
-                if relative <= 0.78, current < 5 {
+                if relative <= 0.86, current < 5 {
                     let next = current + 1
-                    store.columnCountOverride = next
+                    withAnimation(MobileMotion.accessible(MobileMotion.gestureSpring, reduced: reduceMotion)) {
+                        store.columnCountOverride = next
+                    }
                     pinchBaselineScale = value.magnification
-                    livePinchRubberScale = 1.0
-                    MobileHaptics.light()
+                    MobileHaptics.selection()
                     flashPinchBadge("\(next) 列")
-                } else if relative >= 1.26, current > 1 {
+                } else if relative >= 1.15, current > 1 {
                     let next = current - 1
-                    store.columnCountOverride = next
+                    withAnimation(MobileMotion.accessible(MobileMotion.gestureSpring, reduced: reduceMotion)) {
+                        store.columnCountOverride = next
+                    }
                     pinchBaselineScale = value.magnification
-                    livePinchRubberScale = 1.0
-                    MobileHaptics.light()
+                    MobileHaptics.selection()
                     flashPinchBadge("\(next) 列")
                 }
             }
             .onEnded { _ in
                 pinchBaselineScale = 1.0
-                withAnimation(MobileMotion.accessible(MobileMotion.gestureSpring, reduced: reduceMotion)) {
-                    livePinchRubberScale = 1.0
-                }
+                didDismissKeyboardForPinch = false
             }
     }
 

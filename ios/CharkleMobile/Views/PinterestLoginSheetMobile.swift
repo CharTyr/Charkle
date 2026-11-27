@@ -21,6 +21,9 @@ struct PinterestLoginSheetMobile: View {
     @State private var isVerifying: Bool = false
     @State private var statusHint: String? = nil
     @State private var webCommand = WebCommand()
+    @State private var cookieRetryGeneration: Int = 0
+    @State private var postPopupVerifyTask: Task<Void, Never>?
+    @State private var autoVerifyTask: Task<Void, Never>?
 
     struct WebCommand: Equatable {
         enum Action { case none, reload, goBack, closePopup }
@@ -55,6 +58,7 @@ struct PinterestLoginSheetMobile: View {
                 ZStack(alignment: .top) {
                     PinterestLoginWebViewMobile(
                         command: webCommand,
+                        cookieRetryGeneration: cookieRetryGeneration,
                         onURLChanged: { url in
                             if let host = url.host(), !host.isEmpty {
                                 currentHost = host
@@ -132,6 +136,12 @@ struct PinterestLoginSheetMobile: View {
                 }
             }
         }
+        .onDisappear {
+            postPopupVerifyTask?.cancel()
+            postPopupVerifyTask = nil
+            autoVerifyTask?.cancel()
+            autoVerifyTask = nil
+        }
     }
 
     private func maybeAutoVerify(for url: URL) {
@@ -149,11 +159,13 @@ struct PinterestLoginSheetMobile: View {
     }
 
     private func schedulePostPopupVerify() {
-        Task {
+        postPopupVerifyTask?.cancel()
+        postPopupVerifyTask = Task {
             for delayMs in [600, 1400, 2600] {
                 try? await Task.sleep(for: .milliseconds(delayMs))
-                guard !isVerifying else { return }
+                guard !Task.isCancelled, !isVerifying else { return }
                 let cookies = await WKWebsiteDataStore.default().httpCookieStore.allCookies()
+                guard !Task.isCancelled else { return }
                 let hasAuth = cookies.contains {
                     $0.domain.lowercased().contains("pinterest") && $0.name == "_auth" && $0.value == "1"
                 }
@@ -162,6 +174,7 @@ struct PinterestLoginSheetMobile: View {
                     let ok = await onVerifySession()
                     isVerifying = false
                     if ok { return }
+                    cookieRetryGeneration &+= 1
                 }
             }
         }
@@ -169,16 +182,22 @@ struct PinterestLoginSheetMobile: View {
 
     private func triggerAutoVerifyFromCookies() {
         guard !isVerifying else { return }
-        Task {
+        autoVerifyTask?.cancel()
+        autoVerifyTask = Task {
             let cookies = await WKWebsiteDataStore.default().httpCookieStore.allCookies()
+            guard !Task.isCancelled else { return }
             let hasAuth = cookies.contains {
                 $0.domain.lowercased().contains("pinterest") && $0.name == "_auth" && $0.value == "1"
             }
-            guard hasAuth else { return }
+            guard hasAuth else {
+                cookieRetryGeneration &+= 1
+                return
+            }
             isVerifying = true
             let ok = await onVerifySession()
             isVerifying = false
             if !ok {
+                cookieRetryGeneration &+= 1
                 statusHint = "若已完成登录，可点击右上角「已完成」同步会话。"
             }
         }
@@ -192,6 +211,7 @@ struct PinterestLoginSheetMobile: View {
             let ok = await onVerifySession()
             isVerifying = false
             if !ok {
+                cookieRetryGeneration &+= 1
                 statusHint = "暂未检测到已登录的 Pinterest 会话，请先在网页内完成登录。"
             }
         }
@@ -200,6 +220,7 @@ struct PinterestLoginSheetMobile: View {
 
 private struct PinterestLoginWebViewMobile: UIViewRepresentable {
     let command: PinterestLoginSheetMobile.WebCommand
+    let cookieRetryGeneration: Int
     let onURLChanged: (URL) -> Void
     let onLoadingChanged: (Bool) -> Void
     let onPopupStateChanged: (Bool) -> Void
@@ -234,6 +255,10 @@ private struct PinterestLoginWebViewMobile: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: UIView, context: Context) {
+        if context.coordinator.lastRetryGeneration != cookieRetryGeneration {
+            context.coordinator.lastRetryGeneration = cookieRetryGeneration
+            context.coordinator.resetAuthCookieTrigger()
+        }
         guard context.coordinator.lastCommandID != command.id else { return }
         context.coordinator.lastCommandID = command.id
         switch command.action {
@@ -251,6 +276,13 @@ private struct PinterestLoginWebViewMobile: UIViewRepresentable {
     static func dismantleUIView(_ uiView: UIView, coordinator: Coordinator) {
         coordinator.stopObservingCookies()
         coordinator.closeAllPopups()
+        if let primary = coordinator.primaryWebView {
+            primary.stopLoading()
+            primary.navigationDelegate = nil
+            primary.uiDelegate = nil
+            primary.removeFromSuperview()
+        }
+        coordinator.primaryWebView = nil
     }
 
     @MainActor
@@ -264,7 +296,12 @@ private struct PinterestLoginWebViewMobile: UIViewRepresentable {
         weak var primaryWebView: WKWebView?
         var popupStack: [WKWebView] = []
         var lastCommandID: UUID?
+        var lastRetryGeneration: Int = 0
         private var didFireAuthCookieCallback = false
+
+        func resetAuthCookieTrigger() {
+            didFireAuthCookieCallback = false
+        }
 
         var activeWebView: WKWebView? {
             popupStack.last ?? primaryWebView

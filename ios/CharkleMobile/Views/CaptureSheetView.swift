@@ -20,6 +20,7 @@ struct CaptureSheetView: View {
     @State private var isCameraPresented = false
     @State private var autoExtractSocialMedia = false
     @State private var isFolderPickerPresented = false
+    @State private var hasInitializedFolder = false
 
     var body: some View {
         NavigationStack {
@@ -231,6 +232,7 @@ struct CaptureSheetView: View {
                 }
                 .padding(16)
             }
+            .charkleDismissKeyboardOnScroll()
             .background(MobileTheme.galleryGround(for: colorScheme))
             .navigationTitle("采集素材")
             .navigationBarTitleDisplayMode(.inline)
@@ -240,6 +242,8 @@ struct CaptureSheetView: View {
                 }
             }
             .onAppear {
+                guard !hasInitializedFolder else { return }
+                hasInitializedFolder = true
                 selectedFolderID = store.activeFolderIDForCapture
             }
             .onChange(of: photoItems) { _, items in
@@ -310,21 +314,33 @@ struct CaptureSheetView: View {
         let tempDir = FileManager.default.temporaryDirectory
             .appending(path: "CharklePhotoImports-\(UUID().uuidString)", directoryHint: .isDirectory)
         try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: tempDir) }
+        var movieTempURLs: [URL] = []
+        defer {
+            try? FileManager.default.removeItem(at: tempDir)
+            for movieURL in movieTempURLs {
+                try? FileManager.default.removeItem(at: movieURL)
+            }
+        }
 
         for (index, item) in items.enumerated() {
-            if let data = try? await item.loadTransferable(type: Data.self) {
-                let isVideo = item.supportedContentTypes.contains(where: { $0.conforms(to: .movie) })
-                if isVideo {
-                    let fileURL = tempDir.appending(path: "video-\(index + 1).mov")
+            let isVideo = item.supportedContentTypes.contains(where: { $0.conforms(to: .movie) })
+            if isVideo {
+                if let movie = try? await item.loadTransferable(type: TransferredMovieFile.self) {
+                    movieTempURLs.append(movie.url)
+                    inputs.append(.fileURL(movie.url))
+                    continue
+                }
+                if let data = try? await item.loadTransferable(type: Data.self) {
+                    let ext = item.supportedContentTypes.first?.preferredFilenameExtension ?? "mov"
+                    let fileURL = tempDir.appending(path: "video-\(index + 1).\(ext)")
                     if (try? data.write(to: fileURL, options: .atomic)) != nil {
                         inputs.append(.fileURL(fileURL))
                     }
-                } else {
-                    let ext = item.supportedContentTypes.first?.preferredFilenameExtension ?? "jpg"
-                    let name = "相册素材-\(Int(Date().timeIntervalSince1970))-\(index + 1).\(ext)"
-                    inputs.append(.imageData(data, suggestedName: name, sourceURL: nil))
                 }
+            } else if let data = try? await item.loadTransferable(type: Data.self) {
+                let ext = item.supportedContentTypes.first?.preferredFilenameExtension ?? "jpg"
+                let name = "相册素材-\(Int(Date().timeIntervalSince1970))-\(index + 1).\(ext)"
+                inputs.append(.imageData(data, suggestedName: name, sourceURL: nil))
             }
         }
         photoItems = []
@@ -363,6 +379,21 @@ struct CaptureSheetView: View {
         }
         if didImportAny {
             dismiss()
+        }
+    }
+}
+
+/// Streams picked videos directly via `FileRepresentation` instead of buffering the entire video into RAM.
+private nonisolated struct TransferredMovieFile: Transferable, Sendable {
+    let url: URL
+
+    static var transferRepresentation: some TransferRepresentation {
+        FileRepresentation(importedContentType: .movie) { received in
+            let ext = received.file.pathExtension.isEmpty ? "mov" : received.file.pathExtension
+            let copyURL = FileManager.default.temporaryDirectory
+                .appending(path: "CharklePickedVideo-\(UUID().uuidString).\(ext)")
+            try FileManager.default.copyItem(at: received.file, to: copyURL)
+            return Self(url: copyURL)
         }
     }
 }

@@ -146,6 +146,7 @@ struct HierarchicalFolderPickerSheet: View {
                 .padding(.horizontal, 16)
                 .padding(.vertical, 14)
             }
+            .charkleDismissKeyboardOnScroll()
         }
         .background(MobileTheme.galleryGround(for: colorScheme).ignoresSafeArea())
         .navigationTitle(title)

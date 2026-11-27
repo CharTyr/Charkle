@@ -67,7 +67,7 @@ struct MoodboardsListView: View {
                     .padding(14)
                 }
                 .refreshable {
-                    if store.isGoogleDriveConnected {
+                    if store.hasConnectedCloudBackend {
                         await store.syncNow(quiet: false)
                     } else {
                         await store.reloadAll()

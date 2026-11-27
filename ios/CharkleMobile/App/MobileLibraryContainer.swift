@@ -13,9 +13,17 @@ public nonisolated enum MobileLibraryContainer {
     public static let deepLinkScheme = "charkle-mobile"
     public static let pasteboardShareTypeIdentifier = "com.charkle.mobile.pending-share-v1"
 
+    /// Process-lifetime cached App Group container URL so hot callers (`reloadAll`, `sharedFoldersIndexURL`,
+    /// `listPendingCaptureFiles`) never repeatedly read and parse `embedded.mobileprovision` on MainActor.
+    private static let cachedSharedAppGroupContainerURL: URL? = resolveSharedAppGroupContainerURL()
+
     /// Resolves a genuine OS-granted shared App Group container URL, or `nil` when no App Group
     /// entitlement is active for this process (never falls back to the process-private sandbox).
     public static func sharedAppGroupContainerURL() -> URL? {
+        cachedSharedAppGroupContainerURL
+    }
+
+    private static func resolveSharedAppGroupContainerURL() -> URL? {
         let fm = FileManager.default
         for candidate in candidateAppGroupIdentifiers() {
             if let url = fm.containerURL(forSecurityApplicationGroupIdentifier: candidate) {

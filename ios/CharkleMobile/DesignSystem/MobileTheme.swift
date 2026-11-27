@@ -295,6 +295,36 @@ struct CharkleScrollEdgeSoftModifier: ViewModifier {
     }
 }
 
+/// Resigns active first responder across the key window (including sibling overlays such as
+/// the bottom Liquid Glass search capsule or pinned sidebar/picker search bars) the instant
+/// a user begins dragging a scrollable surface.
+@MainActor
+enum MobileKeyboard {
+    private(set) static var dismissSequence: UInt64 = 0
+
+    static func dismiss() {
+        dismissSequence &+= 1
+        UIApplication.shared.sendAction(
+            #selector(UIResponder.resignFirstResponder),
+            to: nil,
+            from: nil,
+            for: nil
+        )
+    }
+}
+
+private struct CharkleDismissKeyboardOnScrollModifier: ViewModifier {
+    func body(content: Content) -> some View {
+        content
+            .scrollDismissesKeyboard(.immediately)
+            .onScrollPhaseChange { _, newPhase in
+                if newPhase == .interacting {
+                    MobileKeyboard.dismiss()
+                }
+            }
+    }
+}
+
 extension View {
     func charkleFloatingCapsule(interactive: Bool = true, tint: Color? = nil) -> some View {
         modifier(CharkleFloatingSurfaceModifier(shape: Capsule(), interactive: interactive, tint: tint))
@@ -321,6 +351,10 @@ extension View {
     func charkleScrollEdgeSoft(for edges: Edge.Set = .top) -> some View {
         modifier(CharkleScrollEdgeSoftModifier(edges: edges))
     }
+
+    func charkleDismissKeyboardOnScroll() -> some View {
+        modifier(CharkleDismissKeyboardOnScrollModifier())
+    }
 }
 
 struct MobileTactileButtonStyle: ButtonStyle {
@@ -335,37 +369,50 @@ struct MobileTactileButtonStyle: ButtonStyle {
 }
 
 enum MobileHaptics {
+    private static let lightGenerator = UIImpactFeedbackGenerator(style: .light)
+    private static let mediumGenerator = UIImpactFeedbackGenerator(style: .medium)
+    private static let selectionGenerator = UISelectionFeedbackGenerator()
+    private static let notificationGenerator = UINotificationFeedbackGenerator()
+
     static func light() {
-        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        lightGenerator.impactOccurred()
     }
 
     static func medium() {
-        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        mediumGenerator.impactOccurred()
+    }
+
+    static func selection() {
+        selectionGenerator.selectionChanged()
     }
 
     static func success() {
-        UINotificationFeedbackGenerator().notificationOccurred(.success)
+        notificationGenerator.notificationOccurred(.success)
     }
 
     static func warning() {
-        UINotificationFeedbackGenerator().notificationOccurred(.warning)
+        notificationGenerator.notificationOccurred(.warning)
     }
 
     static func error() {
-        UINotificationFeedbackGenerator().notificationOccurred(.error)
+        notificationGenerator.notificationOccurred(.error)
     }
 }
 
 enum MobileFormatters {
+    private static let relativeDateFormatter: RelativeDateTimeFormatter = {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.locale = Locale(identifier: "zh_CN")
+        formatter.unitsStyle = .short
+        return formatter
+    }()
+
     static func byteCount(_ bytes: Int64) -> String {
         ByteCountFormatter.string(fromByteCount: max(0, bytes), countStyle: .file)
     }
 
     static func relativeDate(_ date: Date) -> String {
-        let formatter = RelativeDateTimeFormatter()
-        formatter.locale = Locale(identifier: "zh_CN")
-        formatter.unitsStyle = .short
-        return formatter.localizedString(for: date, relativeTo: Date())
+        relativeDateFormatter.localizedString(for: date, relativeTo: Date())
     }
 }
 

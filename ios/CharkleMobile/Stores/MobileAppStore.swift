@@ -62,9 +62,15 @@ final class MobileAppStore {
 
     // MARK: - Navigation & Library State
     var scope: MobileScope = .allItems
-    var assets: [AssetRecord] = []
-    var inboxAssets: [AssetRecord] = []
-    var folders: [FolderRecord] = []
+    var assets: [AssetRecord] = [] {
+        didSet { assetsMutationVersion &+= 1 }
+    }
+    var inboxAssets: [AssetRecord] = [] {
+        didSet { assetsMutationVersion &+= 1 }
+    }
+    var folders: [FolderRecord] = [] {
+        didSet { rebuildFolderCaches() }
+    }
     var smartFolders: [SmartFolderRecord] = []
     var boards: [MoodboardSummary] = []
     var tagCounts: [TagCount] = []
@@ -74,6 +80,12 @@ final class MobileAppStore {
     var hasCompletedInitialLoad: Bool = false
     var hasBootstrapped: Bool = false
 
+    @ObservationIgnored
+    var assetsMutationVersion: UInt64 = 0
+    @ObservationIgnored
+    private var cachedFolderTree: [FolderHierarchyNode] = []
+    @ObservationIgnored
+    private var cachedFlattenedFolders: [FolderHierarchyNode] = []
     @ObservationIgnored
     private var reloadAssetsGeneration: UInt64 = 0
     @ObservationIgnored
@@ -157,11 +169,51 @@ final class MobileAppStore {
     // MARK: - Derived Helpers
 
     var folderTree: [FolderHierarchyNode] {
-        FolderHierarchyNode.buildTree(from: folders)
+        _ = folders
+        return cachedFolderTree
     }
 
     var flattenedFolders: [FolderHierarchyNode] {
-        FolderHierarchyNode.flattened(from: folders)
+        _ = folders
+        return cachedFlattenedFolders
+    }
+
+    private func rebuildFolderCaches() {
+        let tree = FolderHierarchyNode.buildTree(from: folders)
+        cachedFolderTree = tree
+        var flat: [FolderHierarchyNode] = []
+        flat.reserveCapacity(folders.count)
+        func append(_ nodes: [FolderHierarchyNode]) {
+            for node in nodes {
+                flat.append(node)
+                if !node.children.isEmpty {
+                    append(node.children)
+                }
+            }
+        }
+        append(tree)
+        cachedFlattenedFolders = flat
+    }
+
+    /// Instant live asset lookup across current library scope and Inbox so Quick Look & Inspector
+    /// never display stale snapshots after ratings, tags, folder moves, or EXIF hydration.
+    func liveAsset(id: UUID) -> AssetRecord? {
+        if let hit = assets.first(where: { $0.id == id }) {
+            return hit
+        }
+        if let hit = inboxAssets.first(where: { $0.id == id }) {
+            return hit
+        }
+        return nil
+    }
+
+    func applyHydratedAsset(_ updated: AssetRecord) {
+        if let idx = assets.firstIndex(where: { $0.id == updated.id }) {
+            assets[idx] = updated
+        }
+        if let idx = inboxAssets.firstIndex(where: { $0.id == updated.id }) {
+            inboxAssets[idx] = updated
+        }
     }
 
     var currentScopeTitle: String {
@@ -279,7 +331,10 @@ final class MobileAppStore {
     private func drainPasteboardShareEnvelopeIfPresent() async {
         let pb = UIPasteboard.general
         let uti = MobileLibraryContainer.pasteboardShareTypeIdentifier
-        guard let rawData = pb.data(forPasteboardType: uti),
+        // Inspect UTI metadata first without reading contents so resuming from other apps
+        // never triggers a spurious iOS "Charkle would like to paste" permission banner.
+        guard pb.contains(pasteboardTypes: [uti]),
+              let rawData = pb.data(forPasteboardType: uti),
               let envelope = try? JSONDecoder().decode(PasteboardShareEnvelope.self, from: rawData) else {
             return
         }
@@ -809,6 +864,13 @@ final class MobileAppStore {
                 colorHex: node.folder.colorHex
             )
         }
+        Task(priority: .utility) {
+            await Self.writeSharedFoldersSnapshotOffMain(summaries)
+        }
+    }
+
+    @concurrent
+    private static func writeSharedFoldersSnapshotOffMain(_ summaries: [SharedFolderSummary]) async {
         MobileLibraryContainer.saveSharedFoldersSnapshot(summaries)
     }
 
@@ -1272,6 +1334,9 @@ final class MobileAppStore {
             } else {
                 showToast("已将当前画面设为素材封面", tone: .success)
             }
+            if hasConnectedCloudBackend {
+                Task { await self.syncNow(quiet: true) }
+            }
             return updated
         } catch {
             showToast("更新封面失败：\(error.localizedDescription)", tone: .error)
@@ -1419,7 +1484,12 @@ final class MobileAppStore {
 
     // MARK: - Organize & Edit
 
-    func patchAssets(_ patch: AssetBatchPatch, successToast: String? = nil) async {
+    func patchAssets(
+        _ patch: AssetBatchPatch,
+        successToast: String? = nil,
+        actionTitle: String? = nil,
+        onAction: (() -> Void)? = nil
+    ) async {
         do {
             let updated = try await engine.updateAssets(patch)
             let updatedByID = Dictionary(uniqueKeysWithValues: updated.map { ($0.id, $0) })
@@ -1428,18 +1498,43 @@ final class MobileAppStore {
                     assets[idx] = fresh
                 }
             }
-            await reloadAll()
+            for idx in inboxAssets.indices {
+                if let fresh = updatedByID[inboxAssets[idx].id] {
+                    inboxAssets[idx] = fresh
+                }
+            }
+            if requiresFullReload(for: patch) {
+                await reloadAll()
+            } else if patch.pinnedOffline != nil {
+                cacheStats = await engine.cacheStats()
+            }
             if let successToast {
                 MobileHaptics.light()
-                showToast(successToast, tone: .success)
+                showToast(successToast, tone: .success, actionTitle: actionTitle, onAction: onAction)
             }
-            if isGoogleDriveConnected {
+            if hasConnectedCloudBackend {
                 Task { await self.syncNow(quiet: true) }
             }
         } catch {
             MobileHaptics.error()
             showToast("更新失败：\(error.localizedDescription)", tone: .error)
         }
+    }
+
+    private func requiresFullReload(for patch: AssetBatchPatch) -> Bool {
+        if patch.folderAssignment != .unchanged { return true }
+        if patch.isTrashed != nil { return true }
+        if !patch.addTags.isEmpty || !patch.removeTags.isEmpty || patch.acceptSuggestedTags { return true }
+        if case .smartFolder = scope { return true }
+        if patch.rating != nil && (criteria.minRating > 0 || criteria.sortBy == .ratingDesc) { return true }
+        if patch.pinnedOffline != nil && criteria.onlyPinnedOffline { return true }
+        if patch.title != nil && (criteria.sortBy == .nameAsc || !criteria.searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) {
+            return true
+        }
+        if patch.notes != nil && !criteria.searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return true
+        }
+        return false
     }
 
     func permanentlyDelete(ids: [UUID]) async {
@@ -1453,7 +1548,7 @@ final class MobileAppStore {
             await reloadAll()
             MobileHaptics.warning()
             showToast("已永久删除 \(ids.count) 项素材", tone: .info)
-            if isGoogleDriveConnected || !syncConfig.enabledCloudBackends.isEmpty {
+            if hasConnectedCloudBackend {
                 Task { await self.syncNow(quiet: true) }
             }
         } catch {
@@ -1470,7 +1565,7 @@ final class MobileAppStore {
             await reloadAll()
             MobileHaptics.success()
             showToast("已创建文件夹「\(folder.name)」", tone: .success)
-            if isGoogleDriveConnected || !syncConfig.enabledCloudBackends.isEmpty {
+            if hasConnectedCloudBackend {
                 Task { await self.syncNow(quiet: true) }
             }
         } catch {
@@ -1486,7 +1581,7 @@ final class MobileAppStore {
             }
             await reloadAll()
             showToast("已删除文件夹，素材已移回收件箱", tone: .info)
-            if isGoogleDriveConnected || !syncConfig.enabledCloudBackends.isEmpty {
+            if hasConnectedCloudBackend {
                 Task { await self.syncNow(quiet: true) }
             }
         } catch {
@@ -1690,7 +1785,7 @@ final class MobileAppStore {
             await reloadAll()
             MobileHaptics.success()
             showToast("已创建情绪板「\(saved.title)」", tone: .success)
-            if isGoogleDriveConnected {
+            if hasConnectedCloudBackend {
                 Task { await self.syncNow(quiet: true) }
             }
             return saved
@@ -1720,7 +1815,7 @@ final class MobileAppStore {
             await reloadAll()
             MobileHaptics.success()
             showToast("已智能生成情绪板「\(saved.title)」", tone: .success)
-            if isGoogleDriveConnected {
+            if hasConnectedCloudBackend {
                 Task { await self.syncNow(quiet: true) }
             }
             return saved
@@ -1744,7 +1839,7 @@ final class MobileAppStore {
             if !quiet {
                 showToast("情绪板已保存", tone: .success)
             }
-            if isGoogleDriveConnected {
+            if hasConnectedCloudBackend {
                 Task { await self.syncNow(quiet: true) }
             }
             return saved
@@ -1763,7 +1858,7 @@ final class MobileAppStore {
             await reloadAll()
             MobileHaptics.warning()
             showToast("已删除情绪板", tone: .info)
-            if isGoogleDriveConnected {
+            if hasConnectedCloudBackend {
                 Task { await self.syncNow(quiet: true) }
             }
         } catch {
@@ -1844,26 +1939,56 @@ final class MobileAppStore {
             padding: 44,
             darkAppearance: darkAppearance
         )
+        let safeTitle = document.title
+            .replacingOccurrences(of: "/", with: "-")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let fileName = (safeTitle.isEmpty ? "Charkle-Moodboard" : safeTitle) + ".png"
+        let outURL = FileManager.default.temporaryDirectory.appending(path: fileName)
+        let result = await Self.renderBoardPNGOffMain(
+            document: document,
+            assetsByID: assetsByID,
+            thumbMap: thumbMap,
+            options: options,
+            outURL: outURL
+        )
+        switch result {
+        case .success(let url):
+            return url
+        case .failure(let error):
+            showToast(error.localizedDescription, tone: .error)
+            return nil
+        }
+    }
+
+    @concurrent
+    private static func renderBoardPNGOffMain(
+        document: MoodboardDocument,
+        assetsByID: [UUID: AssetRecord],
+        thumbMap: [UUID: URL],
+        options: BoardImageRenderer.RenderOptions,
+        outURL: URL
+    ) async -> Result<URL, Error> {
         guard let pngData = BoardImageRenderer.renderPNG(
             document: document,
             assetsByID: assetsByID,
             thumbnailURL: { thumbMap[$0] },
             options: options
         ) else {
-            showToast("导出情绪板图片失败", tone: .error)
-            return nil
+            return .failure(NSError(
+                domain: "com.charkle.mobile.board",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "导出情绪板图片失败"]
+            ))
         }
-        let safeTitle = document.title
-            .replacingOccurrences(of: "/", with: "-")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        let fileName = (safeTitle.isEmpty ? "Charkle-Moodboard" : safeTitle) + ".png"
-        let outURL = FileManager.default.temporaryDirectory.appending(path: fileName)
         do {
             try pngData.write(to: outURL, options: .atomic)
-            return outURL
+            return .success(outURL)
         } catch {
-            showToast("写入导出文件失败：\(error.localizedDescription)", tone: .error)
-            return nil
+            return .failure(NSError(
+                domain: "com.charkle.mobile.board",
+                code: 2,
+                userInfo: [NSLocalizedDescriptionKey: "写入导出文件失败：\(error.localizedDescription)"]
+            ))
         }
     }
 
@@ -2229,13 +2354,21 @@ final class MobileAppStore {
         withAnimation(MobileMotion.enterSm) {
             toast = MobileToast(message: message, tone: tone, actionTitle: actionTitle, onAction: onAction)
         }
-        let durationSeconds: Double = actionTitle != nil ? 4.5 : 3.0
+        let durationSeconds: Double = actionTitle != nil ? 5.2 : 3.0
         toastDismissTask = Task {
             try? await Task.sleep(for: .seconds(durationSeconds))
             guard !Task.isCancelled else { return }
             withAnimation(MobileMotion.exitSm) {
                 toast = nil
             }
+        }
+    }
+
+    func dismissToast() {
+        toastDismissTask?.cancel()
+        toastDismissTask = nil
+        withAnimation(MobileMotion.exitSm) {
+            toast = nil
         }
     }
 

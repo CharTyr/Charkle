@@ -1,3 +1,4 @@
+import ImageIO
 import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
@@ -28,6 +29,7 @@ final class ShareViewController: UIViewController {
                 self?.extensionContext?.completeRequest(returningItems: nil)
             },
             onCancel: { [weak self] in
+                model.cleanupStaging()
                 self?.extensionContext?.cancelRequest(
                     withError: NSError(domain: "com.charkle.mobile.share", code: 0)
                 )
@@ -128,6 +130,10 @@ private final class ShareExtensionViewModel {
         self.tempStagingDir = staging
     }
 
+    deinit {
+        try? FileManager.default.removeItem(at: tempStagingDir)
+    }
+
     func extractSharedItems() async {
         isExtracting = true
         defer { isExtracting = false }
@@ -138,13 +144,21 @@ private final class ShareExtensionViewModel {
         }
 
         var rawCollected: [ExtractedShareItem] = []
+        var hasPreviewImage = false
         for extItem in extensionItems {
             let itemTitle = extItem.attributedTitle?.string.trimmingCharacters(in: .whitespacesAndNewlines)
             let providers = extItem.attachments ?? []
             var extractedFromProviders = false
 
             for provider in providers {
-                if let extracted = await loadItem(from: provider, fallbackTitle: itemTitle) {
+                if let extracted = await loadItem(
+                    from: provider,
+                    fallbackTitle: itemTitle,
+                    generatePreview: !hasPreviewImage
+                ) {
+                    if extracted.previewImage != nil {
+                        hasPreviewImage = true
+                    }
                     rawCollected.append(extracted)
                     extractedFromProviders = true
                 }
@@ -248,6 +262,9 @@ private final class ShareExtensionViewModel {
             // Path B: Sideloaded / re-signed IPA without active App Group -> NEVER drop into private extension sandbox.
             // Hand off directly to CharkleMobile via `charkle-mobile://import` (inline URL for links/text, or
             // local-only short-lived pasteboard envelope for images/files/large batches).
+            // Bound total binary payload inside Share Extension's ~120 MB Jetsam ceiling.
+            let maxPasteboardBinaryBytes = 12 * 1024 * 1024
+            var totalBinaryBytes = 0
             var payloads: [PendingSharePayload] = []
             var embeddedFiles: [String: Data] = [:]
             var hasBinaryFiles = false
@@ -255,9 +272,26 @@ private final class ShareExtensionViewModel {
             for item in items {
                 switch item.source {
                 case .stagedFile(let sourceURL):
-                    let ext = sourceURL.pathExtension.isEmpty ? "bin" : sourceURL.pathExtension
-                    let stagedName = "media-\(UUID().uuidString).\(ext)"
-                    let data = try Data(contentsOf: sourceURL)
+                    let originalExt = sourceURL.pathExtension.isEmpty ? "bin" : sourceURL.pathExtension
+                    let fileSize = (try? sourceURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+                    let data: Data
+                    let finalExt: String
+                    if fileSize > 2_500_000, let compactJPEG = Self.downscaledJPEGData(from: sourceURL, maxPixelSize: 2400) {
+                        data = compactJPEG
+                        finalExt = "jpg"
+                    } else if fileSize > maxPasteboardBinaryBytes {
+                        errorMessage = "文件体积过大（\(ByteCountFormatter.string(fromByteCount: Int64(fileSize), countStyle: .file))），无 App Group 环境下请直接在 Charkle 应用内「采集 → 相册 / 文件」导入。"
+                        return false
+                    } else {
+                        data = try Data(contentsOf: sourceURL)
+                        finalExt = originalExt
+                    }
+                    let stagedName = "media-\(UUID().uuidString).\(finalExt)"
+                    totalBinaryBytes += data.count
+                    if totalBinaryBytes > maxPasteboardBinaryBytes {
+                        errorMessage = "本次批量分享体积超出分享面板内存上限，请分批分享或直接在 Charkle 内导入。"
+                        return false
+                    }
                     embeddedFiles[stagedName] = data
                     hasBinaryFiles = true
                     payloads.append(PendingSharePayload(
@@ -269,8 +303,22 @@ private final class ShareExtensionViewModel {
                         targetFolderID: selectedFolderID
                     ))
 
-                case .imageData(let data, let ext):
-                    let stagedName = "image-\(UUID().uuidString).\(ext)"
+                case .imageData(let rawData, let originalExt):
+                    let data: Data
+                    let finalExt: String
+                    if rawData.count > 2_500_000, let compactJPEG = Self.downscaledJPEGData(from: rawData, maxPixelSize: 2400) {
+                        data = compactJPEG
+                        finalExt = "jpg"
+                    } else {
+                        data = rawData
+                        finalExt = originalExt
+                    }
+                    let stagedName = "image-\(UUID().uuidString).\(finalExt)"
+                    totalBinaryBytes += data.count
+                    if totalBinaryBytes > maxPasteboardBinaryBytes {
+                        errorMessage = "本次批量分享图片体积超出分享面板内存上限，请分批分享或直接在 Charkle 内导入。"
+                        return false
+                    }
                     embeddedFiles[stagedName] = data
                     hasBinaryFiles = true
                     payloads.append(PendingSharePayload(
@@ -352,13 +400,17 @@ private final class ShareExtensionViewModel {
         }
     }
 
-    private func cleanupStaging() {
+    func cleanupStaging() {
         try? FileManager.default.removeItem(at: tempStagingDir)
     }
 
     // MARK: - Provider Extraction
 
-    private func loadItem(from provider: NSItemProvider, fallbackTitle: String?) async -> ExtractedShareItem? {
+    private func loadItem(
+        from provider: NSItemProvider,
+        fallbackTitle: String?,
+        generatePreview: Bool
+    ) async -> ExtractedShareItem? {
         // 1. Web URLs & File URLs (`public.url`) — X, Safari, Xiaohongshu, Threads, Bluesky, etc.
         if provider.hasItemConformingToTypeIdentifier(UTType.url.identifier) {
             if let loaded = await loadValue(from: provider, typeIdentifier: UTType.url.identifier),
@@ -369,7 +421,7 @@ private final class ShareExtensionViewModel {
                             displayTitle: url.lastPathComponent,
                             subtitle: "本地文件",
                             explicitTitle: nil,
-                            previewImage: previewIfImage(staged),
+                            previewImage: generatePreview ? downsamplePreview(from: staged) : nil,
                             source: .stagedFile(staged)
                         )
                     }
@@ -385,8 +437,17 @@ private final class ShareExtensionViewModel {
             }
         }
 
-        // 2. Images (`public.image`) — stage immediately so security-scoped URLs never expire before Save.
+        // 2. Images (`public.image`) — stage immediately to disk so multi-photo shares stay well within 120MB Jetsam cap.
         if provider.hasItemConformingToTypeIdentifier(UTType.image.identifier) {
+            if let staged = await stageFileRepresentation(from: provider, typeIdentifier: UTType.image.identifier) {
+                return ExtractedShareItem(
+                    displayTitle: staged.lastPathComponent,
+                    subtitle: "图片素材",
+                    explicitTitle: nil,
+                    previewImage: generatePreview ? downsamplePreview(from: staged) : nil,
+                    source: .stagedFile(staged)
+                )
+            }
             if let loaded = await loadValue(from: provider, typeIdentifier: UTType.image.identifier) {
                 switch loaded {
                 case .url(let url):
@@ -395,39 +456,50 @@ private final class ShareExtensionViewModel {
                             displayTitle: url.lastPathComponent,
                             subtitle: "图片素材",
                             explicitTitle: nil,
-                            previewImage: previewIfImage(staged),
+                            previewImage: generatePreview ? downsamplePreview(from: staged) : nil,
                             source: .stagedFile(staged)
                         )
                     }
                 case .imageJPEG(let data, let width, let height):
+                    let preview = generatePreview ? downsamplePreview(from: data) : nil
+                    if let staged = stageDataToTempFile(data, ext: "jpg") {
+                        return ExtractedShareItem(
+                            displayTitle: "分享图片",
+                            subtitle: "\(width) × \(height)",
+                            explicitTitle: nil,
+                            previewImage: preview,
+                            source: .stagedFile(staged)
+                        )
+                    }
                     return ExtractedShareItem(
                         displayTitle: "分享图片",
                         subtitle: "\(width) × \(height)",
                         explicitTitle: nil,
-                        previewImage: UIImage(data: data),
+                        previewImage: preview,
                         source: .imageData(data, ext: "jpg")
                     )
                 case .data(let data):
                     let ext = Self.detectImageExtension(data)
+                    let preview = generatePreview ? downsamplePreview(from: data) : nil
+                    if let staged = stageDataToTempFile(data, ext: ext) {
+                        return ExtractedShareItem(
+                            displayTitle: "分享图片",
+                            subtitle: ByteCountFormatter.string(fromByteCount: Int64(data.count), countStyle: .file),
+                            explicitTitle: nil,
+                            previewImage: preview,
+                            source: .stagedFile(staged)
+                        )
+                    }
                     return ExtractedShareItem(
                         displayTitle: "分享图片",
                         subtitle: ByteCountFormatter.string(fromByteCount: Int64(data.count), countStyle: .file),
                         explicitTitle: nil,
-                        previewImage: UIImage(data: data),
+                        previewImage: preview,
                         source: .imageData(data, ext: ext)
                     )
                 case .text:
                     break
                 }
-            }
-            if let staged = await stageFileRepresentation(from: provider, typeIdentifier: UTType.image.identifier) {
-                return ExtractedShareItem(
-                    displayTitle: staged.lastPathComponent,
-                    subtitle: "图片素材",
-                    explicitTitle: nil,
-                    previewImage: previewIfImage(staged),
-                    source: .stagedFile(staged)
-                )
             }
         }
 
@@ -487,12 +559,22 @@ private final class ShareExtensionViewModel {
                     displayTitle: url.lastPathComponent,
                     subtitle: "文件",
                     explicitTitle: nil,
-                    previewImage: previewIfImage(staged),
+                    previewImage: generatePreview ? downsamplePreview(from: staged) : nil,
                     source: .stagedFile(staged)
                 )
             }
         }
         return nil
+    }
+
+    private func stageDataToTempFile(_ data: Data, ext: String) -> URL? {
+        let dest = tempStagingDir.appending(path: "\(UUID().uuidString).\(ext)")
+        do {
+            try data.write(to: dest, options: .atomic)
+            return dest
+        } catch {
+            return nil
+        }
     }
 
     private func stageLocalFileCopy(from sourceURL: URL) -> URL? {
@@ -730,9 +812,82 @@ private final class ShareExtensionViewModel {
         return "jpg"
     }
 
-    private func previewIfImage(_ url: URL) -> UIImage? {
-        guard let data = try? Data(contentsOf: url) else { return nil }
-        return UIImage(data: data)
+    private func downsamplePreview(from url: URL, maxPixelSize: CGFloat = 640) -> UIImage? {
+        autoreleasepool {
+            let sourceOptions: [CFString: Any] = [kCGImageSourceShouldCache: false]
+            guard let source = CGImageSourceCreateWithURL(url as CFURL, sourceOptions as CFDictionary) else {
+                return nil
+            }
+            let thumbOptions: [CFString: Any] = [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceShouldCacheImmediately: true,
+                kCGImageSourceThumbnailMaxPixelSize: Int(maxPixelSize)
+            ]
+            guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, thumbOptions as CFDictionary) else {
+                return nil
+            }
+            return UIImage(cgImage: cgImage)
+        }
+    }
+
+    private func downsamplePreview(from data: Data, maxPixelSize: CGFloat = 640) -> UIImage? {
+        autoreleasepool {
+            let sourceOptions: [CFString: Any] = [kCGImageSourceShouldCache: false]
+            guard let source = CGImageSourceCreateWithData(data as CFData, sourceOptions as CFDictionary) else {
+                return nil
+            }
+            let thumbOptions: [CFString: Any] = [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceShouldCacheImmediately: true,
+                kCGImageSourceThumbnailMaxPixelSize: Int(maxPixelSize)
+            ]
+            guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, thumbOptions as CFDictionary) else {
+                return nil
+            }
+            return UIImage(cgImage: cgImage)
+        }
+    }
+
+    private static func downscaledJPEGData(from url: URL, maxPixelSize: CGFloat) -> Data? {
+        autoreleasepool {
+            let sourceOptions: [CFString: Any] = [kCGImageSourceShouldCache: false]
+            guard let source = CGImageSourceCreateWithURL(url as CFURL, sourceOptions as CFDictionary),
+                  CGImageSourceGetCount(source) == 1 else {
+                return nil
+            }
+            let thumbOptions: [CFString: Any] = [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceShouldCacheImmediately: true,
+                kCGImageSourceThumbnailMaxPixelSize: Int(maxPixelSize)
+            ]
+            guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, thumbOptions as CFDictionary) else {
+                return nil
+            }
+            return UIImage(cgImage: cgImage).jpegData(compressionQuality: 0.82)
+        }
+    }
+
+    private static func downscaledJPEGData(from data: Data, maxPixelSize: CGFloat) -> Data? {
+        autoreleasepool {
+            let sourceOptions: [CFString: Any] = [kCGImageSourceShouldCache: false]
+            guard let source = CGImageSourceCreateWithData(data as CFData, sourceOptions as CFDictionary),
+                  CGImageSourceGetCount(source) == 1 else {
+                return nil
+            }
+            let thumbOptions: [CFString: Any] = [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceShouldCacheImmediately: true,
+                kCGImageSourceThumbnailMaxPixelSize: Int(maxPixelSize)
+            ]
+            guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, thumbOptions as CFDictionary) else {
+                return nil
+            }
+            return UIImage(cgImage: cgImage).jpegData(compressionQuality: 0.82)
+        }
     }
 }
 
@@ -863,36 +1018,56 @@ private struct ShareSheetRootView: View {
                 .foregroundStyle(.secondary)
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
-                    folderChip(title: "收件箱", id: nil)
+                    folderChip(title: "收件箱", id: nil, depth: 0, colorHex: nil)
                     ForEach(model.folders) { folder in
-                        folderChip(title: folder.name, id: folder.id)
+                        folderChip(title: folder.name, id: folder.id, depth: folder.depth, colorHex: folder.colorHex)
                     }
                 }
             }
         }
     }
 
-    private func folderChip(title: String, id: UUID?) -> some View {
+    private func folderChip(title: String, id: UUID?, depth: Int, colorHex: String?) -> some View {
         let isSelected = model.selectedFolderID == id
         let accent = colorScheme == .dark
             ? Color(red: 0.357, green: 0.553, blue: 0.937)
             : Color(red: 0.165, green: 0.376, blue: 0.878)
+        let prefix = depth > 0 ? String(repeating: "↳ ", count: min(depth, 2)) : ""
         return Button {
             model.selectedFolderID = id
         } label: {
-            Text(title)
-                .font(.system(size: 13, weight: isSelected ? .semibold : .medium))
-                .foregroundStyle(isSelected ? .white : .primary)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 7)
-                .background(
-                    isSelected
-                        ? accent
-                        : (colorScheme == .dark ? Color(red: 0.14, green: 0.15, blue: 0.17) : Color(red: 0.93, green: 0.93, blue: 0.91)),
-                    in: Capsule()
-                )
+            HStack(spacing: 5) {
+                if let dot = Self.shareColor(fromHex: colorHex) {
+                    Circle()
+                        .fill(isSelected ? Color.white.opacity(0.92) : dot)
+                        .frame(width: 7, height: 7)
+                }
+                Text("\(prefix)\(title)")
+                    .font(.system(size: 13, weight: isSelected ? .semibold : .medium))
+                    .foregroundStyle(isSelected ? .white : .primary)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+            .background(
+                isSelected
+                    ? accent
+                    : (colorScheme == .dark ? Color(red: 0.14, green: 0.15, blue: 0.17) : Color(red: 0.93, green: 0.93, blue: 0.91)),
+                in: Capsule()
+            )
         }
         .buttonStyle(.plain)
+    }
+
+    private static func shareColor(fromHex raw: String?) -> Color? {
+        guard let raw else { return nil }
+        let cleaned = raw.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: "#", with: "")
+        var hex: UInt64 = 0
+        guard cleaned.count == 6, Scanner(string: cleaned).scanHexInt64(&hex) else { return nil }
+        return Color(
+            red: Double((hex >> 16) & 0xFF) / 255.0,
+            green: Double((hex >> 8) & 0xFF) / 255.0,
+            blue: Double(hex & 0xFF) / 255.0
+        )
     }
 
     private var metadataSection: some View {

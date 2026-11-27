@@ -40,12 +40,20 @@ struct MoodboardStudioView: View {
     @State private var exportedImageURL: URL?
     @State private var isExporting = false
     @State private var saveDebounceTask: Task<Void, Never>?
+    @State private var hasPendingSave: Bool = false
     @State private var dragStartFrames: [UUID: BoardRect] = [:]
     @State private var activeDraggingNodeID: UUID? = nil
+    @State private var didPushGestureUndo: Bool = false
     @State private var isPinchingCanvas: Bool = false
     @State private var pinchStartZoom: CGFloat = 1.0
     @State private var pinchStartOffset: CGSize = .zero
     @State private var pinchStartLocation: CGPoint? = nil
+    @State private var undoStack: [MoodboardDocument] = []
+    @State private var redoStack: [MoodboardDocument] = []
+    @State private var viewportSize: CGSize = .zero
+    @State private var lastFittedBoardID: UUID? = nil
+
+    private let maxUndoHistoryCount = 30
 
     private enum ResizeCorner: CaseIterable {
         case topLeading, topTrailing, bottomLeading, bottomTrailing
@@ -159,7 +167,22 @@ struct MoodboardStudioView: View {
             }
         }
         .task(id: boardID) {
+            await flushPendingSaveAsync()
+            undoStack.removeAll()
+            redoStack.removeAll()
+            selectedNodeID = nil
+            lastFittedBoardID = nil
             await loadBoard()
+            if viewportSize.width > 10, viewportSize.height > 10 {
+                fitCanvasToViewport(viewportSize)
+                lastFittedBoardID = boardID
+            }
+        }
+        .onDisappear {
+            flushPendingSave()
+        }
+        .background {
+            moodboardKeyboardShortcutsBridge
         }
         .sheet(isPresented: $isAddAssetsSheetPresented) {
             NavigationStack {
@@ -350,46 +373,70 @@ struct MoodboardStudioView: View {
                     selectedNodeID = nil
                 }
 
-                // World layer
+                // World layer 1: Group frames behind everything
                 ZStack(alignment: .topLeading) {
-                    // 1. Group frames behind everything
                     ForEach(doc.nodes.filter { if case .groupFrame = $0.kind { return true }; return false }.sorted(by: { $0.zIndex < $1.zIndex })) { node in
                         draggableBoardNode(node)
                     }
-
-                    // 2. Connectors between nodes
-                    Canvas { context, _ in
-                        drawConnectors(doc.connectors, nodes: doc.nodes, in: &context)
-                    }
-                    .allowsHitTesting(false)
-
-                    // 3. Asset cards, Notes, Palette strips
-                    ForEach(doc.nodes.filter { if case .groupFrame = $0.kind { return false }; return true }.sorted(by: { $0.zIndex < $1.zIndex })) { node in
-                        draggableBoardNode(node)
-                    }
-
-                    // 4. Persisted + live freehand Ink Strokes
-                    Canvas { context, _ in
-                        for stroke in doc.inkStrokes {
-                            drawInkStroke(stroke.points, colorHex: stroke.colorHex, lineWidth: stroke.lineWidth, opacity: stroke.opacity, in: &context)
-                        }
-                        if activeStrokePoints.count >= 2 {
-                            drawInkStroke(activeStrokePoints, colorHex: activeInkColorHex, lineWidth: 3.5, opacity: 0.92, in: &context)
-                        }
-                    }
-                    .allowsHitTesting(false)
                 }
                 .scaleEffect(canvasZoom, anchor: .topLeading)
                 .offset(canvasOffset)
+
+                // World layer 2: Unclipped viewport-space Connectors
+                Canvas { context, _ in
+                    context.translateBy(x: canvasOffset.width, y: canvasOffset.height)
+                    context.scaleBy(x: canvasZoom, y: canvasZoom)
+                    drawConnectors(doc.connectors, nodes: doc.nodes, in: &context)
+                }
+                .allowsHitTesting(false)
+
+                // World layer 3: Asset cards, Notes, Palette strips
+                ZStack(alignment: .topLeading) {
+                    ForEach(doc.nodes.filter { if case .groupFrame = $0.kind { return false }; return true }.sorted(by: { $0.zIndex < $1.zIndex })) { node in
+                        draggableBoardNode(node)
+                    }
+                }
+                .scaleEffect(canvasZoom, anchor: .topLeading)
+                .offset(canvasOffset)
+
+                // World layer 4: Unclipped viewport-space persisted + live Ink Strokes
+                Canvas { context, _ in
+                    context.translateBy(x: canvasOffset.width, y: canvasOffset.height)
+                    context.scaleBy(x: canvasZoom, y: canvasZoom)
+                    for stroke in doc.inkStrokes {
+                        drawInkStroke(stroke.points, colorHex: stroke.colorHex, lineWidth: stroke.lineWidth, opacity: stroke.opacity, in: &context)
+                    }
+                    if activeStrokePoints.count >= 2 {
+                        drawInkStroke(activeStrokePoints, colorHex: activeInkColorHex, lineWidth: 3.5, opacity: 0.92, in: &context)
+                    }
+                }
+                .allowsHitTesting(false)
             }
             .coordinateSpace(name: "moodboardViewport")
             .clipped()
             .contentShape(Rectangle())
             .gesture(isDrawingInk ? nil : canvasPanGesture)
-            .simultaneousGesture(isDrawingInk ? nil : canvasPinchGesture)
+            .simultaneousGesture(canvasPinchGesture)
             .highPriorityGesture(isDrawingInk ? inkDrawGesture : nil)
             .onAppear {
-                fitCanvasToViewport(proxy.size)
+                viewportSize = proxy.size
+                if lastFittedBoardID != doc.id {
+                    fitCanvasToViewport(proxy.size)
+                    lastFittedBoardID = doc.id
+                }
+            }
+            .onChange(of: proxy.size) { _, newSize in
+                viewportSize = newSize
+                if lastFittedBoardID != doc.id, newSize.width > 10, newSize.height > 10 {
+                    fitCanvasToViewport(newSize)
+                    lastFittedBoardID = doc.id
+                }
+            }
+            .onChange(of: doc.id) { _, newID in
+                if lastFittedBoardID != newID, viewportSize.width > 10, viewportSize.height > 10 {
+                    fitCanvasToViewport(viewportSize)
+                    lastFittedBoardID = newID
+                }
             }
         }
     }
@@ -432,6 +479,7 @@ struct MoodboardStudioView: View {
                             activeDraggingNodeID = nil
                         }
                         dragStartFrames.removeValue(forKey: node.id)
+                        didPushGestureUndo = false
                         if !isPinchingCanvas {
                             scheduleSave()
                         }
@@ -475,6 +523,7 @@ struct MoodboardStudioView: View {
                                 }
                                 .onEnded { _ in
                                     dragStartFrames.removeValue(forKey: node.id)
+                                    didPushGestureUndo = false
                                     if !isPinchingCanvas {
                                         scheduleSave()
                                     }
@@ -514,6 +563,11 @@ struct MoodboardStudioView: View {
                     pinchStartOffset = canvasOffset
                     pinchStartLocation = val.startLocation
 
+                    // Cancel any stray ink stroke started as the second finger touched down for pinch zoom
+                    if !activeStrokePoints.isEmpty {
+                        activeStrokePoints = []
+                    }
+
                     // If a 1-finger node drag started right before the 2nd finger landed, revert it immediately!
                     if let draggingID = activeDraggingNodeID,
                        let startFrame = dragStartFrames[draggingID],
@@ -523,6 +577,10 @@ struct MoodboardStudioView: View {
                         document = doc
                         dragStartFrames.removeValue(forKey: draggingID)
                         activeDraggingNodeID = nil
+                        if didPushGestureUndo {
+                            _ = undoStack.popLast()
+                            didPushGestureUndo = false
+                        }
                     }
                 }
 
@@ -547,13 +605,19 @@ struct MoodboardStudioView: View {
     private var inkDrawGesture: some Gesture {
         DragGesture(minimumDistance: 0)
             .onChanged { val in
+                guard !isPinchingCanvas else { return }
                 let wx = Double((val.location.x - canvasOffset.width) / max(0.05, canvasZoom))
                 let wy = Double((val.location.y - canvasOffset.height) / max(0.05, canvasZoom))
+                if let last = activeStrokePoints.last,
+                   hypot(wx - last.x, wy - last.y) < 2.5 {
+                    return
+                }
                 activeStrokePoints.append(InkStrokePoint(x: wx, y: wy, pressure: 0.6))
             }
             .onEnded { _ in
                 defer { activeStrokePoints = [] }
-                guard activeStrokePoints.count >= 2, var doc = document else { return }
+                guard !isPinchingCanvas, activeStrokePoints.count >= 2, var doc = document else { return }
+                pushUndoSnapshot(doc)
                 let stroke = InkStroke(
                     points: activeStrokePoints,
                     colorHex: activeInkColorHex,
@@ -653,6 +717,7 @@ struct MoodboardStudioView: View {
             Divider().frame(height: 18)
             Button {
                 guard var doc = document, !doc.inkStrokes.isEmpty else { return }
+                pushUndoSnapshot(doc)
                 doc.inkStrokes.removeLast()
                 document = doc
                 scheduleSave()
@@ -671,7 +736,14 @@ struct MoodboardStudioView: View {
     }
 
     private func moodboardBottomDock(doc: MoodboardDocument) -> some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 4) {
+            dockIconButton("撤销", icon: "arrow.uturn.backward", isActive: false, isDisabled: undoStack.isEmpty) {
+                undoBoardEdit()
+            }
+            dockIconButton("重做", icon: "arrow.uturn.forward", isActive: false, isDisabled: redoStack.isEmpty) {
+                redoBoardEdit()
+            }
+            Divider().frame(height: 18).padding(.horizontal, 2)
             dockIconButton("添加素材", icon: "photo.badge.plus", isActive: false) {
                 isAddAssetsSheetPresented = true
             }
@@ -708,15 +780,21 @@ struct MoodboardStudioView: View {
         .charkleFloatingCapsule(interactive: true)
     }
 
-    private func dockIconButton(_ label: String, icon: String, isActive: Bool, action: @escaping () -> Void) -> some View {
+    private func dockIconButton(
+        _ label: String,
+        icon: String,
+        isActive: Bool,
+        isDisabled: Bool = false,
+        action: @escaping () -> Void
+    ) -> some View {
         Button {
             MobileHaptics.light()
             action()
         } label: {
             Image(systemName: icon)
-                .font(.system(size: 17, weight: .medium))
-                .foregroundStyle(isActive ? .white : .primary)
-                .frame(width: 44, height: 36)
+                .font(.system(size: 16.5, weight: .medium))
+                .foregroundStyle(isActive ? .white : (isDisabled ? MobileTheme.tertiaryInk(for: colorScheme) : .primary))
+                .frame(width: 40, height: 36)
                 .background(
                     isActive ? MobileTheme.accentButtonFill(for: colorScheme) : .clear,
                     in: Capsule()
@@ -724,10 +802,72 @@ struct MoodboardStudioView: View {
                 .contentShape(Capsule())
         }
         .buttonStyle(MobileTactileButtonStyle())
+        .disabled(isDisabled)
         .accessibilityLabel(label)
     }
 
-    // MARK: - Data & Mutations
+    @ViewBuilder
+    private var moodboardKeyboardShortcutsBridge: some View {
+        Group {
+            Button("") {
+                guard !isNoteEditorPresented && !isGroupCreatorPresented else { return }
+                undoBoardEdit()
+            }
+            .keyboardShortcut("z", modifiers: .command)
+            Button("") {
+                guard !isNoteEditorPresented && !isGroupCreatorPresented else { return }
+                redoBoardEdit()
+            }
+            .keyboardShortcut("z", modifiers: [.command, .shift])
+            Button("") {
+                if let selID = selectedNodeID, !isNoteEditorPresented, !isGroupCreatorPresented {
+                    MobileHaptics.light()
+                    removeNode(selID)
+                }
+            }
+            .keyboardShortcut(.delete, modifiers: .command)
+        }
+        .frame(width: 0, height: 0)
+        .opacity(0.001)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+
+    // MARK: - Data, Undo/Redo & Mutations
+
+    private func pushUndoSnapshot(_ snapshot: MoodboardDocument) {
+        undoStack.append(snapshot)
+        if undoStack.count > maxUndoHistoryCount {
+            undoStack.removeFirst(undoStack.count - maxUndoHistoryCount)
+        }
+        redoStack.removeAll()
+    }
+
+    private func undoBoardEdit() {
+        guard let previous = undoStack.popLast(), let current = document else { return }
+        redoStack.append(current)
+        if redoStack.count > maxUndoHistoryCount {
+            redoStack.removeFirst(redoStack.count - maxUndoHistoryCount)
+        }
+        document = previous
+        if let selID = selectedNodeID, !previous.nodes.contains(where: { $0.id == selID }) {
+            selectedNodeID = nil
+        }
+        scheduleSave()
+    }
+
+    private func redoBoardEdit() {
+        guard let next = redoStack.popLast(), let current = document else { return }
+        undoStack.append(current)
+        if undoStack.count > maxUndoHistoryCount {
+            undoStack.removeFirst(undoStack.count - maxUndoHistoryCount)
+        }
+        document = next
+        if let selID = selectedNodeID, !next.nodes.contains(where: { $0.id == selID }) {
+            selectedNodeID = nil
+        }
+        scheduleSave()
+    }
 
     private func loadBoard() async {
         guard let loaded = await store.fetchBoardDocument(id: boardID) else { return }
@@ -737,12 +877,32 @@ struct MoodboardStudioView: View {
 
     private func scheduleSave() {
         guard let current = document else { return }
+        hasPendingSave = true
         saveDebounceTask?.cancel()
         saveDebounceTask = Task {
             try? await Task.sleep(for: .milliseconds(320))
             guard !Task.isCancelled else { return }
+            hasPendingSave = false
             _ = await store.saveBoardDocument(current, quiet: true)
         }
+    }
+
+    private func flushPendingSave() {
+        guard hasPendingSave, let current = document else { return }
+        hasPendingSave = false
+        saveDebounceTask?.cancel()
+        saveDebounceTask = nil
+        Task {
+            _ = await store.saveBoardDocument(current, quiet: true)
+        }
+    }
+
+    private func flushPendingSaveAsync() async {
+        guard hasPendingSave, let current = document else { return }
+        hasPendingSave = false
+        saveDebounceTask?.cancel()
+        saveDebounceTask = nil
+        _ = await store.saveBoardDocument(current, quiet: true)
     }
 
     private func handleNodeDoubleTap(_ node: BoardNode) {
@@ -764,6 +924,7 @@ struct MoodboardStudioView: View {
 
     private func mutateNode(_ id: UUID, _ mutate: (inout BoardNode) -> Void) {
         guard var doc = document, let idx = doc.nodes.firstIndex(where: { $0.id == id }) else { return }
+        pushUndoSnapshot(doc)
         mutate(&doc.nodes[idx])
         doc.nodes[idx].updatedAt = Date()
         document = doc
@@ -774,6 +935,8 @@ struct MoodboardStudioView: View {
         guard var doc = document, let idx = doc.nodes.firstIndex(where: { $0.id == id }) else { return }
         let start = dragStartFrames[id] ?? doc.nodes[idx].frame
         if dragStartFrames[id] == nil {
+            pushUndoSnapshot(doc)
+            didPushGestureUndo = true
             dragStartFrames[id] = start
         }
         let zoom = Double(max(0.1, canvasZoom))
@@ -792,6 +955,8 @@ struct MoodboardStudioView: View {
         guard var doc = document, let idx = doc.nodes.firstIndex(where: { $0.id == id }) else { return }
         let start = dragStartFrames[id] ?? doc.nodes[idx].frame
         if dragStartFrames[id] == nil {
+            pushUndoSnapshot(doc)
+            didPushGestureUndo = true
             dragStartFrames[id] = start
         }
 
@@ -814,8 +979,12 @@ struct MoodboardStudioView: View {
             let scaleW = (start.width + deltaW) / start.width
             let scaleH = (start.height + deltaH) / start.height
             let uniformScale = max(0.25, (abs(deltaW) >= abs(deltaH)) ? scaleW : scaleH)
-            let newW = max(90, start.width * uniformScale)
-            let newH = max(72, newW / aspect)
+            var newW = max(90, start.width * uniformScale)
+            var newH = newW / aspect
+            if newH < 72 {
+                newH = 72
+                newW = max(90, newH * aspect)
+            }
             deltaW = newW - start.width
             deltaH = newH - start.height
         } else {
@@ -846,6 +1015,7 @@ struct MoodboardStudioView: View {
 
     private func removeNode(_ id: UUID) {
         guard var doc = document else { return }
+        pushUndoSnapshot(doc)
         doc.nodes.removeAll { $0.id == id }
         doc.connectors.removeAll { $0.fromNodeID == id || $0.toNodeID == id }
         if selectedNodeID == id { selectedNodeID = nil }
@@ -855,6 +1025,7 @@ struct MoodboardStudioView: View {
 
     private func saveNoteDraft() {
         guard var doc = document else { return }
+        pushUndoSnapshot(doc)
         let title = noteTitleDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         let text = noteTextDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         if let editID = editingNoteNodeID, let idx = doc.nodes.firstIndex(where: { $0.id == editID }) {
@@ -876,6 +1047,7 @@ struct MoodboardStudioView: View {
 
     private func addGroupFrame(title: String, tint: GroupTint) {
         guard var doc = document else { return }
+        pushUndoSnapshot(doc)
         let maxY = doc.nodes.map(\.frame.maxY).max() ?? 20
         let node = BoardNode(
             kind: .groupFrame(title: title, tint: tint),
@@ -890,12 +1062,14 @@ struct MoodboardStudioView: View {
 
     private func appendAssetsToBoard(_ ids: [UUID]) async {
         guard !ids.isEmpty else { return }
+        await flushPendingSaveAsync()
         await store.addAssets(ids, toBoard: boardID)
         await loadBoard()
     }
 
     private func toggleLayoutMode(toFreeform: Bool) {
         guard var doc = document else { return }
+        pushUndoSnapshot(doc)
         if toFreeform, case .autoEditorial(let cfg) = doc.mode {
             let solved = computeAutoEditorialFrames(nodes: doc.nodes, config: cfg, width: 960)
             for idx in doc.nodes.indices {
@@ -913,6 +1087,7 @@ struct MoodboardStudioView: View {
 
     private func applyEditorialStyle(_ style: EditorialStyle) {
         guard var doc = document else { return }
+        pushUndoSnapshot(doc)
         isDrawingInk = false
         doc.mode = .autoEditorial(AutoLayoutConfig(columns: 3, spacing: 14, style: style, showPaletteStrip: true))
         document = doc

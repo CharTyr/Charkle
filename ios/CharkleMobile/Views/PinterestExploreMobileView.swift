@@ -1,4 +1,5 @@
 import CharkleCore
+import QuartzCore
 import SwiftUI
 import UIKit
 
@@ -10,6 +11,8 @@ import UIKit
 struct PinterestExploreMobileView: View {
     @Bindable var store: MobileAppStore
     @Bindable var controller: PinterestExploreController
+    /// Suspends the 120Hz UIKit spatial canvas while this tab is hidden inside the compact tab stack.
+    var isTabActive: Bool = true
     /// Optional leading pill injected on iPhone `搜图` tab to switch cleanly back to `库内搜图`.
     var onSwitchToLibrarySearch: (() -> Void)? = nil
     /// Optional sidebar toggle for iPad `NavigationSplitView` (since Pinterest hides the system nav bar).
@@ -20,11 +23,12 @@ struct PinterestExploreMobileView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.openURL) private var openURL
 
-    @State private var cameraScale: CGFloat = 0.78
     @State private var cameraCommand = PinterestCameraCommandMobile()
     @State private var isSearchExpanded: Bool = false
     @State private var isSingleImporting: Bool = false
     @State private var excludedGlobalRects: [CGRect] = []
+    @State private var lastViewportReportRect: CGRect = .zero
+    @State private var lastViewportReportTime: CFTimeInterval = 0
     @FocusState private var isSearchFocused: Bool
 
     private var accent: Color {
@@ -145,7 +149,7 @@ struct PinterestExploreMobileView: View {
                 fastPickMode: controller.fastPickMode,
                 isDark: colorScheme == .dark,
                 accentColor: UIColor(accent),
-                isInteractionSuspended: controller.activeDetailPin != nil || controller.isTrayExpanded || controller.isLoginSheetPresented || controller.isBoardImportSheetPresented,
+                isInteractionSuspended: !isTabActive || controller.activeDetailPin != nil || controller.isTrayExpanded || controller.isLoginSheetPresented || controller.isBoardImportSheetPresented,
                 excludedGlobalRects: excludedGlobalRects,
                 cameraCommand: cameraCommand,
                 onOpenDetail: { pin in
@@ -161,10 +165,23 @@ struct PinterestExploreMobileView: View {
                     )
                 },
                 onCameraChanged: { cam, visibleWorld in
-                    if abs(cam.scale - cameraScale) > 0.01 {
-                        cameraScale = cam.scale
+                    if isSearchFocused {
+                        isSearchFocused = false
+                        MobileKeyboard.dismiss()
                     }
-                    controller.updateCameraViewport(visibleWorldRect: visibleWorld, scale: cam.scale)
+                    let now = CACurrentMediaTime()
+                    let dx = abs(visibleWorld.midX - lastViewportReportRect.midX)
+                    let dy = abs(visibleWorld.midY - lastViewportReportRect.midY)
+                    let dw = abs(visibleWorld.width - lastViewportReportRect.width)
+                    if lastViewportReportRect == .zero
+                        || dx > 80
+                        || dy > 80
+                        || dw > 80
+                        || (now - lastViewportReportTime) >= 0.08 {
+                        lastViewportReportRect = visibleWorld
+                        lastViewportReportTime = now
+                        controller.updateCameraViewport(visibleWorldRect: visibleWorld, scale: cam.scale)
+                    }
                 }
             )
             .ignoresSafeArea()
@@ -1171,6 +1188,7 @@ private struct PinterestTraySheetMobile: View {
                             .padding(.horizontal, horizontalPadding)
                             .padding(.vertical, 8)
                         }
+                        .charkleDismissKeyboardOnScroll()
                     }
 
                     Divider()

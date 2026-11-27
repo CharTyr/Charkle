@@ -81,7 +81,11 @@ struct AssetDetailView: View {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
+    @State private var pageAssets: [AssetRecord]
+    @State private var pageIndexByID: [UUID: Int]
+    @State private var localHydratedAssets: [UUID: AssetRecord] = [:]
     @State private var currentAssetID: UUID
+    @State private var pagedAssetID: UUID?
     @State private var isInspectorVisible: Bool
     @State private var isCompactInspectorPresented: Bool
     @State private var selectedInspectorTab: DetailInspectorTab
@@ -93,6 +97,8 @@ struct AssetDetailView: View {
     @State private var confirmPermanentDelete: Bool = false
     @State private var isCurrentAssetZoomed: Bool = false
     @State private var isMoveFolderSheetPresented: Bool = false
+    @State private var preferLongStripFitWidth: Bool = true
+    @State private var isInspectorTextFocused: Bool = false
 
     init(
         store: MobileAppStore,
@@ -112,27 +118,50 @@ struct AssetDetailView: View {
         self.onCurrentAssetChanged = onCurrentAssetChanged
         self.onFilterByColor = onFilterByColor
         self.onFilterByTag = onFilterByTag
+        let seeded = allAssets.isEmpty ? [initialAsset] : allAssets
+        var lookup: [UUID: Int] = Dictionary(minimumCapacity: seeded.count)
+        for (idx, item) in seeded.enumerated() {
+            lookup[item.id] = idx
+        }
+        _pageAssets = State(initialValue: seeded)
+        _pageIndexByID = State(initialValue: lookup)
         _currentAssetID = State(initialValue: initialAsset.id)
+        _pagedAssetID = State(initialValue: initialAsset.id)
         _selectedInspectorTab = State(initialValue: initialInspectorTab)
         _isInspectorVisible = State(initialValue: true)
         _isCompactInspectorPresented = State(initialValue: openInspectorImmediately)
     }
 
     private var orderedAssets: [AssetRecord] {
-        let live = store.assets
-        if live.contains(where: { $0.id == currentAssetID }) {
-            return live
-        }
-        if allAssets.contains(where: { $0.id == currentAssetID }) {
-            return allAssets
-        }
-        return [initialAsset]
+        pageAssets
+    }
+
+    private var currentAssetIndex: Int? {
+        pageIndexByID[currentAssetID]
     }
 
     private var currentAsset: AssetRecord {
-        store.assets.first(where: { $0.id == currentAssetID })
-            ?? allAssets.first(where: { $0.id == currentAssetID })
-            ?? initialAsset
+        if let live = store.liveAsset(id: currentAssetID) {
+            return live
+        }
+        if let hydrated = localHydratedAssets[currentAssetID] {
+            return hydrated
+        }
+        if let idx = currentAssetIndex, idx < orderedAssets.count {
+            return orderedAssets[idx]
+        }
+        return initialAsset
+    }
+
+    private var isCurrentAssetLongStrip: Bool {
+        guard !currentAsset.isGitHubRepo,
+              !currentAsset.isSocialPost,
+              currentAsset.mediaKind == .image || currentAsset.mediaKind == .designFile,
+              currentAsset.pixelWidth > 0,
+              currentAsset.pixelHeight >= 1_600 else {
+            return false
+        }
+        return Double(currentAsset.pixelHeight) / Double(currentAsset.pixelWidth) >= 2.2
     }
 
     private var supportsVisualTransform: Bool {
@@ -201,8 +230,9 @@ struct AssetDetailView: View {
                         store: store,
                         asset: currentAsset,
                         selectedTab: $selectedInspectorTab,
+                        isTextFieldFocused: $isInspectorTextFocused,
                         onSelectAsset: { nextID in
-                            currentAssetID = nextID
+                            navigateToAsset(id: nextID)
                         },
                         onFilterByColor: onFilterByColor,
                         onFilterByTag: onFilterByTag,
@@ -214,6 +244,7 @@ struct AssetDetailView: View {
                 }
             }
         }
+        .background(keyboardShortcutsBridge)
         .statusBarHidden(!isChromeVisible)
         .interactiveDismissDisabled(isCurrentAssetZoomed)
         .background(ZoomDismissCoordinatorBridge(isZoomedOrZooming: isCurrentAssetZoomed))
@@ -246,9 +277,10 @@ struct AssetDetailView: View {
                     store: store,
                     asset: currentAsset,
                     selectedTab: $selectedInspectorTab,
+                    isTextFieldFocused: $isInspectorTextFocused,
                     onSelectAsset: { nextID in
                         isCompactInspectorPresented = false
-                        currentAssetID = nextID
+                        navigateToAsset(id: nextID)
                     },
                     onFilterByColor: { hex in
                         isCompactInspectorPresented = false
@@ -295,13 +327,37 @@ struct AssetDetailView: View {
         } message: {
             Text("彻底删除后将无法从回收站恢复。")
         }
+        .onChange(of: pagedAssetID) { _, nextID in
+            if let nextID, nextID != currentAssetID {
+                currentAssetID = nextID
+            }
+        }
         .onChange(of: currentAssetID) { _, nextID in
-            previewTransform.reset()
-            isCurrentAssetZoomed = false
+            if pagedAssetID != nextID {
+                pagedAssetID = nextID
+            }
+            if previewTransform.hasActiveTransform {
+                previewTransform.reset()
+            }
+            if isCurrentAssetZoomed {
+                isCurrentAssetZoomed = false
+            }
+            preferLongStripFitWidth = true
             onCurrentAssetChanged(nextID)
+            prefetchAdjacentPreviews(around: nextID)
+        }
+        .onAppear {
+            prefetchAdjacentPreviews(around: currentAssetID)
         }
         .task(id: currentAssetID) {
-            _ = try? await store.engine.hydrateImageMetadataIfNeeded(id: currentAssetID)
+            // Defer disk/SQLite metadata hydration & similar queries slightly so rapid
+            // horizontal swiping stays locked at 120Hz without main-thread contention.
+            try? await Task.sleep(for: .milliseconds(160))
+            guard !Task.isCancelled else { return }
+            if let hydrated = try? await store.engine.hydrateImageMetadataIfNeeded(id: currentAssetID) {
+                localHydratedAssets[hydrated.id] = hydrated
+                store.applyHydratedAsset(hydrated)
+            }
             if selectedInspectorTab == .similar {
                 await store.loadSimilarAssets(for: currentAssetID)
             }
@@ -610,6 +666,26 @@ struct AssetDetailView: View {
                     .buttonStyle(MobileTactileButtonStyle())
                     .accessibilityLabel("旋转与翻转")
                 }
+
+                if isCurrentAssetLongStrip {
+                    Button {
+                        MobileHaptics.light()
+                        preferLongStripFitWidth.toggle()
+                    } label: {
+                        Image(systemName: preferLongStripFitWidth ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
+                            .font(.system(size: 15.5, weight: .medium))
+                            .foregroundStyle(
+                                preferLongStripFitWidth ? MobileTheme.accent(for: colorScheme) : .primary
+                            )
+                            .frame(width: 44, height: 38)
+                            .background(
+                                preferLongStripFitWidth ? MobileTheme.accentSoft(for: colorScheme) : .clear,
+                                in: Capsule()
+                            )
+                    }
+                    .buttonStyle(MobileTactileButtonStyle())
+                    .accessibilityLabel(preferLongStripFitWidth ? "切回适配全屏" : "切回长图全宽滚动")
+                }
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 4)
@@ -643,7 +719,16 @@ struct AssetDetailView: View {
                     Task {
                         await store.patchAssets(
                             AssetBatchPatch(assetIDs: [id], isTrashed: true),
-                            successToast: "已移入回收站"
+                            successToast: "已移入回收站",
+                            actionTitle: "撤销",
+                            onAction: {
+                                Task {
+                                    await store.patchAssets(
+                                        AssetBatchPatch(assetIDs: [id], isTrashed: false),
+                                        successToast: "已恢复素材"
+                                    )
+                                }
+                            }
                         )
                     }
                 } label: {
@@ -814,31 +899,148 @@ struct AssetDetailView: View {
     }
 
     private var mediaPager: some View {
-        TabView(selection: $currentAssetID) {
-            ForEach(orderedAssets) { asset in
-                AssetStageContentView(
-                    store: store,
-                    asset: asset,
-                    transform: asset.id == currentAssetID ? previewTransform : PreviewTransformState(),
-                    isActivePage: asset.id == currentAssetID,
-                    onZoomInteractionChanged: { zoomed in
-                        if asset.id == currentAssetID {
-                            isCurrentAssetZoomed = zoomed
-                        }
-                    },
-                    onSingleTap: {
-                        withAnimation(MobileMotion.accessible(MobileMotion.enterSm, reduced: reduceMotion)) {
-                            isChromeVisible.toggle()
-                            if !isChromeVisible {
-                                activeUtilityDrawer = nil
+        ScrollView(.horizontal, showsIndicators: false) {
+            LazyHStack(spacing: 0) {
+                ForEach(orderedAssets) { asset in
+                    let isActive = asset.id == currentAssetID
+                    let liveAsset = isActive ? currentAsset : (store.liveAsset(id: asset.id) ?? asset)
+                    AssetStageContentView(
+                        store: store,
+                        asset: liveAsset,
+                        transform: isActive ? previewTransform : PreviewTransformState(),
+                        isActivePage: isActive,
+                        preferLongStripFitWidth: isActive ? preferLongStripFitWidth : true,
+                        onZoomInteractionChanged: { zoomed in
+                            if asset.id == currentAssetID {
+                                isCurrentAssetZoomed = zoomed
+                            }
+                        },
+                        onSingleTap: {
+                            withAnimation(MobileMotion.accessible(MobileMotion.enterSm, reduced: reduceMotion)) {
+                                isChromeVisible.toggle()
+                                if !isChromeVisible {
+                                    activeUtilityDrawer = nil
+                                }
                             }
                         }
+                    )
+                    .containerRelativeFrame([.horizontal, .vertical])
+                    .id(asset.id)
+                }
+            }
+            .scrollTargetLayout()
+        }
+        .scrollTargetBehavior(.paging)
+        .scrollPosition(id: $pagedAssetID)
+    }
+
+    private var keyboardShortcutsBridge: some View {
+        Group {
+            Button("") {
+                if isInspectorTextFocused {
+                    MobileKeyboard.dismiss()
+                } else {
+                    dismiss()
+                }
+            }
+            .keyboardShortcut(.escape, modifiers: [])
+
+            if !isInspectorTextFocused && !isCompactInspectorPresented && !isMoveFolderSheetPresented {
+                Button("") { dismiss() }
+                    .keyboardShortcut(.space, modifiers: [])
+                Button("") { stepCurrentAsset(by: -1) }
+                    .keyboardShortcut(.leftArrow, modifiers: [])
+                Button("") { stepCurrentAsset(by: 1) }
+                    .keyboardShortcut(.rightArrow, modifiers: [])
+            }
+            Button("") {
+                if horizontalSizeClass == .regular {
+                    withAnimation(MobileMotion.accessible(MobileMotion.drawerEase, reduced: reduceMotion)) {
+                        isInspectorVisible.toggle()
                     }
-                )
-                .tag(asset.id)
+                } else {
+                    isCompactInspectorPresented.toggle()
+                }
+            }
+            .keyboardShortcut("i", modifiers: .command)
+
+            if supportsVisualTransform {
+                Button("") { rotatePreview(by: 90) }
+                    .keyboardShortcut("r", modifiers: .command)
+                Button("") { rotatePreview(by: -90) }
+                    .keyboardShortcut("r", modifiers: [.command, .shift])
+                Button("") { toggleFlip(horizontal: true) }
+                    .keyboardShortcut("h", modifiers: [.command, .shift])
+                Button("") { toggleFlip(horizontal: false) }
+                    .keyboardShortcut("v", modifiers: [.command, .shift])
+                Button("") { resetTransform() }
+                    .keyboardShortcut("0", modifiers: .command)
+            }
+
+            ForEach(1...5, id: \.self) { star in
+                Button("") {
+                    let id = currentAsset.id
+                    let target = currentAsset.rating == star ? 0 : star
+                    MobileHaptics.light()
+                    Task {
+                        await store.patchAssets(AssetBatchPatch(assetIDs: [id], rating: target))
+                    }
+                }
+                .keyboardShortcut(KeyEquivalent(Character("\(star)")), modifiers: .command)
             }
         }
-        .tabViewStyle(.page(indexDisplayMode: .never))
+        .labelsHidden()
+        .frame(width: 0, height: 0)
+        .opacity(0.001)
+        .accessibilityHidden(true)
+    }
+
+    private func stepCurrentAsset(by delta: Int) {
+        guard let idx = currentAssetIndex else { return }
+        let next = idx + delta
+        guard next >= 0, next < orderedAssets.count else { return }
+        currentAssetID = orderedAssets[next].id
+    }
+
+    private func navigateToAsset(id nextID: UUID) {
+        if pageIndexByID[nextID] != nil {
+            currentAssetID = nextID
+            return
+        }
+        if let found = store.similarResults.first(where: { $0.asset.id == nextID })?.asset
+            ?? store.liveAsset(id: nextID) {
+            pageIndexByID[found.id] = pageAssets.count
+            pageAssets.append(found)
+            currentAssetID = found.id
+            pagedAssetID = found.id
+        } else {
+            Task {
+                if let fetched = try? await store.engine.fetchAsset(id: nextID) {
+                    if pageIndexByID[fetched.id] == nil {
+                        pageIndexByID[fetched.id] = pageAssets.count
+                        pageAssets.append(fetched)
+                    }
+                    currentAssetID = fetched.id
+                    pagedAssetID = fetched.id
+                }
+            }
+        }
+    }
+
+    private func prefetchAdjacentPreviews(around assetID: UUID) {
+        guard let idx = pageIndexByID[assetID] else { return }
+        let assets = orderedAssets
+        var ids: [UUID] = []
+        ids.reserveCapacity(5)
+        for offset in [1, -1, 2, -2] {
+            let target = idx + offset
+            if target >= 0 && target < assets.count {
+                ids.append(assets[target].id)
+            }
+        }
+        if !ids.isEmpty {
+            store.thumbnails.prefetch(assetIDs: ids, tier: .preview1400)
+        }
     }
 
     private func prepareAndShareOriginal() async {
@@ -899,9 +1101,13 @@ private struct AssetFilmstripScrubber: View {
             .onAppear {
                 proxy.scrollTo(selectedID, anchor: .center)
             }
-            .onChange(of: selectedID) { _, next in
+            .task(id: selectedID) {
+                // Brief coalesce so rapid horizontal swiping doesn't queue conflicting
+                // ScrollViewReader animations against the main 120Hz pager deceleration.
+                try? await Task.sleep(for: .milliseconds(35))
+                guard !Task.isCancelled else { return }
                 withAnimation(MobileMotion.settleStrong) {
-                    proxy.scrollTo(next, anchor: .center)
+                    proxy.scrollTo(selectedID, anchor: .center)
                 }
             }
         }
@@ -915,18 +1121,18 @@ private struct FilmstripThumbCell: View {
     @State private var image: UIImage?
 
     var body: some View {
+        let displayImage = thumbnails.cachedImage(for: asset.id, tier: .grid520) ?? image
         Color(.secondarySystemFill)
             .overlay {
-                if let image {
-                    Image(uiImage: image)
+                if let displayImage {
+                    Image(uiImage: displayImage)
                         .resizable()
                         .scaledToFill()
                 }
             }
             .clipped()
             .task(id: "\(asset.id.uuidString)-\(thumbnails.revision)") {
-                if let hit = thumbnails.cachedImage(for: asset.id, tier: .grid520) {
-                    image = hit
+                if thumbnails.cachedImage(for: asset.id, tier: .grid520) != nil {
                     return
                 }
                 image = await thumbnails.loadImage(for: asset.id, tier: .grid520)
@@ -941,6 +1147,7 @@ private struct AssetStageContentView: View {
     let asset: AssetRecord
     let transform: PreviewTransformState
     let isActivePage: Bool
+    var preferLongStripFitWidth: Bool = true
     let onZoomInteractionChanged: (Bool) -> Void
     let onSingleTap: () -> Void
 
@@ -948,9 +1155,32 @@ private struct AssetStageContentView: View {
     @State private var image: UIImage?
     @State private var localOriginalURL: URL?
 
+    private var resolvedStageImage: UIImage? {
+        image ?? store.thumbnails.bestCachedPreviewImage(for: asset.id)
+    }
+
+    private var shouldUseLongStripFitWidth: Bool {
+        guard preferLongStripFitWidth,
+              !asset.isGitHubRepo,
+              !asset.isSocialPost,
+              asset.mediaKind == .image || asset.mediaKind == .designFile else {
+            return false
+        }
+        if asset.pixelWidth > 0 && asset.pixelHeight >= 1_600 {
+            return Double(asset.pixelHeight) / Double(asset.pixelWidth) >= 2.2
+        }
+        if let display = resolvedStageImage, display.size.width > 0 {
+            let pxH = display.size.height * display.scale
+            let pxW = display.size.width * display.scale
+            return pxH >= 1_600 && (pxH / pxW) >= 2.2
+        }
+        return false
+    }
+
     var body: some View {
+        let displayImage = resolvedStageImage
         Group {
-            if asset.mediaKind == .video, let localOriginalURL {
+            if asset.mediaKind == .video, let localOriginalURL, isActivePage {
                 MobileLocalVideoStageView(
                     assetID: asset.id,
                     videoURL: localOriginalURL,
@@ -961,9 +1191,28 @@ private struct AssetStageContentView: View {
                             imageData: jpegData,
                             timestampSeconds: ts
                         )
+                    },
+                    onCaptureFailed: {
+                        MobileHaptics.warning()
+                        store.showToast("当前视频画面尚未就绪，请播放或定位画面后再试", tone: .warning)
                     }
                 )
                 .padding(12)
+            } else if asset.mediaKind == .video {
+                ZStack {
+                    if let displayImage {
+                        Image(uiImage: displayImage)
+                            .resizable()
+                            .scaledToFit()
+                            .clipShape(RoundedRectangle(cornerRadius: MobileTheme.Radius.cardOuter, style: .continuous))
+                            .padding(12)
+                    } else {
+                        ProgressView("正在加载视频…")
+                            .font(.system(size: 13))
+                            .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if asset.mediaKind == .document,
                       (asset.fileName as NSString).pathExtension.lowercased() == "pdf",
                       let localOriginalURL {
@@ -971,18 +1220,19 @@ private struct AssetStageContentView: View {
                     .clipShape(RoundedRectangle(cornerRadius: MobileTheme.Radius.cardOuter, style: .continuous))
                     .padding(12)
             } else if let post = asset.richMetadata?.socialPost {
-                socialPostStage(post)
+                socialPostStage(post, coverImage: displayImage)
             } else if let web = asset.richMetadata?.webPage, web.hasRichSummary || !web.attachments.isEmpty {
-                webPageStage(web)
+                webPageStage(web, coverImage: displayImage)
             } else if let repo = asset.richMetadata?.githubRepo {
-                githubRepoStage(repo)
+                githubRepoStage(repo, coverImage: displayImage)
             } else {
                 ZStack {
-                    if let image {
+                    if let displayImage {
                         ZoomableImageView(
-                            image: image,
+                            image: displayImage,
                             transform: transform,
                             isActivePage: isActivePage,
+                            fitWidthMode: shouldUseLongStripFitWidth,
                             onZoomInteractionChanged: onZoomInteractionChanged,
                             onSingleTap: onSingleTap
                         )
@@ -996,17 +1246,32 @@ private struct AssetStageContentView: View {
             }
         }
         .task(id: "\(asset.id.uuidString)-\(store.thumbnails.revision)") {
-            if let preview = await store.thumbnails.loadImage(for: asset.id, tier: .preview1400) {
+            // Fast path: load lightweight preview1400 (or grid520 fallback) for immediate display
+            if let cachedOrig = store.thumbnails.cachedOriginalImage(for: asset.id) {
+                image = cachedOrig
+            } else if let preview = await store.thumbnails.loadImage(for: asset.id, tier: .preview1400) {
                 image = preview
             } else if let grid = await store.thumbnails.loadImage(for: asset.id, tier: .grid520) {
                 image = grid
             }
+        }
+        .task(id: "\(asset.id.uuidString)-active-\(isActivePage)-\(store.thumbnails.revision)") {
+            guard isActivePage else { return }
             if asset.mediaKind == .image || asset.mediaKind == .designFile {
+                if let cachedOrig = store.thumbnails.cachedOriginalImage(for: asset.id) {
+                    image = cachedOrig
+                    return
+                }
+                // Wait briefly for horizontal swipe momentum to settle before decoding 2600px original
+                try? await Task.sleep(for: .milliseconds(180))
+                guard !Task.isCancelled else { return }
                 if let orig = await store.thumbnails.loadOriginalImage(for: asset) {
                     image = orig
                 }
             } else if asset.mediaKind == .video || (asset.fileName as NSString).pathExtension.lowercased() == "pdf" {
-                localOriginalURL = try? await store.engine.originalURL(for: asset.id)
+                if localOriginalURL == nil {
+                    localOriginalURL = try? await store.engine.originalURL(for: asset.id)
+                }
             }
         }
     }
@@ -1022,7 +1287,7 @@ private struct AssetStageContentView: View {
         }
     }
 
-    private func socialPostStage(_ post: SocialPostMetadata) -> some View {
+    private func socialPostStage(_ post: SocialPostMetadata, coverImage: UIImage?) -> some View {
         let attachments = post.effectiveAttachments
         let hasInlineStreamVideo = post.platform.isVideoPlatform
             || (post.hasVideo && attachments.contains(where: { $0.kind == .video || $0.kind == .gif }))
@@ -1031,7 +1296,7 @@ private struct AssetStageContentView: View {
                 if hasInlineStreamVideo {
                     MobileStreamingVideoPlayerView(
                         playbackKey: "\(asset.id.uuidString):\(post.originalURL)",
-                        coverImage: image,
+                        coverImage: coverImage,
                         durationText: post.formattedVideoDuration,
                         watchURL: URL(string: post.originalURL),
                         openActionLabel: post.platform.openActionLabel,
@@ -1043,6 +1308,10 @@ private struct AssetStageContentView: View {
                                 timestampSeconds: ts
                             )
                         },
+                        onCaptureFailed: {
+                            MobileHaptics.warning()
+                            store.showToast("当前视频画面尚未就绪，请播放或定位画面后再试", tone: .warning)
+                        },
                         resolvePlan: {
                             await VideoPlatformResolver.resolvePlaybackPlan(for: post)
                         }
@@ -1051,8 +1320,8 @@ private struct AssetStageContentView: View {
                     .frame(maxWidth: 680)
                     .clipShape(RoundedRectangle(cornerRadius: MobileTheme.Radius.cardOuter, style: .continuous))
                     .frame(maxWidth: .infinity)
-                } else if let image {
-                    Image(uiImage: image)
+                } else if let coverImage {
+                    Image(uiImage: coverImage)
                         .resizable()
                         .scaledToFit()
                         .frame(maxWidth: 560)
@@ -1295,7 +1564,7 @@ private struct AssetStageContentView: View {
         }
     }
 
-    private func webPageStage(_ web: WebPageRichMetadata) -> some View {
+    private func webPageStage(_ web: WebPageRichMetadata, coverImage: UIImage?) -> some View {
         let attachments = web.attachments
         let externalURL = URL(string: web.canonicalURL) ?? asset.externalWebURL
         let hasStreamableVideo = web.hasVideo
@@ -1315,7 +1584,7 @@ private struct AssetStageContentView: View {
                 if hasStreamableVideo {
                     MobileStreamingVideoPlayerView(
                         playbackKey: "web:\(asset.id.uuidString):\(web.canonicalURL)",
-                        coverImage: image,
+                        coverImage: coverImage,
                         durationText: formattedDur,
                         watchURL: externalURL,
                         openActionLabel: "在浏览器打开",
@@ -1326,6 +1595,10 @@ private struct AssetStageContentView: View {
                                 imageData: jpegData,
                                 timestampSeconds: ts
                             )
+                        },
+                        onCaptureFailed: {
+                            MobileHaptics.warning()
+                            store.showToast("当前视频画面尚未就绪，请播放或定位画面后再试", tone: .warning)
                         },
                         resolvePlan: {
                             await VideoPlatformResolver.resolveWebPagePlaybackPlan(
@@ -1338,8 +1611,8 @@ private struct AssetStageContentView: View {
                     .frame(maxWidth: 680)
                     .clipShape(RoundedRectangle(cornerRadius: MobileTheme.Radius.cardOuter, style: .continuous))
                     .frame(maxWidth: .infinity)
-                } else if let image {
-                    Image(uiImage: image)
+                } else if let coverImage {
+                    Image(uiImage: coverImage)
                         .resizable()
                         .scaledToFit()
                         .frame(maxWidth: 560)
@@ -1490,11 +1763,11 @@ private struct AssetStageContentView: View {
         }
     }
 
-    private func githubRepoStage(_ repo: GitHubRepoMetadata) -> some View {
+    private func githubRepoStage(_ repo: GitHubRepoMetadata, coverImage: UIImage?) -> some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
-                if let image {
-                    Image(uiImage: image)
+                if let coverImage {
+                    Image(uiImage: coverImage)
                         .resizable()
                         .scaledToFit()
                         .clipShape(RoundedRectangle(cornerRadius: MobileTheme.Radius.cardOuter, style: .continuous))
@@ -1554,6 +1827,7 @@ private struct MobileLocalVideoStageView: View {
     let videoURL: URL
     let isActivePage: Bool
     let onSetCoverFrame: @MainActor (Data, Double?) async -> Void
+    var onCaptureFailed: (() -> Void)? = nil
 
     @Environment(\.colorScheme) private var colorScheme
     @State private var captureBridge = MobileVideoFrameCaptureBridge()
@@ -1580,6 +1854,8 @@ private struct MobileLocalVideoStageView: View {
                         defer { isCapturingCover = false }
                         if let captured = await captureBridge.captureCurrentFrame?() {
                             await onSetCoverFrame(captured.jpegData, captured.timestampSeconds)
+                        } else {
+                            onCaptureFailed?()
                         }
                     }
                 } label: {
@@ -1615,9 +1891,11 @@ private struct MobileStreamingVideoPlayerView: View {
     let openActionLabel: String
     let isActivePage: Bool
     var onSetCoverFrame: (@MainActor (_ jpegData: Data, _ timestampSeconds: Double?) async -> Void)? = nil
+    var onCaptureFailed: (() -> Void)? = nil
     let resolvePlan: () async -> VideoStreamPlaybackPlan
 
     @State private var plan: VideoStreamPlaybackPlan?
+    @State private var resolvedPlaybackKey: String?
     @State private var isResolving: Bool = true
     @State private var directStreamIndex: Int = 0
     @State private var useEmbedMode: Bool = false
@@ -1728,6 +2006,8 @@ private struct MobileStreamingVideoPlayerView: View {
                                     defer { isCapturingCover = false }
                                     if let captured = await captureBridge.captureCurrentFrame?() {
                                         await onSetCoverFrame(captured.jpegData, captured.timestampSeconds)
+                                    } else {
+                                        onCaptureFailed?()
                                     }
                                 }
                             } label: {
@@ -1779,10 +2059,12 @@ private struct MobileStreamingVideoPlayerView: View {
                 isResolving = false
                 return
             }
-            if plan != nil {
+            if plan != nil && resolvedPlaybackKey == playbackKey {
                 isResolving = false
                 return
             }
+            plan = nil
+            resolvedPlaybackKey = nil
             isResolving = true
             directStreamIndex = 0
             useEmbedMode = false
@@ -1795,6 +2077,7 @@ private struct MobileStreamingVideoPlayerView: View {
             guard !Task.isCancelled else { return }
 
             plan = resolved
+            resolvedPlaybackKey = playbackKey
             if resolved.directStreams.isEmpty && resolved.embedPlayer != nil {
                 useEmbedMode = true
             }
@@ -1855,6 +2138,7 @@ private struct MobileDirectStreamPlayerController: UIViewControllerRepresentable
     @MainActor
     final class Coordinator {
         var currentStream: VideoStreamPlaybackPlan.DirectStream?
+        var isActive: Bool = false
         var loadTask: Task<Void, Never>?
         var statusObservation: NSKeyValueObservation?
         var videoOutput: AVPlayerItemVideoOutput?
@@ -1871,6 +2155,7 @@ private struct MobileDirectStreamPlayerController: UIViewControllerRepresentable
         ) {
             teardown(controller)
             currentStream = stream
+            self.isActive = isActive
             self.captureBridge = captureBridge
             self.onPlaybackFailed = onPlaybackFailed
             didReportFailure = false
@@ -1914,7 +2199,7 @@ private struct MobileDirectStreamPlayerController: UIViewControllerRepresentable
                     }
                     return (result.jpegData, result.timestampSeconds)
                 }
-                if isActive {
+                if self.isActive {
                     player.play()
                 }
             }
@@ -1927,6 +2212,7 @@ private struct MobileDirectStreamPlayerController: UIViewControllerRepresentable
         }
 
         func teardown(_ controller: AVPlayerViewController) {
+            isActive = false
             loadTask?.cancel()
             loadTask = nil
             statusObservation?.invalidate()
@@ -1936,6 +2222,7 @@ private struct MobileDirectStreamPlayerController: UIViewControllerRepresentable
             controller.player?.pause()
             controller.player?.replaceCurrentItem(with: nil)
             controller.player = nil
+            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
         }
     }
 
@@ -1960,6 +2247,9 @@ private struct MobileDirectStreamPlayerController: UIViewControllerRepresentable
     }
 
     func updateUIViewController(_ uiViewController: AVPlayerViewController, context: Context) {
+        context.coordinator.isActive = isActive
+        context.coordinator.captureBridge = captureBridge
+        context.coordinator.onPlaybackFailed = onPlaybackFailed
         if context.coordinator.currentStream != stream {
             context.coordinator.attach(
                 stream: stream,
@@ -2023,15 +2313,19 @@ private struct MobileEmbedStreamWebView: UIViewRepresentable {
             loadEmbed(embed, into: uiView, coordinator: context.coordinator)
         }
         if !isActive {
+            uiView.pauseAllMediaPlayback(completionHandler: nil)
             uiView.evaluateJavaScript("document.querySelectorAll('video,audio').forEach(e=>e.pause());", completionHandler: nil)
         }
     }
 
     static func dismantleUIView(_ uiView: WKWebView, coordinator: Coordinator) {
         coordinator.captureBridge?.captureCurrentFrame = nil
+        uiView.pauseAllMediaPlayback(completionHandler: nil)
+        uiView.closeAllMediaPresentations(completionHandler: nil)
         uiView.stopLoading()
-        uiView.loadHTMLString("", baseURL: nil)
+        uiView.loadHTMLString("<html></html>", baseURL: nil)
         coordinator.loadedEmbed = nil
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
 
     private func registerSnapshotBridge(for webView: WKWebView) {
@@ -2069,6 +2363,7 @@ private struct ZoomableImageView: UIViewRepresentable {
     let image: UIImage
     let transform: PreviewTransformState
     let isActivePage: Bool
+    var fitWidthMode: Bool = false
     let onZoomInteractionChanged: (Bool) -> Void
     let onSingleTap: () -> Void
 
@@ -2109,20 +2404,25 @@ private struct ZoomableImageView: UIViewRepresentable {
         scrollView.addGestureRecognizer(singleTap)
 
         context.coordinator.scrollView = scrollView
-        scrollView.configure(image: image, transform: transform)
+        scrollView.configure(image: image, transform: transform, fitWidthMode: fitWidthMode)
+        scrollView.syncPanEnabledForCurrentZoom()
         return scrollView
     }
 
     func updateUIView(_ scrollView: ZoomablePhotoScrollView, context: Context) {
         context.coordinator.onZoomInteractionChanged = onZoomInteractionChanged
         context.coordinator.onSingleTap = onSingleTap
-        scrollView.configure(image: image, transform: transform)
+        scrollView.configure(image: image, transform: transform, fitWidthMode: fitWidthMode)
         scrollView.attachPinchPriorityToModalTransitionIfNeeded()
 
         if !isActivePage && scrollView.zoomScale > 1.01 {
             scrollView.setZoomScale(1.0, animated: false)
             scrollView.centerContent()
             context.coordinator.reportZoomState(false)
+        }
+        scrollView.syncPanEnabledForCurrentZoom()
+        if isActivePage {
+            context.coordinator.reportZoomState(scrollView.shouldBlockModalDismiss)
         }
     }
 
@@ -2151,35 +2451,43 @@ private struct ZoomableImageView: UIViewRepresentable {
             (scrollView as? ZoomablePhotoScrollView)?.contentContainerView
         }
 
+        func scrollViewDidScroll(_ scrollView: UIScrollView) {
+            guard let photoScroll = scrollView as? ZoomablePhotoScrollView else { return }
+            reportZoomState(photoScroll.shouldBlockModalDismiss)
+        }
+
         func scrollViewWillBeginZooming(_ scrollView: UIScrollView, with view: UIView?) {
+            scrollView.panGestureRecognizer.isEnabled = true
             reportZoomState(true)
         }
 
         func scrollViewDidZoom(_ scrollView: UIScrollView) {
-            (scrollView as? ZoomablePhotoScrollView)?.centerContent()
-            let active = scrollView.zoomScale > 1.01 || scrollView.isZooming || scrollView.isZoomBouncing
-            reportZoomState(active)
+            guard let photoScroll = scrollView as? ZoomablePhotoScrollView else { return }
+            photoScroll.centerContent()
+            photoScroll.syncPanEnabledForCurrentZoom()
+            reportZoomState(photoScroll.shouldBlockModalDismiss)
         }
 
         func scrollViewDidEndZooming(_ scrollView: UIScrollView, with view: UIView?, atScale scale: CGFloat) {
-            (scrollView as? ZoomablePhotoScrollView)?.centerContent()
+            guard let photoScroll = scrollView as? ZoomablePhotoScrollView else { return }
+            photoScroll.centerContent()
             if scale <= 1.03 {
                 if abs(scrollView.zoomScale - 1.0) > 0.001 {
                     scrollView.setZoomScale(1.0, animated: true)
                 }
-                reportZoomState(false)
-            } else {
-                reportZoomState(true)
             }
+            photoScroll.syncPanEnabledForCurrentZoom()
+            reportZoomState(photoScroll.shouldBlockModalDismiss)
         }
 
         @objc func handleDoubleTap(_ gesture: UITapGestureRecognizer) {
             guard let scrollView else { return }
             if scrollView.zoomScale > 1.05 {
                 scrollView.setZoomScale(1.0, animated: true)
-                reportZoomState(false)
+                scrollView.syncPanEnabledForCurrentZoom()
+                reportZoomState(scrollView.isFitWidthActive && scrollView.contentOffset.y > 6)
             } else {
-                let targetScale: CGFloat = 2.5
+                let targetScale: CGFloat = min(scrollView.maximumZoomScale, 2.5)
                 let tapPoint = gesture.location(in: scrollView.contentContainerView)
                 let width = scrollView.bounds.width / targetScale
                 let height = scrollView.bounds.height / targetScale
@@ -2189,6 +2497,7 @@ private struct ZoomableImageView: UIViewRepresentable {
                     width: width,
                     height: height
                 )
+                scrollView.panGestureRecognizer.isEnabled = true
                 reportZoomState(true)
                 scrollView.zoom(to: rect, animated: true)
             }
@@ -2200,9 +2509,9 @@ private struct ZoomableImageView: UIViewRepresentable {
     }
 }
 
-/// Native `UIScrollView` container that computes pixel-accurate aspect-fit layout (including 90°/270°
-/// rotation and horizontal/vertical mirror transforms) and ensures modal zoom-transition pinch
-/// recognizers defer to photo zooming.
+/// Native `UIScrollView` container that computes pixel-accurate aspect-fit (or long-strip fit-width)
+/// layout (including 90°/270° rotation and horizontal/vertical mirror transforms) and ensures modal
+/// zoom-transition pinch recognizers defer to photo zooming.
 private final class ZoomablePhotoScrollView: UIScrollView {
     let contentContainerView = UIView()
     private let imageView = UIImageView()
@@ -2210,7 +2519,17 @@ private final class ZoomablePhotoScrollView: UIScrollView {
     private var lastBoundsSize: CGSize = .zero
     private var lastImageSize: CGSize = .zero
     private var currentTransform = PreviewTransformState()
+    private var requestedFitWidthMode = false
+    private(set) var isFitWidthActive = false
     private var configuredTransitionGestures = NSHashTable<UIGestureRecognizer>.weakObjects()
+    private var didAttachModalPinchPriority = false
+
+    var shouldBlockModalDismiss: Bool {
+        if zoomScale > 1.01 || isZooming || isZoomBouncing {
+            return true
+        }
+        return isFitWidthActive && contentContainerView.frame.height > bounds.height + 1 && contentOffset.y > 6
+    }
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -2230,6 +2549,8 @@ private final class ZoomablePhotoScrollView: UIScrollView {
         super.didMoveToWindow()
         if window != nil {
             attachPinchPriorityToModalTransitionIfNeeded()
+        } else {
+            didAttachModalPinchPriority = false
         }
     }
 
@@ -2248,19 +2569,21 @@ private final class ZoomablePhotoScrollView: UIScrollView {
         }
     }
 
-    func configure(image: UIImage, transform: PreviewTransformState) {
+    func configure(image: UIImage, transform: PreviewTransformState, fitWidthMode: Bool = false) {
         let imageChanged = imageView.image !== image
         let imageSizeChanged = lastImageSize != image.size
         let transformChanged = currentTransform != transform
+        let fitModeChanged = requestedFitWidthMode != fitWidthMode
 
         if imageChanged {
             imageView.image = image
             lastImageSize = image.size
         }
         currentTransform = transform
+        requestedFitWidthMode = fitWidthMode
 
-        if imageSizeChanged || transformChanged || contentContainerView.bounds.size == .zero {
-            if zoomScale > 1.01 && transformChanged {
+        if imageSizeChanged || transformChanged || fitModeChanged || contentContainerView.bounds.size == .zero {
+            if zoomScale > 1.01 && (transformChanged || fitModeChanged) {
                 setZoomScale(1.0, animated: false)
             }
             if zoomScale <= 1.01 {
@@ -2282,18 +2605,32 @@ private final class ZoomablePhotoScrollView: UIScrollView {
 
         let availW = bounds.width
         let availH = bounds.height
+        let useFitWidth = requestedFitWidthMode && !isQuarterTurn && (availW / availH > visualAspect)
+        isFitWidthActive = useFitWidth
+
         let fittedSize: CGSize
-        if availW / availH > visualAspect {
+        if useFitWidth {
+            fittedSize = CGSize(width: availW, height: availW / max(0.0001, visualAspect))
+        } else if availW / availH > visualAspect {
             fittedSize = CGSize(width: availH * visualAspect, height: availH)
         } else {
             fittedSize = CGSize(width: availW, height: availW / max(0.0001, visualAspect))
         }
+
+        let imageScale = imageView.image?.scale ?? 1.0
+        let pixelLong = max(rawSize.width * imageScale, rawSize.height * imageScale)
+        let fitLong = max(1, max(fittedSize.width, fittedSize.height))
+        maximumZoomScale = min(16.0, max(6.0, (pixelLong / fitLong) * 3.0))
 
         contentContainerView.transform = .identity
         contentContainerView.frame = CGRect(origin: .zero, size: fittedSize)
         contentSize = fittedSize
         applyImageTransformOnly()
         centerContent()
+        if useFitWidth {
+            contentOffset = CGPoint(x: -contentInset.left, y: -contentInset.top)
+        }
+        syncPanEnabledForCurrentZoom()
     }
 
     private func applyImageTransformOnly() {
@@ -2312,6 +2649,14 @@ private final class ZoomablePhotoScrollView: UIScrollView {
         let flipY: CGFloat = currentTransform.flipVertical ? -1 : 1
         imageView.transform = CGAffineTransform(rotationAngle: radians)
             .concatenating(CGAffineTransform(scaleX: flipX, y: flipY))
+    }
+
+    func syncPanEnabledForCurrentZoom() {
+        let canScrollLongStrip = isFitWidthActive && contentContainerView.frame.height > bounds.height + 1
+        let shouldPan = zoomScale > 1.01 || isZooming || isZoomBouncing || canScrollLongStrip
+        if panGestureRecognizer.isEnabled != shouldPan {
+            panGestureRecognizer.isEnabled = shouldPan
+        }
     }
 
     func centerContent() {
@@ -2333,11 +2678,13 @@ private final class ZoomablePhotoScrollView: UIScrollView {
     /// Ensures any pinch-to-dismiss gesture attached to the presented `.navigationTransition(.zoom)`
     /// modal defers to `UIScrollView.pinchGestureRecognizer` whenever two fingers are pinching a photo.
     func attachPinchPriorityToModalTransitionIfNeeded() {
-        guard let scrollPinch = pinchGestureRecognizer,
+        guard !didAttachModalPinchPriority,
+              let scrollPinch = pinchGestureRecognizer,
               let modalVC = ZoomDismissTransitionLookup.presentedModalViewController(from: self) else {
             return
         }
-        for recognizer in ZoomDismissTransitionLookup.modalTransitionDismissRecognizers(for: modalVC) {
+        let recognizers = ZoomDismissTransitionLookup.modalTransitionDismissRecognizers(for: modalVC)
+        for recognizer in recognizers {
             guard !configuredTransitionGestures.contains(recognizer) else { continue }
             let typeName = String(describing: type(of: recognizer))
             if recognizer is UIPinchGestureRecognizer
@@ -2346,6 +2693,9 @@ private final class ZoomablePhotoScrollView: UIScrollView {
                 recognizer.require(toFail: scrollPinch)
                 configuredTransitionGestures.add(recognizer)
             }
+        }
+        if !recognizers.isEmpty {
+            didAttachModalPinchPriority = true
         }
     }
 }
@@ -2478,17 +2828,28 @@ private struct ZoomDismissCoordinatorBridge: UIViewControllerRepresentable {
 // MARK: - Full 2-Tab Detail Inspector (Info | Similar Assets)
 
 private struct DetailInspectorPanel: View {
+    private enum FocusField: Hashable {
+        case title
+        case tag
+        case notes
+    }
+
     @Bindable var store: MobileAppStore
     let asset: AssetRecord
     @Binding var selectedTab: AssetDetailView.DetailInspectorTab
+    @Binding var isTextFieldFocused: Bool
     let onSelectAsset: (UUID) -> Void
     let onFilterByColor: (String) -> Void
     let onFilterByTag: (String) -> Void
     let onDismissDetail: () -> Void
 
     @Environment(\.colorScheme) private var colorScheme
+    @FocusState private var focusedField: FocusField?
     @State private var titleDraft: String = ""
     @State private var notesDraft: String = ""
+    @State private var loadedAssetID: UUID? = nil
+    @State private var loadedTitleBaseline: String = ""
+    @State private var loadedNotesBaseline: String = ""
     @State private var newTagText: String = ""
     @State private var isInspectorFolderPickerPresented: Bool = false
 
@@ -2511,12 +2872,55 @@ private struct DetailInspectorPanel: View {
             }
         }
         .onAppear { syncDrafts() }
-        .onChange(of: asset.id) { _, _ in syncDrafts() }
+        .onChange(of: focusedField) { _, newValue in
+            isTextFieldFocused = (newValue != nil)
+        }
+        .onChange(of: asset.id) { _, _ in
+            flushPendingDrafts()
+            syncDrafts()
+        }
+        .onChange(of: asset.title) { _, newValue in
+            if loadedAssetID == asset.id && titleDraft == loadedTitleBaseline {
+                titleDraft = newValue
+                loadedTitleBaseline = newValue
+            }
+        }
+        .onChange(of: asset.notes) { _, newValue in
+            if loadedAssetID == asset.id && notesDraft == loadedNotesBaseline {
+                notesDraft = newValue
+                loadedNotesBaseline = newValue
+            }
+        }
+        .onDisappear {
+            isTextFieldFocused = false
+            flushPendingDrafts()
+        }
     }
 
     private func syncDrafts() {
+        loadedAssetID = asset.id
         titleDraft = asset.title
         notesDraft = asset.notes
+        loadedTitleBaseline = asset.title
+        loadedNotesBaseline = asset.notes
+    }
+
+    private func flushPendingDrafts() {
+        guard let targetID = loadedAssetID else { return }
+        let trimmedTitle = titleDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let titleChanged = !trimmedTitle.isEmpty && trimmedTitle != loadedTitleBaseline
+        let notesChanged = notesDraft != loadedNotesBaseline
+        guard titleChanged || notesChanged else { return }
+
+        let nextTitle: String? = titleChanged ? trimmedTitle : nil
+        let nextNotes: String? = notesChanged ? notesDraft : nil
+        if titleChanged { loadedTitleBaseline = trimmedTitle }
+        if notesChanged { loadedNotesBaseline = notesDraft }
+        Task {
+            await store.patchAssets(
+                AssetBatchPatch(assetIDs: [targetID], title: nextTitle, notes: nextNotes)
+            )
+        }
     }
 
     private var infoTabContent: some View {
@@ -2524,6 +2928,7 @@ private struct DetailInspectorPanel: View {
             VStack(alignment: .leading, spacing: 16) {
                 inspectorCard("基本信息") {
                     TextField("标题", text: $titleDraft)
+                        .focused($focusedField, equals: .title)
                         .font(.system(size: 14, weight: .semibold))
                         .onSubmit { saveTitle() }
                         .padding(10)
@@ -2803,6 +3208,7 @@ private struct DetailInspectorPanel: View {
 
                     HStack(spacing: 8) {
                         TextField("添加标签…", text: $newTagText)
+                            .focused($focusedField, equals: .tag)
                             .font(.system(size: 13))
                             .textInputAutocapitalization(.never)
                             .onSubmit { addNewTag() }
@@ -2816,6 +3222,7 @@ private struct DetailInspectorPanel: View {
 
                 inspectorCard("备注与识别文本") {
                     TextField("写下灵感说明或用途备注…", text: $notesDraft, axis: .vertical)
+                        .focused($focusedField, equals: .notes)
                         .lineLimit(3...6)
                         .font(.system(size: 13))
                         .padding(10)
@@ -2823,9 +3230,12 @@ private struct DetailInspectorPanel: View {
 
                     if notesDraft != asset.notes {
                         Button("保存备注") {
+                            let targetID = asset.id
+                            let draft = notesDraft
+                            loadedNotesBaseline = draft
                             Task {
                                 await store.patchAssets(
-                                    AssetBatchPatch(assetIDs: [asset.id], notes: notesDraft),
+                                    AssetBatchPatch(assetIDs: [targetID], notes: draft),
                                     successToast: "备注已保存"
                                 )
                             }
@@ -2865,7 +3275,7 @@ private struct DetailInspectorPanel: View {
                     }
                 }
 
-                if let exif = asset.richMetadata?.photoExif, !exif.isEmpty {
+                if let exif = asset.richMetadata?.photoExif, exif.hasMeaningfulCameraExif {
                     inspectorCard("拍摄参数") {
                         if let camera = exif.cameraDisplayName { specRow("相机", camera) }
                         if let lens = exif.lensModel { specRow("镜头", lens) }
@@ -2906,11 +3316,29 @@ private struct DetailInspectorPanel: View {
                     .buttonStyle(.plain)
 
                     Button(role: .destructive) {
+                        let targetID = asset.id
+                        let wasTrashed = asset.isTrashed
                         Task {
-                            await store.patchAssets(
-                                AssetBatchPatch(assetIDs: [asset.id], isTrashed: !asset.isTrashed),
-                                successToast: asset.isTrashed ? "已恢复素材" : "已移入回收站"
-                            )
+                            if wasTrashed {
+                                await store.patchAssets(
+                                    AssetBatchPatch(assetIDs: [targetID], isTrashed: false),
+                                    successToast: "已恢复素材"
+                                )
+                            } else {
+                                await store.patchAssets(
+                                    AssetBatchPatch(assetIDs: [targetID], isTrashed: true),
+                                    successToast: "已移入回收站",
+                                    actionTitle: "撤销",
+                                    onAction: {
+                                        Task {
+                                            await store.patchAssets(
+                                                AssetBatchPatch(assetIDs: [targetID], isTrashed: false),
+                                                successToast: "已撤销移入回收站"
+                                            )
+                                        }
+                                    }
+                                )
+                            }
                             onDismissDetail()
                         }
                     } label: {
@@ -2923,6 +3351,7 @@ private struct DetailInspectorPanel: View {
             }
             .padding(14)
         }
+        .charkleDismissKeyboardOnScroll()
     }
 
     private var similarTabContent: some View {
@@ -2981,8 +3410,10 @@ private struct DetailInspectorPanel: View {
     private func saveTitle() {
         let trimmed = titleDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, trimmed != asset.title else { return }
+        loadedTitleBaseline = trimmed
+        let targetID = asset.id
         Task {
-            await store.patchAssets(AssetBatchPatch(assetIDs: [asset.id], title: trimmed), successToast: "标题已更新")
+            await store.patchAssets(AssetBatchPatch(assetIDs: [targetID], title: trimmed), successToast: "标题已更新")
         }
     }
 
@@ -3066,19 +3497,56 @@ private struct FlowTagGrid<Item: Hashable, Content: View>: View {
     }
 }
 
-private struct PDFDocumentPreview: UIViewRepresentable {
+private nonisolated struct UncheckedPDFDocumentBox: @unchecked Sendable {
+    let document: PDFDocument?
+}
+
+private struct PDFDocumentPreview: View {
     let url: URL
+    @State private var document: PDFDocument?
+    @State private var isLoading = true
+
+    var body: some View {
+        ZStack {
+            if let document {
+                PDFKitRepresentable(document: document)
+            } else if isLoading {
+                ProgressView("正在解析 PDF…")
+                    .font(.system(size: 13))
+            } else {
+                Text("无法打开此 PDF 文档")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .task(id: url) {
+            isLoading = true
+            let box = await Self.loadDocumentOffMain(url: url)
+            guard !Task.isCancelled else { return }
+            document = box.document
+            isLoading = false
+        }
+    }
+
+    @concurrent
+    private static func loadDocumentOffMain(url: URL) async -> UncheckedPDFDocumentBox {
+        UncheckedPDFDocumentBox(document: PDFDocument(url: url))
+    }
+}
+
+private struct PDFKitRepresentable: UIViewRepresentable {
+    let document: PDFDocument
 
     func makeUIView(context: Context) -> PDFView {
         let view = PDFView()
         view.autoScales = true
-        view.document = PDFDocument(url: url)
+        view.document = document
         return view
     }
 
     func updateUIView(_ uiView: PDFView, context: Context) {
-        if uiView.document?.documentURL != url {
-            uiView.document = PDFDocument(url: url)
+        if uiView.document !== document {
+            uiView.document = document
         }
     }
 }
