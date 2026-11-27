@@ -56,6 +56,26 @@ public struct NotchShelfSettingsPane: View {
                 SettingsCardDivider()
 
                 SettingsRow(
+                    title: "托盘展开形态",
+                    subtitle: coordinator.notchPresentationMode.settingsSubtitle
+                ) {
+                    Picker("", selection: Binding(
+                        get: { coordinator.notchPresentationMode },
+                        set: { coordinator.notchPresentationMode = $0 }
+                    )) {
+                        ForEach(NotchShelfPresentationMode.allCases, id: \.self) { mode in
+                            Text(mode.shortLabel).tag(mode)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                    .frame(width: 264)
+                    .disabled(!coordinator.notchShelfEnabled)
+                }
+
+                SettingsCardDivider()
+
+                SettingsRow(
                     title: "默认收纳目标",
                     subtitle: "拖入浮窗或通过快捷键采集的新灵感默认落入此位置（也可在浮窗顶部随时切换）"
                 ) {

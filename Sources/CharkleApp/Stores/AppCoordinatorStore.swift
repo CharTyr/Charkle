@@ -190,6 +190,10 @@ public final class AppCoordinatorStore {
         didSet { UserDefaults.standard.set(notchHoverTriggerEnabled, forKey: Keys.notchHoverTriggerEnabled) }
     }
 
+    public var notchPresentationMode: NotchShelfPresentationMode {
+        didSet { UserDefaults.standard.set(notchPresentationMode.rawValue, forKey: Keys.notchPresentationMode) }
+    }
+
     public var globalHotkeysEnabled: Bool {
         didSet { UserDefaults.standard.set(globalHotkeysEnabled, forKey: Keys.globalHotkeysEnabled) }
     }
@@ -240,6 +244,7 @@ public final class AppCoordinatorStore {
     private enum Keys {
         static let notchShelfEnabled = "charkle.notchShelfEnabled"
         static let notchHoverTriggerEnabled = "charkle.notchHoverTriggerEnabled"
+        static let notchPresentationMode = "charkle.notchPresentationMode"
         static let globalHotkeysEnabled = "charkle.globalHotkeysEnabled"
         static let defaultNotchTargetMode = "charkle.defaultNotchTargetMode"
         static let launchInMinimalCaptureMode = "charkle.launchInMinimalCaptureMode"
@@ -257,6 +262,8 @@ public final class AppCoordinatorStore {
         let defaults = UserDefaults.standard
         self.notchShelfEnabled = defaults.object(forKey: Keys.notchShelfEnabled) as? Bool ?? true
         self.notchHoverTriggerEnabled = defaults.object(forKey: Keys.notchHoverTriggerEnabled) as? Bool ?? true
+        self.notchPresentationMode = defaults.string(forKey: Keys.notchPresentationMode)
+            .flatMap(NotchShelfPresentationMode.init(rawValue:)) ?? .alwaysShowRecent
         self.globalHotkeysEnabled = defaults.object(forKey: Keys.globalHotkeysEnabled) as? Bool ?? true
         self.defaultNotchTargetMode = defaults.string(forKey: Keys.defaultNotchTargetMode)
             .flatMap(NotchTargetMode.init(rawValue:)) ?? .inbox

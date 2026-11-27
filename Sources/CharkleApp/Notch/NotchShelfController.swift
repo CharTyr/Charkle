@@ -329,6 +329,7 @@ public final class NotchShelfController {
     private var lastAnchoredScreenFrame: NSRect = .zero
     private var lastSensorScreenFrames: [NSRect] = []
     private var lastObservedNotchEnabled: Bool = true
+    private var lastObservedPresentationMode: NotchShelfPresentationMode = .alwaysShowRecent
     private var screenObserver: (any NSObjectProtocol)?
     private var activeSpaceObserver: (any NSObjectProtocol)?
     private var menuBeginObserver: (any NSObjectProtocol)?
@@ -368,6 +369,11 @@ public final class NotchShelfController {
         self.onCollectClipboard = onCollectClipboard
         self.onOpenMainWindow = onOpenMainWindow
         self.shelfState.targetMode = coordinator.defaultNotchTargetMode
+        self.lastObservedPresentationMode = coordinator.notchPresentationMode
+        self.shelfState.isRecentStripExpanded = NotchShelfState.shouldShowRecentStripOnExpand(
+            presentationMode: coordinator.notchPresentationMode,
+            trigger: .manual
+        )
 
         promiseQueue.name = "com.charkle.notch.filepromises"
         createFixedPanel()
@@ -485,18 +491,33 @@ public final class NotchShelfController {
         } else {
             // Keep explicitly toggled Notch Shelf open (via ⌥⇧S hotkey, Menu Bar, or Preview button)
             // even when the cursor is elsewhere on screen; pressing ⌥⇧S / Esc / × or unpinning dismisses it.
-            expand(forDrag: false, pinOpen: true)
+            expand(trigger: .manual, pinOpen: true)
         }
     }
 
     public func expand(forDrag: Bool = false, pinOpen: Bool = false) {
+        let trigger: NotchExpandTrigger = forDrag ? .drag : (pinOpen ? .manual : .hover)
+        expand(trigger: trigger, pinOpen: pinOpen)
+    }
+
+    public func expand(trigger: NotchExpandTrigger, pinOpen: Bool = false) {
         guard coordinator.notchShelfEnabled, !isHiddenForMissionControl else { return }
+        let forDrag = (trigger == .drag)
+        let wasExpanded = shelfState.isExpanded
         cancelAutoCollapse()
         cancelHoverExpand()
         cancelPanelOrderOut()
         anchorFixedPanelIfScreenChanged()
         refreshClipboardHint(force: !forDrag)
         guard let panel else { return }
+
+        if !wasExpanded {
+            shelfState.isFullGalleryExpanded = false
+            shelfState.isRecentStripExpanded = NotchShelfState.shouldShowRecentStripOnExpand(
+                presentationMode: coordinator.notchPresentationMode,
+                trigger: trigger
+            )
+        }
 
         panel.ignoresMouseEvents = false
         if !panel.isVisible {
@@ -515,6 +536,14 @@ public final class NotchShelfController {
         } else {
             ensurePollTimerRunning(fastForDrag: isDraggingNow)
         }
+    }
+
+    public func setRecentStripExpanded(_ expanded: Bool) {
+        cancelAutoCollapse()
+        if !expanded {
+            shelfState.isFullGalleryExpanded = false
+        }
+        shelfState.isRecentStripExpanded = expanded
     }
 
     public func collapse(force: Bool = false) {
@@ -579,7 +608,7 @@ public final class NotchShelfController {
                 notchHeight: metrics.notchHeight
             )
             if stillInHover {
-                self.expand(forDrag: false)
+                self.expand(trigger: .hover)
             }
         }
         hoverExpandWorkItem = item
@@ -596,6 +625,9 @@ public final class NotchShelfController {
         if expanded && shelfState.isMinimalCaptureOnly {
             return
         }
+        if expanded {
+            shelfState.isRecentStripExpanded = true
+        }
         shelfState.isFullGalleryExpanded = expanded
         if expanded {
             shelfState.isPinnedOpen = true
@@ -607,7 +639,7 @@ public final class NotchShelfController {
 
     /// Shows an active in-progress spinner in the Notch Shelf (e.g. while downloading X post media).
     public func showProcessing(_ message: String) {
-        expand(forDrag: false)
+        expand(trigger: .statusBanner)
         bannerResetTask?.cancel()
         cancelAutoCollapse()
         shelfState.statusBanner = nil
@@ -616,7 +648,7 @@ public final class NotchShelfController {
 
     /// Shows a brief confirmation in the Notch Shelf (e.g. after screenshot, clipboard, or X post collect).
     public func flashConfirmation(_ message: String) {
-        expand(forDrag: false)
+        expand(trigger: .statusBanner)
         bannerResetTask?.cancel()
         shelfState.processingMessage = nil
         shelfState.statusBanner = message
@@ -664,6 +696,9 @@ public final class NotchShelfController {
             },
             onToggleFullGallery: { [weak self] full in
                 self?.toggleFullGallery(full)
+            },
+            onToggleRecentStrip: { [weak self] showRecent in
+                self?.setRecentStripExpanded(showRecent)
             },
             onOpenAssetInQuickLook: { [weak self] asset in
                 guard let self else { return }
@@ -924,6 +959,7 @@ public final class NotchShelfController {
         withObservationTracking {
             _ = coordinator.notchShelfEnabled
             _ = coordinator.notchHoverTriggerEnabled
+            _ = coordinator.notchPresentationMode
         } onChange: { [weak self] in
             Task { @MainActor [weak self] in
                 guard let self else { return }
@@ -935,6 +971,16 @@ public final class NotchShelfController {
 
     private func syncNotchEnabledState() {
         let enabled = coordinator.notchShelfEnabled
+        let mode = coordinator.notchPresentationMode
+        if mode != lastObservedPresentationMode {
+            lastObservedPresentationMode = mode
+            if shelfState.isExpanded && !shelfState.isFullGalleryExpanded && !isSensorDragging && !isPanelDragging {
+                shelfState.isRecentStripExpanded = NotchShelfState.shouldShowRecentStripOnExpand(
+                    presentationMode: mode,
+                    trigger: .manual
+                )
+            }
+        }
         if !enabled {
             cancelHoverExpand()
             collapse(force: true)

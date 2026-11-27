@@ -120,6 +120,7 @@ public struct NotchShelfView: View {
     public let onCollectClipboard: () -> Void
     public let onOpenMainWindow: () -> Void
     public let onToggleFullGallery: (Bool) -> Void
+    public let onToggleRecentStrip: (Bool) -> Void
     public let onOpenAssetInQuickLook: (AssetRecord) -> Void
     public let onResolveDragFileURL: (UUID) -> URL?
     public let onClose: () -> Void
@@ -141,6 +142,7 @@ public struct NotchShelfView: View {
         onCollectClipboard: @escaping () -> Void,
         onOpenMainWindow: @escaping () -> Void,
         onToggleFullGallery: @escaping (Bool) -> Void = { _ in },
+        onToggleRecentStrip: @escaping (Bool) -> Void = { _ in },
         onOpenAssetInQuickLook: @escaping (AssetRecord) -> Void = { _ in },
         onResolveDragFileURL: @escaping (UUID) -> URL? = { _ in nil },
         onClose: @escaping () -> Void
@@ -153,6 +155,7 @@ public struct NotchShelfView: View {
         self.onCollectClipboard = onCollectClipboard
         self.onOpenMainWindow = onOpenMainWindow
         self.onToggleFullGallery = onToggleFullGallery
+        self.onToggleRecentStrip = onToggleRecentStrip
         self.onOpenAssetInQuickLook = onOpenAssetInQuickLook
         self.onResolveDragFileURL = onResolveDragFileURL
         self.onClose = onClose
@@ -252,6 +255,10 @@ public struct NotchShelfView: View {
                 value: isFullGallery
             )
             .animation(
+                CharkleMotion.accessible(CharkleMotion.notchMorphSpring, reduced: reduceMotion),
+                value: shelfState.isRecentStripExpanded
+            )
+            .animation(
                 CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion),
                 value: shelfState.isDropTargeted
             )
@@ -332,7 +339,10 @@ public struct NotchShelfView: View {
             // nor the full masonry waterfall ever reflow mid-morph while the black capsule springs smoothly.
             let bodyTransition = CharkleMotion.originTransition(anchor: .top, scale: 0.985, reduced: reduceMotion)
             let compactInnerW = max(300, shelfState.compactBodyWidth - 32)
-            let compactInnerH = max(96, shelfState.compactCardHeight - shelfState.topNotchBandHeight - 22)
+            let activeCompactHeight = shelfState.isRecentStripExpanded
+                ? shelfState.compactCardHeight
+                : shelfState.dropOnlyCardHeight
+            let compactInnerH = max(96, activeCompactHeight - shelfState.topNotchBandHeight - 22)
             let fullInnerW = max(400, shelfState.fullGalleryBodyWidth - 32)
             let fullInnerH = max(240, shelfState.fullGalleryCardHeight - shelfState.topNotchBandHeight - 22)
 
@@ -390,85 +400,141 @@ public struct NotchShelfView: View {
 
             // Row 3: Slim Drop Well / Status Banner
             dropWellRow
-                .frame(height: 52)
+                .frame(height: shelfState.isRecentStripExpanded ? 52 : 60)
 
-            // Row 4: Recent Assets Filmstrip (kept in Minimal Mode with bounded 16-item lightweight cache for fast drag-out)
-            VStack(alignment: .leading, spacing: 7) {
-                HStack(spacing: 8) {
-                    Text("最近素材")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 9)
-                        .padding(.vertical, 3.5)
-                        .background(Color.white.opacity(0.14), in: Capsule(style: .continuous))
-
-                    Text("最近保存与查看 · 拖动可放入其他 App、情绪板或文件夹")
-                        .font(.system(size: 10.5))
-                        .foregroundStyle(.white.opacity(0.48))
-                        .lineLimit(1)
-
-                    Spacer()
-
-                    if shelfState.isMinimalCaptureOnly {
-                        Button {
-                            onOpenMainWindow()
-                        } label: {
-                            HStack(spacing: 4) {
-                                Text("恢复主窗看全部")
-                                    .font(.system(size: 10.5, weight: .semibold))
-                                Image(systemName: "arrow.up.forward.app")
-                                    .font(.system(size: 9.5, weight: .semibold))
-                            }
-                            .foregroundStyle(.white.opacity(0.78))
+            // Row 4: Either full Recent Assets Filmstrip OR compact 1-click expand footer
+            if shelfState.isRecentStripExpanded {
+                VStack(alignment: .leading, spacing: 7) {
+                    HStack(spacing: 8) {
+                        Text("最近素材")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(.white)
                             .padding(.horizontal, 9)
                             .padding(.vertical, 3.5)
-                            .background(Color.white.opacity(0.09), in: Capsule(style: .continuous))
+                            .background(Color.white.opacity(0.14), in: Capsule(style: .continuous))
+
+                        Text("最近保存与查看 · 拖动可放入其他 App、情绪板或文件夹")
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(.white.opacity(0.48))
+                            .lineLimit(1)
+
+                        Spacer()
+
+                        Button {
+                            onToggleRecentStrip(false)
+                        } label: {
+                            HStack(spacing: 3) {
+                                Text("仅收集")
+                                    .font(.system(size: 10.5, weight: .medium))
+                                Image(systemName: "chevron.up")
+                                    .font(.system(size: 8.5, weight: .bold))
+                            }
+                            .foregroundStyle(.white.opacity(0.68))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3.5)
+                            .background(Color.white.opacity(0.08), in: Capsule(style: .continuous))
                         }
                         .buttonStyle(.plain)
-                        .help("退出极简模式并打开主窗口浏览全部素材")
+                        .help("收起最近素材，仅保留简洁收集窗")
+
+                        if shelfState.isMinimalCaptureOnly {
+                            Button {
+                                onOpenMainWindow()
+                            } label: {
+                                HStack(spacing: 4) {
+                                    Text("恢复主窗看全部")
+                                        .font(.system(size: 10.5, weight: .semibold))
+                                    Image(systemName: "arrow.up.forward.app")
+                                        .font(.system(size: 9.5, weight: .semibold))
+                                }
+                                .foregroundStyle(.white.opacity(0.78))
+                                .padding(.horizontal, 9)
+                                .padding(.vertical, 3.5)
+                                .background(Color.white.opacity(0.09), in: Capsule(style: .continuous))
+                            }
+                            .buttonStyle(.plain)
+                            .help("退出极简模式并打开主窗口浏览全部素材")
+                        } else {
+                            Button {
+                                onToggleFullGallery(true)
+                            } label: {
+                                HStack(spacing: 4) {
+                                    Text("全部 (\(recentAssets.count))")
+                                        .font(.system(size: 11, weight: .semibold))
+                                        .monospacedDigit()
+                                    Image(systemName: "chevron.down")
+                                        .font(.system(size: 9, weight: .bold))
+                                }
+                                .foregroundStyle(.white.opacity(0.84))
+                                .padding(.horizontal, 9)
+                                .padding(.vertical, 3.5)
+                                .background(Color.white.opacity(0.10), in: Capsule(style: .continuous))
+                            }
+                            .buttonStyle(.plain)
+                            .help("展开全画面瀑布流浏览最近素材（支持框选多选）")
+                        }
+                    }
+
+                    if recentAssets.isEmpty {
+                        HStack {
+                            Spacer()
+                            Text("暂无最近素材，拖入文件或按 ⌥⇧V 粘贴收藏")
+                                .font(.system(size: 11.5))
+                                .foregroundStyle(.white.opacity(0.45))
+                            Spacer()
+                        }
+                        .frame(height: 104)
                     } else {
-                        Button {
-                            onToggleFullGallery(true)
-                        } label: {
-                            HStack(spacing: 4) {
-                                Text("全部 (\(recentAssets.count))")
-                                    .font(.system(size: 11, weight: .semibold))
-                                    .monospacedDigit()
-                                Image(systemName: "chevron.down")
-                                    .font(.system(size: 9, weight: .bold))
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            LazyHStack(spacing: 9) {
+                                ForEach(recentAssets.prefix(shelfState.isMinimalCaptureOnly ? 16 : 24)) { asset in
+                                    recentFilmstripCard(asset)
+                                }
                             }
-                            .foregroundStyle(.white.opacity(0.84))
-                            .padding(.horizontal, 9)
-                            .padding(.vertical, 3.5)
-                            .background(Color.white.opacity(0.10), in: Capsule(style: .continuous))
+                            .padding(.vertical, 2)
                         }
-                        .buttonStyle(.plain)
-                        .help("展开全画面瀑布流浏览最近素材（支持框选多选）")
+                        .background(HorizontalWheelScrollRedirector())
+                        .frame(height: 110)
+                        .clipped()
                     }
                 }
+                .transition(.opacity)
+            } else {
+                HStack(spacing: 8) {
+                    HStack(spacing: 5) {
+                        Circle()
+                            .fill(activeBlue.opacity(0.85))
+                            .frame(width: 5, height: 5)
+                        Text(targetDropHint)
+                            .font(.system(size: 10.5, weight: .medium))
+                            .foregroundStyle(.white.opacity(0.56))
+                            .lineLimit(1)
+                    }
 
-                if recentAssets.isEmpty {
-                    HStack {
-                        Spacer()
-                        Text("暂无最近素材，拖入文件或按 ⌥⇧V 粘贴收藏")
-                            .font(.system(size: 11.5))
-                            .foregroundStyle(.white.opacity(0.45))
-                        Spacer()
-                    }
-                    .frame(height: 104)
-                } else {
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        LazyHStack(spacing: 9) {
-                            ForEach(recentAssets.prefix(shelfState.isMinimalCaptureOnly ? 16 : 24)) { asset in
-                                recentFilmstripCard(asset)
-                            }
+                    Spacer(minLength: 8)
+
+                    Button {
+                        onToggleRecentStrip(true)
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "photo.on.rectangle.angled")
+                                .font(.system(size: 9.5, weight: .semibold))
+                            Text("展开最近素材 (\(library.recentActivityAssets().count))")
+                                .font(.system(size: 11, weight: .semibold))
+                                .monospacedDigit()
+                            Image(systemName: "chevron.down")
+                                .font(.system(size: 8.5, weight: .bold))
                         }
-                        .padding(.vertical, 2)
+                        .foregroundStyle(.white.opacity(0.88))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 4)
+                        .background(Color.white.opacity(0.11), in: Capsule(style: .continuous))
                     }
-                    .background(HorizontalWheelScrollRedirector())
-                    .frame(height: 110)
-                    .clipped()
+                    .buttonStyle(.plain)
+                    .help("展开最近素材横条，快速预览或拖出到其他应用")
                 }
+                .frame(height: 26)
+                .transition(.opacity)
             }
         }
     }

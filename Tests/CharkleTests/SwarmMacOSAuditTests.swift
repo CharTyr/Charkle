@@ -293,4 +293,36 @@ struct SwarmMacOSAuditTests {
         }
         #expect(violations.isEmpty, "App-wide invariant violations: \(violations.joined(separator: "; "))")
     }
+
+    @Test("Notch Shelf 3-mode presentation setting and slim collection capsule contracts")
+    func notchShelfPresentationModeContracts() throws {
+        let state = try readSource("Sources/CharkleApp/Notch/NotchShelfState.swift")
+        let controller = try readSource("Sources/CharkleApp/Notch/NotchShelfController.swift")
+        let view = try readSource("Sources/CharkleApp/Notch/NotchShelfView.swift")
+        let settings = try readSource("Sources/CharkleApp/Views/Settings/NotchShelfSettingsPane.swift")
+        let coordinator = try readSource("Sources/CharkleApp/Stores/AppCoordinatorStore.swift")
+
+        // 3 presentation modes & persistence
+        #expect(state.contains("public enum NotchShelfPresentationMode"))
+        #expect(state.contains("case alwaysShowRecent"))
+        #expect(state.contains("case dropOnlyOnDrag"))
+        #expect(state.contains("case alwaysDropOnlyUntilExpanded"))
+        #expect(state.contains("public var dropOnlyCardHeight: CGFloat"))
+        #expect(state.contains("public static func shouldShowRecentStripOnExpand("))
+        #expect(coordinator.contains("public var notchPresentationMode: NotchShelfPresentationMode"))
+        #expect(coordinator.contains("charkle.notchPresentationMode"))
+
+        // Controller trigger dispatch & live toggle
+        #expect(controller.contains("public func expand(trigger: NotchExpandTrigger, pinOpen: Bool = false)"))
+        #expect(controller.contains("public func setRecentStripExpanded(_ expanded: Bool)"))
+        #expect(controller.contains("NotchShelfState.shouldShowRecentStripOnExpand("))
+        #expect(controller.contains("onToggleRecentStrip:"))
+
+        // View slim collection capsule + 1-click expand/collapse + Settings UI
+        #expect(view.contains("展开最近素材 ("))
+        #expect(view.contains("onToggleRecentStrip(true)"))
+        #expect(view.contains("onToggleRecentStrip(false)"))
+        #expect(settings.contains("title: \"托盘展开形态\""))
+        #expect(settings.contains("coordinator.notchPresentationMode"))
+    }
 }
