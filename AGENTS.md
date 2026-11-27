@@ -20,11 +20,17 @@ Managed by Trellis. Edits outside this block are preserved; edits inside may be 
 
 <!-- TRELLIS:END -->
 
-## Charkle Monorepo & Native Desktop Engineering Guardrails
+## Charkle Monorepo & Multi-Platform Engineering Guardrails
 
-### 1. Three-Platform Control & Division of Labor
-- **Canonical Authority**: Root `DESIGN.md` (visual/motion/interaction language), `.trellis/spec/cross-platform/index.md` (sync wire contract, `.charkleboard`, MCP safety, interaction parity), `.trellis/spec/macos/native-design-system.md` (macOS native shell), and `.trellis/spec/windows/fluent2-design-system.md` + `windows/AGENTS.md` (Windows Fluent 2 / WinUI 3 native shell, Win32/OLE guardrails, local visual engine invariants) govern native desktop work alongside Web (`./web/`).
-- **Workspace Scope**: Keep platform edits strictly scoped to the active platform (`Sources/`, `Tests/`, `scripts/` for macOS; `windows/` for Windows; `web/` for Web). For cross-platform follow-ups outside the active session's target platform, issue or update structured tasks under `.trellis/tasks/` instead of editing other platform folders directly unless explicitly instructed.
+### 1. Five-Platform Control & Division of Labor
+- **Canonical Authority**:
+  - Root `DESIGN.md` (cross-platform visual, typography, motion & interaction language), `CONTRIBUTING.md` (team collaboration & PR gates), `docs/ARCHITECTURE.md` (current five-platform architecture), and `.trellis/spec/cross-platform/index.md` (`/.charkle/` sync wire contract, `.charkleboard`, MCP safety, interaction parity).
+  - **macOS & Apple Core**: `.trellis/spec/backend/index.md`, `.trellis/spec/frontend/index.md`, `.trellis/spec/macos/native-design-system.md`.
+  - **iOS / iPadOS**: `ios/README.md` (shares `Sources/CharkleCore` directly via root SwiftPM; keep `CharkleCore` free of unguarded macOS-only AppKit APIs and `SwiftUI`).
+  - **Windows & Rust Core**: `.trellis/spec/windows/index.md`, `.trellis/spec/windows/fluent2-design-system.md`, and `windows/AGENTS.md` (Fluent 2 shell, Win32/OLE guardrails, local visual engine invariants).
+  - **Android**: `android/README.md`, `.trellis/spec/android/index.md`, and `.trellis/spec/android/m3-expressive-design-system.md` (Kotlin + Jetpack Compose M3 Expressive; consumes `windows/crates/charkle-core` via standalone UniFFI crate `android/rust/charkle-android-ffi` without modifying `windows/Cargo.toml` members).
+  - **Web / Cloudflare Workers**: `web/README.md`, `.trellis/spec/web/index.md`, and `.trellis/spec/web/dual-runtime-guidelines.md`.
+- **Workspace Scope**: Keep platform edits strictly scoped to the active platform (`Sources/`, `Tests/`, `scripts/` for macOS; `ios/` for iOS/iPadOS; `windows/` for Windows; `android/` for Android; `web/` for Web; `Resources/BrowserExtension/` & `Resources/FigmaPlugin/` for shared companions). When changing shared cores (`Sources/CharkleCore` or `windows/crates/charkle-core`), preserve compatibility for every consuming platform. For cross-platform follow-ups outside the active session's target platform, issue or update structured tasks under `.trellis/tasks/` instead of editing other platform folders directly unless explicitly instructed.
 
 ### 2. Repository Purity, Privacy & Git Push Discipline
 - **Zero External Inspiration / Author Mentions**: Never introduce names of external reference/competitor products, design-tip authors, or unrelated third-party tooling in tracked source, comments, tests, specs, docs, or Trellis tasks. Only cite actual runtime integrations; credit `gdirect` solely in root `README.md` **Acknowledgements**.

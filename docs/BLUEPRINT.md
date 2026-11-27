@@ -1,9 +1,17 @@
-# Charkle v1.0 产品与架构规划蓝图
+# Charkle v1.0 初始产品与架构蓝图（历史归档）
 
-> **状态**：规划评审稿（确认后再开始建仓与编码）  
+> **档案说明**：本文档是 Charkle 立项初期（v1.0 建仓前）的设计蓝图，保留用于追溯产品初心与早期模块划分思考。  
+> **最新权威架构与开发文档请移步**：
+> - 全平台最新系统架构（v1.5.1 五端 + 伴生插件）：[`docs/ARCHITECTURE.md`](ARCHITECTURE.md)
+> - 全平台开发与测试手册：[`docs/DEVELOPMENT.md`](DEVELOPMENT.md)
+> - 跨端版本与功能矩阵：[`docs/PLATFORM_MATRIX.md`](PLATFORM_MATRIX.md)
+> - 多人协作与文档总索引：[`docs/README.md`](README.md) · [`CONTRIBUTING.md`](../CONTRIBUTING.md)
+
+---
+
 > **应用名称**：**Charkle**（Bundle ID: `com.charkle.app` · URL Scheme: `charkle://` · Drive 根目录: `/Charkle/`）  
-> **目标平台**：macOS 15+（Apple Silicon，优先适配 macOS 原生 Liquid Glass 与 Swift 6.4 并发模型）  
-> **仓库结构**：统一多端 Monorepo（macOS 原生、Web 版、Windows 原生规划）
+> **v1.0 初始目标平台**：macOS 15+（Apple Silicon）  
+> **仓库结构**：统一多端 Monorepo（现已演进覆盖 macOS、iOS/iPadOS、Windows、Android 与 Web）
 
 ---
 
@@ -248,18 +256,14 @@ flowchart LR
 
 | 里程碑 | 交付内容 | 验收标准 |
 | :--- | :--- | :--- |
-| **M0 建仓与基建** | 创建 `~/Documents/Projects/Charkle`、SPM 四 Target 结构、Git 基线、`build-app.sh`；确认/升级本机 `gdirect` CLI 至 `v0.13.2` | `swift build` / `swift test` 零警告跑通，确认本机 `gdirect` 账号与直连 IP 可用 |
-| **M1 数据与全媒体底座** | `LibraryDatabase`（SQLite WAL + FTS5 + 拼音 + 向量）+ `MediaPipeline`（5 大类全媒体缩略图/波形/网页快照 + 10GB LRU 缓存 + 钉选离线）+ 离线 Vision/CIELAB | 万级模拟资产查询 < 20ms；全媒体导入与 LRU 淘汰 Swift Testing 全绿 |
+| **M0 建仓与基建** | 初始化 Charkle Monorepo、SPM 四 Target 结构、Git 基线、`build-app.sh`；确认可选 `gdirect` CLI 环境 | `swift build` / `swift test` 零警告跑通，确认直连通道可用 |
+| **M1 数据与全媒体底座** | `LibraryDatabase`（SQLite WAL + FTS5 + 拼音 + 向量）+ `MediaPipeline`（全媒体缩略图/波形/网页快照 + 10GB LRU 缓存 + 钉选离线）+ 离线 Vision/CIELAB | 万级模拟资产查询 < 20ms；全媒体导入与 LRU 淘汰 Swift Testing 全绿 |
 | **M2 云同步引擎** | `DriveTransport` 双通道（`DirectAPITransport` + `gdirect` 加速为主、`MountedVolumeTransport` 可选）+ `/.charkle/` 分片增量同步 + FileID 改名追踪 | 内存多端冲突/网页改名/断网续传测试全绿 + 实测真实 Google Drive 同步跑通 |
 | **M3 画廊、收件箱与 Quick Look** | 虚拟化瀑布流、多选/框选/批量编辑、可视化筛选条、`⌘J` 跳转、收件箱键盘/AI 清理台、全媒体 Quick Look、Liquid Glass 浮层与设置页 | 10k 模拟素材流畅滚动；亮暗双模式与 Liquid Glass 层级克制清晰 |
 | **M4 双模情绪板（核心）** | 4 入口快速生成 + MMR 策展 + 右侧候选替换池 + 自动排版↔自由画布无缝切换 + 便签/分组/色卡/箭头连线/手绘批注 + 拖入新图自动入 Inbox + PNG/Figma 导出 | 从灵感词/种子图 10 秒内成板、画布缩放/手绘流畅、双端同步不串位 |
 | **M5 刘海浮窗与全局采集** | 动画友好的固定透明 `NSPanel` 刘海宿主、防 Mission Control、收件箱/文件夹/活跃情绪板三目标直投、区域截图与剪贴板收藏 | 跨 App 拖拽稳定不切屏，直接投放当前活跃情绪板实时可见 |
-| **M6 统一动效专项** | 刘海弹簧形变动画（类灵动岛体感）、Quick Look 景深展开、情绪板双模流式重排、Liquid Glass 容器变形与无障碍降级 | 全程可打断、物理一致、高刷新率无卡顿 |
+| **M6 统一动效专项** | 刘海弹簧形变动画、Quick Look 景深展开、情绪板双模流式重排、Liquid Glass 容器变形与无障碍降级 | 全程可打断、物理一致、高刷新率无卡顿 |
 
 ---
 
-## 待确认项（确认后即可启动 M0）
-
-1. **仓库路径**：是否确认直接创建在 `~/Documents/Projects/Charkle`？（你本地 `~/Documents/Projects/` 下已有其他项目。）
-2. **本机 `gdirect` CLI 升级**：进入 M0 时，是否授权我帮你把 `~/.local/bin/gdirect` 从 `0.1.2` 升级到与 `/Applications/gdirect.app` 一致的 `v0.13.2`（执行官方安装脚本），方便后续实测双通道？
-3. **蓝图调整**：以上关于 **情绪板双模与手绘连线、Drive 双通道与分片同步、Liquid Glass 边界、以及 M0–M6 拆分**，有没有哪块你想调整优先级或增删？
+> **里程碑归档**：以上 M0–M6 均已在早期 v1.0 阶段完成交付。后续演进（多后端同步、iOS/iPadOS、Windows、Android、Pinterest 空间浏览、6 平台社媒采集、智能去重、PureRef / `.eaglepack` 互通、视频书签流式播放与选帧设封面）请查阅 [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) 与 [`docs/PLATFORM_MATRIX.md`](PLATFORM_MATRIX.md)。

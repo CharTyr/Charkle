@@ -1,6 +1,10 @@
 # Charkle Web
 
-Self-hosted full-stack TypeScript visual reference library & rapid moodboard studio — featuring 1:1 domain parity and lossless bidirectional `/.charkle/` sync with Charkle for macOS, built-in MCP server, and bundled Figma / FigJam bridge plugin.
+Self-hosted full-stack TypeScript visual reference library & rapid moodboard studio — featuring 1:1 domain parity and lossless bidirectional `/.charkle/` sync with Charkle for macOS, iOS/iPadOS, Windows, and Android, built-in MCP server, and bundled Figma / FigJam bridge plugin.
+
+> **开发必读**：[文档总索引](../docs/README.md) · [多人协作指南](../CONTRIBUTING.md) · [Web 开发规范](../.trellis/spec/web/index.md) · [双运行时指南](../.trellis/spec/web/dual-runtime-guidelines.md) · [跨端协议](../.trellis/spec/cross-platform/index.md)
+>
+> **Figma 插件一致约束**：`web/figma-plugin/` 必须与 `../Resources/FigmaPlugin/` 保持逐字节一致；修改后请执行 `node ../scripts/test-figma-plugin.cjs` 与 `diff -rq ../Resources/FigmaPlugin figma-plugin`。
 
 ## Workspace Architecture
 

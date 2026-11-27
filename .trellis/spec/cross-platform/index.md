@@ -1,6 +1,6 @@
-# Cross-Platform Shared Contracts (macOS · Web · Windows)
+# Cross-Platform Shared Contracts (macOS · iOS/iPadOS · Windows · Android · Web)
 
-> Single source of truth for wire protocols, file formats, safety boundaries, visual design authority ([`DESIGN.md`](../../../DESIGN.md)), and repository hygiene shared across macOS (`Sources/`), Web (`./web/`), and Windows (`./windows/`).
+> Single source of truth for wire protocols, file formats, safety boundaries, visual design authority ([`DESIGN.md`](../../../DESIGN.md)), and repository hygiene shared across macOS (`Sources/`), iOS/iPadOS (`ios/`, sharing `Sources/CharkleCore`), Windows (`./windows/`), Android (`./android/`, sharing `windows/crates/charkle-core` via UniFFI), and Web (`./web/`).
 
 ---
 
@@ -138,3 +138,21 @@
    - `SocialPlatform` includes `xiaohongshu` (`小红书`, `#FF2442` accent, noun `"笔记"`, hiding internal 24-hex user IDs in subtitle typography). Parsers MUST support `/explore/<id>`, `/discovery/item/<id>`, `/user/profile/<uid>/<id>`, and `xhslink.com` short links (including mobile app share copy), preserving `xsec_token` / `xsec_source` query parameters for openability while computing token-independent canonical deduplication keys (`xhs:<noteID>`, `x:<tweetID>`).
    - Xiaohongshu resolvers parse `window.__INITIAL_STATE__` (sanitizing bare JS `undefined` -> `null` outside strings) with multi-`og:image` fallback and interstitial rejection, and ALWAYS attach `Referer: https://www.xiaohongshu.com/` + desktop browser `User-Agent` when fetching `*.xhscdn.com` / `*.xiaohongshu.com` media or avatars. Xiaohongshu bookmark cards MUST render as native vertical feed cards (`900×1440`, `aspectRatio = 0.625`) combining a strict vertical **3:4 (`900×1200`)** full-bleed cover on top with a crisp `240px` paper-white footer preserving the bold note title (up to 2 lines), author avatar/name, and like count (with an idempotent startup migration upgrading legacy covers and 3:4 multi-image grid alignment in Quick Look).
    - Desktop clients expose a loopback-only Bearer-authenticated extension bridge (`127.0.0.1:41937` on macOS, speaking the exact `/api/v1/*` contract plus `GET /api/v1/health`, `POST /api/v1/auth/local-pair`, `GET /api/v1/assets/existing-sources`, `POST /api/v1/folders` with `reuseExisting`, and `socialBookmark` + `skipDuplicates` on `POST /api/v1/assets/ingest`). Same-machine zero-config pairing (`POST /api/v1/auth/local-pair`, default ON and toggleable in Settings) MUST strictly require a browser-extension `Origin` (`chrome-extension://`, `safari-web-extension://`, `moz-extension://`) plus `X-Charkle-Extension: 1`, rejecting all web/localhost origins with `403`, while the extension auto-pairs on install/open and self-heals on port/token changes without exposing raw token fields unless manually expanded. Shared Chrome & Safari MV3 extension source lives in `Resources/BrowserExtension/` (embedded inside `Charkle.app/Contents/Resources/BrowserExtension` for Chromium and compiled into a signed sandboxed `CharkleSafariExtension.appex` inside `Contents/PlugIns/` with `NSAllowsLocalNetworking = true` and classic single-file `background.js` for Safari); its image grabber grid MUST use explicit `grid-auto-rows` + `align-content: start` to avoid WebKit implicit-row overlap.
+
+---
+
+## 6. v1.3–v1.5.1 Cross-Platform Interchange & Media Contracts
+
+1. **Multi-Backend Sync & Anti-Resurrection Invariants (`v1.4.0+`)**:
+   - `DriveTransportMode` supports `directAPIWithGDirect`, `iCloudDrive`, `webDAV`, `gdirectMount`, and `localOnly`; multiple `SyncBackendProfile` instances may run simultaneously against independent roots.
+   - Permanent asset deletion MUST record tombstones propagated via `/.charkle/ops/` and checked before re-ingesting cloud files by `driveFileID` / relative path so older offline devices never resurrect deleted assets.
+2. **6-Platform Social Batch Collector & Non-AI Smart Deduplication (`v1.3.0+`)**:
+   - `Resources/BrowserExtension/` (`v1.3.0+`) supports batch author-media & saved-collection import across 6 visual platforms (`x`, `pixiv`, `bluesky`, `threads`, `instagram`, `xiaohongshu`) with per-post subfolder organization and token-independent canonical deduplication keys.
+   - Smart Deduplication (`SmartDeduplicator` / `dedup.rs`) MUST remain 100% deterministic without requiring Cloud AI, cover all 8 `MediaKind`s, retain the highest-quality version, losslessly merge tags/notes/folder/moodboard references onto the survivor, and route discarded duplicates to reversible soft Trash by default.
+3. **Third-Party Format Interoperability (`v1.3.0+` / `v1.5.0+`)**:
+   - **`.eaglepack` / `.library` Lossless Importer**: Preserves nested folders, tags, notes, ratings, URLs, and originals without duplicating existing identical files.
+   - **PureRef `.pur` Bidirectional Codec**: Supports lossless import of `.pur` reference boards into Charkle libraries/moodboards and export of Charkle moodboards to `.pur` while preserving relative spatial transforms.
+4. **Video Bookmarks, Zero-Download Streaming & Frame-to-Cover (`v1.5.0–v1.5.1`)**:
+   - `SocialPlatform` includes `youtube` and `bilibili` alongside `x`, `threads`, `bluesky`, `xiaohongshu`, `pixiv`, `instagram`. Video bookmarks remain zero-download by default (storing link, 16:9 cover, duration, and summary/chapters).
+   - Preview-time streaming resolves Tier 1 direct HTTP Range/HLS stream first and automatically falls back to Tier 2 official embed players (with `strict-origin-when-cross-origin` Referer policy for YouTube) while tearing down media cleanly on exit (`0%` idle CPU).
+   - **"设当前帧为封面" (`updateAssetCoverImage`)** applies to both local `.video` assets and streaming video bookmarks: atomically regenerates `grid520` & `preview1400` thumbnails, refreshes `dominantColors`, invalidates UI thumbnail caches immediately, and queues `/.charkle/thumbnails/` sync.
