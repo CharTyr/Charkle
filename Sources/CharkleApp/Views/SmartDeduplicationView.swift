@@ -246,7 +246,7 @@ public struct SmartDeduplicationView: View {
                 .font(CharkleTheme.text(.headline, weight: .semibold))
                 .foregroundStyle(.primary)
 
-            Text("全媒体纯本地算法 · 无需 AI")
+            Text("本地离线分析")
                 .font(CharkleTheme.text(.caption, weight: .medium))
                 .foregroundStyle(activeAccent)
                 .padding(.horizontal, 8)
@@ -258,7 +258,7 @@ public struct SmartDeduplicationView: View {
             if let report, !isScanning {
                 Text(
                     String(
-                        format: "已扫描 %d 项 · %.2fs",
+                        format: "已扫描 %d 项（%.2fs）",
                         report.scannedAssetCount,
                         max(0.01, report.durationSeconds)
                     )
@@ -581,7 +581,7 @@ public struct SmartDeduplicationView: View {
             HStack(spacing: 10) {
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 6) {
-                        Text("\(group.primaryMediaKind.localizedLabel) · \(group.matchKind.localizedLabel)")
+                        Text("\(group.primaryMediaKind.localizedLabel) / \(group.matchKind.localizedLabel)")
                             .font(CharkleTheme.text(.body, weight: .semibold))
                         if group.matchKind == .nearIdentical || group.matchKind == .audioWaveform {
                             Text("相似度 \(similarityPct)%")
@@ -657,7 +657,7 @@ public struct SmartDeduplicationView: View {
             HStack(spacing: 6) {
                 if isKept {
                     Label(
-                        candidate.isRecommendedKeep ? "推荐保留 · 质量最高" : "已手动指定保留",
+                        candidate.isRecommendedKeep ? "推荐保留（质量最高）" : "已手动指定保留",
                         systemImage: "crown.fill"
                     )
                     .font(CharkleTheme.text(.caption, weight: .semibold))
@@ -921,7 +921,7 @@ public struct SmartDeduplicationView: View {
                 }
                 let sizeStr = ByteCountFormatter.string(fromByteCount: result.reclaimedBytes, countStyle: .file)
                 let verb = disposal == .permanentlyDelete ? "已彻底清理" : "已移至废纸篓"
-                let boardNote = result.updatedBoardCount > 0 ? " · 自动迁移 \(result.updatedBoardCount) 个情绪板引用" : ""
+                let boardNote = result.updatedBoardCount > 0 ? "，已自动迁移 \(result.updatedBoardCount) 个情绪板引用" : ""
                 coordinator.showToast(
                     "\(verb) \(result.removedAssetCount) 项重复素材（释放 \(sizeStr)）\(boardNote)",
                     icon: "checkmark.seal.fill",

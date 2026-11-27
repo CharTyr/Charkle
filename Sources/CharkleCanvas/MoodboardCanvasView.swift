@@ -849,7 +849,7 @@ public struct MoodboardCanvasView: View {
             .overlay(alignment: .top) {
                 if isDraggingThis {
                     Text("\(Int(currentRotation.rounded()))°")
-                        .font(CanvasSurface.text(.caption, weight: .semibold, design: .monospaced))
+                        .font(CanvasSurface.text(.caption, weight: .semibold))
                         .monospacedDigit()
                         .foregroundStyle(.white)
                         .padding(.horizontal, 7)
@@ -945,7 +945,7 @@ public struct MoodboardCanvasView: View {
                 } label: {
                     HStack(spacing: 3) {
                         Text("\(Int(singleAngle.rounded()))°")
-                            .font(CanvasSurface.text(.caption, weight: .semibold, design: .monospaced))
+                            .font(CanvasSurface.text(.caption, weight: .semibold))
                             .monospacedDigit()
                         Image(systemName: "arrow.uturn.backward")
                             .font(.system(size: 9.5, weight: .semibold))
@@ -1470,7 +1470,7 @@ public struct MoodboardCanvasView: View {
                 .overlay(alignment: .bottom) {
                     if isActiveCorner, let live = interaction.liveResizeFrame {
                         Text("\(Int(live.width.rounded())) × \(Int(live.height.rounded()))")
-                            .font(CanvasSurface.text(.caption, weight: .semibold, design: .monospaced))
+                            .font(CanvasSurface.text(.caption, weight: .semibold))
                             .monospacedDigit()
                             .foregroundStyle(.white)
                             .padding(.horizontal, 7)
@@ -2477,7 +2477,7 @@ public struct MoodboardCanvasView: View {
                     .font(.system(size: 16, weight: .semibold))
                     .foregroundStyle(Color.accentColor)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("一句话语义裁切 (Jev Box)")
+                    Text("语义裁切")
                         .font(CanvasSurface.text(.body, weight: .semibold))
                     Text("输入想聚焦的局部元素，非破坏性裁切到目标区域，随时可还原。")
                         .font(CanvasSurface.text(.caption))
@@ -2556,9 +2556,9 @@ public struct MoodboardCanvasView: View {
                     .font(.system(size: 16, weight: .semibold))
                     .foregroundStyle(Color.accentColor)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("以图找局部 (Jev Visual-Target Box)")
+                    Text("以图找局部")
                         .font(CanvasSurface.text(.body, weight: .semibold))
-                    Text("选择一张参考图，Jev Box 会在当前图片中找出与该参考图最匹配的局部并自动裁切。")
+                    Text("选择一张参考图，自动在当前画面中定位最匹配的局部并裁切。")
                         .font(CanvasSurface.text(.caption))
                         .foregroundStyle(.secondary)
                 }
@@ -2619,7 +2619,7 @@ public struct MoodboardCanvasView: View {
                     .font(.system(size: 16, weight: .semibold))
                     .foregroundStyle(Color.accentColor)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("指物批注 (Jev Box)")
+                    Text("指物批注")
                         .font(CanvasSurface.text(.body, weight: .semibold))
                     Text("定位画面中的目标元素，并在旁侧自动生成便签与精准指向箭头。")
                         .font(CanvasSurface.text(.caption))
@@ -4346,7 +4346,7 @@ private struct FreeformZoomControlsPill: View {
                 onResetZoom()
             } label: {
                 Text("\(Int((camera.zoom * 100).rounded()))%")
-                    .font(CanvasSurface.text(.caption, weight: .semibold, design: .monospaced))
+                    .font(CanvasSurface.text(.caption, weight: .semibold))
                     .monospacedDigit()
                     .frame(minWidth: compact ? 36 : 42)
             }

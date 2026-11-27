@@ -308,11 +308,14 @@ public struct QuickLookOverlayView: View {
                             .lineLimit(1)
                             .truncationMode(.middle)
 
-                        Text("\(asset.pixelWidth) × \(asset.pixelHeight) · \(asset.mediaKind.localizedLabel)")
-                            .font(CharkleTheme.text(.caption, weight: .medium, design: .monospaced))
-                            .monospacedDigit()
-                            .foregroundStyle(.white.opacity(0.62))
-                            .fixedSize(horizontal: true, vertical: false)
+                        HStack(spacing: 8) {
+                            Text("\(asset.pixelWidth) × \(asset.pixelHeight)")
+                                .monospacedDigit()
+                            Text(asset.mediaKind.localizedLabel)
+                        }
+                        .font(CharkleTheme.text(.caption, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.62))
+                        .fixedSize(horizontal: true, vertical: false)
 
                         Spacer(minLength: 12)
 
@@ -890,10 +893,10 @@ public struct QuickLookOverlayView: View {
                         .fill(Color(charkleHex: asset.dominantColors.first?.hex ?? "#5C6B73"))
                         .frame(width: 10, height: 10)
                     Text(webMeta?.siteName ?? asset.sourceDomain ?? "网页书签")
-                        .font(CharkleTheme.text(.caption, weight: .semibold, design: .monospaced))
+                        .font(CharkleTheme.text(.caption, weight: .semibold))
                         .foregroundStyle(.secondary)
                     if let author = webMeta?.authorName, !author.isEmpty {
-                        Text("· \(author)")
+                        Text(author)
                             .font(CharkleTheme.text(.caption))
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
@@ -1003,7 +1006,7 @@ public struct QuickLookOverlayView: View {
                             stepZoom(by: 0.8)
                         }
                         Text("\(Int((zoomScale * 100).rounded()))%")
-                            .font(CharkleTheme.text(.caption, weight: .semibold, design: .monospaced))
+                            .font(CharkleTheme.text(.caption, weight: .semibold))
                             .monospacedDigit()
                             .foregroundStyle(.white.opacity(0.88))
                             .frame(minWidth: 42)
@@ -1046,7 +1049,7 @@ public struct QuickLookOverlayView: View {
                                 HStack(spacing: 3) {
                                     if displayRotationDegrees != 0 {
                                         Text("\(displayRotationDegrees)°")
-                                            .font(CharkleTheme.text(.caption, weight: .semibold, design: .monospaced))
+                                            .font(CharkleTheme.text(.caption, weight: .semibold))
                                             .monospacedDigit()
                                     }
                                     Image(systemName: "arrow.uturn.backward")
@@ -1788,13 +1791,13 @@ struct QuickLookAudioStudioCard: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(asset.title)
                         .font(CharkleTheme.text(.headline, weight: .semibold))
-                    Text(fileURL != nil ? "音频原文件就绪 · 点击波形可跳转" : "音频波形预览（原文件按需下载后可播放）")
+                    Text(fileURL != nil ? "音频原文件就绪，点击波形可跳转" : "音频波形预览（原文件按需下载后可播放）")
                         .font(CharkleTheme.text(.caption))
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
                 Text(CanvasFormatters.durationString(asset.durationSeconds))
-                    .font(CharkleTheme.text(.caption, weight: .semibold, design: .monospaced))
+                    .font(CharkleTheme.text(.caption, weight: .semibold))
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
             }

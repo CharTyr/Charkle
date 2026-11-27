@@ -183,7 +183,7 @@ public struct GeneralSettingsPane: View {
             SettingsSection("入门与帮助") {
                 SettingsRow(
                     title: "快速上手引导",
-                    subtitle: "重新配置素材库存储、刘海浮窗与录屏权限、AI 智能与外观偏好（每步均可跳过）"
+                    subtitle: "重新配置存储位置、刘海浮窗、AI 与外观偏好"
                 ) {
                     Button("重新查看") {
                         coordinator.closeSettings()

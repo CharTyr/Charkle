@@ -258,7 +258,8 @@ public struct SmartFolderEditorSheet: View {
                                     Slider(value: $colorTolerance, in: 10...48, step: 2)
                                         .frame(width: 180)
                                     Text("ΔE ≤ \(Int(colorTolerance))")
-                                        .font(CharkleTheme.text(.caption, design: .monospaced))
+                                        .font(CharkleTheme.text(.caption))
+                                        .monospacedDigit()
                                         .foregroundStyle(.secondary)
                                 }
                             }

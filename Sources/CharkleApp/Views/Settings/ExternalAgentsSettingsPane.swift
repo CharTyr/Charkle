@@ -17,7 +17,7 @@ public struct ExternalAgentsSettingsPane: View {
         ("找参考图并建情绪板", "帮我用 Charkle MCP 挑 10 张温暖胶片质感、偏奶油色调的咖啡馆参考图，先看联系表去重，再生成一块名为「早秋咖啡馆视觉」的情绪板。"),
         ("批量智能整理收件箱", "帮我查看 Charkle 收件箱里未整理的素材并附上文件夹建议，先用 dry_run 给我看变更摘要，确认后再一次批量归档到现有文件夹。"),
         ("视觉去重清理", "扫描 Charkle 素材库中的重复图片并拼出对比联系表，帮我挑出画质最干净的无水印版本，确认后合并标签并把副本移入废纸篓。"),
-        ("撤回上一次 AI 整理", "查看 Charkle 最近一次外部 Agent 整理记录（run_id），并帮我一键回滚。")
+        ("撤回上一次 AI 整理", "查看 Charkle 最近一次外部 Agent 整理记录（run_id），并帮我回滚。")
     ]
 
     public init(syncAndAI: SyncAndAIStore) {
@@ -196,7 +196,7 @@ public struct ExternalAgentsSettingsPane: View {
                         )
                         SettingsGuideStep(
                             "2",
-                            title: "每次写操作自动签发 run_id，支持一键跨端回滚",
+                            title: "每次写操作自动签发 run_id，支持跨端回滚",
                             detail: "批量整理、改目录、修补情绪板与去重合并均可随时调用 rollback_run 无损撤销并同步五端。"
                         )
                         SettingsGuideStep(
@@ -241,13 +241,13 @@ public struct ExternalAgentsSettingsPane: View {
 
                     VStack(alignment: .leading, spacing: 10) {
                         Text("创建新的作用域密钥（每把钥匙独立绑定权限，互不干扰）")
-                            .font(.system(size: 11.5, weight: .medium))
+                            .font(CharkleTheme.text(.caption, weight: .medium))
                             .foregroundStyle(.secondary)
 
                         HStack(spacing: 8) {
                             TextField("例如：云端开发机 / 收件箱自动分拣", text: $newTokenName)
                                 .textFieldStyle(.roundedBorder)
-                                .font(.system(size: 12))
+                                .font(CharkleTheme.text(.caption))
 
                             Picker("", selection: $newTokenScope) {
                                 ForEach(ExternalAgentAccessLevel.allCases, id: \.self) { level in
@@ -270,7 +270,7 @@ public struct ExternalAgentsSettingsPane: View {
                             VStack(alignment: .leading, spacing: 6) {
                                 HStack {
                                     Text("新密钥「\(syncAndAI.lastCreatedAgentTokenName ?? "")」明文仅显示一次，请妥善复制：")
-                                        .font(.system(size: 11, weight: .semibold))
+                                        .font(CharkleTheme.text(.caption, weight: .semibold))
                                         .foregroundStyle(SettingsPalette.positiveInk(for: colorScheme))
                                     Spacer()
                                     Button("复制密钥") {
@@ -292,7 +292,7 @@ public struct ExternalAgentsSettingsPane: View {
                             }
                             .padding(10)
                             .background(
-                                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                RoundedRectangle(cornerRadius: CharkleTheme.Radius.popoverInner, style: .continuous)
                                     .fill(SettingsPalette.positiveInk(for: colorScheme).opacity(0.08))
                             )
                         }
@@ -311,7 +311,7 @@ public struct ExternalAgentsSettingsPane: View {
                                     VStack(alignment: .leading, spacing: 2) {
                                         HStack(spacing: 6) {
                                             Text(token.name)
-                                                .font(.system(size: 12, weight: .semibold))
+                                                .font(CharkleTheme.text(.caption, weight: .semibold))
                                             SettingsStatusBadge(
                                                 token.accessLevel.displayTitle,
                                                 tint: token.isEnabled
@@ -320,7 +320,7 @@ public struct ExternalAgentsSettingsPane: View {
                                             )
                                         }
                                         Text("\(token.tokenPrefix)…")
-                                            .font(.system(size: 11, design: .monospaced))
+                                            .font(CharkleTheme.text(.caption, design: .monospaced))
                                             .foregroundStyle(.secondary)
                                     }
 
@@ -355,12 +355,12 @@ public struct ExternalAgentsSettingsPane: View {
             }
 
             SettingsSection(
-                "接入本机 AI 客户端（stdio MCP · 关软件也能用）",
-                caption: draftConfig.mcpEnabled ? nil : "本机 stdio MCP 已关闭 · 开启上方开关后生效"
+                "接入本机 AI 客户端（stdio MCP，关闭应用仍可用）",
+                caption: draftConfig.mcpEnabled ? nil : "本机 stdio MCP 已关闭，开启上方开关后生效"
             ) {
                 SettingsRow(
                     title: "Claude Code / Codex",
-                    subtitle: "一行命令即可将 Charkle 注册为本机零依赖原生 MCP 服务"
+                    subtitle: "在终端执行以下命令注册本机原生 MCP 服务"
                 ) {
                     Button("复制 Claude Code 命令") {
                         SettingsHelpers.copyToClipboard(
@@ -400,15 +400,15 @@ public struct ExternalAgentsSettingsPane: View {
             }
             .opacity(draftConfig.mcpEnabled ? 1.0 : 0.72)
 
-            SettingsSection("MCP v2 能力清单与推荐对话") {
+            SettingsSection("MCP v2 能力清单与常用对话") {
                 SettingsRow(
-                    title: "10 项正交安全工具 · 5 项动态资源 · 5 套内置工作流",
+                    title: "10 项正交安全工具、5 项动态资源、5 套内置工作流",
                     subtitle: "library_overview / query_assets（一跳联系表 + 会话去重）/ inspect_assets（局部放大 + 跨机下载）/ get_board / ingest_assets（跨机上传）/ organize_assets（异构批量 + dry_run）/ manage_folder / save_moodboard / deduplicate_assets / rollback_run"
                 ) {
                     EmptyView()
                 }
 
-                InlineGuideDisclosure("不知道怎么跟 AI 开口？查看 4 条推荐对话示例") {
+                InlineGuideDisclosure("常用对话示例") {
                     ForEach(Array(Self.samplePrompts.enumerated()), id: \.element.title) { index, item in
                         if index > 0 {
                             CharkleHairlineDivider()
@@ -447,20 +447,20 @@ public struct ExternalAgentsSettingsPane: View {
 
     private func stdioStatusSubtitle(enabled: Bool, helperReady: Bool) -> String {
         guard enabled else {
-            return "已关闭 · 本机 stdio MCP 客户端请求将被即时拦截"
+            return "已关闭，本机 stdio MCP 请求将被拦截"
         }
         return helperReady
-            ? "原生 Swift stdio MCP 助手已就绪 · 10 项精简安全工具，App 退出亦可静默查库"
-            : "当前运行在开发态，正式打包为 Charkle.app 后将自动内置原生 stdio MCP 助手"
+            ? "原生 Swift stdio MCP 助手已就绪（10 项安全工具，退出应用亦可查库）"
+            : "开发态运行，打包为 Charkle.app 后自动内置原生 stdio MCP 助手"
     }
 
     private func httpStatusSubtitle(enabled: Bool, isRunning: Bool, endpoint: String) -> String {
         guard enabled else {
-            return "已关闭 · 远程与本地 HTTP MCP 请求均被拦截"
+            return "已关闭，远程与本地 HTTP MCP 请求均被拦截"
         }
         return isRunning
-            ? "已就绪 · 监听 \(endpoint)（需携带作用域密钥）"
-            : "已开启 · 等待内置 HTTP 服务启动"
+            ? "已就绪，监听 \(endpoint)（需携带作用域密钥）"
+            : "已开启，等待内置 HTTP 服务启动"
     }
 
     private func selfCheckSubtitleColor() -> Color {

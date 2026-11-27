@@ -43,9 +43,9 @@ public struct ExtensionsSettingsPane: View {
                     title: "桌面端本地连接桥接",
                     subtitle: bridge.isRunning
                         ? (bridge.allowLocalAutoPair
-                            ? "已就绪 · 本机 Safari / Chrome 扩展启用后自动直连，无需填写地址或令牌"
-                            : "运行中 · \(bridge.baseURL)（已开启手动令牌校验，仅本机 127.0.0.1 可访问）")
-                        : (bridge.lastError ?? "已关闭 · 开启后 Safari 与 Chrome 扩展可直连当前 Charkle 素材库"),
+                            ? "已就绪，本机 Safari / Chrome 扩展启用后自动直连"
+                            : "运行中：\(bridge.baseURL)（手动令牌校验，仅限本机访问）")
+                        : (bridge.lastError ?? "已关闭，开启后可供 Safari 与 Chrome 扩展连接素材库"),
                     subtitleColor: bridge.isRunning
                         ? SettingsPalette.positiveInk(for: colorScheme)
                         : .secondary
@@ -80,7 +80,7 @@ public struct ExtensionsSettingsPane: View {
 
                 SettingsRow(
                     title: "同机扩展自动免密配对",
-                    subtitle: "仅允许本机已安装的浏览器扩展自动握手连接，普通网页与外部站点一律拦截"
+                    subtitle: "仅允许本机浏览器扩展自动配对，拦截普通网页请求"
                 ) {
                     Toggle(
                         "",
@@ -108,7 +108,7 @@ public struct ExtensionsSettingsPane: View {
                 SettingsRow(
                     title: "Safari 浏览器扩展",
                     subtitle: safariEmbedded
-                        ? "已随 Charkle.app 原生内嵌 · 勾选启用后即可自动直连并一键批量导入 X 书签与小红书收藏"
+                        ? "已内置于 Charkle.app，启用后自动直连并批量导入 X 书签与小红书"
                         : "使用正式打包的 Charkle.app 即可自动注册原生 Safari 扩展"
                 ) {
                     Button("打开 Safari 扩展设置") {
@@ -118,7 +118,7 @@ public struct ExtensionsSettingsPane: View {
                     .fixedSize()
                 }
 
-                InlineGuideDisclosure("如何在 Safari 中启用（仅首次需要，2 步即用）") {
+                InlineGuideDisclosure("如何在 Safari 中启用") {
                     SettingsGuideStep(
                         "1",
                         title: "点击上方「打开 Safari 扩展设置」，或在 Safari 菜单栏进入「设置 → 扩展」"
@@ -126,7 +126,7 @@ public struct ExtensionsSettingsPane: View {
                     SettingsGuideStep(
                         "2",
                         title: "勾选左侧列表中的「Charkle」，并点击「始终允许在所有网站上」",
-                        detail: "启用后点击工具栏 Charkle 图标即可自动连接本机 Charkle，无需复制令牌。若未显示本地签名扩展，请先在 Safari「设置 → 高级」开启开发者功能，再于「开发」菜单勾选「允许未签名的扩展」。"
+                        detail: "启用后点击工具栏图标即可连接；若未显示扩展，请在 Safari「开发」菜单开启「允许未签名的扩展」。"
                     )
                 }
 
@@ -135,7 +135,7 @@ public struct ExtensionsSettingsPane: View {
                 SettingsRow(
                     title: "Chrome / Arc / Edge / Brave 扩展",
                     subtitle: extManifestURL != nil
-                        ? "已内置零构建扩展目录 · 加载后自动连接本机 Charkle，支持抓图、拖图与 X / 小红书批量导入"
+                        ? "已内置扩展目录，加载后自动直连，支持采集与 X / 小红书批量导入"
                         : "未在当前路径找到扩展目录，请运行 ./scripts/build-app.sh release 打包完整应用"
                 ) {
                     if let extDir {
@@ -158,8 +158,8 @@ public struct ExtensionsSettingsPane: View {
                     )
                     SettingsGuideStep(
                         "3",
-                        title: "安装后即自动连上本机 Charkle，打开 X 书签/历史页或小红书收藏页即可一键同步",
-                        detail: "支持自动增量滚动、自动跳过已导入条目（遇到连续已导入项可自动停止），并自动拉取小红书完整多图与 3:4 封面。"
+                        title: "安装后自动连接本机，在 X 书签或小红书收藏页即可批量导入",
+                        detail: "支持增量滚动与跳过已导入条目，并拉取小红书多图与 3:4 封面。"
                     )
                 }
 
@@ -240,7 +240,7 @@ public struct ExtensionsSettingsPane: View {
                 SettingsRow(
                     title: "Charkle → Figma / FigJam Bridge",
                     subtitle: manifestURL != nil
-                        ? "已内置于 Charkle · 纯本地离线导入，无需 API 密钥，无损保留独立图层、原图像素与 GIF"
+                        ? "已内置离线插件，无需 API 密钥，保留独立图层、原图与 GIF"
                         : "未在当前开发路径找到内置插件目录，请使用正式打包后的 Charkle.app",
                     subtitleColor: manifestURL != nil
                         ? SettingsPalette.positiveInk(for: colorScheme)
@@ -255,7 +255,7 @@ public struct ExtensionsSettingsPane: View {
                     }
                 }
 
-                InlineGuideDisclosure("如何在 Figma 桌面端导入（仅首次需要，3 步）") {
+                InlineGuideDisclosure("如何在 Figma 桌面端安装插件") {
                     SettingsGuideStep(
                         "1",
                         title: "打开 Figma 桌面端的任意 Design 或 FigJam 文件"
@@ -267,7 +267,7 @@ public struct ExtensionsSettingsPane: View {
                     SettingsGuideStep(
                         "3",
                         title: "选择 Charkle 内置的 manifest.json 即可完成安装",
-                        detail: "提示：点击下方「复制路径」后，在文件选择框按 ⇧⌘G 粘贴即可一步直达。"
+                        detail: "复制下方路径后，在文件选择框按 ⇧⌘G 粘贴即可定位。"
                     )
                 }
 
@@ -303,12 +303,12 @@ public struct ExtensionsSettingsPane: View {
                     SettingsGuideStep(
                         "1",
                         title: "在 Charkle 打开任意情绪板，点击底部或右侧检查器的「导出 → 导出至 Figma / FigJam」",
-                        detail: "Charkle 会生成一份无损 .charkleboard 打包文件（超大图片自动无损切块，GIF 保留原字节）。"
+                        detail: "生成无损 .charkleboard 文件（大图自动切块，GIF 保留原文件）。"
                     )
                     SettingsGuideStep(
                         "2",
                         title: "在 Figma / FigJam 中运行「Charkle → Figma Bridge」插件，拖入该文件",
-                        detail: "所有对象都会以原生可编辑图层落地画布，方便继续二次创作。"
+                        detail: "导入后保留为可编辑的原生图层。"
                     )
                 }
             }

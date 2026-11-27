@@ -789,7 +789,7 @@ public struct CharkleInspectorSection<HeaderTrailing: View, Content: View>: View
                 if shouldShowGrip {
                     if let reorderActions {
                         CharkleReorderGrip(isHighlighted: isReorderHighlighted || isHeaderHovered || isSectionHovered)
-                            .help("按住拖拽可自由调整排序 · 右键可快速置顶或恢复默认")
+                            .help("按住拖拽排序，右键可置顶或恢复默认")
                             .onDrag(reorderActions.onBeginDrag, preview: {
                                 dragPreviewPill
                             })
@@ -827,7 +827,7 @@ public struct CharkleInspectorSection<HeaderTrailing: View, Content: View>: View
 
             if let reorderActions {
                 staticHeader
-                    .help("按住标题栏拖拽可自由调整排序 · 右键可快速置顶或恢复默认")
+                    .help("按住标题栏拖拽排序，右键可置顶或恢复默认")
                     .onDrag(reorderActions.onBeginDrag, preview: {
                         dragPreviewPill
                     })

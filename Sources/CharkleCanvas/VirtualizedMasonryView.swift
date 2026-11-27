@@ -1290,7 +1290,7 @@ private enum MasonryStaticLayerAssets {
         if let hit = badgeCache.object(forKey: key) {
             return (hit.image, hit.size)
         }
-        let font = NSFont.monospacedSystemFont(ofSize: 10, weight: .semibold)
+        let font = NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .semibold)
         let attrs: [NSAttributedString.Key: Any] = [
             .font: font,
             .foregroundColor: NSColor.white.withAlphaComponent(0.95)
@@ -1385,13 +1385,13 @@ private enum MasonryStaticLayerAssets {
                     let badge: String = {
                         if asset.isGitHubRepo { return "GITHUB" }
                         if let post = asset.richMetadata?.socialPost { return post.displayHandleLine ?? post.authorName }
-                        if asset.mediaKind == .model3D { return "3D · \(asset.richMetadata?.model3DFormat ?? "MODEL")" }
+                        if asset.mediaKind == .model3D { return "3D \(asset.richMetadata?.model3DFormat ?? "MODEL")" }
                         return asset.mediaKind == .webBookmark
                             ? (asset.sourceDomain ?? "web.link")
                             : CanvasFormatters.fileExtensionBadge(for: asset.fileName)
                     }()
                     let badgeAttrs: [NSAttributedString.Key: Any] = [
-                        .font: NSFont.monospacedSystemFont(ofSize: 10.5, weight: .semibold),
+                        .font: NSFont.monospacedDigitSystemFont(ofSize: 10.5, weight: .semibold),
                         .foregroundColor: secondaryTextColor
                     ]
                     (badge as NSString).draw(at: CGPoint(x: 14, y: 14), withAttributes: badgeAttrs)

@@ -89,12 +89,12 @@ public struct MoodboardGeneratorSheet: View {
     private var activeProviderBadge: String {
         let hasGenerative = isGenerativeProviderReady
         if !hasGenerative && isTypeSafeReady {
-            return "TypeSafe Jev 视觉策展"
+            return "视觉定位策展"
         }
         guard hasGenerative else { return "仅本机离线模式" }
-        let suffix = isTypeSafeReady ? " + Jev 精排" : ""
+        let suffix = isTypeSafeReady ? " + 视觉精排" : ""
         switch syncAndAI.aiConfig.provider {
-        case .disabled: return isTypeSafeReady ? "TypeSafe Jev 视觉策展" : "仅本机离线模式"
+        case .disabled: return isTypeSafeReady ? "视觉定位策展" : "仅本机离线模式"
         case .chatGPTSubscription: return "ChatGPT 订阅视觉策展\(suffix)"
         case .gemini: return "Gemini 视觉策展\(suffix)"
         case .openAICompatible:
@@ -175,7 +175,7 @@ public struct MoodboardGeneratorSheet: View {
                 VStack(alignment: .leading, spacing: 1.5) {
                     Text("AI 情绪板策展工作台")
                         .font(CharkleTheme.text(.headline, weight: .semibold))
-                    Text("组合灵感词、目录与种子图，由 Agent 视觉审片、宁缺毋滥挑选并编排分区")
+                    Text("组合灵感词、目录与种子图，自动筛选素材并编排分区")
                         .font(CharkleTheme.text(.caption))
                         .foregroundStyle(.secondary)
                 }
@@ -647,7 +647,7 @@ public struct MoodboardGeneratorSheet: View {
                 Text(prop.draftDocument.title)
                     .font(CharkleTheme.text(.headline, weight: .semibold))
                 Spacer()
-                Text("入选 \(prop.primaryMatches.count) 张 · 候选池 +\(prop.candidatePool.count)")
+                Text("入选 \(prop.primaryMatches.count) 张，候选池 +\(prop.candidatePool.count)")
                     .font(CharkleTheme.text(.caption, weight: .medium))
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
@@ -723,7 +723,7 @@ public struct MoodboardGeneratorSheet: View {
                         Text(section.title)
                             .font(CharkleTheme.text(.body, weight: .semibold))
                         if !section.rationale.isEmpty {
-                            Text("· \(section.rationale)")
+                            Text(section.rationale)
                                 .font(CharkleTheme.text(.caption))
                                 .foregroundStyle(.secondary)
                                 .lineLimit(1)
@@ -857,7 +857,7 @@ public struct MoodboardGeneratorSheet: View {
                 .foregroundStyle(.secondary)
             Text("输入灵感方向，点击左侧「\(isCloudAIReady ? "开始 AI 视觉策展" : "生成离线策展初稿")」")
                 .font(CharkleTheme.text(.body, weight: .semibold))
-            Text("系统会把候选素材拼成编号视觉联系表直接看图筛选，只挑选真正契合氛围的作品，自动划分逻辑分区、标注主视觉并提炼全板色卡；初稿生成后还可继续对话微调。")
+            Text("按灵感方向筛选素材、编排分区并提炼色卡，初稿生成后可继续微调。")
                 .font(CharkleTheme.text(.caption))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -876,13 +876,13 @@ public struct MoodboardGeneratorSheet: View {
                 .frame(width: 260)
 
             if let prop = moodboards.proposal {
-                HStack(spacing: 5) {
+                HStack(spacing: 6) {
                     Image(systemName: prop.usedCloudAI ? "sparkles" : "desktopcomputer")
                         .font(.system(size: 10.5))
                     Text(prop.usedCloudAI ? "已启用云端增强智能" : "本机离线策展")
                         .font(CharkleTheme.text(.caption, weight: .medium))
                     if prop.cachedVisualInsightsCount > 0 {
-                        Text("· 沉淀 \(prop.cachedVisualInsightsCount) 条视觉理解")
+                        Text("已缓存 \(prop.cachedVisualInsightsCount) 条视觉理解")
                             .font(CharkleTheme.text(.caption))
                             .foregroundStyle(.tertiary)
                     }

@@ -588,7 +588,7 @@ public struct PinterestExploreWorkspaceView: View {
                             .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
                     }
 
-                    Text(controller.trayCount > 0 ? "采集托盘 · \(controller.trayCount)" : "采集托盘")
+                    Text(controller.trayCount > 0 ? "采集托盘 (\(controller.trayCount))" : "采集托盘")
                         .font(CharkleTheme.text(.body, weight: .semibold).monospacedDigit())
 
                     Image(systemName: controller.isTrayExpanded ? "chevron.down" : "chevron.up")
@@ -639,7 +639,7 @@ public struct PinterestExploreWorkspaceView: View {
                     .foregroundStyle(activeAccent)
                 Text("Pinterest 采集托盘")
                     .font(CharkleTheme.text(.body, weight: .semibold))
-                Text("已勾选 \(controller.selectedTrayCount) / 共 \(controller.trayCount) 项 · 点卡片查看条目详情")
+                Text("已勾选 \(controller.selectedTrayCount) / \(controller.trayCount) 项，点击卡片查看详情")
                     .font(CharkleTheme.text(.caption))
                     .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
 
@@ -931,7 +931,7 @@ public struct PinterestExploreWorkspaceView: View {
                 VStack(spacing: 6) {
                     Text("在 Charkle 无限空间中浏览 Pinterest")
                         .font(CharkleTheme.text(.title, weight: .semibold))
-                    Text("登录你的 Pinterest 账号，在丝滑的 2D 无限画布中自由滑动与锚定缩放，像逛灵感购物车一样批量加入托盘并一键收入素材库，也支持把已有画板收藏按目录整批导入。")
+                    Text("登录 Pinterest 后，可在无限画布中浏览灵感、批量加入托盘，或将画板按目录导入素材库。")
                         .font(CharkleTheme.text(.body))
                         .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
                         .multilineTextAlignment(.center)
@@ -1116,19 +1116,21 @@ private struct PinterestPinDetailOverlayMac: View {
                             Text(pin.displayTitle)
                                 .font(CharkleTheme.text(.body, weight: .semibold))
                                 .lineLimit(1)
-                            HStack(spacing: 6) {
+                            HStack(spacing: 8) {
                                 Text("Pinterest 条目")
                                     .font(CharkleTheme.text(.caption, weight: .medium))
                                     .foregroundStyle(accent)
                                 if let board = pin.boardName, !board.isEmpty {
-                                    Text("· \(board)")
+                                    Text(board)
                                         .font(CharkleTheme.text(.caption))
                                         .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
+                                        .lineLimit(1)
                                 }
                                 if let domain = pin.domain, !domain.isEmpty {
-                                    Text("· \(domain)")
+                                    Text(domain)
                                         .font(CharkleTheme.text(.caption))
                                         .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme).opacity(0.72))
+                                        .lineLimit(1)
                                 }
                             }
                         }
@@ -1569,7 +1571,7 @@ private struct PinterestBoardImportSheetMac: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("批量导入 Pinterest 收藏（按画板分目录）")
                         .font(CharkleTheme.text(.headline, weight: .semibold))
-                    Text("勾选要同步的 Pinterest 画板，Charkle 会自动按画板名建立或复用对应文件夹，并自动去重。")
+                    Text("勾选画板后，自动按画板名称建立或复用目录并去重。")
                         .font(CharkleTheme.text(.caption))
                         .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
                 }
@@ -1728,7 +1730,7 @@ private struct PinterestBoardImportSheetMac: View {
                                 .font(CharkleTheme.text(.caption, weight: .medium))
                                 .lineLimit(1)
                             Spacer()
-                            Text("已入库 \(progress.overallImported) · 跳过 \(progress.overallSkipped)")
+                            Text("已入库 \(progress.overallImported)，跳过 \(progress.overallSkipped)")
                                 .font(CharkleTheme.text(.caption).monospacedDigit())
                                 .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
                         }

@@ -16,8 +16,8 @@ public enum CharkleAppIconVariant: String, CaseIterable, Identifiable, Sendable 
 
     public var subtitle: String {
         switch self {
-        case .light: "默认 · 柔和虹彩浅底"
-        case .dark: "可选 · 深邃青灰暗底"
+        case .light: "柔和浅底（默认）"
+        case .dark: "深灰暗底"
         }
     }
 

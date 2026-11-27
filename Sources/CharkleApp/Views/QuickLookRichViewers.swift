@@ -106,7 +106,7 @@ struct QuickLookGitHubRepoCard: View {
                 }
 
                 // Language + Homepage
-                HStack(spacing: 10) {
+                HStack(spacing: 8) {
                     if let lang = repo.language, !lang.isEmpty {
                         HStack(spacing: 5) {
                             Circle()
@@ -118,15 +118,13 @@ struct QuickLookGitHubRepoCard: View {
                         }
                     }
                     if let hp = repo.homepageURL, let hpURL = URL(string: hp.hasPrefix("http") ? hp : "https://\(hp)") {
-                        Text("·").foregroundStyle(.tertiary)
                         Link(hp.replacingOccurrences(of: "https://", with: "").replacingOccurrences(of: "http://", with: ""), destination: hpURL)
                             .font(CharkleTheme.text(.body, weight: .medium))
                             .lineLimit(1)
                     }
                     if let license = repo.licenseName, !license.isEmpty {
-                        Text("·").foregroundStyle(.tertiary)
                         Text(license)
-                            .font(CharkleTheme.text(.caption, design: .monospaced))
+                            .font(CharkleTheme.text(.caption))
                             .foregroundStyle(.secondary)
                     }
                 }
@@ -175,8 +173,7 @@ struct QuickLookGitHubRepoCard: View {
                 // README Section
                 VStack(alignment: .leading, spacing: 12) {
                     Text("README")
-                        .font(CharkleTheme.text(.caption, weight: .bold, design: .monospaced))
-                        .tracking(0.8)
+                        .font(CharkleTheme.text(.caption, weight: .bold))
                         .foregroundStyle(.secondary)
 
                     if let readme = repo.readmeMarkdown, !readme.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -486,7 +483,7 @@ struct QuickLookSocialPostCard: View {
                 if post.mediaFetchFailed {
                     VStack(alignment: .leading, spacing: 8) {
                         HStack(spacing: 6) {
-                            Text("媒体暂未保存到本地：未能连接目标服务器 ·")
+                            Text("媒体暂未保存到本地：未能连接目标服务器，")
                                 .font(CharkleTheme.text(.caption))
                                 .foregroundStyle(.secondary)
                             if let url = URL(string: post.originalURL) {
@@ -1411,7 +1408,7 @@ struct QuickLookMarkdownReaderCard: View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 10) {
                 Text(CanvasFormatters.fileExtensionBadge(for: asset.fileName))
-                    .font(CharkleTheme.text(.caption, weight: .bold, design: .monospaced))
+                    .font(CharkleTheme.text(.caption, weight: .bold))
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)
                     .background(Color.primary.opacity(0.08), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.sm, style: .continuous))
@@ -2416,8 +2413,8 @@ struct QuickLookModel3DViewer: View {
                 .shadow(color: .black.opacity(0.45), radius: 28, y: 12)
 
                 HStack(spacing: 8) {
-                    Text("3D · \(asset.richMetadata?.model3DFormat ?? url.pathExtension.uppercased())")
-                        .font(CharkleTheme.text(.caption, weight: .bold, design: .monospaced))
+                    Text("3D \(asset.richMetadata?.model3DFormat ?? url.pathExtension.uppercased())")
+                        .font(CharkleTheme.text(.caption, weight: .bold))
                         .foregroundStyle(.white.opacity(0.9))
                         .padding(.horizontal, 10)
                         .padding(.vertical, 5)

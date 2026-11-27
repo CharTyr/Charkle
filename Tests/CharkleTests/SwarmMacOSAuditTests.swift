@@ -432,4 +432,49 @@ struct SwarmMacOSAuditTests {
         }
         #expect(violations.isEmpty, "P1 typography/radius violations: \(violations.joined(separator: "; "))")
     }
+
+    @Test("macOS P2 polish: zero middle-dot UI separators, zero promo/codename copy, and restrained monospace usage")
+    @MainActor
+    func macOSP2CopyAndMonospaceDisciplineContracts() throws {
+        let appFiles = try allAppSwiftFiles()
+        let canvasRoot = Self.repoRoot.appendingPathComponent("Sources/CharkleCanvas", isDirectory: true)
+        var canvasFiles: [URL] = []
+        if let enumerator = FileManager.default.enumerator(
+            at: canvasRoot,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) {
+            for case let url as URL in enumerator where url.pathExtension == "swift" {
+                canvasFiles.append(url)
+            }
+        }
+        let uiFiles = (appFiles + canvasFiles).sorted { $0.path < $1.path }
+
+        let bannedCopyRegex = try NSRegularExpression(
+            pattern: #"(?:10\s*秒|往屏幕顶部甩|边逛网页边|长出一块|零配置|立即可用|一键|Jev\s*Box|TypeSafe\s*\(Jev\)|TypeSafe\s+Jev|秒看)"#
+        )
+        var violations: [String] = []
+
+        for file in uiFiles {
+            let content = try String(contentsOf: file, encoding: .utf8)
+            for (idx, rawLine) in content.components(separatedBy: .newlines).enumerated() {
+                let line = rawLine.trimmingCharacters(in: .whitespaces)
+                if line.hasPrefix("//") { continue }
+                if line.contains("·") && !line.contains("&middot;") {
+                    violations.append("middle-dot UI separator in \(file.lastPathComponent):\(idx + 1)")
+                }
+                if line.contains("\"") {
+                    let nsLine = line as NSString
+                    let range = NSRange(location: 0, length: nsLine.length)
+                    if bannedCopyRegex.firstMatch(in: line, range: range) != nil {
+                        violations.append("promo/codename copy in \(file.lastPathComponent):\(idx + 1)")
+                    }
+                }
+            }
+        }
+        #expect(violations.isEmpty, "P2 copy/separator violations: \(violations.joined(separator: "; "))")
+
+        let richViewers = try readSource("Sources/CharkleApp/Views/QuickLookRichViewers.swift")
+        #expect(!richViewers.contains(".tracking(0.8)"))
+    }
 }

@@ -146,7 +146,7 @@ public struct AISettingsPane: View {
     // MARK: - Built-in Offline Capabilities Strip
 
     private var offlineCapabilitiesSection: some View {
-        SettingsSection("基础离线能力", caption: "全部 Mac 免费内置 · 无需下载 · 数据不出本机") {
+        SettingsSection("基础离线能力", caption: "全部 Mac 本机内置，无需下载，数据留在本地") {
             HStack(spacing: 0) {
                 offlineBadge(icon: "paintpalette", label: "自动配色提取")
                 CharkleHairlineDivider(axis: .vertical)
@@ -229,18 +229,18 @@ public struct AISettingsPane: View {
                 InlineGuideDisclosure("各方案怎么选？如何获取 API 密钥") {
                     SettingsGuideStep(
                         "1",
-                        title: "ChatGPT 订阅账号（最省心，零密钥配置）",
-                        detail: "已有 ChatGPT Plus / Pro 订阅时直接登录授权，无需申请或管理 API Key。"
+                        title: "ChatGPT 订阅账号（免配置密钥）",
+                        detail: "使用已有 ChatGPT Plus / Pro 订阅授权，无需申请 API Key。"
                     )
                     SettingsGuideStep(
                         "2",
-                        title: "Google Gemini（性价比高，原生支持多模态与向量检索）",
-                        detail: "前往 Google AI Studio 免费创建 API Key，点击「Gemini / 自定义 API…」粘贴保存即可。"
+                        title: "Google Gemini（支持多模态与向量检索）",
+                        detail: "在 Google AI Studio 创建 API Key 后，填入「Gemini / 自定义 API…」。"
                     )
                     SettingsGuideStep(
                         "3",
                         title: "自定义 API（支持 Claude / OpenRouter / DeepSeek / 本机 Ollama）",
-                        detail: "内置常见服务商一键预设，也支持连接本机运行的 Ollama 多模态模型。"
+                        detail: "支持填充常用服务商预设，也可连接本机 Ollama 多模态模型。"
                     )
                 }
             } else {
@@ -278,7 +278,7 @@ public struct AISettingsPane: View {
 
                 SettingsRow(
                     title: "导入时自动分析",
-                    subtitle: "收藏新素材后自动补充画面描述与建议标签，让灵感词生板更懂你的参考库"
+                    subtitle: "导入素材后自动生成画面描述与标签，提升检索与生板准确度"
                 ) {
                     Toggle("", isOn: $draftAIConfig.autoAnalyzeOnImport)
                         .labelsHidden()
@@ -293,7 +293,7 @@ public struct AISettingsPane: View {
 
                 SettingsRow(
                     title: "仅上传轻量化预览图",
-                    subtitle: "大幅节省网络流量，避免发送原始高清大图"
+                    subtitle: "发送缩略图而非原始大图，节省网络流量"
                 ) {
                     Toggle("", isOn: $draftAIConfig.sendThumbnailsToCloud)
                         .labelsHidden()
@@ -322,7 +322,7 @@ public struct AISettingsPane: View {
         return SettingsSection("进阶视觉定位（实验性）") {
             SettingsRow(
                 title: "精准画面定位与智能分拣",
-                subtitle: "开启后支持情绪板语义局部裁切、截图自动去噪、主体色板提取与收件箱智能归类；未开启时由本机 Apple Vision 兜底"
+                subtitle: "用于语义裁切、截图去噪与收件箱归类，未开启时回退 Apple Vision"
             ) {
                 Toggle("", isOn: $draftTypeSafeConfig.enabled)
                     .labelsHidden()
@@ -339,8 +339,8 @@ public struct AISettingsPane: View {
                 SettingsRow(
                     title: "TypeSafe 视觉定位引擎",
                     subtitle: syncAndAI.hasStoredTypeSafeKey
-                        ? "已配置密钥 · 模型 \(draftTypeSafeConfig.model) · 已开启 \(enabledCapabilitiesCount)/6 项增强场景"
-                        : "尚未填写 TypeSafe API 密钥，填写后即可启用精准定位与看图精排",
+                        ? "已配置密钥，模型 \(draftTypeSafeConfig.model)（已启用 \(enabledCapabilitiesCount)/6 项）"
+                        : "尚未配置 TypeSafe API 密钥，填写后启用视觉定位与精排",
                     subtitleColor: syncAndAI.hasStoredTypeSafeKey
                         ? SettingsPalette.positiveInk(for: colorScheme)
                         : SettingsPalette.warningInk(for: colorScheme)
@@ -371,16 +371,16 @@ public struct AISettingsPane: View {
                 }
             }
 
-            InlineGuideDisclosure("这是什么？和上方云端 AI 有什么区别？") {
+            InlineGuideDisclosure("与上方云端 AI 的区别") {
                 SettingsGuideStep(
                     "1",
-                    title: "与生成式大模型互补：专注「指哪打哪」的坐标定位与视觉评分",
-                    detail: "普通大模型擅长描述画面和起标签；视觉定位引擎专门用来在图里精准圈出主体坐标、裁掉截图外壳，或给候选素材打分。"
+                    title: "专注画面坐标定位与视觉评分，与通用大模型互补",
+                    detail: "用于定位主体坐标、裁除截图边框与候选素材评分，与画面描述互补。"
                 )
                 SettingsGuideStep(
                     "2",
-                    title: "完全可选，不开也不影响核心体验",
-                    detail: "未开启时，主体聚焦与视觉相似自动回退至 macOS 原生 Apple Vision，零额外费用。"
+                    title: "按需启用，不影响基础功能",
+                    detail: "关闭时主体聚焦与视觉相似自动回退至系统 Apple Vision。"
                 )
             }
         }
@@ -396,9 +396,9 @@ public struct AISettingsPane: View {
         return SettingsSection("用量统计") {
             SettingsRow(
                 title: usage.totalRequests > 0
-                    ? "今日 \(todayTotal) 次 · 累计 \(usage.totalRequests) 次（\(CloudAIUsageSummary.formatTokenCount(allTotalTokens)) tokens）"
+                    ? "今日 \(todayTotal) 次，累计 \(usage.totalRequests) 次（\(CloudAIUsageSummary.formatTokenCount(allTotalTokens)) tokens）"
                     : "暂无云端调用记录",
-                subtitle: "分别统计普通云端模型与视觉定位引擎在本机的调用次数与 Token 消耗"
+                subtitle: "统计本机云端模型与视觉定位引擎的调用次数和 Token 消耗"
             ) {
                 Button("查看明细…") {
                     syncAndAI.refreshAIUsage()
@@ -697,7 +697,7 @@ public struct AISettingsPane: View {
     private var customAPIConfigContent: some View {
         VStack(alignment: .leading, spacing: 10) {
             VStack(alignment: .leading, spacing: 5) {
-                Text("一键填充常见服务商预设")
+                Text("填充常用服务商预设")
                     .font(CharkleTheme.text(.caption, weight: .medium))
                     .foregroundStyle(.secondary)
                 HStack(spacing: 6) {
@@ -1043,7 +1043,7 @@ public struct AISettingsPane: View {
                     if let usedAt = bucket.lastUsedAt {
                         let provider = bucket.lastProviderLabel ?? title
                         let modelPart = bucket.lastModel.map { " (\($0))" } ?? ""
-                        Text("最近调用：\(provider)\(modelPart) · \(SettingsHelpers.relativeTimeText(usedAt))")
+                        Text("最近调用：\(provider)\(modelPart)，\(SettingsHelpers.relativeTimeText(usedAt))")
                     } else {
                         Text(emptyHint)
                     }
@@ -1089,9 +1089,9 @@ public struct AISettingsPane: View {
     private var cloudDisconnectedSubtitle: String {
         switch draftAIConfig.provider {
         case .disabled:
-            "连接后可自动生成画面描述、建议标签，并大幅提升灵感词生板准确度"
+            "连接后支持自动生成画面描述、建议标签与灵感词生板"
         case .chatGPTSubscription:
-            "直接登录你的 ChatGPT Plus / Pro 账号即可使用，无需手动管理 API 密钥"
+            "登录 ChatGPT Plus / Pro 账号即可使用，无需 API 密钥"
         case .gemini:
             "前往「Gemini / 自定义 API…」粘贴 Google AI Studio 密钥并测试连接"
         case .openAICompatible:
@@ -1115,12 +1115,12 @@ public struct AISettingsPane: View {
             return "仅使用本机离线能力"
         case .chatGPTSubscription:
             let account = syncAndAI.chatGPTSession.email ?? syncAndAI.chatGPTSession.displayName
-            return "已连接（\(account)）· 当前模型：\(model)"
+            return "已连接（\(account)），模型：\(model)"
         case .gemini:
-            return "已连接 · 当前模型：\(model)"
+            return "已连接，模型：\(model)"
         case .openAICompatible:
             let host = URL(string: draftAIConfig.baseURL)?.host() ?? draftAIConfig.baseURL
-            return "已连接（\(host)）· 当前模型：\(model)"
+            return "已连接（\(host)），模型：\(model)"
         }
     }
 

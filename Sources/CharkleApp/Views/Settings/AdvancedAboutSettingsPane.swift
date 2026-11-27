@@ -74,12 +74,12 @@ public struct AdvancedAboutSettingsPane: View {
                 SettingsRow(
                     title: "网络受限时使用本机 gdirect 兜底",
                     subtitle: snap.cliPath == nil
-                        ? "未检测到本机 gdirect CLI；安装后可在网络受限时自动回退优选节点"
+                        ? "未检测到本机 gdirect，安装后可在直连受阻时自动回退"
                         : (draftSyncConfig.useGDirectIPAcceleration
                             ? (healthyNodeCount > 0
-                                ? "已开启 · 检测到 \(healthyNodeCount) 个健康节点（仅当标准 HTTPS 直连受阻时自动启用）"
-                                : "已开启 · 当无法直连 googleapis.com 时自动尝试本机 gdirect")
-                            : "已关闭 · 仅使用标准 Google Drive HTTPS 直连")
+                                ? "已开启，检测到 \(healthyNodeCount) 个健康节点，直连受阻时自动启用"
+                                : "已开启，无法直连 googleapis.com 时自动使用本机 gdirect")
+                            : "已关闭，仅使用标准 Google Drive HTTPS 直连")
                 ) {
                     Toggle("", isOn: $draftSyncConfig.useGDirectIPAcceleration)
                         .labelsHidden()
@@ -124,9 +124,9 @@ public struct AdvancedAboutSettingsPane: View {
                     title: "gdirect 本地挂载模式",
                     subtitle: draftSyncConfig.mode == .gdirectMount
                         ? (snap.isMountActive
-                            ? "当前已启用 · 挂载目录：\(draftSyncConfig.mountPath)"
+                            ? "已启用，挂载目录：\(draftSyncConfig.mountPath)"
                             : "当前已选择挂载模式，但尚未挂载卷")
-                        : "默认推荐使用免挂载直连 API；仅限习惯在访达 ~/GoogleDrive 挂载访问的用户",
+                        : "默认推荐直连 API；适合需在访达 ~/GoogleDrive 挂载访问的用户",
                     subtitleColor: draftSyncConfig.mode == .gdirectMount && snap.isMountActive
                         ? SettingsPalette.positiveInk(for: colorScheme)
                         : .secondary
@@ -176,7 +176,7 @@ public struct AdvancedAboutSettingsPane: View {
 
                 SettingsRow(
                     title: "打开应用数据目录",
-                    subtitle: "~/Library/Application Support/Charkle（包含本地数据库、缓存与外部 Agent 配置）"
+                    subtitle: "~/Library/Application Support/Charkle（数据库、缓存与 Agent 配置）"
                 ) {
                     Button("在访达中打开") {
                         let dir = ExternalAgentConfigStore.defaultDirectory()
@@ -208,11 +208,11 @@ public struct AdvancedAboutSettingsPane: View {
                             Text("Charkle")
                                 .font(CharkleTheme.text(.body, weight: .semibold))
                             Text("v\(appVersion) (\(buildNumber))")
-                                .font(CharkleTheme.text(.caption, weight: .medium, design: .monospaced))
+                                .font(CharkleTheme.text(.caption, weight: .medium))
                                 .monospacedDigit()
                                 .foregroundStyle(.secondary)
                         }
-                        Text("面向设计师的视觉素材库与 10 秒情绪板创作台 · Apple Vision 离线引擎 + 可读云端存储")
+                        Text("本地优先的视觉素材库与情绪板工作台，内置离线检索与可读云端同步")
                             .font(CharkleTheme.text(.caption))
                             .foregroundStyle(.secondary)
                     }
@@ -241,7 +241,7 @@ public struct AdvancedAboutSettingsPane: View {
         if let progress = syncAndAI.rebuildVisualIndexProgress {
             return "正在离线重建配色、OCR 与视觉相似特征（\(progress.completed) / \(progress.total)）…"
         }
-        return "升级 macOS 或发现部分素材缺少配色、文字识别或相似推荐时，可离线重新扫描全库（共 \(library.allAssetsByID.count) 项）"
+        return "离线重新提取全库配色、OCR 与视觉相似特征（共 \(library.allAssetsByID.count) 项）"
     }
 
     // MARK: - Software Updates Section
@@ -280,7 +280,7 @@ public struct AdvancedAboutSettingsPane: View {
 
             SettingsRow(
                 title: "启动时自动检查更新",
-                subtitle: "每 6 小时静默检查一次 GitHub Releases，仅在有新版本时以轻提示提醒"
+                subtitle: "每 6 小时检查一次 GitHub Releases，有新版本时提示"
             ) {
                 Toggle(
                     "",
@@ -328,7 +328,7 @@ public struct AdvancedAboutSettingsPane: View {
         case .checking:
             return "正在连接 GitHub Releases 检查最新版本…"
         case .upToDate(let checkedAt):
-            return "已是最新稳定版本 · 上次检查：\(SettingsHelpers.relativeTimeText(checkedAt))"
+            return "已是最新版本，上次检查：\(SettingsHelpers.relativeTimeText(checkedAt))"
         case .available(let update):
             return "发现新版本 \(update.tagName) 可供下载"
         case .downloading(let update, let progress, _, _):
@@ -400,7 +400,7 @@ public struct AdvancedAboutSettingsPane: View {
                             .font(CharkleTheme.text(.body, weight: .medium))
                             .foregroundStyle(.primary)
                         Text(inlineDownloadBytesText(downloaded: downloadedBytes, total: totalBytes, progress: progress))
-                            .font(CharkleTheme.text(.caption, design: .monospaced))
+                            .font(CharkleTheme.text(.caption))
                             .monospacedDigit()
                             .foregroundStyle(.secondary)
                     }
@@ -510,9 +510,9 @@ public struct AdvancedAboutSettingsPane: View {
         let pct = Int((min(1.0, max(0.0, progress)) * 100).rounded())
         let down = fmt.string(fromByteCount: max(0, downloaded))
         if total > 0 {
-            return "\(down) / \(fmt.string(fromByteCount: total)) · \(pct)%"
+            return "\(down) / \(fmt.string(fromByteCount: total))（\(pct)%）"
         }
-        return "\(down) · \(pct)%"
+        return "\(down)（\(pct)%）"
     }
 
     // MARK: - gdirect Mount Management Sheet
@@ -529,7 +529,7 @@ public struct AdvancedAboutSettingsPane: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("gdirect 本地挂载管理")
                         .font(CharkleTheme.text(.headline, weight: .semibold))
-                    Text("通过本机 gdirect 将 Google Drive 挂载为本地目录，与正常直连 OAuth 账号可共存。")
+                    Text("通过 gdirect 将 Google Drive 挂载为本地目录，可与直连 OAuth 共存。")
                         .font(CharkleTheme.text(.caption))
                         .foregroundStyle(.secondary)
                 }

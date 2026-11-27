@@ -94,7 +94,7 @@ public struct SyncSettingsPane: View {
         SettingsSection("云端同步服务") {
             SettingsRow(
                 title: "当前素材库仅保存在本机",
-                subtitle: "路径：\(draftConfig.localLibraryPath) · 启用云同步可在多台 Mac 间自动同步并支持团队共享"
+                subtitle: "路径：\(draftConfig.localLibraryPath)（启用云同步可跨设备同步）"
             ) {
                 Button("管理素材库位置") {
                     coordinator.selectedSettingsTab = .library
@@ -107,7 +107,7 @@ public struct SyncSettingsPane: View {
 
             SettingsRow(
                 title: "Google Drive 云端直连",
-                subtitle: "推荐 · 原始文件按可读目录保存在你的 Google Drive，支持共享协作与网页端直接拖入新素材"
+                subtitle: "推荐：按可读目录同步至 Google Drive，支持共享协作"
             ) {
                 Button("启用 Google 同步") {
                     draftConfig.mode = .directAPIWithGDirect
@@ -117,21 +117,21 @@ public struct SyncSettingsPane: View {
                 .fixedSize()
             }
 
-            InlineGuideDisclosure("开始前需要准备什么？（仅首次需 3 分钟配置凭据）") {
+            InlineGuideDisclosure("开始前需要准备什么（首次需配置 OAuth 凭据）") {
                 SettingsGuideStep(
                     "1",
-                    title: "直连你自己的 Google Drive，不经任何第三方中转服务器",
-                    detail: "因此首次登录前需要准备一份个人桌面端 OAuth 凭据（client_secret.json）。"
+                    title: "直连个人 Google Drive，不经第三方中转服务器",
+                    detail: "首次登录需配置个人桌面端 OAuth 凭据（client_secret.json）。"
                 )
                 SettingsGuideStep(
                     "2",
-                    title: "如果你本机已装过 gdirect，可直接一键导入",
-                    detail: "启用 Google 同步后，Charkle 会自动检测本机 gdirect 并提供免填导入。"
+                    title: "本机已安装 gdirect 时可直接导入凭据",
+                    detail: "启用 Google 同步后会自动检测本机 gdirect 并支持直接导入。"
                 )
                 SettingsGuideStep(
                     "3",
                     title: "想把已有本地素材一并迁上云盘？",
-                    detail: "请前往「素材库 → 更改或转移…」选择完整无损迁移，自动搬运原件与情绪板。"
+                    detail: "可在「素材库 → 更改或转移…」执行完整无损迁移。"
                 )
             }
 
@@ -139,7 +139,7 @@ public struct SyncSettingsPane: View {
 
             SettingsRow(
                 title: "iCloud Drive 云同步",
-                subtitle: "免配置 OAuth · 直接通过苹果 iCloud Drive 与 iPhone / iPad / 多台 Mac 自动双向同步"
+                subtitle: "无需配置 OAuth，通过 iCloud Drive 在 Apple 设备间自动同步"
             ) {
                 Button("启用 iCloud Drive") {
                     draftConfig.mode = .iCloudDrive
@@ -223,7 +223,7 @@ public struct SyncSettingsPane: View {
 
                     Spacer()
 
-                    Text("同时启用多个后端时，所有素材、文件夹与情绪板将自动双向镜像到每个后端。")
+                    Text("启用多个后端时，素材、文件夹与情绪板会自动双向镜像。")
                         .font(CharkleTheme.text(.caption))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
@@ -246,10 +246,10 @@ public struct SyncSettingsPane: View {
             return .secondary
         }()
         let subtitle: String = {
-            if !profile.isEnabled { return "已暂停 · \(profile.locationSummary)" }
+            if !profile.isEnabled { return "已暂停：\(profile.locationSummary)" }
             if let err = status?.lastError, !err.isEmpty { return "异常：\(err)" }
             if let syncedAt = status?.lastSyncedAt {
-                return "\(profile.locationSummary) · 上次同步 \(SettingsHelpers.relativeTimeText(syncedAt))"
+                return "\(profile.locationSummary)（上次同步 \(SettingsHelpers.relativeTimeText(syncedAt))）"
             }
             return profile.locationSummary
         }()
@@ -339,8 +339,8 @@ public struct SyncSettingsPane: View {
         return SettingsSection("iCloud Drive 状态") {
             SettingsRow(
                 title: avail.hasAutomaticPath ? "本机 iCloud Drive 已就绪" : "请确认系统已开启 iCloud Drive",
-                subtitle: avail.systemCloudDocsPath.map { "目录：\($0) · 与 iPhone / iPad「文件 → iCloud Drive」完全互通" }
-                    ?? (avail.ubiquityDocumentsPath ?? "请在系统设置 → Apple ID → iCloud 中开启 iCloud 云盘，或在后端编辑中手动指定目录")
+                subtitle: avail.systemCloudDocsPath.map { "目录：\($0)（与 iPhone / iPad「文件」互通）" }
+                    ?? (avail.ubiquityDocumentsPath ?? "请在系统设置中开启 iCloud 云盘，或手动指定目录")
             ) {
                 if let primaryICloud = draftConfig.resolvedBackends.first(where: { $0.mode == .iCloudDrive }) {
                     Button("测试 iCloud") {
@@ -411,7 +411,7 @@ public struct SyncSettingsPane: View {
                                 .font(CharkleTheme.text(.body, weight: .medium))
                             if isSyncing, let percentText {
                                 Text(percentText)
-                                    .font(CharkleTheme.text(.caption, weight: .semibold, design: .monospaced))
+                                    .font(CharkleTheme.text(.caption, weight: .semibold))
                                     .monospacedDigit()
                                     .foregroundStyle(.secondary)
                             }
@@ -469,7 +469,7 @@ public struct SyncSettingsPane: View {
 
                     if let report = syncAndAI.lastSyncReport {
                         Text("↑ \(report.uploadedOps)  ↓ \(report.downloadedOps)  +\(report.discoveredRemoteAssets) 新发现")
-                            .font(CharkleTheme.text(.caption, design: .monospaced))
+                            .font(CharkleTheme.text(.caption))
                             .monospacedDigit()
                             .foregroundStyle(.tertiary)
                     }
@@ -508,8 +508,8 @@ public struct SyncSettingsPane: View {
                 SettingsRow(
                     title: gdirectEmail ?? "当前处于 gdirect 本地挂载模式",
                     subtitle: snap.isMountActive
-                        ? "已挂载至 \(draftConfig.mountPath)（如需切回免挂载高速直连，可前往「高级与关于」管理）"
-                        : "当前挂载卷未激活，可在「高级与关于」执行挂载或切回标准直连 API",
+                        ? "已挂载至 \(draftConfig.mountPath)，可在「高级与关于」切换直连"
+                        : "挂载卷未激活，可在「高级与关于」挂载或切回标准直连",
                     subtitleColor: snap.isMountActive
                         ? SettingsPalette.positiveInk(for: colorScheme)
                         : SettingsPalette.warningInk(for: colorScheme)
@@ -638,13 +638,13 @@ public struct SyncSettingsPane: View {
                         InlineGuideDisclosure("为什么首次登录需要配置一次凭据？") {
                             SettingsGuideStep(
                                 "1",
-                                title: "你的素材直连个人 Google Drive，零中转",
-                                detail: "Charkle 不经过云端代理服务器，所有原图和情绪板直接读写你自己的网盘。"
+                                title: "直连个人 Google Drive，无第三方中转",
+                                detail: "所有原图与情绪板均直接读写个人网盘，不经代理服务器。"
                             )
                             SettingsGuideStep(
                                 "2",
-                                title: "按教程 3 分钟创建一次桌面端 Client ID 即可长期使用",
-                                detail: "点击「配置凭据并登录」即可打开官方教程链接，支持直接导入下载的 client_secret.json。"
+                                title: "按教程创建一次桌面端 OAuth 凭据即可长期使用",
+                                detail: "点击「配置凭据并登录」查看教程，支持导入 client_secret.json。"
                             )
                         }
                     }
@@ -804,7 +804,7 @@ public struct SyncSettingsPane: View {
                 title: host.isEmpty ? "尚未配置 WebDAV 服务器" : host,
                 subtitle: host.isEmpty
                     ? "支持坚果云、Nextcloud、群晖 NAS、Alist 等标准 WebDAV 服务"
-                    : "账号：\(draftConfig.webDAVUsername.isEmpty ? "未填写" : draftConfig.webDAVUsername) · 路径：\(draftConfig.webDAVRemotePath)",
+                    : "账号：\(draftConfig.webDAVUsername.isEmpty ? "未填写" : draftConfig.webDAVUsername)，路径：\(draftConfig.webDAVRemotePath)",
                 subtitleColor: isConnected ? SettingsPalette.positiveInk(for: colorScheme) : .secondary
             ) {
                 HStack(spacing: 8) {
@@ -845,7 +845,7 @@ public struct SyncSettingsPane: View {
         SettingsSection("同步偏好") {
             SettingsRow(
                 title: "同步轻量化预览图",
-                subtitle: "切换其他 Mac 时秒看完整画廊，无需等待下载原始大文件"
+                subtitle: "跨设备浏览时直接显示预览图，无需先下载原始大文件"
             ) {
                 Toggle("", isOn: $draftConfig.syncThumbnails)
                     .labelsHidden()
@@ -860,7 +860,7 @@ public struct SyncSettingsPane: View {
 
             SettingsRow(
                 title: "同步智能搜索索引",
-                subtitle: "在多台设备间共享搜索索引，保持一致的搜图与情绪板推荐体验"
+                subtitle: "在多台设备间同步搜索索引，保持一致的检索体验"
             ) {
                 Toggle("", isOn: $draftConfig.syncEmbeddings)
                     .labelsHidden()
@@ -1010,12 +1010,12 @@ public struct SyncSettingsPane: View {
 
     private func googleAccountHint(hasOAuth: Bool, hasGDirect: Bool, isFallback: Bool) -> String {
         if isFallback {
-            return "当前暂用本机 gdirect 兜底，独立登录 Google 账号后可启用免挂载 HTTP/2 高速直连"
+            return "当前使用本机 gdirect 兜底，登录 Google 账号后可启用直连"
         }
         if !hasOAuth {
             return hasGDirect
-                ? "检测到本机 gdirect，可一键导入凭据并完成登录"
-                : "首次登录需配置一次 Google 桌面端凭据，完成后自动开启直连同步"
+                ? "检测到本机 gdirect，可直接导入凭据并登录"
+                : "首次登录需配置 Google 桌面端 OAuth 凭据"
         }
         return "登录 Google 账号后，素材与情绪板将自动直连同步"
     }

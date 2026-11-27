@@ -609,7 +609,7 @@ public struct GalleryFilmstripView: View {
                         .fill(Color(charkleHex: asset.dominantColors.first?.hex ?? "#5C6B73"))
                         .frame(width: 9, height: 9)
                     Text(asset.sourceDomain ?? "网页书签")
-                        .font(CharkleTheme.text(.caption, weight: .semibold, design: .monospaced))
+                        .font(CharkleTheme.text(.caption, weight: .semibold))
                         .foregroundStyle(.secondary)
                     Spacer()
                     if let urlStr = asset.sourceURL {
@@ -664,7 +664,7 @@ public struct GalleryFilmstripView: View {
                                 resetViewTransform(animated: true)
                             } label: {
                                 Text("\(Int((zoomScale * 100).rounded()))%")
-                                    .font(CharkleTheme.text(.caption, weight: .semibold, design: .monospaced))
+                                    .font(CharkleTheme.text(.caption, weight: .semibold))
                                     .monospacedDigit()
                                     .foregroundStyle(.primary.opacity(0.88))
                                     .frame(minWidth: 42)
@@ -714,7 +714,7 @@ public struct GalleryFilmstripView: View {
                                     HStack(spacing: 3) {
                                         if displayRotationDegrees != 0 {
                                             Text("\(displayRotationDegrees)°")
-                                                .font(CharkleTheme.text(.caption, weight: .semibold, design: .monospaced))
+                                                .font(CharkleTheme.text(.caption, weight: .semibold))
                                                 .monospacedDigit()
                                         }
                                         Image(systemName: "arrow.uturn.backward")
@@ -763,7 +763,7 @@ public struct GalleryFilmstripView: View {
 
                 if asset.pixelWidth > 0 && asset.pixelHeight > 0 {
                     Text("\(asset.pixelWidth) × \(asset.pixelHeight)")
-                        .font(CharkleTheme.text(.caption, design: .monospaced))
+                        .font(CharkleTheme.text(.caption))
                         .monospacedDigit()
                         .foregroundStyle(.secondary)
                 }

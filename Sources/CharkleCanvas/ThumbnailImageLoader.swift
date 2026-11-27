@@ -1061,8 +1061,8 @@ public struct ProceduralMediaFallbackCard: View {
                     .font(.system(size: 24, weight: .regular))
                     .foregroundStyle(.white.opacity(0.9))
                     .shadow(color: .black.opacity(0.25), radius: 6, y: 2)
-                Text("GIF / MOTION")
-                    .font(CanvasSurface.text(.caption, weight: .semibold, design: .monospaced))
+                Text("GIF")
+                    .font(CanvasSurface.text(.caption, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.82))
             }
         }
@@ -1087,7 +1087,7 @@ public struct ProceduralMediaFallbackCard: View {
                         .offset(x: 1)
                 }
                 Text(CanvasFormatters.durationString(asset.durationSeconds))
-                    .font(CanvasSurface.text(.caption, weight: .medium, design: .monospaced))
+                    .font(CanvasSurface.text(.caption, weight: .medium))
                     .monospacedDigit()
                     .foregroundStyle(.white.opacity(0.78))
             }
@@ -1104,7 +1104,7 @@ public struct ProceduralMediaFallbackCard: View {
                     .foregroundStyle(barColor)
                 Spacer()
                 Text(CanvasFormatters.durationString(asset.durationSeconds))
-                    .font(CanvasSurface.text(.caption, weight: .medium, design: .monospaced))
+                    .font(CanvasSurface.text(.caption, weight: .medium))
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
             }
@@ -1165,7 +1165,7 @@ public struct ProceduralMediaFallbackCard: View {
                     .fill(accent)
                     .frame(width: 8, height: 8)
                 Text(domain)
-                    .font(CanvasSurface.text(.caption, weight: .medium, design: .monospaced))
+                    .font(CanvasSurface.text(.caption, weight: .medium))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                 Spacer()
@@ -1209,7 +1209,7 @@ public struct ProceduralMediaFallbackCard: View {
         return VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text(ext)
-                    .font(CanvasSurface.text(.caption, weight: .bold, design: .monospaced))
+                    .font(CanvasSurface.text(.caption, weight: .bold))
                     .padding(.horizontal, 6)
                     .padding(.vertical, 3)
                     .background(Color.primary.opacity(0.08), in: RoundedRectangle(cornerRadius: CanvasSurface.Radius.sm, style: .continuous))
@@ -1265,7 +1265,7 @@ public struct ProceduralMediaFallbackCard: View {
             }
             VStack(spacing: 8) {
                 Text(ext)
-                    .font(CanvasSurface.text(.body, weight: .bold, design: .monospaced))
+                    .font(CanvasSurface.text(.body, weight: .bold))
                     .foregroundStyle(Color.charkleIsLightHex(primaryHex) ? Color.black.opacity(0.86) : Color.white)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 5)

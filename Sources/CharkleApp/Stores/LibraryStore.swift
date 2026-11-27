@@ -875,7 +875,7 @@ public final class LibraryStore {
                 return post.displayAuthorName
             }()
             var noteParts: [String] = [
-                "来源\(post.platform.postNoun)：\(authorAttribution) · \(post.platform.displayName)"
+                "来源\(post.platform.postNoun)：\(authorAttribution)（\(post.platform.displayName)）"
             ]
             if let summary = post.videoSummary?.trimmingCharacters(in: .whitespacesAndNewlines), !summary.isEmpty {
                 noteParts.append("视频摘要：\n\(summary)")

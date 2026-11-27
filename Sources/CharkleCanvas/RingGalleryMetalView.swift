@@ -610,14 +610,14 @@ private final class RingTexturePool {
 
                 let badge: String = switch asset.mediaKind {
                 case .audio: "AUDIO"
-                case .model3D: "3D · \(asset.richMetadata?.model3DFormat ?? "MODEL")"
+                case .model3D: "3D \(asset.richMetadata?.model3DFormat ?? "MODEL")"
                 case .webBookmark:
                     asset.isGitHubRepo ? "GITHUB" : (asset.richMetadata?.socialPost?.platform.displayName.uppercased() ?? asset.sourceDomain ?? "WEB")
                 default:
                     CanvasFormatters.fileExtensionBadge(for: asset.fileName)
                 }
                 let badgeAttrs: [NSAttributedString.Key: Any] = [
-                    .font: NSFont.monospacedSystemFont(ofSize: 18, weight: .bold),
+                    .font: NSFont.monospacedDigitSystemFont(ofSize: 18, weight: .bold),
                     .foregroundColor: secondaryText
                 ]
                 (badge as NSString).draw(at: CGPoint(x: 28, y: 28), withAttributes: badgeAttrs)

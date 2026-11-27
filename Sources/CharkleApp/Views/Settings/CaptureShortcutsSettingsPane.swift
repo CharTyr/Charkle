@@ -28,7 +28,7 @@ public struct CaptureShortcutsSettingsPane: View {
                 SettingsRow(
                     title: "屏幕录制权限",
                     subtitle: hasScreenCapturePermission
-                        ? "已授权 · 可随时在其他应用中使用 \(captureAreaSummary) 区域截图收入素材库"
+                        ? "已授权，可使用 \(captureAreaSummary) 在任意应用中区域截图入库"
                         : "需要授予屏幕录制权限，才能在任意应用中区域截图并直接入库",
                     subtitleColor: hasScreenCapturePermission
                         ? CharkleTheme.positive(for: colorScheme)
@@ -114,7 +114,7 @@ public struct CaptureShortcutsSettingsPane: View {
                 )
                 SettingsCardDivider()
                 recorderRow(
-                    title: "一键收藏当前剪贴板",
+                    title: "收藏当前剪贴板",
                     subtitle: "自动识别图片、网页、社交帖文与媒体链接",
                     name: .collectClipboard
                 )

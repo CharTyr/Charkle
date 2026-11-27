@@ -35,7 +35,7 @@ public struct GoogleOAuthSetupSheet: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("配置 Google Drive 登录凭据")
                         .font(CharkleTheme.text(.headline, weight: .semibold))
-                    Text("Charkle 直连你自己的 Google Drive，仅首次需要配置一次桌面端凭据，密钥安全保存于 macOS 钥匙串。")
+                    Text("直连你的 Google Drive，首次需配置桌面端 OAuth 凭据并保存于钥匙串。")
                         .font(CharkleTheme.text(.caption))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -50,7 +50,7 @@ public struct GoogleOAuthSetupSheet: View {
                     Link(destination: SettingsHelpers.gdirectTutorialURL) {
                         HStack(spacing: 5) {
                             Image(systemName: "book.pages")
-                            Text("查看 Google Cloud 桌面端凭据 3 分钟图文教程")
+                            Text("查看 Google Cloud 桌面端凭据配置教程")
                             Image(systemName: "arrow.up.right")
                                 .font(.system(size: 10, weight: .semibold))
                         }
@@ -73,7 +73,7 @@ public struct GoogleOAuthSetupSheet: View {
                                 }
                             }
                         } label: {
-                            Label("从本机 gdirect 一键导入", systemImage: "arrow.down.doc.fill")
+                            Label("从本机 gdirect 导入", systemImage: "arrow.down.doc.fill")
                         }
                         .buttonStyle(SettingsPrimaryButtonStyle())
                         .disabled(syncAndAI.isBusy)

@@ -82,7 +82,7 @@ public struct CharkleToastOverlay: View {
                             .contentShape(Rectangle())
                             .allowsHitTesting(expanded)
 
-                        // Hover-expanded top utility pill ("全部关闭" / "另有 N 条 · 全部关闭")
+                        // Hover-expanded top utility pill ("全部关闭" / "另有 N 条，全部关闭")
                         if expanded {
                             expandedHeaderPill(totalCount: totalCount, hiddenCount: overflowCount)
                                 .offset(y: -(expandedBodyHeight + CharkleToastDeckLayout.expandedSpacing))
@@ -208,7 +208,7 @@ public struct CharkleToastOverlay: View {
 
     private func expandedHeaderPill(totalCount: Int, hiddenCount: Int) -> some View {
         let label = hiddenCount > 0
-            ? "另有 \(hiddenCount) 条 · 全部关闭"
+            ? "另有 \(hiddenCount) 条，全部关闭"
             : "全部关闭 (\(totalCount))"
         let pillShape = Capsule(style: .continuous)
 

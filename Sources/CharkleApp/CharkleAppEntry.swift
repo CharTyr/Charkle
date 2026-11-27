@@ -242,7 +242,7 @@ public final class CharkleRuntime {
         }
 
         if announce {
-            notchController?.flashConfirmation("已切换至极简刘海模式 · 保留顶部采集与最近素材")
+            notchController?.flashConfirmation("已切换至极简刘海模式，保留顶部采集与最近素材")
         }
     }
 
@@ -819,7 +819,7 @@ public final class CharkleRuntime {
                     await library.refreshAll()
                 }
                 await moodboards.refreshBoards()
-                let msg = "同步完成 · 上传 \(report.uploadedOps) / 拉取 \(report.downloadedOps) / 新发现 \(report.discoveredRemoteAssets)"
+                let msg = "同步完成：上传 \(report.uploadedOps) / 拉取 \(report.downloadedOps) / 新发现 \(report.discoveredRemoteAssets)"
                 coordinator.showToast(msg, icon: "checkmark.icloud.fill", tone: .success)
                 if coordinator.isMinimalCaptureMode {
                     notchController?.flashConfirmation("云端同步完成")
@@ -961,7 +961,7 @@ private struct CharkleMenuBarContentView: View {
                 registerWindowOpener()
                 runtime.exitMinimalCaptureMode(openMainWindow: true)
             }
-            Text("极简刘海模式运行中 · 最低资源占用")
+            Text("极简刘海模式运行中（低资源占用）")
         } else {
             Button("打开 Charkle 主窗口") {
                 registerWindowOpener()

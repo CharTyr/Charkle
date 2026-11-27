@@ -570,7 +570,7 @@ public struct SidebarView: View {
                                     .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
-                            .help("全媒体智能去重（纯本地算法，保留最高质量 · ⌘⇧D）")
+                            .help("全媒体智能去重（本地扫描，保留最高质量，⌘⇧D）")
                         }
                     }
                     .padding(.trailing, 10)
@@ -652,7 +652,7 @@ public struct SidebarView: View {
                             }
                         }
                         .buttonStyle(CharkleButtonStyle(.subtle, size: .xs, cornerRadius: 999))
-                        .help("4 入口 10 秒快速生成情绪板")
+                        .help("快速生成情绪板")
                     }
                     .padding(.trailing, 10)
 

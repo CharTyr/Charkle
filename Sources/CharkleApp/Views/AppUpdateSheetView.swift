@@ -126,36 +126,38 @@ public struct AppUpdateSheetView: View {
     @ViewBuilder
     private var headerSubtitleView: some View {
         if let update = appUpdater.activeUpdate {
-            HStack(spacing: 6) {
-                Text("v\(appUpdater.currentVersion.description)")
-                    .font(CharkleTheme.text(.caption, weight: .medium, design: .monospaced))
-                    .monospacedDigit()
-                    .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
+            HStack(spacing: 8) {
+                HStack(spacing: 5) {
+                    Text("v\(appUpdater.currentVersion.description)")
+                        .font(CharkleTheme.text(.caption, weight: .medium))
+                        .monospacedDigit()
+                        .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
 
-                Image(systemName: "arrow.right")
-                    .font(.system(size: 9.5, weight: .semibold))
-                    .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
+                    Image(systemName: "arrow.right")
+                        .font(.system(size: 9.5, weight: .semibold))
+                        .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
 
-                Text(update.tagName)
-                    .font(CharkleTheme.text(.caption, weight: .semibold, design: .monospaced))
-                    .monospacedDigit()
-                    .foregroundStyle(activeAccent)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 1.5)
-                    .background(
-                        CharkleTheme.accentSoft(for: colorScheme, source: accentSource),
-                        in: Capsule(style: .continuous)
-                    )
+                    Text(update.tagName)
+                        .font(CharkleTheme.text(.caption, weight: .semibold))
+                        .monospacedDigit()
+                        .foregroundStyle(activeAccent)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 1.5)
+                        .background(
+                            CharkleTheme.accentSoft(for: colorScheme, source: accentSource),
+                            in: Capsule(style: .continuous)
+                        )
+                }
 
                 if update.assetSizeBytes > 0 {
-                    Text("· \(Self.formatBytes(update.assetSizeBytes))")
+                    Text(Self.formatBytes(update.assetSizeBytes))
                         .font(CharkleTheme.text(.caption))
                         .monospacedDigit()
                         .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
                 }
 
                 if let publishedAt = update.publishedAt {
-                    Text("· \(Self.formatReleaseDate(publishedAt))")
+                    Text(Self.formatReleaseDate(publishedAt))
                         .font(CharkleTheme.text(.caption))
                         .monospacedDigit()
                         .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
@@ -163,7 +165,7 @@ public struct AppUpdateSheetView: View {
             }
         } else {
             Text("当前版本 v\(appUpdater.currentVersion.description) (\(appUpdater.currentBuildNumber))")
-                .font(CharkleTheme.text(.caption, weight: .medium, design: .monospaced))
+                .font(CharkleTheme.text(.caption, weight: .medium))
                 .monospacedDigit()
                 .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
         }
@@ -253,7 +255,7 @@ public struct AppUpdateSheetView: View {
                         .foregroundStyle(.primary)
                     Spacer()
                     Text(Self.downloadCounterText(downloaded: downloadedBytes, total: totalBytes, progress: progress))
-                        .font(CharkleTheme.text(.caption, weight: .medium, design: .monospaced))
+                        .font(CharkleTheme.text(.caption, weight: .medium))
                         .monospacedDigit()
                         .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
                 }
@@ -340,7 +342,8 @@ public struct AppUpdateSheetView: View {
                     .font(CharkleTheme.text(.body, weight: .medium))
                     .foregroundStyle(.primary)
                 Text("校验来源：github.com/CharTyr/Charkle")
-                    .font(CharkleTheme.text(.caption, design: .monospaced))
+                    .font(CharkleTheme.text(.caption))
+                    .monospacedDigit()
                     .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
             }
 
@@ -609,9 +612,9 @@ public struct AppUpdateSheetView: View {
         let percent = Int((min(1.0, max(0.0, progress)) * 100).rounded())
         let downloadedText = formatBytes(downloaded)
         if total > 0 {
-            return "\(downloadedText) / \(formatBytes(total)) · \(percent)%"
+            return "\(downloadedText) / \(formatBytes(total))（\(percent)%）"
         }
-        return "\(downloadedText) · \(percent)%"
+        return "\(downloadedText)（\(percent)%）"
     }
 
     private static func formatReleaseDate(_ date: Date) -> String {

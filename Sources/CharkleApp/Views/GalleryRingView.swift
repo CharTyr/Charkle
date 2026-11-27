@@ -272,7 +272,7 @@ public struct GalleryRingView: View {
                     .frame(maxWidth: 200)
                 if let idx = activeIndex {
                     Text("\(idx + 1) / \(assets.count)")
-                        .font(CharkleTheme.text(.caption, weight: .medium, design: .monospaced))
+                        .font(CharkleTheme.text(.caption, weight: .medium))
                         .monospacedDigit()
                         .foregroundStyle(.secondary)
                 }
@@ -410,7 +410,7 @@ public struct GalleryRingView: View {
                     .foregroundStyle(.secondary)
                 Spacer()
                 Text(valueText)
-                    .font(CharkleTheme.text(.caption, weight: .semibold, design: .monospaced))
+                    .font(CharkleTheme.text(.caption, weight: .semibold))
                     .monospacedDigit()
                     .foregroundStyle(.primary)
             }

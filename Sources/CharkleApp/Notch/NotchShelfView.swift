@@ -416,7 +416,7 @@ public struct NotchShelfView: View {
                             .padding(.vertical, 3.5)
                             .background(Color.white.opacity(0.14), in: Capsule(style: .continuous))
 
-                        Text("最近保存与查看 · 拖动可放入其他 App、情绪板或文件夹")
+                        Text("最近保存与查看，可拖入其他应用、情绪板或文件夹")
                             .font(CharkleTheme.text(.caption))
                             .foregroundStyle(.white.opacity(0.48))
                             .lineLimit(1)
@@ -596,7 +596,7 @@ public struct NotchShelfView: View {
                 .background(Color.white.opacity(0.09), in: Capsule(style: .continuous))
 
                 if !notchSelectedIDs.isEmpty {
-                    Text("已框选 \(notchSelectedIDs.count) 项 · 可直接拖出")
+                    Text("已框选 \(notchSelectedIDs.count) 项，可直接拖出")
                         .font(CharkleTheme.text(.caption, weight: .semibold))
                         .lineLimit(1)
                         .foregroundStyle(activeBlue)
@@ -604,7 +604,7 @@ public struct NotchShelfView: View {
                         .padding(.vertical, 4)
                         .background(activeBlue.opacity(0.18), in: Capsule(style: .continuous))
                 } else {
-                    Text("拖拽空白处框选多选 · 拖出至其他 App / 情绪板 / 文件夹")
+                    Text("拖拽空白处可框选多张，支持拖入其他应用或画板")
                         .font(CharkleTheme.text(.caption))
                         .foregroundStyle(.white.opacity(0.48))
                         .lineLimit(1)

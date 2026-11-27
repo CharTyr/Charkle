@@ -115,21 +115,21 @@ public struct LibrarySettingsPane: View {
                     }
                 }
 
-                InlineGuideDisclosure("切换存储方式会丢失素材吗？怎么安全搬家") {
+                InlineGuideDisclosure("如何安全迁移或切换存储位置") {
                     SettingsGuideStep(
                         "1",
                         title: "选择「完整无损迁移（推荐）」不会丢失任何内容",
-                        detail: "Charkle 会先验证新位置可写、自动拉取尚未缓存在本机的云端原件，再把全部文件夹、原图与情绪板写入新位置。"
+                        detail: "先验证新位置可写并拉取云端原件，再完整写入文件夹、原图与情绪板。"
                     )
                     SettingsGuideStep(
                         "2",
                         title: "「仅切换指向位置」适合接入已有素材库",
-                        detail: "如果你在另一台 Mac 或云盘已有现成的 Charkle 目录，仅切换指向即可直接连接，不搬运本机现有文件。"
+                        detail: "连接另一台设备或云盘中已有的 Charkle 目录，不搬运本机文件。"
                     )
                     SettingsGuideStep(
                         "3",
                         title: "随时可在 Google Drive、WebDAV 与纯本地之间互迁",
-                        detail: "原始文件均按可读文件夹保存，不锁定专有格式，在访达或网盘网页端都能直接查看。"
+                        detail: "原件按普通文件夹存储，可在访达或网盘网页端直接查看。"
                     )
                 }
             }
@@ -139,7 +139,7 @@ public struct LibrarySettingsPane: View {
                     if let onImportMaterialPackage {
                         SettingsRow(
                             title: "导入 .eaglepack 素材包 / .library 素材库",
-                            subtitle: "无损保留多级文件夹、配色、标签、星级评分、注释、来源链接与原始时间，也可直接拖入主界面或刘海托盘"
+                            subtitle: "保留多级文件夹、标签、评分、注释与来源链接，也支持直接拖入导入"
                         ) {
                             Button("选择素材包…") {
                                 onImportMaterialPackage()
@@ -155,8 +155,8 @@ public struct LibrarySettingsPane: View {
 
                     if let onOpenSmartDeduplication {
                         SettingsRow(
-                            title: "全媒体智能去重（纯本地算法 · 无需 AI）",
-                            subtitle: "基于内容校验、画面相似度、音频波形与来源链接检出图片/动图/视频/音频/设计稿/书签/文档/3D 重复项，自动保留最高质量版本并合并标签与情绪板引用"
+                            title: "全媒体本地去重（无需 AI）",
+                            subtitle: "按哈希、画面与波形识别全媒体重复项，保留最高画质并合并标签与引用"
                         ) {
                             Button("扫描重复素材…") {
                                 onOpenSmartDeduplication()
@@ -258,7 +258,7 @@ public struct LibrarySettingsPane: View {
 
                 SettingsRow(
                     title: "清理临时原件缓存",
-                    subtitle: "立即释放未设为「始终保留在本地」的临时原件，云端与本地原件安全保留"
+                    subtitle: "释放临时原件缓存，常驻离线素材与云端原件不受影响"
                 ) {
                     Button("立即清理") {
                         Task { await syncAndAI.evictCacheNow() }
@@ -379,7 +379,7 @@ public struct LibrarySettingsPane: View {
                             .foregroundStyle(.secondary)
                         TextField("Charkle", text: $draftTargetConfig.iCloudFolderName)
                             .textFieldStyle(.roundedBorder)
-                        Text("与 iPhone / iPad 版 Charkle 共享同一份 iCloud Drive 文件夹，支持在「云同步」中同时叠加 Google Drive / WebDAV 多后端。")
+                        Text("与 iPhone / iPad 版共享此 iCloud 目录，可在「云同步」叠加其他后端。")
                             .font(CharkleTheme.text(.caption))
                             .foregroundStyle(.secondary)
                     }

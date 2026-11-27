@@ -305,7 +305,7 @@ struct BoardAssetNodeView: View {
                                 HStack(spacing: 3) {
                                     Image(systemName: "viewfinder")
                                         .font(.system(size: 9, weight: .semibold))
-                                    Text("局部取景 · 还原")
+                                    Text("还原取景")
                                         .font(CanvasSurface.text(.caption, weight: .semibold))
                                 }
                                 .foregroundStyle(.white)
@@ -414,7 +414,7 @@ struct BoardAssetNodeView: View {
                         }
                     }
                 } label: {
-                    Label("智能取景与标注 (Jev Box)", systemImage: "viewfinder.circle")
+                    Label("智能取景与标注", systemImage: "viewfinder.circle")
                 }
             }
             Divider()
@@ -723,10 +723,11 @@ struct BoardGroupFrameView: View {
                     .foregroundStyle(accent)
 
                 if itemCount > 0 {
-                    Text("\(itemCount) ·")
+                    Text("\(itemCount)")
                         .font(CanvasSurface.text(.caption, weight: .bold, design: .rounded))
                         .monospacedDigit()
                         .foregroundStyle(accent)
+                        .padding(.trailing, 2)
                 }
 
                 TextField("分组名称", text: $draftTitle)

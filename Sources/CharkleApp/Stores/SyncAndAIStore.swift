@@ -169,7 +169,7 @@ public final class SyncAndAIStore {
         case .standard:
             statusMessage = "已清零普通云端模型用量统计"
         case .jev:
-            statusMessage = "已清零 Jev 判断模型用量统计"
+            statusMessage = "已清零视觉定位引擎用量统计"
         case nil:
             statusMessage = "已清零全部云端模型用量统计"
         }
@@ -380,7 +380,7 @@ public final class SyncAndAIStore {
             syncStatus = await engine.syncStatus()
             cacheStats = await engine.cacheStats()
             hasWebDAVPassword = await engine.hasWebDAVPassword()
-            statusMessage = "素材库已迁移至「\(report.targetLocation)」· 共 \(report.migratedAssets) 项素材、\(report.migratedFolders) 个文件夹、\(report.migratedBoards) 块情绪板"
+            statusMessage = "素材库已迁移至「\(report.targetLocation)」，共 \(report.migratedAssets) 项素材、\(report.migratedFolders) 个文件夹、\(report.migratedBoards) 块情绪板"
             return report
         } catch {
             syncConfig = await engine.syncConfig()
@@ -460,7 +460,7 @@ public final class SyncAndAIStore {
             lastSyncReport = report
             syncStatus = await engine.syncStatus()
             cacheStats = await engine.cacheStats()
-            statusMessage = "同步完成 · 上传 \(report.uploadedOps) / 拉取 \(report.downloadedOps) / 新发现 \(report.discoveredRemoteAssets) 项"
+            statusMessage = "同步完成：上传 \(report.uploadedOps) / 拉取 \(report.downloadedOps) / 新发现 \(report.discoveredRemoteAssets) 项"
             return report
         } catch {
             statusMessage = nil
@@ -611,7 +611,7 @@ public final class SyncAndAIStore {
             lastSyncReport = report
             syncStatus = await engine.syncStatus()
             cacheStats = await engine.cacheStats()
-            statusMessage = "单后端同步完成 · ↑ \(report.uploadedOps) / ↓ \(report.downloadedOps)"
+            statusMessage = "单后端同步完成：↑ \(report.uploadedOps) / ↓ \(report.downloadedOps)"
             return report
         } catch {
             statusMessage = nil
@@ -807,7 +807,7 @@ public final class SyncAndAIStore {
             if let successMessage {
                 statusMessage = successMessage
             } else if !quiet {
-                statusMessage = "已保存 TypeSafe (Jev) 实验配置（密钥仅存于 macOS 钥匙串）"
+                statusMessage = "已保存视觉定位引擎配置（密钥仅存于 macOS 钥匙串）"
             }
         } catch {
             statusMessage = nil
@@ -829,8 +829,8 @@ public final class SyncAndAIStore {
             typeSafeModels = models
             let names = models.map(\.name).joined(separator: "、")
             statusMessage = models.isEmpty
-                ? "TypeSafe API 连接成功"
-                : "TypeSafe 连接成功 · 可用模型：\(names)"
+                ? "视觉定位引擎连接成功"
+                : "视觉定位引擎连接成功，可用模型：\(names)"
             return true
         } catch {
             statusMessage = nil
@@ -873,9 +873,9 @@ public final class SyncAndAIStore {
                 switch (config.mcpEnabled, config.httpMCPEnabled) {
                 case (true, true):
                     let remoteNote = config.allowRemoteHTTPMCP ? "（含跨机器远程）" : "（仅本机）"
-                    statusMessage = "本机与 HTTP MCP\(remoteNote) 已开启 · 本机权限：\(config.accessLevel.displayTitle)"
+                    statusMessage = "本机与 HTTP MCP\(remoteNote) 已开启，本机权限：\(config.accessLevel.displayTitle)"
                 case (true, false):
-                    statusMessage = "已开启本机 MCP（stdio）· 权限：\(config.accessLevel.displayTitle)"
+                    statusMessage = "已开启本机 MCP（stdio），权限：\(config.accessLevel.displayTitle)"
                 case (false, true):
                     statusMessage = "已开启 HTTP MCP 服务"
                 case (false, false):
@@ -1088,7 +1088,7 @@ public final class SyncAndAIStore {
             let prompts = (caps?["promptCount"] as? Int) ?? 0
             let assets = (lib?["totalAssets"] as? Int) ?? 0
             let boards = (lib?["boardCount"] as? Int) ?? 0
-            return (true, "自检通过 · 原生助手响应正常（\(tools) 工具 / \(prompts) 工作流 / \(assets) 素材 / \(boards) 情绪板）")
+            return (true, "自检通过：原生助手响应正常（\(tools) 工具 / \(prompts) 工作流 / \(assets) 素材 / \(boards) 情绪板）")
         }
 
         let errData = (try? Data(contentsOf: stderrURL)) ?? Data()

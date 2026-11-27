@@ -2009,7 +2009,8 @@ public struct MainWindowView: View {
                                         Text(folderName)
                                             .font(CharkleTheme.text(.caption, weight: .semibold))
                                         Text("\(Int((rec.confidence * 100).rounded()))%")
-                                            .font(CharkleTheme.text(.caption, weight: .medium, design: .monospaced))
+                                            .font(CharkleTheme.text(.caption, weight: .medium))
+                                            .monospacedDigit()
                                             .foregroundStyle(.secondary)
                                     }
                                     .foregroundStyle(rec.confidence >= 0.65 ? activeAccent : Color.primary)
@@ -2248,7 +2249,7 @@ public struct MainWindowView: View {
                         .font(.system(size: 12, weight: .medium))
                         .symbolVariant(.fill)
                         .foregroundStyle(activeAccent)
-                    Text(isNarrowBar ? "收入板" : "一键收入情绪板")
+                    Text(isNarrowBar ? "收入板" : "收入情绪板")
                         .font(CharkleTheme.text(.caption, weight: .semibold))
                         .foregroundStyle(.primary.opacity(0.90))
                         .lineLimit(1)
@@ -2277,7 +2278,7 @@ public struct MainWindowView: View {
                 Image(systemName: "trash")
                     .font(.system(size: 12.5, weight: .medium))
                     .foregroundStyle(.secondary)
-                Text("废纸篓 · 共 \(allIDs.count) 项素材")
+                Text("废纸篓（\(allIDs.count) 项）")
                     .font(CharkleTheme.text(.caption, weight: .semibold))
                     .monospacedDigit()
             }
@@ -2499,7 +2500,7 @@ public struct MainWindowView: View {
                 CharkleEmptyStateVignette(.emptyTrash)
                 Text("废纸篓是空的")
                     .font(CharkleTheme.text(.headline, weight: .semibold))
-                Text("移至废纸篓的素材会暂存在这里，你可以随时放回原处或彻底删除。")
+                Text("已移至废纸篓的素材会暂存在此，可随时恢复或彻底删除。")
                     .font(CharkleTheme.text(.body))
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
@@ -2510,7 +2511,7 @@ public struct MainWindowView: View {
                 )
                 Text(isFiltered ? "没有符合筛选条件的素材" : (isFolder ? "当前文件夹还没有素材" : "这里还没有素材"))
                     .font(CharkleTheme.text(.headline, weight: .semibold))
-                Text("直接拖入图片、GIF、视频、PDF、音频、设计文件或 X / 网页链接，或按 ⌥⇧V 粘贴剪贴板内容。")
+                Text("拖入图片、视频、文档、设计文件或网页链接，或按 ⌥⇧V 采集剪贴板。")
                     .font(CharkleTheme.text(.body))
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
@@ -2850,7 +2851,7 @@ public struct MainWindowView: View {
                         Text("情绪板创作台")
                             .font(CharkleTheme.text(.title, weight: .semibold))
                             .tracking(-0.3)
-                        Text("单源引用素材库 · 无限自由画布与智能灵感策展")
+                        Text("本地优先素材库与自由情绪板画布")
                             .font(CharkleTheme.text(.body))
                             .foregroundStyle(.secondary)
                     }
@@ -2861,7 +2862,7 @@ public struct MainWindowView: View {
                         Label("导入 PureRef", systemImage: "square.grid.2x2")
                     }
                     .buttonStyle(CharkleButtonStyle(.standard, size: .sm))
-                    .help("一键导入 PureRef (.pur) 场景到素材库并还原为可编辑情绪板")
+                    .help("导入 PureRef (.pur) 场景并还原为可编辑情绪板")
 
                     Button {
                         Task {
@@ -2881,7 +2882,7 @@ public struct MainWindowView: View {
                             Image(systemName: "sparkles.rectangle.stack")
                                 .font(.system(size: 12.5, weight: .semibold))
                                 .symbolVariant(.fill)
-                            Text("10 秒快速生成")
+                            Text("快速生成情绪板")
                         }
                     }
                     .buttonStyle(CharkleButtonStyle(.accent, size: .sm))
@@ -2892,7 +2893,7 @@ public struct MainWindowView: View {
                         CharkleEmptyStateVignette(.emptyMoodboard)
                         Text("还没有情绪板")
                             .font(CharkleTheme.text(.headline, weight: .semibold))
-                        Text("通过灵感词、种子图、主色板或直接框选素材，10 秒生成首张可编辑情绪板。")
+                        Text("通过灵感词、种子图、主色板或框选素材，快速生成可编辑情绪板。")
                             .font(CharkleTheme.text(.body))
                             .foregroundStyle(.secondary)
                             .multilineTextAlignment(.center)
@@ -2907,7 +2908,7 @@ public struct MainWindowView: View {
                             }
                             .buttonStyle(CharkleButtonStyle(.standard, size: .md))
 
-                            Button("10 秒快速生成") {
+                            Button("快速生成情绪板") {
                                 coordinator.presentMoodboardGenerator(entry: .prompt)
                             }
                             .buttonStyle(CharkleButtonStyle(.accent, size: .md))
@@ -3044,13 +3045,11 @@ public struct MainWindowView: View {
                     }
                 }
 
-                HStack {
+                HStack(spacing: 8) {
                     Text("\(board.itemCount) 个节点")
                         .font(CharkleTheme.text(.caption))
                         .monospacedDigit()
                         .foregroundStyle(.secondary)
-                    Text("·")
-                        .foregroundStyle(.tertiary)
                     Text("自由画布")
                         .font(CharkleTheme.text(.caption))
                         .foregroundStyle(.secondary)
@@ -3290,7 +3289,7 @@ public struct MainWindowView: View {
                             switch res {
                             case .success(let region):
                                 coordinator.showToast(
-                                    region.found ? "已添加指物批注 · \(region.summary)" : region.summary,
+                                    region.found ? "已添加指物批注：\(region.summary)" : region.summary,
                                     icon: region.found ? "scope" : "questionmark.circle",
                                     tone: region.found ? .neutral : .warning
                                 )
@@ -3453,7 +3452,7 @@ public struct MainWindowView: View {
             if coordinator.isOnboardingPresented {
                 if event.isARepeat { return nil }
                 resignTextFocusIfNeeded()
-                coordinator.showToast("已跳过首次引导 · 随时可在「设置 → 通用」重新查看", icon: "forward.end.fill")
+                coordinator.showToast("已跳过首次引导，可在「设置 → 通用」重新查看", icon: "forward.end.fill")
                 withAnimation(CharkleMotion.accessible(CharkleMotion.exitMd, reduced: reduceMotion)) {
                     coordinator.completeOnboarding()
                 }
@@ -4047,7 +4046,7 @@ public struct MainWindowView: View {
                 await library.refreshAll()
                 await moodboards.refreshBoards()
                 coordinator.showToast(
-                    "同步完成 · 上传 \(report.uploadedOps) / 拉取 \(report.downloadedOps) / 新发现 \(report.discoveredRemoteAssets)",
+                    "同步完成：上传 \(report.uploadedOps) / 拉取 \(report.downloadedOps) / 新发现 \(report.discoveredRemoteAssets)",
                     icon: "checkmark.icloud.fill"
                 )
             } else if let err = syncAndAI.errorMessage {
@@ -4166,7 +4165,7 @@ private struct FloatingSyncStatusPill: View {
             }
             Button("打开存储与同步设置…") { onOpenSettings() }
         }
-        .help(syncAndAI.syncConfig.mode == .localOnly ? "\(syncPillLabel) · 点击打开存储设置" : "\(syncPillLabel) · 点击查看云端同步进度与状态")
+        .help(syncAndAI.syncConfig.mode == .localOnly ? "\(syncPillLabel)（点击打开存储设置）" : "\(syncPillLabel)（点击查看同步状态）")
     }
 
     private var syncDotColor: Color {
@@ -4195,7 +4194,7 @@ private struct FloatingSyncStatusPill: View {
             return "同步异常"
         case .idle:
             if syncAndAI.isBusy { return "同步中…" }
-            let pendingSuffix = status.pendingOpCount > 0 ? " · 待传 \(status.pendingOpCount)" : ""
+            let pendingSuffix = status.pendingOpCount > 0 ? " / 待传 \(status.pendingOpCount)" : ""
             let enabledCount = syncAndAI.syncConfig.enabledBackends.count
             if enabledCount > 1 {
                 return "多后端 (\(enabledCount))\(pendingSuffix)"
@@ -4231,7 +4230,7 @@ private struct FloatingSyncStatusPill: View {
                             .font(CharkleTheme.text(.body, weight: .semibold))
                         if isSyncing, let percentText {
                             Text(percentText)
-                                .font(CharkleTheme.text(.caption, weight: .semibold, design: .monospaced))
+                                .font(CharkleTheme.text(.caption, weight: .semibold))
                                 .monospacedDigit()
                                 .foregroundStyle(activeAccent)
                         }
@@ -4302,7 +4301,7 @@ private struct FloatingSyncStatusPill: View {
                             .foregroundStyle(.secondary)
                         Spacer()
                         Text("↑ \(report.uploadedOps)  ↓ \(report.downloadedOps)  +\(report.discoveredRemoteAssets)")
-                            .font(CharkleTheme.text(.caption, weight: .medium, design: .monospaced))
+                            .font(CharkleTheme.text(.caption, weight: .medium))
                             .monospacedDigit()
                     }
                 }
@@ -4368,7 +4367,7 @@ private struct InboxZeroCelebrationView: View {
                 Text("收件箱已清空")
                     .font(CharkleTheme.text(.title, weight: .semibold))
                     .tracking(-0.2)
-                Text("所有灵感都已妥善归档或进入情绪板。随时拖动文件到 MacBook 刘海或按 \(GlobalHotkeyManager.displayString(for: .captureArea, fallback: "⌥⇧A")) 截图采集。")
+                Text("素材已全部整理完成。拖入文件到顶部刘海或按 \(GlobalHotkeyManager.displayString(for: .captureArea, fallback: "⌥⇧A")) 可随时采集。")
                     .font(CharkleTheme.text(.body))
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
@@ -4376,7 +4375,7 @@ private struct InboxZeroCelebrationView: View {
                 HStack(spacing: 10) {
                     Button("浏览全部素材", action: onBrowseAll)
                         .buttonStyle(CharkleButtonStyle(.standard, size: .md))
-                    Button("10 秒生成情绪板", action: onGenerateBoard)
+                    Button("生成情绪板", action: onGenerateBoard)
                         .buttonStyle(CharkleButtonStyle(.accent, size: .md))
                 }
                 .padding(.top, 4)

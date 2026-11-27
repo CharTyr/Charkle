@@ -417,7 +417,7 @@ public struct OnboardingView: View {
                 }
                 .buttonStyle(SettingsSecondaryButtonStyle())
             } else {
-                Text("每一步都可跳过 · 随时可在「设置 (⌘,) → 通用」重新查看")
+                Text("每一步均可跳过，随时可在「设置 (⌘,) → 通用」重新查看")
                     .font(CharkleTheme.text(.caption))
                     .foregroundStyle(.secondary)
             }
@@ -425,7 +425,7 @@ public struct OnboardingView: View {
             Spacer()
 
             Text("\(currentStep.rawValue + 1) / \(Step.allCases.count)")
-                .font(CharkleTheme.text(.caption, weight: .medium, design: .monospaced))
+                .font(CharkleTheme.text(.caption, weight: .medium))
                 .monospacedDigit()
                 .foregroundStyle(.tertiary)
                 .padding(.trailing, 4)
@@ -541,7 +541,7 @@ public struct OnboardingView: View {
                         .tracking(-0.45)
                         .foregroundStyle(.primary)
 
-                    Text("专为视觉创作者打造的 macOS 灵感收集与情绪板工作台。花 1 分钟按需选几项偏好，或直接跳过立即开始。")
+                    Text("macOS 视觉灵感库与情绪板工作台，按需配置或直接开始。")
                         .font(CharkleTheme.text(.body))
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
@@ -555,8 +555,8 @@ public struct OnboardingView: View {
                     index: 0,
                     iconName: "notch",
                     accentHex: "#3B74E8",
-                    title: "顶部刘海随手拖",
-                    subtitle: "跨应用拖起即收纳，不抢窗口焦点，支持反向拖出复用",
+                    title: "顶部刘海收纳",
+                    subtitle: "跨应用拖入即存，不抢焦点，支持反向拖出复用",
                     targetStep: .capture
                 )
                 welcomePillarCard(
@@ -564,7 +564,7 @@ public struct OnboardingView: View {
                     iconName: "library",
                     accentHex: "#D96B43",
                     title: "本地与云端无损互迁",
-                    subtitle: "支持纯本地、Google Drive 与 WebDAV，随时一键安全搬家",
+                    subtitle: "支持本地目录、Google Drive 与 WebDAV 同步",
                     targetStep: .storage
                 )
                 welcomePillarCard(
@@ -572,7 +572,7 @@ public struct OnboardingView: View {
                     iconName: "ai-spark",
                     accentHex: "#2A8F9D",
                     title: "离线视觉 + 可选云 AI",
-                    subtitle: "免费内置配色提取、OCR 与相似检索，按需接入云端策展",
+                    subtitle: "内置配色提取、OCR 与相似检索，按需接入云端",
                     targetStep: .intelligence
                 )
                 welcomePillarCard(
@@ -580,7 +580,7 @@ public struct OnboardingView: View {
                     iconName: "moodboard",
                     accentHex: "#3D9970",
                     title: "自由画布与 Figma 桥接",
-                    subtitle: "10 秒拼板推演灵感，原生支持导出高分辨率可编辑 Figma 包",
+                    subtitle: "自由拼板推演灵感，支持导出可编辑 Figma 包",
                     targetStep: .workspace
                 )
             }
@@ -680,15 +680,15 @@ public struct OnboardingView: View {
                     accentHex: isLocal ? "#D96B43" : "#3B74E8",
                     badgeText: isLocal ? "本机隐私优先" : (directAccount != nil ? "已连接云端" : "多机自动同步"),
                     caption: isLocal
-                        ? "所有素材原件与索引直接留在你指定的本机目录，零账号即可开箱使用。"
-                        : "文件夹、原图与情绪板自动增量同步；随时可在「设置 → 素材库」一键无损互迁。"
+                        ? "素材原件与索引保存在本机目录，无需账号即可使用。"
+                        : "目录、原图与情绪板自动增量同步，随时可在设置中无损迁移。"
                 )
             },
             content: {
                 stepHeading(
                     title: "素材库保存在哪里？",
-                    subtitle: "默认使用纯本地目录，也可现在或以后再接入云盘。跳过此步将保留当前存储设置。",
-                    optionalTag: "可选 · 可跳过"
+                    subtitle: "默认使用本地目录，也可按需接入云盘同步。",
+                    optionalTag: "可选"
                 )
 
                 VStack(spacing: 10) {
@@ -697,7 +697,7 @@ public struct OnboardingView: View {
                         title: "纯本地文件夹",
                         badge: "默认推荐",
                         badgeTint: SettingsPalette.positiveInk(for: colorScheme),
-                        subtitle: "零配置立即可用，文件完整留在你的 Mac 本地文件夹",
+                        subtitle: "文件完整保存在本机指定目录，离线可用",
                         iconName: "library",
                         isSelected: isLocal
                     ) {
@@ -723,7 +723,7 @@ public struct OnboardingView: View {
                         title: "Google Drive 云端直连",
                         badge: directAccount != nil ? "已连接" : nil,
                         badgeTint: SettingsPalette.positiveInk(for: colorScheme),
-                        subtitle: "直连你自己的 Google Drive，不经第三方中转，支持多机同步与共享协作",
+                        subtitle: "不经第三方中转，支持多设备同步与共享协作",
                         iconName: "drive-sync",
                         isSelected: isGoogle
                     ) {
@@ -757,7 +757,7 @@ public struct OnboardingView: View {
                                     .fixedSize()
                                     .disabled(syncAndAI.isBusy)
                                 } else {
-                                    Text(hasGDirect ? "检测到本机 gdirect，可一键导入凭据" : "首次直连需准备个人桌面端 OAuth 凭据")
+                                    Text(hasGDirect ? "检测到本机 gdirect，可直接导入凭据" : "首次连接需配置个人桌面端 OAuth 凭据")
                                         .font(CharkleTheme.text(.caption))
                                         .foregroundStyle(.secondary)
                                     Spacer()
@@ -797,7 +797,7 @@ public struct OnboardingView: View {
                         title: "WebDAV 云盘 / 自建 NAS",
                         badge: (isWebDAV && !draftSyncConfig.webDAVServerURL.isEmpty && syncAndAI.hasWebDAVPassword) ? "已保存" : nil,
                         badgeTint: SettingsPalette.positiveInk(for: colorScheme),
-                        subtitle: "兼容坚果云、Nextcloud、群晖 NAS、Alist 等任意标准 WebDAV 服务",
+                        subtitle: "兼容坚果云、Nextcloud、群晖与 Alist 等服务",
                         iconName: "drive-sync",
                         isSelected: isWebDAV
                     ) {
@@ -871,8 +871,8 @@ public struct OnboardingView: View {
             content: {
                 stepHeading(
                     title: "刘海浮窗、截图权限与快捷键",
-                    subtitle: "在任意应用中拖拽靠近屏幕顶部即可收纳灵感，以下开关即时生效，不需要的项目可留空跳过。",
-                    optionalTag: "可选 · 可跳过"
+                    subtitle: "跨应用拖拽至屏幕顶部即可收纳，以下开关即时生效。",
+                    optionalTag: "可选"
                 )
 
                 // 1. Live macOS Screen Recording Permission Card (aligned with CaptureShortcutsSettingsPane)
@@ -893,8 +893,8 @@ public struct OnboardingView: View {
                             let captureKey = GlobalHotkeyManager.displayString(for: .captureArea, fallback: "⌥⇧A")
                             Text(
                                 hasScreenCapturePermission
-                                    ? "已就绪 · 可随时按 \(captureKey) 在任意应用中框选截图入库"
-                                    : "仅在使用 \(captureKey) 区域截图时需要；纯拖图或收藏剪贴板可直接跳过"
+                                    ? "已就绪，按 \(captureKey) 可在任意应用中框选截图"
+                                    : "仅区域截图（\(captureKey)）需要，拖拽或剪贴板收藏无需此权限"
                             )
                             .font(CharkleTheme.text(.caption))
                             .foregroundStyle(.secondary)
@@ -993,7 +993,7 @@ public struct OnboardingView: View {
                     let notchKey = GlobalHotkeyManager.displayString(for: .toggleNotchShelf, fallback: "⌥⇧S")
                     instantSwitchRow(
                         title: "启用系统全局快捷键",
-                        subtitle: "任意应用中随时按 \(captureKey) 截图、\(clipboardKey) 收藏剪贴板与推文、\(notchKey) 呼出刘海",
+                        subtitle: "\(captureKey) 截图、\(clipboardKey) 收藏剪贴板、\(notchKey) 呼出浮窗",
                         isOn: Binding(
                             get: { coordinator.globalHotkeysEnabled },
                             set: { newVal in
@@ -1149,7 +1149,7 @@ public struct OnboardingView: View {
                         Text("基础离线能力免费内置")
                             .font(CharkleTheme.text(.caption, weight: .semibold))
                             .foregroundStyle(.primary)
-                        Text("无需下载模型 · 数据不出本机")
+                        Text("无需下载模型，数据仅留本机")
                             .font(CharkleTheme.text(.caption))
                             .foregroundStyle(.secondary)
                             .padding(.bottom, 2)
@@ -1177,8 +1177,8 @@ public struct OnboardingView: View {
             content: {
                 stepHeading(
                     title: "需要云端 AI 自动打标与生板吗？",
-                    subtitle: "纯属可选增强项。跳过将保持仅使用本机离线能力，日后可在「设置 → AI 智能」随时接入。",
-                    optionalTag: "可选 · 可跳过"
+                    subtitle: "可选增强能力，随时可在「设置 → AI 智能」配置。",
+                    optionalTag: "可选"
                 )
 
                 VStack(spacing: 10) {
@@ -1186,7 +1186,7 @@ public struct OnboardingView: View {
                         title: "仅使用内置离线能力",
                         badge: "默认",
                         badgeTint: SettingsPalette.positiveInk(for: colorScheme),
-                        subtitle: "零费用、零账号、完全离线；配色、OCR、相似图与快搜全部立即可用",
+                        subtitle: "无需账号，内置配色、OCR、相似检索与拼音快搜",
                         iconName: "similar",
                         isSelected: isLocalOnly
                     ) {
@@ -1200,7 +1200,7 @@ public struct OnboardingView: View {
                         title: "连接 ChatGPT 订阅账号",
                         badge: syncAndAI.chatGPTSession.status == .connected ? "已连接" : nil,
                         badgeTint: SettingsPalette.positiveInk(for: colorScheme),
-                        subtitle: "使用你的 ChatGPT Plus / Pro 订阅，无需额外购买 API Key",
+                        subtitle: "复用 Plus / Pro 订阅额度，无需单独配置 API Key",
                         isSelected: isChatGPT,
                         icon: {
                             SettingsHelpers.chatGPTBrandMark(size: 17, color: isChatGPT ? .primary : .secondary)
@@ -1246,7 +1246,7 @@ public struct OnboardingView: View {
                         title: "Google Gemini 或自定义 API",
                         badge: (isAPI && (syncAndAI.hasStoredAIKey || isLocalOllama)) ? "已配置" : nil,
                         badgeTint: SettingsPalette.positiveInk(for: colorScheme),
-                        subtitle: "一键预设 Gemini、OpenAI、Claude、DeepSeek 或本机 Ollama",
+                        subtitle: "内置 OpenAI、Claude、DeepSeek 与本地 Ollama 预设",
                         iconName: "sparkle-board",
                         isSelected: isAPI
                     ) {
@@ -1314,7 +1314,7 @@ public struct OnboardingView: View {
                     }
                 }
 
-                Text("TypeSafe 视觉增强与外部 AI Agent (MCP) 可随时在「设置 → 生态与智能」中按需开启。")
+                Text("视觉定位增强与外部 MCP 集成可在「设置」中按需开启。")
                     .font(CharkleTheme.text(.caption))
                     .foregroundStyle(.tertiary)
 
@@ -1350,9 +1350,9 @@ public struct OnboardingView: View {
             },
             content: {
                 stepHeading(
-                    title: "挑选顺眼的图标与画廊排布",
-                    subtitle: "点选立即生效，程序坞图标与主画布默认排布会实时同步。保持默认可直接跳过。",
-                    optionalTag: "可选 · 可跳过"
+                    title: "选择应用图标与画廊排布",
+                    subtitle: "点选后即时生效，之后可在设置中随时更改。",
+                    optionalTag: "可选"
                 )
 
                 // 1. App Icon Variant Choice Cards (matching GeneralSettingsPane)
@@ -1451,7 +1451,7 @@ public struct OnboardingView: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("启动时默认收起侧边栏为精简图标栏")
                             .font(CharkleTheme.text(.body, weight: .medium))
-                        Text("随时可用 ⌘\\ 一键展开或收起，左侧底部齿轮按钮可随时打开设置")
+                        Text("随时可按 ⌘\\ 切换侧边栏展开或收起")
                             .font(CharkleTheme.text(.caption))
                             .foregroundStyle(.secondary)
                     }
@@ -1522,7 +1522,7 @@ public struct OnboardingView: View {
         let accent = Color(charkleHex: "#D96B43")
         let tile = Color.primary.opacity(colorScheme == .dark ? 0.14 : 0.09)
         return VStack(alignment: .leading, spacing: 7) {
-            Text("视图预览 · \(mode.localizedLabel)")
+            Text("视图预览：\(mode.localizedLabel)")
                 .font(CharkleTheme.text(.caption, weight: .semibold))
                 .foregroundStyle(.secondary)
 
@@ -1611,7 +1611,7 @@ public struct OnboardingView: View {
                 ? "刘海 → \(coordinator.defaultNotchTargetMode.localizedTitle)"
                 : "刘海已关闭"
             let permPart = hasScreenCapturePermission ? "录屏已授权" : "录屏未开启"
-            return "\(notchPart) · \(permPart)"
+            return "\(notchPart) / \(permPart)"
         }()
 
         let aiSummary: String = switch draftAIConfig.provider {
@@ -1626,7 +1626,7 @@ public struct OnboardingView: View {
                 : "自定义 API（待填密钥）"
         }
 
-        let workspaceSummary = "\(appIconManager.currentVariant.title)图标 · \(coordinator.galleryLayoutMode.localizedLabel)"
+        let workspaceSummary = "\(appIconManager.currentVariant.title)图标 / \(coordinator.galleryLayoutMode.localizedLabel)"
 
         return VStack(spacing: 20) {
             Spacer(minLength: 4)
@@ -1660,7 +1660,7 @@ public struct OnboardingView: View {
                 Text("一切准备就绪")
                     .font(CharkleTheme.text(.title, weight: .bold))
                     .tracking(-0.35)
-                Text("点击任意卡片可回头微调，或随时按 ⌘, 打开设置页继续深度定制。")
+                Text("点击卡片可返回调整，或按 ⌘, 打开完整设置。")
                     .font(CharkleTheme.text(.body))
                     .foregroundStyle(.secondary)
             }
@@ -2052,7 +2052,7 @@ public struct OnboardingView: View {
     }
 
     private func skipEntireOnboarding() {
-        coordinator.showToast("已跳过首次引导 · 随时可在「设置 → 通用」重新查看", icon: "forward.end.fill")
+        coordinator.showToast("已跳过首次引导，随时可在「设置 → 通用」重新查看", icon: "forward.end.fill")
         onFinish()
     }
 

@@ -341,7 +341,7 @@ public struct InspectorView: View {
                             .onDrag {
                                 NSItemProvider(object: CharkleDragIdentifiers.encode(assetIDs: [scored.asset.id]) as NSString)
                             }
-                            .help(scored.matchReasons.isEmpty ? scored.asset.title : "\(scored.asset.title) · \(scored.matchReasons.joined(separator: " / "))")
+                            .help(scored.matchReasons.isEmpty ? scored.asset.title : "\(scored.asset.title)（\(scored.matchReasons.joined(separator: " / "))）")
                         }
                     }
                 }
@@ -836,7 +836,7 @@ public struct InspectorView: View {
                                         switch await library.extractSubjectPalette(for: asset.id) {
                                         case .success(let res):
                                             coordinator.showToast(
-                                                "主体色板已更新 · \(res.subjectRegion.summary)",
+                                                "主体色板已更新：\(res.subjectRegion.summary)",
                                                 icon: "paintpalette.fill"
                                             )
                                         case .failure(let error):
@@ -1131,7 +1131,7 @@ public struct InspectorView: View {
                         let depthDPI = [
                             exif.bitDepth.map { "\($0)-bit" },
                             exif.dpiWidth.map { "\($0) DPI" }
-                        ].compactMap { $0 }.joined(separator: " · ")
+                        ].compactMap { $0 }.joined(separator: " / ")
                         if !depthDPI.isEmpty {
                             CharkleHairlineDivider()
                             CharkleSpecRow("色深 / 分辨率", value: depthDPI)
@@ -1487,7 +1487,7 @@ public struct InspectorView: View {
                         let parts = [
                             aiGen.steps.map { "\($0) 步" },
                             aiGen.cfgScale.map { String(format: "CFG %.1f", $0).replacingOccurrences(of: ".0", with: "") }
-                        ].compactMap { $0 }.joined(separator: " · ")
+                        ].compactMap { $0 }.joined(separator: " / ")
                         list.append(("步数 / CFG", parts, false, false))
                     }
                     if let seed = aiGen.seed, !seed.isEmpty {
@@ -1599,7 +1599,7 @@ public struct InspectorView: View {
                             let parts = [
                                 exif.bitDepth.map { "\($0)-bit" },
                                 exif.dpiWidth.map { "\($0) DPI" }
-                            ].compactMap { $0 }.joined(separator: " · ")
+                            ].compactMap { $0 }.joined(separator: " / ")
                             list.append(("色深 / 分辨率", parts))
                         }
                         if let sw = exif.software { list.append(("软件", sw)) }
@@ -1669,7 +1669,7 @@ public struct InspectorView: View {
                         Text("已选中 \(ids.count) 项素材")
                             .font(CharkleTheme.text(.headline, weight: .semibold))
                             .monospacedDigit()
-                        Text(isTrashSelection ? "这些素材当前位于废纸篓，可恢复到原位置或彻底删除" : "批量归档、打标签或一键进入情绪板排版")
+                        Text(isTrashSelection ? "这些素材当前位于废纸篓，可恢复到原位置或彻底删除" : "批量归档、添加标签或加入情绪板")
                             .font(CharkleTheme.text(.caption))
                             .foregroundStyle(.secondary)
                     }
@@ -2093,7 +2093,7 @@ public struct InspectorView: View {
                                     .help(
                                         candidate.matchReasons.isEmpty
                                             ? "\(candidate.asset.title)（点击加入或直接拖入画布）"
-                                            : "\(candidate.asset.title) · \(candidate.matchReasons.joined(separator: " / "))（点击加入或直接拖入画布）"
+                                            : "\(candidate.asset.title)（\(candidate.matchReasons.joined(separator: " / "))，点击加入或直接拖入画布）"
                                     )
                                 }
                             }
@@ -2450,7 +2450,7 @@ public struct InspectorView: View {
                 }
 
                 HStack(spacing: 4) {
-                    Text("已锁定卡片会自动保留 · 支持 ⌘Z 撤销")
+                    Text("已锁定卡片自动保留，支持 ⌘Z 撤销")
                         .font(CharkleTheme.text(.caption))
                         .foregroundStyle(.tertiary)
                     Spacer()
@@ -2522,7 +2522,7 @@ public struct InspectorView: View {
             Text("选择素材查看详情")
                 .font(CharkleTheme.text(.body, weight: .semibold))
                 .foregroundStyle(.secondary)
-            Text("单击卡片检视色板与元数据\n框选多张可一键生成情绪板")
+            Text("单击卡片查看色板与元数据\n框选多张可生成情绪板")
                 .font(CharkleTheme.text(.caption))
                 .foregroundStyle(.tertiary)
                 .multilineTextAlignment(.center)
