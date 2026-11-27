@@ -152,6 +152,11 @@ pub fn run() {
                     let response = protocol::handle_social_proxy_request(&data_dir, &request).await;
                     responder.respond(response);
                 });
+            } else if protocol::is_video_stream_proxy_route(&request) {
+                tauri::async_runtime::spawn(async move {
+                    let response = protocol::handle_video_stream_proxy_request(&request).await;
+                    responder.respond(response);
+                });
             } else if request.method() == "OPTIONS" {
                 let state = app.state::<AppState>();
                 let response = protocol::handle_media_request(
@@ -534,6 +539,10 @@ pub fn run() {
             commands::assets::export_assets_to_pureref,
             commands::assets::extract_link_media_attachment,
             commands::assets::batch_extract_link_media,
+            // v1.5.1 Zero-Download Video Streaming Playback & Frame-to-Cover Selection
+            commands::assets::resolve_video_playback_plan,
+            commands::assets::update_asset_cover_image,
+            commands::assets::capture_webview_region_jpeg,
             // M5 Hybrid Cloud AI, TypeSafe Jev, External Agent, Migration & Diagnostics
             commands::settings::get_ai_provider_state,
             commands::settings::save_ai_provider_config,

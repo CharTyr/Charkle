@@ -6,7 +6,7 @@ use charkle_core::engine::BatchLinkMediaExtractionReport;
 use charkle_core::media::{
     DeduplicationCleanupResult, DeduplicationResolutionPlan, DeduplicationScanReport,
     DeduplicationScanScope, DeduplicationSensitivity, DuplicateDisposalMode,
-    MaterialPackageImportResult, PureRefExportReport, PureRefImportResult,
+    MaterialPackageImportResult, PureRefExportReport, PureRefImportResult, VideoStreamPlaybackPlan,
 };
 use charkle_core::models::core::{
     AssetBatchPatch, AssetRecord, FilterCriteria, FolderSuggestion, MediaKind, ScoredAsset,
@@ -350,4 +350,61 @@ pub async fn batch_extract_link_media(
         .batch_extract_link_media(&uuids)
         .await
         .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn resolve_video_playback_plan(
+    state: State<'_, AppState>,
+    asset_id: String,
+) -> IpcResult<VideoStreamPlaybackPlan> {
+    let uuid = parse_uuid(&asset_id)?;
+    state
+        .engine
+        .resolve_video_playback_plan(uuid)
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn update_asset_cover_image(
+    state: State<'_, AppState>,
+    asset_id: String,
+    image_base64: String,
+) -> IpcResult<AssetRecord> {
+    let uuid = parse_uuid(&asset_id)?;
+    let clean = image_base64
+        .split_once(',')
+        .map(|(_, b64)| b64)
+        .unwrap_or(&image_base64);
+    let data = BASE64_STD.decode(clean.trim()).map_err(|e| IpcError {
+        code: "INVALID_BASE64",
+        message: format!("封面图片编码无效: {e}"),
+    })?;
+    let engine = state.engine.clone();
+    tokio::task::spawn_blocking(move || engine.update_asset_cover_image(uuid, &data))
+        .await
+        .map_err(|e| IpcError {
+            code: "COVER_UPDATE_FAILED",
+            message: format!("更新封面任务失败: {e}"),
+        })?
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn capture_webview_region_jpeg(
+    window: tauri::WebviewWindow,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    device_pixel_ratio: Option<f64>,
+) -> IpcResult<String> {
+    let dpr = device_pixel_ratio.unwrap_or(1.0);
+    let jpeg = crate::web_snapshot::capture_window_region_jpeg(&window, x, y, width, height, dpr)
+        .await
+        .map_err(|message| IpcError {
+            code: "CAPTURE_REGION_FAILED",
+            message,
+        })?;
+    Ok(BASE64_STD.encode(jpeg))
 }

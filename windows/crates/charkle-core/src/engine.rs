@@ -2499,6 +2499,159 @@ impl LiveCharkleEngine {
         Ok(current)
     }
 
+    /// Resolves an inline zero-download streaming playback plan for a bookmarked video post or
+    /// rich webpage asset (Tier 1 native HTTP Range MP4 / HLS -> Tier 2 official embed player).
+    pub async fn resolve_video_playback_plan(
+        &self,
+        asset_id: Uuid,
+    ) -> CoreResult<crate::media::VideoStreamPlaybackPlan> {
+        let Some(asset) = self.db.asset(asset_id)? else {
+            return Err(CoreError::NotFound(format_swift_uuid(&asset_id)));
+        };
+
+        if let Some(post) = asset
+            .rich_metadata
+            .as_ref()
+            .and_then(|r| r.social_post.as_ref())
+        {
+            return Ok(VideoPlatformResolver::resolve_playback_plan(post).await);
+        }
+
+        let source_url = asset
+            .source_url
+            .as_deref()
+            .and_then(|raw| Url::parse(raw.trim()).ok());
+
+        if let Some(web) = asset
+            .rich_metadata
+            .as_ref()
+            .and_then(|r| r.web_page.as_ref())
+        {
+            return Ok(VideoPlatformResolver::resolve_web_page_playback_plan(
+                web,
+                source_url.as_ref(),
+            )
+            .await);
+        }
+
+        if let Some(ref url) = source_url {
+            if let Some(platform_ref) = crate::media::VideoPlatformURLParser::parse(url) {
+                let synthetic = crate::models::core::SocialPostMetadata {
+                    platform: platform_ref.platform(),
+                    author_name: String::new(),
+                    author_handle: String::new(),
+                    author_avatar_url: None,
+                    published_at_text: None,
+                    body_text: String::new(),
+                    quoted_author: None,
+                    quoted_text: None,
+                    article_title: Some(asset.title.clone()),
+                    media_urls: Vec::new(),
+                    media_thumbnail_urls: Vec::new(),
+                    attachments: Vec::new(),
+                    has_video: true,
+                    video_url: Some(url.to_string()),
+                    reply_count: None,
+                    repost_count: None,
+                    like_count: None,
+                    view_count: None,
+                    original_url: url.to_string(),
+                    media_fetch_failed: false,
+                    video_duration_seconds: asset.duration_seconds,
+                    video_summary: None,
+                    video_outline: Vec::new(),
+                    video_id: match &platform_ref {
+                        crate::media::VideoPlatformReference::Youtube { video_id, .. } => {
+                            Some(video_id.clone())
+                        }
+                        crate::media::VideoPlatformReference::Bilibili { bvid, .. } => bvid.clone(),
+                    },
+                    video_cid: None,
+                };
+                return Ok(VideoPlatformResolver::resolve_playback_plan(&synthetic).await);
+            }
+
+            let mut direct_streams = Vec::new();
+            if VideoPlatformResolver::looks_like_direct_video_stream_url(url)
+                && SocialPostResolver::is_safe_public_media_url(url)
+            {
+                let mut headers = std::collections::BTreeMap::new();
+                headers.insert(
+                    "User-Agent".to_string(),
+                    crate::media::STREAM_BROWSER_UA.to_string(),
+                );
+                headers.insert("Referer".to_string(), url.to_string());
+                let is_hls = url.as_str().to_ascii_lowercase().contains(".m3u8");
+                direct_streams.push(crate::media::VideoDirectStream {
+                    url: url.to_string(),
+                    http_headers: headers,
+                    is_hls,
+                });
+            }
+            let embed_player = VideoPlatformResolver::embed_player(url, None, None);
+            return Ok(crate::media::VideoStreamPlaybackPlan {
+                direct_streams,
+                embed_player,
+                watch_url: Some(url.to_string()),
+            });
+        }
+
+        Ok(crate::media::VideoStreamPlaybackPlan::default())
+    }
+
+    /// Replaces an asset's cover thumbnail (`grid520` + `preview1400`) using a user-selected video
+    /// frame or custom image, updates extracted dominant colors, preserves native dimensions for
+    /// local `.video` assets, and queues the `thumbnails` sync projection for cross-platform sync.
+    pub fn update_asset_cover_image(
+        &self,
+        id: Uuid,
+        image_bytes: &[u8],
+    ) -> CoreResult<AssetRecord> {
+        if image_bytes.is_empty() {
+            return Err(CoreError::InvalidPayload("封面图片数据为空。".to_string()));
+        }
+        let Some(mut current) = self.db.asset(id)? else {
+            return Err(CoreError::NotFound(format_swift_uuid(&id)));
+        };
+
+        let decoded = image::load_from_memory(image_bytes)
+            .map_err(|_| CoreError::InvalidPayload("无法解析所选视频帧图片。".to_string()))?;
+        let bounded = if decoded.width().max(decoded.height()) > 1_600 {
+            MediaArtwork::resize(&decoded, 1_600)
+        } else {
+            decoded
+        };
+
+        let original_kind = current.media_kind;
+        let original_width = current.pixel_width;
+        let original_height = current.pixel_height;
+
+        self.media.write_custom_poster(&bounded, &mut current)?;
+        let updated_colors = current.dominant_colors.clone();
+        let (updated_width, updated_height) =
+            if original_kind == MediaKind::Video && original_width > 0 && original_height > 0 {
+                (original_width, original_height)
+            } else {
+                (current.pixel_width, current.pixel_height)
+            };
+
+        let Some(mut latest) = self.db.asset(id)? else {
+            return Err(CoreError::NotFound(format_swift_uuid(&id)));
+        };
+        latest.dominant_colors = updated_colors;
+        latest.pixel_width = updated_width;
+        latest.pixel_height = updated_height;
+
+        let saved = self.db.save_asset_locally(&latest, true)?;
+        if self.sync_config().sync_thumbnails {
+            self.db.mark_projection("thumbnails", saved.id)?;
+        }
+        let _ = self.index_local_visual_descriptor(&saved);
+        self.emit(EngineEvent::AssetEnriched(saved.id));
+        self.emit(EngineEvent::LibraryChanged);
+        Ok(saved)
+    }
+
     /// Automatically migrates legacy Xiaohongshu social-bookmark assets whose covers were rendered
     /// with non-native dimensions (not `900×1440`) to the native 3:4 cover + title/author/likes card.
     /// Idempotent and zero-overhead once migrated; skips media-bearing notes when offline so covers

@@ -3,6 +3,7 @@ import { getTransport } from '../api/transport';
 import {
   createDefaultFilterCriteria,
   formatSocialDisplayHandle,
+  formatVideoTimestamp,
   matchesSmartFolderRule,
   type AssetBatchPatch,
   type AssetRecord,
@@ -447,6 +448,11 @@ export interface LibraryState {
     destinationPath: string,
   ) => Promise<import('../types/domain').PureRefExportReport>;
   refreshRichAsset: (id: string) => Promise<AssetRecord>;
+  updateAssetCoverImage: (
+    assetId: string,
+    imageBase64: string,
+    timestampSeconds?: number | null,
+  ) => Promise<AssetRecord | null>;
   hydrateImageMetadata: (id: string) => Promise<AssetRecord | null>;
   markAssetOpened: (id: string) => Promise<void>;
   patchSingleAssetInMemory: (asset: AssetRecord) => void;
@@ -1164,11 +1170,37 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
   async refreshRichAsset(id) {
     const updated = await getTransport().refreshRichAsset(id);
     get().patchSingleAssetInMemory(updated);
+    get().bumpThumbnailRevisions([id]);
     useCoordinatorStore.getState().pushToast({
       message: '已刷新外部元数据',
       tone: 'success',
     });
     return updated;
+  },
+
+  async updateAssetCoverImage(assetId, imageBase64, timestampSeconds = null) {
+    try {
+      const updated = await getTransport().updateAssetCoverImage(assetId, imageBase64);
+      get().patchSingleAssetInMemory(updated);
+      get().bumpThumbnailRevisions([assetId]);
+      const msg =
+        typeof timestampSeconds === 'number' &&
+        Number.isFinite(timestampSeconds) &&
+        timestampSeconds > 0
+          ? `已将 ${formatVideoTimestamp(timestampSeconds)} 画面设为素材封面`
+          : '已将当前画面设为素材封面';
+      useCoordinatorStore.getState().pushToast({
+        message: msg,
+        tone: 'success',
+      });
+      return updated;
+    } catch (err) {
+      useCoordinatorStore.getState().pushToast({
+        message: `设置封面失败：${err instanceof Error ? err.message : String(err)}`,
+        tone: 'error',
+      });
+      return null;
+    }
   },
 
   async hydrateImageMetadata(id) {

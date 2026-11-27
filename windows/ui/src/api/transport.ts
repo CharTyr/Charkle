@@ -96,6 +96,7 @@ import {
   type UpdateDownloadProgress,
   type UpdatePreferencesDto,
   type VerifiedUpdateInstaller,
+  type VideoStreamPlaybackPlan,
   type WebdavTestResultDto,
   type WindowSurfaceState,
 } from '../types/domain';
@@ -154,6 +155,10 @@ export interface CharkleTransport {
   thumbnailUrl(assetId: string, tier?: ThumbnailTier): string;
   originalUrl(assetId: string, opts?: { cachedOnly?: boolean }): string;
   captureFrameUrl(token: string): string;
+  videoStreamProxyUrl(
+    url: string,
+    opts?: { referer?: string | null; uaPreset?: 'browser' | 'ios-youtube' | 'android-youtube' },
+  ): string;
 
   // Assets
   fetchAssets(criteria: FilterCriteria): Promise<AssetRecord[]>;
@@ -195,6 +200,15 @@ export interface CharkleTransport {
     attachmentIndex?: number | null,
   ): Promise<AssetRecord>;
   batchExtractLinkMedia(assetIds: string[]): Promise<BatchLinkMediaExtractionReport>;
+  resolveVideoPlaybackPlan(assetId: string): Promise<VideoStreamPlaybackPlan>;
+  updateAssetCoverImage(assetId: string, imageBase64: string): Promise<AssetRecord>;
+  captureWebviewRegionJpeg(
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+    devicePixelRatio?: number,
+  ): Promise<string>;
   pickPureRefFilesDialog(): Promise<string[]>;
   scanDuplicates(
     scope: DeduplicationScanScope,
@@ -436,6 +450,17 @@ export class TauriTransport implements CharkleTransport {
     return `http://charkle-media.localhost/capture-frame/${encodeURIComponent(token)}`;
   }
 
+  videoStreamProxyUrl(
+    url: string,
+    opts?: { referer?: string | null; uaPreset?: 'browser' | 'ios-youtube' | 'android-youtube' },
+  ): string {
+    const params = new URLSearchParams();
+    params.set('url', url);
+    if (opts?.referer) params.set('referer', opts.referer);
+    if (opts?.uaPreset && opts.uaPreset !== 'browser') params.set('ua', opts.uaPreset);
+    return `http://charkle-media.localhost/proxy-video-stream?${params.toString()}`;
+  }
+
   fetchAssets(criteria: FilterCriteria): Promise<AssetRecord[]> {
     return invoke('fetch_assets', { criteria });
   }
@@ -552,6 +577,30 @@ export class TauriTransport implements CharkleTransport {
 
   batchExtractLinkMedia(assetIds: string[]): Promise<BatchLinkMediaExtractionReport> {
     return invoke('batch_extract_link_media', { assetIds });
+  }
+
+  resolveVideoPlaybackPlan(assetId: string): Promise<VideoStreamPlaybackPlan> {
+    return invoke('resolve_video_playback_plan', { assetId });
+  }
+
+  updateAssetCoverImage(assetId: string, imageBase64: string): Promise<AssetRecord> {
+    return invoke('update_asset_cover_image', { assetId, imageBase64 });
+  }
+
+  captureWebviewRegionJpeg(
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+    devicePixelRatio = 1,
+  ): Promise<string> {
+    return invoke('capture_webview_region_jpeg', {
+      x,
+      y,
+      width,
+      height,
+      devicePixelRatio,
+    });
   }
 
   async pickPureRefFilesDialog(): Promise<string[]> {
@@ -3196,7 +3245,7 @@ export class InMemoryMockTransport implements CharkleTransport {
 
   async getSystemDiagnostics(): Promise<SystemDiagnosticsDto> {
     return {
-      appVersion: '1.5.0',
+      appVersion: '1.5.1',
       schemaVersion: 2,
       dataDir: '%LOCALAPPDATA%\\Charkle',
       databasePath: '%LOCALAPPDATA%\\Charkle\\Library.sqlite3',
@@ -3317,7 +3366,7 @@ export class InMemoryMockTransport implements CharkleTransport {
 
   // Native GitHub Releases Updater mock state
   private mockUpdatePrefs: UpdatePreferencesDto = {
-    currentVersion: '1.5.0',
+    currentVersion: '1.5.1',
     autoCheckUpdates: true,
     lastUpdateCheckAtMs: null,
     skippedVersion: null,
@@ -4234,6 +4283,113 @@ export class InMemoryMockTransport implements CharkleTransport {
 
   async pinterestCancelBoardImport(): Promise<void> {
     this.mockPinterestBoardImportCancelled = true;
+  }
+
+  seedAssets(assets: AssetRecord[]): void {
+    this.assets = [...assets];
+  }
+
+  mockPlaybackPlans: Record<string, VideoStreamPlaybackPlan> = {};
+  mockCoverUpdates: Array<{ assetId: string; imageBase64: string }> = [];
+  mockCapturedRegionJpeg = '/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AVN//2Q==';
+
+  videoStreamProxyUrl(
+    url: string,
+    opts?: { referer?: string | null; uaPreset?: 'browser' | 'ios-youtube' | 'android-youtube' },
+  ): string {
+    const params = new URLSearchParams();
+    params.set('url', url);
+    if (opts?.referer) params.set('referer', opts.referer);
+    if (opts?.uaPreset && opts.uaPreset !== 'browser') params.set('ua', opts.uaPreset);
+    return `http://charkle-media.localhost/proxy-video-stream?${params.toString()}`;
+  }
+
+  async resolveVideoPlaybackPlan(assetId: string): Promise<VideoStreamPlaybackPlan> {
+    if (this.mockPlaybackPlans[assetId]) {
+      return this.mockPlaybackPlans[assetId];
+    }
+    const asset = this.assets.find((a) => a.id === assetId);
+    if (!asset) {
+      return { directStreams: [], embedPlayer: null, watchUrl: null };
+    }
+    const post = asset.richMetadata?.socialPost;
+    const rawUrl = post?.originalURL || asset.sourceURL || null;
+    if (post?.platform === 'youtube' || (rawUrl && /youtu\.?be/i.test(rawUrl))) {
+      const idMatch = rawUrl?.match(/(?:v=|youtu\.be\/|shorts\/|embed\/)([A-Za-z0-9_-]{11})/);
+      const vid = post?.videoID || idMatch?.[1] || 'dQw4w9WgXcQ';
+      const embedUrl = `https://www.youtube.com/embed/${vid}?autoplay=1&playsinline=1&rel=0&modestbranding=1&origin=https://charkle.app`;
+      return {
+        directStreams: [],
+        embedPlayer: {
+          url: embedUrl,
+          referer: 'https://charkle.app',
+          useIframeWrapper: true,
+          embedHtml: `<iframe src="${embedUrl}" referrerpolicy="strict-origin-when-cross-origin"></iframe>`,
+        },
+        watchUrl: rawUrl,
+      };
+    }
+    if (post?.platform === 'bilibili' || (rawUrl && /bilibili\.com/i.test(rawUrl))) {
+      const bvMatch = rawUrl?.match(/(BV[0-9A-Za-z]{10})/);
+      const bv = post?.videoID || bvMatch?.[1] || 'BV1GJ411x7h7';
+      const cidQuery = post?.videoCID ? `&cid=${post.videoCID}` : '';
+      const embedUrl = `https://player.bilibili.com/player.html?bvid=${bv}${cidQuery}&autoplay=1&danmaku=0&high_quality=1`;
+      return {
+        directStreams: [],
+        embedPlayer: {
+          url: embedUrl,
+          referer: 'https://www.bilibili.com/',
+          useIframeWrapper: true,
+          embedHtml: `<iframe src="${embedUrl}" referrerpolicy="strict-origin-when-cross-origin"></iframe>`,
+        },
+        watchUrl: rawUrl,
+      };
+    }
+    const web = asset.richMetadata?.webPage;
+    const directStreams = (web?.attachments ?? [])
+      .filter((att) => att.kind === 'video' && /\.(mp4|m4v|mov|m3u8|webm)(\?|$)/i.test(att.url))
+      .map((att) => {
+        const httpHeaders: Record<string, string> = {};
+        if (rawUrl) httpHeaders.Referer = rawUrl;
+        return {
+          url: att.url,
+          httpHeaders,
+          isHls: /\.m3u8(\?|$)/i.test(att.url),
+        };
+      });
+    return {
+      directStreams,
+      embedPlayer: null,
+      watchUrl: rawUrl,
+    };
+  }
+
+  async updateAssetCoverImage(assetId: string, imageBase64: string): Promise<AssetRecord> {
+    this.mockCoverUpdates.push({ assetId, imageBase64 });
+    const found = this.assets.find((a) => a.id === assetId);
+    if (!found) throw new Error('Asset not found');
+    const clean = imageBase64.includes(',') ? imageBase64.split(',')[1] : imageBase64;
+    this.thumbs.set(assetId, `data:image/jpeg;base64,${clean}`);
+    const updated: AssetRecord = {
+      ...found,
+      updatedAt: msToCocoaSeconds(Date.now() + this.mockCoverUpdates.length * 1000),
+      dominantColors: [
+        { hex: '#E03232', l: 50, a: 62, b: 42, proportion: 0.65 },
+        ...found.dominantColors.slice(0, 3),
+      ],
+    };
+    this.assets = this.assets.map((a) => (a.id === assetId ? updated : a));
+    return updated;
+  }
+
+  async captureWebviewRegionJpeg(
+    _x: number,
+    _y: number,
+    _width: number,
+    _height: number,
+    _devicePixelRatio = 1,
+  ): Promise<string> {
+    return this.mockCapturedRegionJpeg;
   }
 
   /** Helper for tests inspecting smart folder evaluation. */

@@ -21,6 +21,7 @@ use std::time::UNIX_EPOCH;
 
 use charkle_core::engine::LiveCharkleEngine;
 use charkle_core::media::resolvers::fetch_or_cache_social_media;
+use charkle_core::media::video_platform::{fetch_video_stream_chunk, VideoStreamProxyError};
 use charkle_core::media::xiaohongshu::{fetch_or_cache_xhs_media, XhsProxyError};
 use charkle_core::media::MediaPipeline;
 use charkle_core::models::media::ThumbnailTier;
@@ -104,6 +105,105 @@ pub fn is_xhs_proxy_route(request: &Request<Vec<u8>>) -> bool {
 /// Returns `true` when the incoming `charkle-media://` request targets the async `/proxy-social` route.
 pub fn is_social_proxy_route(request: &Request<Vec<u8>>) -> bool {
     request.uri().path().trim_end_matches('/') == "/proxy-social"
+}
+
+/// Returns `true` when the incoming `charkle-media://` request targets the async
+/// `/proxy-video-stream` zero-download HTTP byte-range streaming proxy route.
+pub fn is_video_stream_proxy_route(request: &Request<Vec<u8>>) -> bool {
+    request.uri().path().trim_end_matches('/') == "/proxy-video-stream"
+}
+
+/// Streams a single bounded HTTP Range chunk from a strict-validated public HTTPS video stream
+/// with site-required `Referer` and `User-Agent` headers (zero local disk download, CORS-enabled
+/// so HTML5 `<video>` + `<canvas>` frame-to-cover extraction works seamlessly).
+pub async fn handle_video_stream_proxy_request(request: &Request<Vec<u8>>) -> Response<Vec<u8>> {
+    if request.method() == "OPTIONS" {
+        return Response::builder()
+            .status(StatusCode::NO_CONTENT)
+            .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+            .header(header::ACCESS_CONTROL_ALLOW_METHODS, "GET, HEAD, OPTIONS")
+            .header(header::ACCESS_CONTROL_ALLOW_HEADERS, "Range, If-None-Match")
+            .header(
+                header::ACCESS_CONTROL_EXPOSE_HEADERS,
+                "Content-Range, Content-Length, Accept-Ranges, Content-Type",
+            )
+            .body(Vec::new())
+            .unwrap_or_else(|_| Response::new(Vec::new()));
+    }
+
+    let query = request.uri().query().unwrap_or("");
+    let parsed_query = Url::parse(&format!(
+        "http://charkle-media.localhost/proxy-video-stream?{query}"
+    ))
+    .ok();
+
+    let mut target_url: Option<String> = None;
+    let mut referer: Option<String> = None;
+    let mut ua_preset: Option<String> = None;
+    if let Some(u) = parsed_query {
+        for (k, v) in u.query_pairs() {
+            match k.as_ref() {
+                "url" => target_url = Some(v.into_owned()),
+                "referer" => referer = Some(v.into_owned()),
+                "ua" => ua_preset = Some(v.into_owned()),
+                _ => {}
+            }
+        }
+    }
+
+    let Some(raw_target) = target_url.filter(|s| !s.trim().is_empty()) else {
+        return error_response(StatusCode::BAD_REQUEST, "Missing url parameter");
+    };
+
+    let client_range = request
+        .headers()
+        .get(header::RANGE)
+        .and_then(|v| v.to_str().ok());
+    let is_head = request.method() == "HEAD";
+
+    match fetch_video_stream_chunk(
+        &raw_target,
+        referer.as_deref(),
+        ua_preset.as_deref(),
+        client_range,
+        is_head,
+    )
+    .await
+    {
+        Ok(res) => {
+            let status = StatusCode::from_u16(res.status).unwrap_or(StatusCode::OK);
+            let mut builder = Response::builder()
+                .status(status)
+                .header(header::CONTENT_TYPE, res.content_type)
+                .header(header::CACHE_CONTROL, "no-store")
+                .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+                .header(
+                    header::ACCESS_CONTROL_EXPOSE_HEADERS,
+                    "Content-Range, Content-Length, Accept-Ranges, Content-Type",
+                );
+            if res.accept_ranges {
+                builder = builder.header(header::ACCEPT_RANGES, "bytes");
+            }
+            if let Some(cr) = res.content_range {
+                builder = builder.header(header::CONTENT_RANGE, cr);
+            }
+            if let Some(cl) = res.content_length {
+                builder = builder.header(header::CONTENT_LENGTH, cl.to_string());
+            } else if !is_head {
+                builder = builder.header(header::CONTENT_LENGTH, res.bytes.len().to_string());
+            }
+            builder
+                .body(res.bytes)
+                .unwrap_or_else(|_| Response::new(Vec::new()))
+        }
+        Err(VideoStreamProxyError::BadRequest(msg)) => error_response(StatusCode::BAD_REQUEST, msg),
+        Err(VideoStreamProxyError::Forbidden(msg)) => error_response(StatusCode::FORBIDDEN, msg),
+        Err(VideoStreamProxyError::TooLarge) => error_response(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "Video stream chunk exceeds streaming window limit",
+        ),
+        Err(VideoStreamProxyError::Upstream(msg)) => error_response(StatusCode::BAD_GATEWAY, &msg),
+    }
 }
 
 /// Asynchronously fetches (or serves from on-disk cache under `data_dir/cache/social-proxy/`) a
@@ -756,5 +856,49 @@ mod tests {
             "image/jpeg"
         );
         assert_eq!(ok_res.body(), jpg_payload);
+    }
+
+    #[tokio::test]
+    async fn proxy_video_stream_enforces_https_ssrf_guard_and_range_bounds() {
+        let missing_req = Request::builder()
+            .uri("http://charkle-media.localhost/proxy-video-stream")
+            .body(Vec::new())
+            .unwrap();
+        assert!(is_video_stream_proxy_route(&missing_req));
+        let missing_res = handle_video_stream_proxy_request(&missing_req).await;
+        assert_eq!(missing_res.status(), StatusCode::BAD_REQUEST);
+
+        for bad_url in [
+            "http://upos-sz-mirrorcos.bilivideo.com/demo.mp4",
+            "https://127.0.0.1:41937/api/v1/health",
+            "https://localhost/internal.mp4",
+            "file:///C:/Windows/win.ini",
+        ] {
+            let encoded =
+                url::form_urlencoded::byte_serialize(bad_url.as_bytes()).collect::<String>();
+            let req = Request::builder()
+                .uri(format!(
+                    "http://charkle-media.localhost/proxy-video-stream?url={encoded}"
+                ))
+                .body(Vec::new())
+                .unwrap();
+            let res = handle_video_stream_proxy_request(&req).await;
+            assert_eq!(
+                res.status(),
+                StatusCode::FORBIDDEN,
+                "expected 403 for {bad_url}"
+            );
+        }
+
+        // Open-ended Chromium `<video>` Range requests are bounded to a 2 MiB window
+        assert_eq!(
+            charkle_core::media::compute_bounded_upstream_range(Some("bytes=0-")).as_deref(),
+            Some("bytes=0-2097151")
+        );
+        assert_eq!(
+            charkle_core::media::compute_bounded_upstream_range(Some("bytes=100-999999999"))
+                .as_deref(),
+            Some("bytes=100-4194403")
+        );
     }
 }

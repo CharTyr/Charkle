@@ -362,6 +362,7 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
 
   const assets = useLibraryStore((s) => s.assets);
   const allAssets = useLibraryStore((s) => s.allAssets);
+  const thumbnailRevisions = useLibraryStore((s) => s.thumbnailRevisions);
   const folders = useLibraryStore((s) => s.folders);
   const updateAssets = useLibraryStore((s) => s.updateAssets);
   const permanentlyDeleteAssets = useLibraryStore((s) => s.permanentlyDeleteAssets);
@@ -868,9 +869,11 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
         previewContentWidth,
         Math.round(fittedHeight * naturalRatio),
       );
-      const thumbVersion = thumbBustNonce > 0
-        ? `${String(targetAsset.updatedAt ?? 0)}-${thumbBustNonce}`
-        : targetAsset.updatedAt;
+      const storeThumbRev = thumbnailRevisions[targetAsset.id] ?? 0;
+      const thumbVersion =
+        thumbBustNonce > 0 || storeThumbRev > 0
+          ? `${String(targetAsset.updatedAt ?? 0)}-${thumbBustNonce}-${storeThumbRev}`
+          : targetAsset.updatedAt;
       const previewSrc = withThumbCacheBust(
         previewFallbackThumb
           ? transport.thumbnailUrl(targetAsset.id, 'grid520')

@@ -43,7 +43,12 @@ pub use resolvers::{
     SocialPostResolver, SocialPostURLParser, WebBookmarkResolver, WebURLParser, XPostReference,
     XPostURLParser,
 };
-pub use video_platform::{VideoPlatformReference, VideoPlatformResolver, VideoPlatformURLParser};
+pub use video_platform::{
+    compute_bounded_upstream_range, crop_png_region_to_jpeg, fetch_video_stream_chunk,
+    VideoDirectStream, VideoEmbedPlayer, VideoPlatformReference, VideoPlatformResolver,
+    VideoPlatformURLParser, VideoStreamPlaybackPlan, VideoStreamProxyError,
+    VideoStreamProxyResponse, STREAM_ANDROID_YOUTUBE_UA, STREAM_BROWSER_UA, STREAM_IOS_YOUTUBE_UA,
+};
 pub use visual_fingerprint::LocalVisualDescriptor;
 pub use xiaohongshu::{
     fetch_or_cache_xhs_media, validate_xhs_proxy_url, XhsProxyError, XhsProxyResponse,

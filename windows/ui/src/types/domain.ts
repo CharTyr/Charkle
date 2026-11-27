@@ -1851,3 +1851,77 @@ export interface PinterestTrayImportProgress {
   total: number;
   currentTitle: string;
 }
+
+// MARK: - v1.5.1 Zero-Download Video Streaming Playback Contracts
+
+export interface VideoDirectStream {
+  url: string;
+  httpHeaders: Record<string, string>;
+  isHls: boolean;
+}
+
+export interface VideoEmbedPlayer {
+  url: string;
+  referer: string;
+  userAgent?: string | null;
+  useIframeWrapper: boolean;
+  embedHtml: string;
+}
+
+export interface VideoStreamPlaybackPlan {
+  directStreams: VideoDirectStream[];
+  embedPlayer?: VideoEmbedPlayer | null;
+  watchUrl?: string | null;
+}
+
+/** Formats a video playhead timestamp (`MM:SS` or `H:MM:SS`) for cover-frame confirmation toasts. */
+export function formatVideoTimestamp(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return '00:00';
+  const total = Math.round(seconds);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  if (h > 0) {
+    return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+  }
+  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+}
+
+/** Returns `true` when a webpage URL points to a recognized video platform or direct video stream. */
+export function isStreamableVideoUrl(rawUrl?: string | null): boolean {
+  const trimmed = rawUrl?.trim();
+  if (!trimmed) return false;
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+  const host = parsed.hostname.toLowerCase();
+  const path = parsed.pathname.toLowerCase();
+  if (
+    host === 'youtube.com' ||
+    host === 'www.youtube.com' ||
+    host === 'm.youtube.com' ||
+    host === 'youtu.be' ||
+    host === 'www.youtu.be' ||
+    host === 'bilibili.com' ||
+    host === 'www.bilibili.com' ||
+    host === 'm.bilibili.com' ||
+    host === 'b23.tv' ||
+    host === 'vimeo.com' ||
+    host === 'www.vimeo.com' ||
+    host === 'player.vimeo.com' ||
+    host === 'dailymotion.com' ||
+    host === 'www.dailymotion.com' ||
+    host === 'dai.ly' ||
+    host === 'geo.dailymotion.com'
+  ) {
+    return true;
+  }
+  if (host.startsWith('player.') || path.includes('/embed/') || path.includes('player.html')) {
+    return true;
+  }
+  return /\.(mp4|m4v|mov|m3u8|webm)(\?|$)/i.test(trimmed);
+}

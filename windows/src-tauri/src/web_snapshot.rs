@@ -378,3 +378,142 @@ async fn capture_webview2_preview(win: &tauri::WebviewWindow) -> Option<WebPageS
         final_url,
     })
 }
+
+/// Captures a cropped JPEG frame of a visible region inside an active `WebviewWindow` using
+/// `ICoreWebView2::CapturePreview`. Used by Quick Look's embedded iframe player fallback
+/// ("设当前帧为封面") so cross-origin YouTube/Bilibili/Vimeo embeds support frame-to-cover too.
+pub async fn capture_window_region_jpeg(
+    win: &tauri::WebviewWindow,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    device_pixel_ratio: f64,
+) -> Result<Vec<u8>, String> {
+    if !width.is_finite() || !height.is_finite() || width < 8.0 || height < 8.0 {
+        return Err("无效的播放器截图区域。".to_string());
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (win, x, y, width, height, device_pixel_ratio);
+        return Err("当前平台不支持 WebView 区域截帧。".to_string());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        use webview2_com::CapturePreviewCompletedHandler;
+        use webview2_com::Microsoft::Web::WebView2::Win32::COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG;
+        use windows::Win32::Foundation::HGLOBAL;
+        use windows::Win32::System::Com::StructuredStorage::{
+            CreateStreamOnHGlobal, GetHGlobalFromStream,
+        };
+        use windows::Win32::System::Com::{STATFLAG_NONAME, STATSTG};
+        use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
+
+        let (png_tx, png_rx) = oneshot::channel::<Option<Vec<u8>>>();
+        let png_slot = Arc::new(Mutex::new(Some(png_tx)));
+
+        let dispatch_res = win.with_webview(move |platform_wv| {
+            let controller = platform_wv.controller();
+            let Ok(core) = (unsafe { controller.CoreWebView2() }) else {
+                if let Ok(mut s) = png_slot.lock() {
+                    if let Some(tx) = s.take() {
+                        let _ = tx.send(None);
+                    }
+                }
+                return;
+            };
+            let Ok(stream) = (unsafe { CreateStreamOnHGlobal(HGLOBAL::default(), true) }) else {
+                if let Ok(mut s) = png_slot.lock() {
+                    if let Some(tx) = s.take() {
+                        let _ = tx.send(None);
+                    }
+                }
+                return;
+            };
+            let stream_for_cb = stream.clone();
+            let png_slot_cb = Arc::clone(&png_slot);
+            let preview_handler = CapturePreviewCompletedHandler::create(Box::new(move |hr| {
+                let bytes = if hr.is_ok() {
+                    unsafe { GetHGlobalFromStream(&stream_for_cb) }
+                        .ok()
+                        .and_then(|hglobal| {
+                            let alloc_size = unsafe { GlobalSize(hglobal) };
+                            if alloc_size == 0 {
+                                return None;
+                            }
+                            let mut stat = STATSTG::default();
+                            let exact_len = if unsafe {
+                                stream_for_cb.Stat(&mut stat, STATFLAG_NONAME)
+                            }
+                            .is_ok()
+                                && stat.cbSize > 0
+                            {
+                                (stat.cbSize as usize).min(alloc_size)
+                            } else {
+                                alloc_size
+                            };
+                            let ptr = unsafe { GlobalLock(hglobal) };
+                            if ptr.is_null() {
+                                return None;
+                            }
+                            let data =
+                                unsafe { std::slice::from_raw_parts(ptr as *const u8, exact_len) }
+                                    .to_vec();
+                            let _ = unsafe { GlobalUnlock(hglobal) };
+                            Some(data)
+                        })
+                } else {
+                    None
+                };
+                if let Ok(mut s) = png_slot_cb.lock() {
+                    if let Some(tx) = s.take() {
+                        let _ = tx.send(bytes);
+                    }
+                }
+                Ok(())
+            }));
+
+            if unsafe {
+                core.CapturePreview(
+                    COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG,
+                    &stream,
+                    &preview_handler,
+                )
+            }
+            .is_err()
+            {
+                if let Ok(mut s) = png_slot.lock() {
+                    if let Some(tx) = s.take() {
+                        let _ = tx.send(None);
+                    }
+                }
+            }
+        });
+
+        if dispatch_res.is_err() {
+            return Err("无法调用 WebView2 截帧接口。".to_string());
+        }
+
+        let png_bytes = tokio::time::timeout(Duration::from_millis(2500), png_rx)
+            .await
+            .map_err(|_| "播放器截帧超时。".to_string())?
+            .map_err(|_| "播放器截帧被中断。".to_string())?
+            .ok_or_else(|| "未能捕获播放器画面。".to_string())?;
+
+        tokio::task::spawn_blocking(move || {
+            charkle_core::media::crop_png_region_to_jpeg(
+                &png_bytes,
+                x,
+                y,
+                width,
+                height,
+                device_pixel_ratio,
+            )
+            .map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|e| format!("裁切视频帧失败: {e}"))?
+    }
+}

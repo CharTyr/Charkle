@@ -12,6 +12,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use chrono::{DateTime, Utc};
 use md5::{Digest as Md5Digest, Md5};
 use reqwest::Client;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use url::Url;
 
@@ -19,12 +20,57 @@ use crate::error::{CoreError, CoreResult};
 use crate::media::resolvers::{ResolvedSocialPost, SocialPostResolver, WebBookmarkResolver};
 use crate::models::core::{
     SocialMediaAttachment, SocialMediaAttachmentKind, SocialPlatform, SocialPostMetadata,
+    WebPageRichMetadata,
 };
 
-const BROWSER_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
-const IOS_YOUTUBE_UA: &str =
+pub const STREAM_BROWSER_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+pub const STREAM_IOS_YOUTUBE_UA: &str =
     "com.google.ios.youtube/19.29.1 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X;)";
-const ANDROID_YOUTUBE_UA: &str = "com.google.android.youtube/19.29.37 (Linux; U; Android 14) gzip";
+pub const STREAM_ANDROID_YOUTUBE_UA: &str =
+    "com.google.android.youtube/19.29.37 (Linux; U; Android 14) gzip";
+
+const BROWSER_UA: &str = STREAM_BROWSER_UA;
+const IOS_YOUTUBE_UA: &str = STREAM_IOS_YOUTUBE_UA;
+const ANDROID_YOUTUBE_UA: &str = STREAM_ANDROID_YOUTUBE_UA;
+
+/// Direct streaming media candidate (progressive HTTP Range MP4 or adaptive HLS `.m3u8`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoDirectStream {
+    pub url: String,
+    #[serde(default)]
+    pub http_headers: BTreeMap<String, String>,
+    #[serde(default)]
+    pub is_hls: bool,
+}
+
+/// Official embedded HTML5 player fallback (zero disk download).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoEmbedPlayer {
+    pub url: String,
+    pub referer: String,
+    pub user_agent: Option<String>,
+    pub use_iframe_wrapper: bool,
+    pub embed_html: String,
+}
+
+/// Zero-download streaming playback descriptor for bookmarked video-site items
+/// (YouTube, Bilibili, Vimeo, Dailymotion, and generic rich webpages with discovered video streams).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoStreamPlaybackPlan {
+    #[serde(default)]
+    pub direct_streams: Vec<VideoDirectStream>,
+    pub embed_player: Option<VideoEmbedPlayer>,
+    pub watch_url: Option<String>,
+}
+
+impl VideoStreamPlaybackPlan {
+    pub fn has_playable_source(&self) -> bool {
+        !self.direct_streams.is_empty() || self.embed_player.is_some()
+    }
+}
 
 const MIXIN_KEY_ENC_TAB: [usize; 64] = [
     46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35, 27, 43, 5, 49, 33, 9, 42, 19, 29,
@@ -1085,6 +1131,705 @@ impl VideoPlatformResolver {
         }
     }
 
+    // MARK: - 1.5 Zero-Download Inline Streaming Playback Plan (Preview-Time Only)
+
+    /// Resolves an inline zero-download streaming plan for a bookmarked social/video post:
+    /// - Tier 1: Direct progressive HTTP Range MP4 / HLS `.m3u8` streams with required site headers
+    ///   (`Referer`, `User-Agent`), proxied via `charkle-media://localhost/proxy-video-stream`.
+    /// - Tier 2: Official embedded HTML5 player fallback (YouTube embed with valid origin &
+    ///   `strict-origin-when-cross-origin` Referer to prevent Error 153, Bilibili HTML5 player,
+    ///   Vimeo, Dailymotion, or explicit `/embed/` player URLs).
+    pub async fn resolve_playback_plan(post: &SocialPostMetadata) -> VideoStreamPlaybackPlan {
+        let watch_url = Url::parse(post.original_url.trim()).ok();
+        match post.platform {
+            SocialPlatform::Bilibili => {
+                Self::resolve_bilibili_playback_plan(post, watch_url.as_ref()).await
+            }
+            SocialPlatform::Youtube => {
+                Self::resolve_youtube_playback_plan(post, watch_url.as_ref()).await
+            }
+            _ => {
+                let mut direct_streams = Vec::new();
+                let mut seen = HashSet::new();
+                let mut headers = BTreeMap::new();
+                headers.insert("User-Agent".to_string(), BROWSER_UA.to_string());
+                if post.platform == SocialPlatform::Xiaohongshu {
+                    headers.insert(
+                        "Referer".to_string(),
+                        "https://www.xiaohongshu.com/".to_string(),
+                    );
+                } else if let Some(ref w) = watch_url {
+                    headers.insert("Referer".to_string(), w.to_string());
+                }
+                for att in post.effective_attachments() {
+                    if !matches!(
+                        att.kind,
+                        SocialMediaAttachmentKind::Video | SocialMediaAttachmentKind::Gif
+                    ) {
+                        continue;
+                    }
+                    let Ok(u) = Url::parse(att.url.trim()) else {
+                        continue;
+                    };
+                    if !SocialPostResolver::is_safe_public_media_url(&u) {
+                        continue;
+                    }
+                    if seen.insert(u.as_str().to_string()) {
+                        let is_hls = is_hls_url(&u);
+                        direct_streams.push(VideoDirectStream {
+                            url: u.to_string(),
+                            http_headers: headers.clone(),
+                            is_hls,
+                        });
+                    }
+                }
+                let embed_player = watch_url
+                    .as_ref()
+                    .and_then(|u| Self::embed_player(u, None, None));
+                VideoStreamPlaybackPlan {
+                    direct_streams,
+                    embed_player,
+                    watch_url: watch_url.map(|u| u.to_string()),
+                }
+            }
+        }
+    }
+
+    /// Resolves an inline zero-download streaming plan for any generic rich webpage bookmark
+    /// (`WebPageRichMetadata`).
+    pub async fn resolve_web_page_playback_plan(
+        web: &WebPageRichMetadata,
+        fallback_url: Option<&Url>,
+    ) -> VideoStreamPlaybackPlan {
+        let canonical = web
+            .canonical_url
+            .as_deref()
+            .and_then(|s| Url::parse(s.trim()).ok())
+            .or_else(|| fallback_url.cloned());
+
+        let mut direct_streams = Vec::new();
+        let mut seen = HashSet::new();
+        let mut embed_candidate = canonical
+            .as_ref()
+            .and_then(|u| Self::embed_player(u, None, None));
+
+        let mut headers = BTreeMap::new();
+        headers.insert("User-Agent".to_string(), BROWSER_UA.to_string());
+        if let Some(ref c) = canonical {
+            headers.insert("Referer".to_string(), c.to_string());
+        }
+
+        for att in &web.attachments {
+            if att.kind != SocialMediaAttachmentKind::Video {
+                continue;
+            }
+            let Ok(u) = Url::parse(att.url.trim()) else {
+                continue;
+            };
+            if !SocialPostResolver::is_safe_public_media_url(&u) {
+                continue;
+            }
+            if Self::looks_like_direct_video_stream_url(&u) {
+                if seen.insert(u.as_str().to_string()) {
+                    let is_hls = is_hls_url(&u);
+                    direct_streams.push(VideoDirectStream {
+                        url: u.to_string(),
+                        http_headers: headers.clone(),
+                        is_hls,
+                    });
+                }
+            } else if embed_candidate.is_none() {
+                embed_candidate = Self::embed_player(&u, None, None);
+            }
+        }
+
+        if direct_streams.is_empty() && web.has_video {
+            if let Some(ref page_url) = canonical {
+                if let Some(ytdlp_stream) =
+                    Self::resolve_direct_stream_via_yt_dlp_if_available(page_url.as_str()).await
+                {
+                    direct_streams.push(ytdlp_stream);
+                }
+            }
+        }
+
+        VideoStreamPlaybackPlan {
+            direct_streams,
+            embed_player: embed_candidate,
+            watch_url: canonical.map(|u| u.to_string()),
+        }
+    }
+
+    /// Pure URL recognizer returning a clean embed player descriptor for major video platforms
+    /// (YouTube, Bilibili, Vimeo, Dailymotion, or explicit `/embed/` player URLs).
+    pub fn embed_player(
+        url: &Url,
+        bvid_override: Option<&str>,
+        cid_override: Option<i64>,
+    ) -> Option<VideoEmbedPlayer> {
+        if !SocialPostResolver::is_safe_public_media_url(url) {
+            return None;
+        }
+        let host = url.host_str()?.to_ascii_lowercase();
+
+        if let Some(parsed) = VideoPlatformURLParser::parse(url) {
+            match parsed {
+                VideoPlatformReference::Youtube { video_id, .. } => {
+                    // Supply `origin=https://charkle.app` + matching Referer policy to avoid YouTube Error 153.
+                    let embed_str = format!(
+                        "https://www.youtube.com/embed/{video_id}?autoplay=1&playsinline=1&rel=0&modestbranding=1&origin=https://charkle.app"
+                    );
+                    let referer = "https://charkle.app".to_string();
+                    let (embed_html, _) = Self::embed_html(&embed_str, &referer);
+                    return Some(VideoEmbedPlayer {
+                        url: embed_str,
+                        referer,
+                        user_agent: Some(BROWSER_UA.to_string()),
+                        use_iframe_wrapper: true,
+                        embed_html,
+                    });
+                }
+                VideoPlatformReference::Bilibili {
+                    bvid: parsed_bv,
+                    aid: parsed_aid,
+                    page,
+                    ..
+                } => {
+                    let mut items: Vec<(String, String)> = Vec::new();
+                    let chosen_bv = bvid_override
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string)
+                        .or(parsed_bv);
+                    if let Some(bv) = chosen_bv {
+                        items.push(("bvid".to_string(), bv));
+                    } else if let Some(aid) = parsed_aid {
+                        items.push(("aid".to_string(), aid.to_string()));
+                    }
+                    if let Some(cid) = cid_override.filter(|&c| c > 0) {
+                        items.push(("cid".to_string(), cid.to_string()));
+                    }
+                    if let Some(p) = page.filter(|&p| p > 1) {
+                        items.push(("page".to_string(), p.to_string()));
+                    }
+                    if !items.is_empty() {
+                        items.push(("autoplay".to_string(), "1".to_string()));
+                        items.push(("danmaku".to_string(), "0".to_string()));
+                        items.push(("high_quality".to_string(), "1".to_string()));
+                        if let Ok(mut embed_url) =
+                            Url::parse("https://player.bilibili.com/player.html")
+                        {
+                            {
+                                let mut qp = embed_url.query_pairs_mut();
+                                for (k, v) in items {
+                                    qp.append_pair(&k, &v);
+                                }
+                            }
+                            let embed_str = embed_url.to_string();
+                            let referer = "https://www.bilibili.com/".to_string();
+                            let (embed_html, _) = Self::embed_html(&embed_str, &referer);
+                            return Some(VideoEmbedPlayer {
+                                url: embed_str,
+                                referer,
+                                user_agent: Some(BROWSER_UA.to_string()),
+                                use_iframe_wrapper: true,
+                                embed_html,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        let segments: Vec<&str> = url
+            .path_segments()
+            .map(|segs| segs.filter(|s| !s.is_empty()).collect())
+            .unwrap_or_default();
+
+        // Vimeo (`vimeo.com/<digits>` or `player.vimeo.com/video/<digits>`)
+        if matches!(
+            host.as_str(),
+            "vimeo.com" | "www.vimeo.com" | "player.vimeo.com"
+        ) {
+            if let Some(numeric_id) = segments
+                .iter()
+                .rev()
+                .copied()
+                .find(|s| s.len() >= 5 && s.bytes().all(|b| b.is_ascii_digit()))
+            {
+                let embed_str =
+                    format!("https://player.vimeo.com/video/{numeric_id}?autoplay=1&playsinline=1");
+                let referer = "https://vimeo.com/".to_string();
+                let (embed_html, _) = Self::embed_html(&embed_str, &referer);
+                return Some(VideoEmbedPlayer {
+                    url: embed_str,
+                    referer,
+                    user_agent: Some(BROWSER_UA.to_string()),
+                    use_iframe_wrapper: true,
+                    embed_html,
+                });
+            }
+        }
+
+        // Dailymotion (`dailymotion.com/video/<id>` or `dai.ly/<id>` or `geo.dailymotion.com`)
+        if matches!(
+            host.as_str(),
+            "dailymotion.com" | "www.dailymotion.com" | "dai.ly" | "geo.dailymotion.com"
+        ) {
+            let video_code: Option<String> = if host == "dai.ly" {
+                segments.first().copied().map(str::to_string)
+            } else if let Some(idx) = segments.iter().position(|s| *s == "video") {
+                segments.get(idx + 1).copied().map(str::to_string)
+            } else {
+                url.query_pairs()
+                    .find(|(k, _)| k == "video")
+                    .map(|(_, v)| v.into_owned())
+            };
+            if let Some(code) = video_code.filter(|c| {
+                !c.is_empty()
+                    && c.bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+            }) {
+                let embed_str = format!("https://geo.dailymotion.com/player.html?video={code}");
+                let referer = "https://www.dailymotion.com/".to_string();
+                let (embed_html, _) = Self::embed_html(&embed_str, &referer);
+                return Some(VideoEmbedPlayer {
+                    url: embed_str,
+                    referer,
+                    user_agent: Some(BROWSER_UA.to_string()),
+                    use_iframe_wrapper: true,
+                    embed_html,
+                });
+            }
+        }
+
+        // Explicit embed / player URLs discovered from `og:video` / JSON-LD `embedUrl`
+        let lower_path = url.path().to_ascii_lowercase();
+        if (host.starts_with("player.")
+            || lower_path.contains("/embed/")
+            || lower_path.contains("player.html"))
+            && !Self::looks_like_direct_video_stream_url(url)
+        {
+            let referer = format!("{}://{host}/", url.scheme());
+            let embed_str = url.to_string();
+            let (embed_html, _) = Self::embed_html(&embed_str, &referer);
+            return Some(VideoEmbedPlayer {
+                url: embed_str,
+                referer,
+                user_agent: Some(BROWSER_UA.to_string()),
+                use_iframe_wrapper: true,
+                embed_html,
+            });
+        }
+
+        None
+    }
+
+    /// Generates clean full-bleed responsive iframe HTML with explicit
+    /// `strict-origin-when-cross-origin` Referer policy (prevents YouTube Error 153 and Bilibili
+    /// Referer rejection in embedded WebViews).
+    pub fn embed_html(embed_url: &str, referer: &str) -> (String, String) {
+        let escaped_src = embed_url
+            .replace('&', "&amp;")
+            .replace('"', "&quot;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;");
+        let html = format!(
+            r#"<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="referrer" content="strict-origin-when-cross-origin">
+  <style>
+    html, body {{
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      background: #000;
+      overflow: hidden;
+    }}
+    iframe {{
+      position: fixed;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      border: 0;
+      background: #000;
+    }}
+  </style>
+</head>
+<body>
+  <iframe
+    src="{escaped_src}"
+    referrerpolicy="strict-origin-when-cross-origin"
+    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share; fullscreen"
+    allowfullscreen
+    webkitallowfullscreen>
+  </iframe>
+</body>
+</html>"#
+        );
+        let base_url = Url::parse(referer)
+            .ok()
+            .filter(|u| matches!(u.scheme(), "http" | "https"))
+            .map(|u| u.to_string())
+            .unwrap_or_else(|| "https://charkle.app".to_string());
+        (html, base_url)
+    }
+
+    /// Returns `true` when `url` points directly to a playable media stream rather than an HTML
+    /// watch/embed page.
+    pub fn looks_like_direct_video_stream_url(url: &Url) -> bool {
+        let ext = Path::new(url.path())
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if matches!(ext.as_str(), "mp4" | "m4v" | "mov" | "m3u8" | "webm") {
+            return true;
+        }
+        let lower = url.as_str().to_ascii_lowercase();
+        lower.contains(".mp4?")
+            || lower.contains(".m3u8?")
+            || lower.contains(".mov?")
+            || lower.contains(".webm?")
+            || lower.contains("mime=video")
+            || lower.contains("/videoplayback?")
+    }
+
+    /// Formats a video playhead timestamp (`MM:SS` or `H:MM:SS`) for user-facing cover toasts.
+    pub fn format_video_timestamp(seconds: f64) -> String {
+        if !seconds.is_finite() || seconds < 0.0 {
+            return "00:00".to_string();
+        }
+        format_timestamp(seconds.round() as i64)
+    }
+
+    async fn resolve_bilibili_playback_plan(
+        post: &SocialPostMetadata,
+        watch_url: Option<&Url>,
+    ) -> VideoStreamPlaybackPlan {
+        let mut bvid = post
+            .video_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        let mut aid: Option<i64> = None;
+        let mut cid = post.video_cid;
+        let mut page: Option<u32> = None;
+
+        if let Some(orig) = watch_url {
+            if let Some(VideoPlatformReference::Bilibili {
+                bvid: parsed_bv,
+                aid: parsed_aid,
+                short_url,
+                page: parsed_page,
+                ..
+            }) = VideoPlatformURLParser::parse(orig)
+            {
+                if bvid.is_none() {
+                    bvid = parsed_bv;
+                }
+                aid = parsed_aid;
+                page = parsed_page;
+                if bvid.is_none() && aid.is_none() {
+                    if let Some(su) = short_url {
+                        if let Some(expanded) = Self::expand_short_redirect(&su).await {
+                            if let Some(VideoPlatformReference::Bilibili {
+                                bvid: rbv,
+                                aid: raid,
+                                page: rpage,
+                                ..
+                            }) = VideoPlatformURLParser::parse(&expanded)
+                            {
+                                bvid = rbv;
+                                aid = raid;
+                                page = page.or(rpage);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if cid.unwrap_or(0) <= 0 || bvid.is_none() {
+            if let Some(fresh) = Self::fetch_bilibili_view_info(bvid.as_deref(), aid, page).await {
+                bvid = Some(fresh.bvid);
+                cid = Some(fresh.cid);
+            }
+        }
+
+        let mut direct_streams = Vec::new();
+        if let (Some(ref resolved_bvid), Some(resolved_cid)) = (&bvid, cid.filter(|&c| c > 0)) {
+            let referer = format!("https://www.bilibili.com/video/{resolved_bvid}");
+            let mut headers = BTreeMap::new();
+            headers.insert("Referer".to_string(), referer);
+            headers.insert("User-Agent".to_string(), BROWSER_UA.to_string());
+            let urls = Self::fetch_bilibili_progressive_streams(resolved_bvid, resolved_cid).await;
+            for u in urls {
+                if SocialPostResolver::is_safe_public_media_url(&u) {
+                    direct_streams.push(VideoDirectStream {
+                        url: u.to_string(),
+                        http_headers: headers.clone(),
+                        is_hls: false,
+                    });
+                }
+            }
+        }
+
+        let canonical_for_embed = if let Some(ref bv) = bvid {
+            let suffix = page
+                .filter(|&p| p > 1)
+                .map(|p| format!("?p={p}"))
+                .unwrap_or_default();
+            Url::parse(&format!("https://www.bilibili.com/video/{bv}{suffix}"))
+                .ok()
+                .or_else(|| watch_url.cloned())
+        } else {
+            watch_url.cloned()
+        };
+
+        let embed_player = canonical_for_embed
+            .as_ref()
+            .and_then(|u| Self::embed_player(u, bvid.as_deref(), cid));
+
+        VideoStreamPlaybackPlan {
+            direct_streams,
+            embed_player,
+            watch_url: canonical_for_embed
+                .or_else(|| watch_url.cloned())
+                .map(|u| u.to_string()),
+        }
+    }
+
+    async fn resolve_youtube_playback_plan(
+        post: &SocialPostMetadata,
+        watch_url: Option<&Url>,
+    ) -> VideoStreamPlaybackPlan {
+        let video_id = post
+            .video_id
+            .as_deref()
+            .filter(|id| VideoPlatformURLParser::is_valid_youtube_id(id))
+            .map(str::to_string)
+            .or_else(|| {
+                let u = watch_url?;
+                match VideoPlatformURLParser::parse(u)? {
+                    VideoPlatformReference::Youtube { video_id, .. } => Some(video_id),
+                    _ => None,
+                }
+            });
+
+        let canonical_url = video_id
+            .as_deref()
+            .and_then(|id| Url::parse(&format!("https://www.youtube.com/watch?v={id}")).ok())
+            .or_else(|| watch_url.cloned());
+        let embed_player = canonical_url
+            .as_ref()
+            .and_then(|u| Self::embed_player(u, None, None));
+
+        let Some(video_id) = video_id else {
+            return VideoStreamPlaybackPlan {
+                direct_streams: Vec::new(),
+                embed_player,
+                watch_url: canonical_url.map(|u| u.to_string()),
+            };
+        };
+
+        let mut direct_streams = Vec::new();
+        let mut hls_streams = Vec::new();
+        let mut seen = HashSet::new();
+
+        for profile in [
+            YouTubeClientProfile::Ios,
+            YouTubeClientProfile::Android,
+            YouTubeClientProfile::TvEmbedded,
+        ] {
+            let Some(payload) = Self::fetch_youtube_player_response(&video_id, profile).await
+            else {
+                continue;
+            };
+            let Some(streaming_data) = payload.get("streamingData") else {
+                continue;
+            };
+
+            let mut headers = BTreeMap::new();
+            headers.insert("User-Agent".to_string(), profile.user_agent().to_string());
+            headers.insert(
+                "Referer".to_string(),
+                "https://www.youtube.com/".to_string(),
+            );
+
+            if let Some(formats) = streaming_data.get("formats").and_then(Value::as_array) {
+                let mut progressive: Vec<(Url, i64)> = formats
+                    .iter()
+                    .filter_map(|entry| {
+                        let url_str = entry.get("url")?.as_str()?;
+                        let u = Url::parse(url_str).ok()?;
+                        if !SocialPostResolver::is_safe_public_media_url(&u) {
+                            return None;
+                        }
+                        let mime = entry
+                            .get("mimeType")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_ascii_lowercase();
+                        if !mime.contains("video/mp4") {
+                            return None;
+                        }
+                        let height = parse_i64(entry.get("height")).unwrap_or(0);
+                        let bitrate = parse_i64(entry.get("bitrate")).unwrap_or(0);
+                        Some((u, height * 10_000 + bitrate / 1_000))
+                    })
+                    .collect();
+                progressive.sort_by_key(|(_, rank)| std::cmp::Reverse(*rank));
+
+                for (stream_url, _) in progressive {
+                    if seen.insert(stream_url.as_str().to_string()) {
+                        direct_streams.push(VideoDirectStream {
+                            url: stream_url.to_string(),
+                            http_headers: headers.clone(),
+                            is_hls: false,
+                        });
+                    }
+                }
+            }
+
+            if let Some(hls_str) = streaming_data.get("hlsManifestUrl").and_then(Value::as_str) {
+                if let Ok(hls_url) = Url::parse(hls_str) {
+                    if SocialPostResolver::is_safe_public_media_url(&hls_url)
+                        && seen.insert(hls_url.as_str().to_string())
+                    {
+                        hls_streams.push(VideoDirectStream {
+                            url: hls_url.to_string(),
+                            http_headers: headers.clone(),
+                            is_hls: true,
+                        });
+                    }
+                }
+            }
+
+            if !direct_streams.is_empty() {
+                break;
+            }
+        }
+
+        // Optional zero-download `yt-dlp -g` fallback when progressive MP4 wasn't returned by InnerTube
+        if direct_streams.is_empty() {
+            if let Some(ref c) = canonical_url {
+                if let Some(ytdlp_stream) =
+                    Self::resolve_direct_stream_via_yt_dlp_if_available(c.as_str()).await
+                {
+                    if seen.insert(ytdlp_stream.url.clone()) {
+                        if ytdlp_stream.is_hls {
+                            hls_streams.push(ytdlp_stream);
+                        } else {
+                            direct_streams.push(ytdlp_stream);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Keep progressive muxed MP4 streams first (natively playable in WebView2 `<video>`),
+        // followed by any HLS manifests for native-HLS environments.
+        direct_streams.extend(hls_streams);
+
+        VideoStreamPlaybackPlan {
+            direct_streams,
+            embed_player,
+            watch_url: canonical_url.map(|u| u.to_string()),
+        }
+    }
+
+    /// Optional zero-download helper: resolves a direct streaming URL via `yt-dlp -g` with a
+    /// bounded timeout (`6s`) and `CREATE_NO_WINDOW` on Windows. Never downloads media to disk.
+    async fn resolve_direct_stream_via_yt_dlp_if_available(
+        page_url: &str,
+    ) -> Option<VideoDirectStream> {
+        let parsed = Url::parse(page_url.trim()).ok()?;
+        if !WebBookmarkResolver::is_web_url(&parsed) {
+            return None;
+        }
+        let binary = find_yt_dlp_binary()?;
+        let url_owned = parsed.to_string();
+        let referer = url_owned.clone();
+
+        let join = tokio::task::spawn_blocking(move || {
+            let mut cmd = std::process::Command::new(binary);
+            cmd.args([
+                "--no-playlist",
+                "--no-warnings",
+                "-g",
+                "-f",
+                "best[ext=mp4]/best[protocol*=m3u8]/best",
+                &url_owned,
+            ]);
+            #[cfg(target_os = "windows")]
+            {
+                use std::os::windows::process::CommandExt;
+                const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+                cmd.creation_flags(CREATE_NO_WINDOW);
+            }
+            let mut child = cmd
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .ok()?;
+
+            let deadline = Instant::now() + Duration::from_secs(6);
+            loop {
+                match child.try_wait() {
+                    Ok(Some(status)) => {
+                        if !status.success() {
+                            return None;
+                        }
+                        break;
+                    }
+                    Ok(None) => {
+                        if Instant::now() >= deadline {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            return None;
+                        }
+                        std::thread::sleep(Duration::from_millis(40));
+                    }
+                    Err(_) => {
+                        let _ = child.kill();
+                        return None;
+                    }
+                }
+            }
+
+            let output = child.wait_with_output().ok()?;
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let first_line = stdout
+                .lines()
+                .map(str::trim)
+                .find(|line| line.starts_with("https://") || line.starts_with("http://"))?;
+            let stream_url = Url::parse(first_line).ok()?;
+            if !SocialPostResolver::is_safe_public_media_url(&stream_url) {
+                return None;
+            }
+            let is_hls = is_hls_url(&stream_url);
+            let mut headers = BTreeMap::new();
+            headers.insert("Referer".to_string(), referer);
+            headers.insert("User-Agent".to_string(), BROWSER_UA.to_string());
+            Some(VideoDirectStream {
+                url: stream_url.to_string(),
+                http_headers: headers,
+                is_hls,
+            })
+        });
+
+        tokio::time::timeout(Duration::from_secs(7), join)
+            .await
+            .ok()?
+            .ok()?
+    }
+
     // MARK: - 2. Explicit On-Demand Video Download
 
     pub async fn download_video(
@@ -1709,6 +2454,267 @@ fn parse_f64(value: Option<&Value>) -> Option<f64> {
         Value::String(s) => s.trim().parse::<f64>().ok(),
         _ => None,
     }
+}
+
+const STREAM_PROXY_CHUNK_BYTES: u64 = 2 * 1024 * 1024;
+const STREAM_PROXY_MAX_RANGE_BYTES: u64 = 4 * 1024 * 1024;
+const STREAM_PROXY_MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
+
+#[derive(Debug, Clone)]
+pub struct VideoStreamProxyResponse {
+    pub status: u16,
+    pub content_type: String,
+    pub content_range: Option<String>,
+    pub content_length: Option<u64>,
+    pub accept_ranges: bool,
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Debug)]
+pub enum VideoStreamProxyError {
+    BadRequest(&'static str),
+    Forbidden(&'static str),
+    TooLarge,
+    Upstream(String),
+}
+
+/// Computes a bounded upstream `Range` header so open-ended browser requests (`bytes=0-`) stream
+/// incrementally in 2–4 MiB windows instead of buffering an entire multi-hundred-MB MP4 into RAM.
+pub fn compute_bounded_upstream_range(client_range: Option<&str>) -> Option<String> {
+    let raw = client_range?.trim();
+    let spec = raw
+        .strip_prefix("bytes=")
+        .or_else(|| raw.strip_prefix("BYTES="))?;
+    let first = spec.split(',').next().unwrap_or("").trim();
+    let (start_str, end_str) = first.split_once('-')?;
+
+    if start_str.is_empty() {
+        let suffix = end_str.trim().parse::<u64>().ok()?;
+        if suffix == 0 {
+            return None;
+        }
+        let clamped = suffix.min(STREAM_PROXY_MAX_RANGE_BYTES);
+        return Some(format!("bytes=-{clamped}"));
+    }
+
+    let start = start_str.trim().parse::<u64>().ok()?;
+    if end_str.trim().is_empty() {
+        let end = start.saturating_add(STREAM_PROXY_CHUNK_BYTES - 1);
+        return Some(format!("bytes={start}-{end}"));
+    }
+
+    let requested_end = end_str.trim().parse::<u64>().ok()?;
+    if requested_end < start {
+        return None;
+    }
+    let bounded_end = requested_end.min(start.saturating_add(STREAM_PROXY_MAX_RANGE_BYTES - 1));
+    Some(format!("bytes={start}-{bounded_end}"))
+}
+
+/// Validates and proxies a single bounded HTTP byte-range chunk from a public HTTPS video stream,
+/// injecting site-required `Referer` and desktop/mobile `User-Agent` headers without saving to disk.
+pub async fn fetch_video_stream_chunk(
+    raw_url: &str,
+    referer: Option<&str>,
+    ua_preset: Option<&str>,
+    client_range: Option<&str>,
+    is_head: bool,
+) -> Result<VideoStreamProxyResponse, VideoStreamProxyError> {
+    let trimmed = raw_url.trim();
+    if trimmed.is_empty() {
+        return Err(VideoStreamProxyError::BadRequest("Missing url parameter"));
+    }
+    let parsed =
+        Url::parse(trimmed).map_err(|_| VideoStreamProxyError::BadRequest("Invalid stream URL"))?;
+    if parsed.scheme() != "https" || !SocialPostResolver::is_safe_public_media_url(&parsed) {
+        return Err(VideoStreamProxyError::Forbidden(
+            "Video stream proxy only permits public HTTPS media URLs",
+        ));
+    }
+
+    let safe_referer: Option<String> = match referer.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(r) if !r.contains('\r') && !r.contains('\n') => Url::parse(r)
+            .ok()
+            .filter(|u| matches!(u.scheme(), "http" | "https"))
+            .map(|u| u.to_string()),
+        _ => {
+            if VideoPlatformURLParser::is_bilibili_media_host(parsed.host_str()) {
+                Some("https://www.bilibili.com/".to_string())
+            } else {
+                None
+            }
+        }
+    };
+
+    let ua = match ua_preset.map(str::trim) {
+        Some("ios-youtube") => STREAM_IOS_YOUTUBE_UA,
+        Some("android-youtube") => STREAM_ANDROID_YOUTUBE_UA,
+        _ => STREAM_BROWSER_UA,
+    };
+
+    let client = Client::builder()
+        .timeout(Duration::from_secs(20))
+        .redirect(reqwest::redirect::Policy::limited(6))
+        .build()
+        .unwrap_or_else(|_| Client::new());
+
+    let mut req = if is_head {
+        client.head(parsed.clone())
+    } else {
+        client.get(parsed.clone())
+    };
+    req = req
+        .header("User-Agent", ua)
+        .header("Accept", "*/*")
+        .header("Accept-Encoding", "identity");
+
+    if let Some(ref r) = safe_referer {
+        req = req.header("Referer", r);
+    }
+    if !is_head {
+        if let Some(bounded_range) = compute_bounded_upstream_range(client_range) {
+            req = req.header("Range", bounded_range);
+        }
+    }
+
+    let mut resp = req
+        .send()
+        .await
+        .map_err(|e| VideoStreamProxyError::Upstream(format!("Stream upstream failed: {e}")))?;
+
+    if !SocialPostResolver::is_safe_public_media_url(resp.url()) {
+        return Err(VideoStreamProxyError::Forbidden(
+            "Redirected stream target blocked by SSRF guard",
+        ));
+    }
+
+    let status = resp.status().as_u16();
+    if status >= 400 {
+        return Err(VideoStreamProxyError::Upstream(format!(
+            "Upstream returned HTTP {status}"
+        )));
+    }
+
+    let content_type = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            if is_hls_url(&parsed) {
+                "application/vnd.apple.mpegurl".to_string()
+            } else {
+                "video/mp4".to_string()
+            }
+        });
+    let content_range = resp
+        .headers()
+        .get(reqwest::header::CONTENT_RANGE)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let content_length = resp.content_length();
+    let accept_ranges = resp
+        .headers()
+        .get(reqwest::header::ACCEPT_RANGES)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| !v.eq_ignore_ascii_case("none"))
+        .unwrap_or(true);
+
+    if is_head {
+        return Ok(VideoStreamProxyResponse {
+            status,
+            content_type,
+            content_range,
+            content_length,
+            accept_ranges,
+            bytes: Vec::new(),
+        });
+    }
+
+    if let Some(len) = content_length {
+        if len as usize > STREAM_PROXY_MAX_BODY_BYTES {
+            return Err(VideoStreamProxyError::TooLarge);
+        }
+    }
+
+    let mut bytes = Vec::with_capacity(
+        content_length
+            .map(|l| (l as usize).min(STREAM_PROXY_CHUNK_BYTES as usize))
+            .unwrap_or(256 * 1024),
+    );
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .map_err(|e| VideoStreamProxyError::Upstream(format!("Stream read error: {e}")))?
+    {
+        if bytes.len().saturating_add(chunk.len()) > STREAM_PROXY_MAX_BODY_BYTES {
+            return Err(VideoStreamProxyError::TooLarge);
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+
+    Ok(VideoStreamProxyResponse {
+        status,
+        content_type,
+        content_range,
+        content_length: Some(bytes.len() as u64),
+        accept_ranges,
+        bytes,
+    })
+}
+
+/// Crops a full-window PNG preview captured from WebView2 to the requested logical rectangle
+/// (`x, y, width, height` scaled by `device_pixel_ratio`) and encodes it as a crisp JPEG cover.
+pub fn crop_png_region_to_jpeg(
+    png_bytes: &[u8],
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    device_pixel_ratio: f64,
+) -> CoreResult<Vec<u8>> {
+    if png_bytes.is_empty() {
+        return Err(CoreError::InvalidPayload(
+            "Empty WebView preview screenshot.".to_string(),
+        ));
+    }
+    let decoded = image::load_from_memory(png_bytes)
+        .map_err(|_| CoreError::InvalidPayload("Failed to decode WebView preview PNG.".into()))?;
+    let img_w = decoded.width();
+    let img_h = decoded.height();
+    if img_w == 0 || img_h == 0 {
+        return Err(CoreError::InvalidPayload(
+            "Zero-dimension WebView preview.".to_string(),
+        ));
+    }
+    let dpr = if device_pixel_ratio.is_finite() {
+        device_pixel_ratio.clamp(0.5, 4.0)
+    } else {
+        1.0
+    };
+    let rx = ((x.max(0.0) * dpr).round() as u32).min(img_w.saturating_sub(1));
+    let ry = ((y.max(0.0) * dpr).round() as u32).min(img_h.saturating_sub(1));
+    let max_w = img_w.saturating_sub(rx).max(1);
+    let max_h = img_h.saturating_sub(ry).max(1);
+    let rw = ((width.max(1.0) * dpr).round() as u32).clamp(1, max_w);
+    let rh = ((height.max(1.0) * dpr).round() as u32).clamp(1, max_h);
+
+    let cropped = decoded.crop_imm(rx, ry, rw, rh);
+    let bounded = if cropped.width().max(cropped.height()) > 1_600 {
+        crate::media::MediaArtwork::resize(&cropped, 1_600)
+    } else {
+        cropped
+    };
+    crate::media::MediaArtwork::encode_jpeg(&bounded, 90)
+}
+
+fn is_hls_url(url: &Url) -> bool {
+    let ext = Path::new(url.path())
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    ext == "m3u8" || url.as_str().to_ascii_lowercase().contains(".m3u8")
 }
 
 fn format_timestamp(seconds: i64) -> String {

@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowSync16Regular,
+  Camera16Regular,
   ImageAdd20Regular,
   ImageMultiple16Regular,
   ImageOff20Regular,
@@ -22,6 +23,11 @@ import {
   type AssetRecord,
   type SocialMediaAttachment,
 } from '../../types/domain';
+import {
+  QuickLookStreamingVideoView,
+  captureVideoElementFrameJpeg,
+  type CapturedVideoFrame,
+} from './QuickLookStreamingVideoView';
 
 export interface SocialPostViewerProps {
   asset: AssetRecord;
@@ -31,10 +37,11 @@ const SocialAttachmentVideo: React.FC<{
   src?: string;
   poster?: string;
   onError: () => void;
-}> = ({ src, poster, onError }) => {
-  const videoRef = useRef<HTMLVideoElement | null>(null);
+  videoElRef?: React.MutableRefObject<HTMLVideoElement | null>;
+}> = ({ src, poster, onError, videoElRef }) => {
+  const localRef = useRef<HTMLVideoElement | null>(null);
   useEffect(() => {
-    const el = videoRef.current;
+    const el = localRef.current;
     return () => {
       if (el) {
         el.pause();
@@ -50,9 +57,13 @@ const SocialAttachmentVideo: React.FC<{
 
   return (
     <video
-      ref={videoRef}
+      ref={(node) => {
+        localRef.current = node;
+        if (videoElRef) videoElRef.current = node;
+      }}
       src={src}
       poster={poster}
+      crossOrigin="anonymous"
       controls
       playsInline
       onError={onError}
@@ -82,13 +93,16 @@ export const SocialPostViewer: React.FC<SocialPostViewerProps> = ({ asset }) => 
   const extractSocialAttachment = useLibraryStore((s) => s.extractSocialAttachment);
   const extractAllSocialAttachments = useLibraryStore((s) => s.extractAllSocialAttachments);
   const refreshRichAsset = useLibraryStore((s) => s.refreshRichAsset);
+  const updateAssetCoverImage = useLibraryStore((s) => s.updateAssetCoverImage);
 
   const [extractingKey, setExtractingKey] = useState<string | null>(null);
   const [retrying, setRetrying] = useState(false);
+  const [capturingInlineCover, setCapturingInlineCover] = useState(false);
   const [avatarFailed, setAvatarFailed] = useState(false);
   const [failedMediaKeys, setFailedMediaKeys] = useState<Record<string, boolean>>({});
   const [fallbackThumbKeys, setFallbackThumbKeys] = useState<Record<string, boolean>>({});
   const [localVideoFailedKeys, setLocalVideoFailedKeys] = useState<Record<string, boolean>>({});
+  const primaryVideoRef = useRef<HTMLVideoElement | null>(null);
 
   useEffect(() => {
     setAvatarFailed(false);
@@ -97,6 +111,8 @@ export const SocialPostViewer: React.FC<SocialPostViewerProps> = ({ asset }) => 
     setLocalVideoFailedKeys({});
     setRetrying(false);
     setExtractingKey(null);
+    setCapturingInlineCover(false);
+    primaryVideoRef.current = null;
   }, [asset.id]);
 
   const attachments = useMemo(() => getEffectiveSocialAttachments(post), [post]);
@@ -200,11 +216,33 @@ export const SocialPostViewer: React.FC<SocialPostViewerProps> = ({ asset }) => 
     }
   };
 
+  const handleApplyCapturedCover = async (frame: CapturedVideoFrame) => {
+    await updateAssetCoverImage(asset.id, frame.imageBase64, frame.timestampSeconds);
+  };
+
+  const handleCapturePrimaryInlineVideoCover = async () => {
+    if (capturingInlineCover) return;
+    setCapturingInlineCover(true);
+    try {
+      const captured = captureVideoElementFrameJpeg(primaryVideoRef.current);
+      if (captured) {
+        await updateAssetCoverImage(asset.id, captured.imageBase64, captured.timestampSeconds);
+      } else {
+        pushToast({ message: '视频尚未就绪，请稍后再截取封面', tone: 'info' });
+      }
+    } finally {
+      setCapturingInlineCover(false);
+    }
+  };
+
   return (
     <div
       data-testid="quicklook-social-viewer"
       onClick={(e) => e.stopPropagation()}
-      className="w-full max-w-[680px] max-h-[82vh] mx-auto rounded-[var(--win-radius-dialog)] bg-[var(--bg-elevated)] border border-[var(--win-stroke-flyout)] shadow-[0_24px_60px_rgba(0,0,0,0.42)] flex flex-col overflow-hidden"
+      className={[
+        'w-full max-h-[82vh] mx-auto rounded-[var(--win-radius-dialog)] bg-[var(--bg-elevated)] border border-[var(--win-stroke-flyout)] shadow-[0_24px_60px_rgba(0,0,0,0.42)] flex flex-col overflow-hidden',
+        isVideoPlatform ? 'max-w-[760px]' : 'max-w-[680px]',
+      ].join(' ')}
     >
       <div className="flex-1 min-h-0 overflow-y-auto charkle-scroll p-6 flex flex-col gap-4">
         {/* Author Header (1:1 macOS QuickLookSocialPostCard) */}
@@ -261,29 +299,27 @@ export const SocialPostViewer: React.FC<SocialPostViewerProps> = ({ asset }) => 
           </h3>
         )}
 
-        {/* YouTube / Bilibili Video Bookmark Cover & Explicit On-Demand Save */}
+        {/* YouTube / Bilibili Zero-Download Inline Streaming Player & Explicit On-Demand Save */}
         {isVideoPlatform && (
           <div
             data-testid="video-bookmark-stage"
             className="flex flex-col gap-3"
           >
-            <div className="relative aspect-video w-full rounded-[var(--win-radius-card)] overflow-hidden bg-black/90 border border-[var(--win-stroke-card)]">
-              <img
-                src={videoCoverSrc}
-                alt={post.articleTitle ?? asset.title}
-                referrerPolicy="no-referrer"
-                className="w-full h-full object-cover"
-              />
-              {videoDurationText && (
-                <span className="absolute bottom-2.5 right-2.5 px-2 py-0.5 rounded-[var(--win-radius-control)] bg-black/80 text-white text-[11.5px] font-semibold charkle-mono">
-                  {videoDurationText}
-                </span>
-              )}
-            </div>
+            <QuickLookStreamingVideoView
+              assetId={asset.id}
+              playbackKey={`${asset.id}:${post.originalURL}`}
+              coverSrc={videoCoverSrc}
+              coverAlt={post.articleTitle ?? asset.title}
+              durationText={videoDurationText}
+              watchUrl={post.originalURL}
+              openActionLabel={platform.openLabel}
+              onOpenExternal={openOriginalPost}
+              onSetCoverFrame={handleApplyCapturedCover}
+            />
 
             <div className="flex items-center justify-between gap-2 flex-wrap">
               <span className="text-[11.5px] text-[var(--text-secondary)]">
-                默认仅保存轻量视频书签与摘要，按需提取 MP4 到本地库
+                在线流式播放（不占用本地空间，可按需保存原视频）
               </span>
               <div className="flex items-center gap-2">
                 <button
@@ -456,6 +492,7 @@ export const SocialPostViewer: React.FC<SocialPostViewerProps> = ({ asset }) => 
                         <SocialAttachmentVideo
                           src={videoSrc}
                           poster={resolvedThumbUrl}
+                          videoElRef={idx === 0 ? primaryVideoRef : undefined}
                           onError={() => {
                             if (canUseCachedLocalVideo && resolvedMediaUrl) {
                               setLocalVideoFailedKeys((prev) => ({ ...prev, [key]: true }));
@@ -465,20 +502,34 @@ export const SocialPostViewer: React.FC<SocialPostViewerProps> = ({ asset }) => 
                           }}
                         />
                       )}
-                      <div className="flex items-center justify-between">
+                      <div className="flex items-center justify-between gap-2 flex-wrap">
                         <span className="inline-flex items-center gap-1 text-[11.5px] font-medium text-[var(--text-secondary)]">
                           <VideoClip16Regular className="w-3.5 h-3.5" />
                           {att.kind === 'gif' ? '动图媒体' : '视频媒体'}
                         </span>
-                        <button
-                          type="button"
-                          disabled={extractingKey !== null}
-                          onClick={() => void handleExtractOne(att, idx)}
-                          className="charkle-pressable inline-flex items-center gap-1 px-2.5 py-1 rounded-[var(--win-radius-control)] bg-[var(--accent-soft)] hover:brightness-95 text-[11.5px] font-semibold text-[var(--accent)] disabled:opacity-50 cursor-pointer"
-                        >
-                          <VideoClip16Regular className="w-3.5 h-3.5" />
-                          <span>{extractingKey === key ? '提取中…' : extractLabel}</span>
-                        </button>
+                        <div className="flex items-center gap-1.5">
+                          {idx === 0 && !mediaFailed && (
+                            <button
+                              type="button"
+                              data-testid="social-video-set-cover-btn"
+                              disabled={capturingInlineCover}
+                              onClick={() => void handleCapturePrimaryInlineVideoCover()}
+                              className="charkle-pressable inline-flex items-center gap-1 px-2.5 py-1 rounded-[var(--win-radius-control)] bg-[var(--bg-subtle)] hover:bg-[var(--win-subtle-hover)] text-[11.5px] font-semibold text-[var(--text-primary)] disabled:opacity-50 cursor-pointer"
+                            >
+                              <Camera16Regular className="w-3.5 h-3.5" />
+                              <span>{capturingInlineCover ? '截取中…' : '设当前帧为封面'}</span>
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            disabled={extractingKey !== null}
+                            onClick={() => void handleExtractOne(att, idx)}
+                            className="charkle-pressable inline-flex items-center gap-1 px-2.5 py-1 rounded-[var(--win-radius-control)] bg-[var(--accent-soft)] hover:brightness-95 text-[11.5px] font-semibold text-[var(--accent)] disabled:opacity-50 cursor-pointer"
+                          >
+                            <VideoClip16Regular className="w-3.5 h-3.5" />
+                            <span>{extractingKey === key ? '提取中…' : extractLabel}</span>
+                          </button>
+                        </div>
                       </div>
                     </div>
                   );

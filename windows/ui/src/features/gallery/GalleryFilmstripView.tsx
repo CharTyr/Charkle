@@ -156,6 +156,7 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({
   const pushToast = useCoordinatorStore((s) => s.pushToast);
 
   const folders = useLibraryStore((s) => s.folders);
+  const thumbnailRevisions = useLibraryStore((s) => s.thumbnailRevisions);
   const updateAssets = useLibraryStore((s) => s.updateAssets);
   const permanentlyDeleteAssets = useLibraryStore((s) => s.permanentlyDeleteAssets);
   const markAssetOpened = useLibraryStore((s) => s.markAssetOpened);
@@ -529,12 +530,18 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({
     }
 
     switch (activeAsset.mediaKind) {
-      case 'video':
+      case 'video': {
+        const posterRev = thumbnailRevisions[activeAsset.id] ?? 0;
+        const posterVer =
+          posterRev > 0 ? `${String(activeAsset.updatedAt ?? 0)}-${posterRev}` : activeAsset.updatedAt;
         return (
           <video
             key={activeAsset.id}
             src={transport.originalUrl(activeAsset.id)}
-            poster={transport.thumbnailUrl(activeAsset.id, 'preview1400')}
+            poster={cacheBustedUrl(
+              transport.thumbnailUrl(activeAsset.id, 'preview1400'),
+              posterVer,
+            )}
             controls
             autoPlay
             playsInline
@@ -543,6 +550,7 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({
             className="max-w-full max-h-full rounded-[var(--radius-settings-outer)] shadow-[0_14px_38px_rgba(0,0,0,0.22)] bg-black"
           />
         );
+      }
       case 'audio':
         return <AudioStudioViewer asset={activeAsset} />;
       case 'model3D':
@@ -583,6 +591,11 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({
       case 'webBookmark': {
         const accentHex = activeAsset.dominantColors[0]?.hex ?? '#5C6B73';
         const domain = webBookmarkDomain(activeAsset);
+        const webThumbRev = thumbnailRevisions[activeAsset.id] ?? 0;
+        const webThumbVer =
+          webThumbRev > 0
+            ? `${String(activeAsset.updatedAt ?? 0)}-${webThumbRev}`
+            : activeAsset.updatedAt;
         if (!fallbackThumb) {
           return (
             <div className="w-full h-full flex flex-col items-center justify-center gap-3 py-1">
@@ -592,10 +605,10 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({
                 className="relative flex-1 min-h-0 max-w-full flex items-center justify-center cursor-pointer"
               >
                 <img
-                  key={`${activeAsset.id}:${activeAsset.updatedAt}`}
+                  key={`${activeAsset.id}:${webThumbVer}`}
                   src={cacheBustedUrl(
                     transport.thumbnailUrl(activeAsset.id, 'preview1400'),
-                    activeAsset.updatedAt,
+                    webThumbVer,
                   )}
                   alt={activeAsset.title}
                   draggable={false}
@@ -1065,7 +1078,12 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({
             >
               <FilmstripThumbVisual
                 item={item}
-                src={cacheBustedUrl(transport.thumbnailUrl(item.id, 'grid520'), item.updatedAt)}
+                src={cacheBustedUrl(
+                  transport.thumbnailUrl(item.id, 'grid520'),
+                  (thumbnailRevisions[item.id] ?? 0) > 0
+                    ? `${String(item.updatedAt ?? 0)}-${thumbnailRevisions[item.id]}`
+                    : item.updatedAt,
+                )}
               />
             </button>
           );

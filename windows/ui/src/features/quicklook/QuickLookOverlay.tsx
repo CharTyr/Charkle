@@ -6,6 +6,7 @@ import {
   ArrowDownload16Regular,
   ArrowUndo16Regular,
   Board16Regular,
+  Camera16Regular,
   ChevronLeft20Regular,
   ChevronRight20Regular,
   Copy16Regular,
@@ -53,7 +54,12 @@ import {
   useMoodboardStore,
   type QuickLookOriginRect,
 } from '../../stores';
-import { mediaKindLabel, type AssetRecord } from '../../types/domain';
+import {
+  formatVideoDurationText,
+  isStreamableVideoUrl,
+  mediaKindLabel,
+  type AssetRecord,
+} from '../../types/domain';
 import { PaneResizeDivider } from '../chrome/PaneResizeDivider';
 import { InspectorView } from '../inspector/InspectorView';
 import { AudioStudioViewer } from './AudioStudioViewer';
@@ -62,6 +68,11 @@ import { GitHubRepoViewer } from './GitHubRepoViewer';
 import { ImageStageViewer } from './ImageStageViewer';
 import { Model3DViewer } from './Model3DViewer';
 import { PdfDocumentViewer } from './PdfDocumentViewer';
+import {
+  QuickLookStreamingVideoView,
+  captureVideoElementFrameJpeg,
+  type CapturedVideoFrame,
+} from './QuickLookStreamingVideoView';
 import { SocialPostViewer } from './SocialPostViewer';
 
 function isTypingInsideQuickLook(target: EventTarget | null): boolean {
@@ -202,7 +213,8 @@ const QuickLookVideoStage: React.FC<{
   asset: AssetRecord;
   src: string;
   poster: string;
-}> = ({ asset, src, poster }) => {
+  videoElRef?: React.MutableRefObject<HTMLVideoElement | null>;
+}> = ({ asset, src, poster, videoElRef }) => {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [failed, setFailed] = useState(false);
 
@@ -222,8 +234,11 @@ const QuickLookVideoStage: React.FC<{
           // Ignore in jsdom
         }
       }
+      if (videoElRef && videoElRef.current === el) {
+        videoElRef.current = null;
+      }
     };
-  }, [asset.id, src, failed]);
+  }, [asset.id, src, failed, videoElRef]);
 
   if (failed) {
     return (
@@ -250,9 +265,14 @@ const QuickLookVideoStage: React.FC<{
 
   return (
     <video
-      ref={videoRef}
+      ref={(node) => {
+        videoRef.current = node;
+        if (videoElRef) videoElRef.current = node;
+      }}
+      data-testid="quicklook-local-video"
       src={src}
       poster={poster}
+      crossOrigin="anonymous"
       controls
       autoPlay
       playsInline
@@ -305,8 +325,10 @@ export const QuickLookOverlay: React.FC = () => {
 
   const assets = useLibraryStore((s) => s.assets);
   const allAssets = useLibraryStore((s) => s.allAssets);
+  const thumbnailRevisions = useLibraryStore((s) => s.thumbnailRevisions);
   const bootstrapped = useLibraryStore((s) => s.bootstrapped);
   const updateAssets = useLibraryStore((s) => s.updateAssets);
+  const updateAssetCoverImage = useLibraryStore((s) => s.updateAssetCoverImage);
   const permanentlyDeleteAssets = useLibraryStore((s) => s.permanentlyDeleteAssets);
   const markAssetOpened = useLibraryStore((s) => s.markAssetOpened);
 
@@ -323,9 +345,11 @@ export const QuickLookOverlay: React.FC = () => {
   const [pausedAnim, setPausedAnim] = useState(false);
   const [boardMenuOpen, setBoardMenuOpen] = useState(false);
   const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
+  const [isCapturingCoverFrame, setIsCapturingCoverFrame] = useState(false);
 
   const boardBtnRef = useRef<HTMLButtonElement | null>(null);
   const freezeAnimRef = useRef<(() => void) | null>(null);
+  const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const lastActiveAssetRef = useRef<AssetRecord | null>(null);
 
   const activeIndex = useMemo(() => {
@@ -647,17 +671,43 @@ export const QuickLookOverlay: React.FC = () => {
     const domain = formatQuickLookBookmarkDomain(active);
     const web = active.richMetadata?.webPage;
     const webAttachments = web?.attachments ?? [];
+    const thumbRev = thumbnailRevisions[active.id] ?? 0;
+    const thumbVersion = thumbRev > 0 ? `${String(active.updatedAt ?? 0)}-${thumbRev}` : active.updatedAt;
     const previewUrl = withQuickLookThumbCacheBust(
       transport.thumbnailUrl(active.id, 'preview1400'),
-      active.updatedAt,
+      thumbVersion,
     );
     const summaryText = web?.summary?.trim() || active.notes.trim();
+    const hasStreamableVideo = Boolean(
+      web?.hasVideo ||
+        webAttachments.some((att) => att.kind === 'video') ||
+        isStreamableVideoUrl(active.sourceURL),
+    );
+    const durationText = formatVideoDurationText(web?.durationSeconds ?? active.durationSeconds);
+
+    const openWebExternal = () => {
+      if (!active.sourceURL) return;
+      void transport
+        .openExternalUrl(active.sourceURL)
+        .then(() => {
+          pushToast({
+            message: `已在默认浏览器中打开 ${domain}`,
+            tone: 'info',
+          });
+        })
+        .catch(() => {
+          pushToast({ message: '无法在默认浏览器中打开链接', tone: 'error' });
+        });
+    };
 
     return (
       <div
         data-testid="quicklook-web-bookmark-card"
         onClick={(e) => e.stopPropagation()}
-        className="w-full max-w-[680px] max-h-[82vh] overflow-y-auto charkle-scroll p-5 rounded-[var(--win-radius-dialog)] bg-[var(--bg-elevated)] border border-[var(--win-stroke-flyout)] shadow-[0_24px_60px_rgba(0,0,0,0.42)] flex flex-col gap-3.5"
+        className={[
+          'w-full max-h-[82vh] overflow-y-auto charkle-scroll p-5 rounded-[var(--win-radius-dialog)] bg-[var(--bg-elevated)] border border-[var(--win-stroke-flyout)] shadow-[0_24px_60px_rgba(0,0,0,0.42)] flex flex-col gap-3.5',
+          hasStreamableVideo ? 'max-w-[760px]' : 'max-w-[680px]',
+        ].join(' ')}
       >
         <div className="flex items-center justify-between gap-3">
           <div className="flex items-center gap-2.5 min-w-0">
@@ -679,38 +729,66 @@ export const QuickLookOverlay: React.FC = () => {
               </span>
             )}
           </div>
-          {active.sourceURL && (
-            <Button
-              variant="accent"
-              size="xs"
-              onClick={() =>
-                void transport
-                  .openExternalUrl(active.sourceURL!)
-                  .then(() => {
-                    pushToast({
-                      message: `已在默认浏览器中打开 ${domain}`,
-                      tone: 'info',
-                    });
-                  })
-                  .catch(() => {
-                    pushToast({ message: '无法在默认浏览器中打开链接', tone: 'error' });
-                  })
-              }
-            >
-              <Open16Regular className="w-3.5 h-3.5" />
-              在默认浏览器中打开
-            </Button>
-          )}
+          <div className="flex items-center gap-2 shrink-0">
+            {hasStreamableVideo && webAttachments.length > 0 && (
+              <Button
+                variant="accent"
+                size="xs"
+                onClick={() =>
+                  void useLibraryStore
+                    .getState()
+                    .batchExtractLinkMedia([active.id], useCoordinatorStore.getState().destination)
+                    .then((report) => {
+                      pushToast({
+                        message:
+                          report.extractedAssets.length > 0
+                            ? '已保存网页视频为独立素材'
+                            : '未能从该网页直接提取视频流',
+                        tone: report.extractedAssets.length > 0 ? 'success' : 'info',
+                      });
+                    })
+                }
+              >
+                保存视频为独立素材
+              </Button>
+            )}
+            {active.sourceURL && (
+              <Button
+                variant={hasStreamableVideo && webAttachments.length > 0 ? 'standard' : 'accent'}
+                size="xs"
+                onClick={openWebExternal}
+              >
+                <Open16Regular className="w-3.5 h-3.5" />
+                在默认浏览器中打开
+              </Button>
+            )}
+          </div>
         </div>
 
-        <div className="w-full max-h-[340px] rounded-[var(--win-radius-card)] overflow-hidden border border-[var(--win-stroke-card)] bg-[var(--bg-subtle)]/40 flex items-center justify-center">
-          <img
-            src={previewUrl}
-            alt={active.title}
-            draggable={false}
-            className="w-full max-h-[340px] object-contain"
+        {hasStreamableVideo ? (
+          <QuickLookStreamingVideoView
+            assetId={active.id}
+            playbackKey={`web:${active.id}:${active.sourceURL ?? ''}`}
+            coverSrc={previewUrl}
+            coverAlt={active.title}
+            durationText={durationText}
+            watchUrl={active.sourceURL ?? null}
+            openActionLabel="在默认浏览器中打开"
+            onOpenExternal={openWebExternal}
+            onSetCoverFrame={async (frame: CapturedVideoFrame) => {
+              await updateAssetCoverImage(active.id, frame.imageBase64, frame.timestampSeconds);
+            }}
           />
-        </div>
+        ) : (
+          <div className="w-full max-h-[340px] rounded-[var(--win-radius-card)] overflow-hidden border border-[var(--win-stroke-card)] bg-[var(--bg-subtle)]/40 flex items-center justify-center">
+            <img
+              src={previewUrl}
+              alt={active.title}
+              draggable={false}
+              className="w-full max-h-[340px] object-contain"
+            />
+          </div>
+        )}
 
         <h3 className="text-[18px] font-semibold text-[var(--text-primary)] charkle-heading">
           {active.title}
@@ -871,12 +949,19 @@ export const QuickLookOverlay: React.FC = () => {
       return renderWebBookmarkCard(active);
     }
     if (active.mediaKind === 'video') {
+      const thumbRev = thumbnailRevisions[active.id] ?? 0;
+      const posterVersion =
+        thumbRev > 0 ? `${String(active.updatedAt ?? 0)}-${thumbRev}` : active.updatedAt;
       return (
         <QuickLookVideoStage
           key={active.id}
           asset={active}
           src={transport.originalUrl(active.id)}
-          poster={transport.thumbnailUrl(active.id, 'preview1400')}
+          poster={withQuickLookThumbCacheBust(
+            transport.thumbnailUrl(active.id, 'preview1400'),
+            posterVersion,
+          )}
+          videoElRef={localVideoRef}
         />
       );
     }
@@ -1223,6 +1308,45 @@ export const QuickLookOverlay: React.FC = () => {
                       </>
                     )}
 
+                    <span className="w-px h-4 bg-white/15" />
+                  </>
+                )}
+
+                {asset.mediaKind === 'video' && !asset.richMetadata?.socialPost && (
+                  <>
+                    <button
+                      type="button"
+                      data-testid="quicklook-set-cover-frame-btn"
+                      disabled={isCapturingCoverFrame}
+                      title="将当前播放位置的视频画面设为素材封面"
+                      onClick={() => {
+                        if (isCapturingCoverFrame) return;
+                        setIsCapturingCoverFrame(true);
+                        void (async () => {
+                          try {
+                            const captured = captureVideoElementFrameJpeg(localVideoRef.current);
+                            if (captured) {
+                              await updateAssetCoverImage(
+                                asset.id,
+                                captured.imageBase64,
+                                captured.timestampSeconds,
+                              );
+                            } else {
+                              pushToast({
+                                message: '视频尚未就绪，请稍后再截取封面',
+                                tone: 'info',
+                              });
+                            }
+                          } finally {
+                            setIsCapturingCoverFrame(false);
+                          }
+                        })();
+                      }}
+                      className="charkle-pressable h-7 px-2.5 rounded-full bg-white/14 hover:bg-white/22 text-white text-[11.5px] font-semibold inline-flex items-center gap-1.5 disabled:opacity-55 cursor-pointer"
+                    >
+                      <Camera16Regular className="w-3.5 h-3.5" />
+                      <span>{isCapturingCoverFrame ? '截取中…' : '设当前帧为封面'}</span>
+                    </button>
                     <span className="w-px h-4 bg-white/15" />
                   </>
                 )}
