@@ -435,26 +435,33 @@ public nonisolated struct MediaPipeline: Sendable {
             rich.isMarkdown = (ext == "md" || ext == "markdown")
             asset.richMetadata = rich
 
-            var firstPagePreview: CGImage?
-            if ext == "pdf" {
-                firstPagePreview = Self.pdf(file)?.poster
-            } else if (parsedDocument?.payload.blocks.isEmpty ?? true) && (parsedDocument?.payload.sheets.isEmpty ?? true) {
-                firstPagePreview = await Self.quickLook(file)?.poster
-            }
-
             let excerptForAssetRecord = plain.isEmpty ? nil : String(plain.prefix(2_000))
-            if let docCard = MediaArtwork.documentCard(
-                title: asset.title,
-                fileExtension: ext,
-                payload: parsedDocument?.payload,
-                firstPageImage: firstPagePreview,
-                versionStack: rich.versionStack
-            ) {
-                render = MediaRender(docCard, text: excerptForAssetRecord)
-            } else if let pageImg = firstPagePreview {
-                render = MediaRender(pageImg, text: excerptForAssetRecord)
-            } else if render == nil {
-                render = await Self.quickLook(file)
+            if ext == "pdf", let pdfRender = Self.pdf(file) {
+                render = MediaRender(
+                    pdfRender.poster,
+                    width: pdfRender.width,
+                    height: pdfRender.height,
+                    duration: pdfRender.duration,
+                    text: excerptForAssetRecord ?? pdfRender.text
+                )
+            } else {
+                var firstPagePreview: CGImage?
+                if (parsedDocument?.payload.blocks.isEmpty ?? true) && (parsedDocument?.payload.sheets.isEmpty ?? true) {
+                    firstPagePreview = await Self.quickLook(file)?.poster
+                }
+                if let docCard = MediaArtwork.documentCard(
+                    title: asset.title,
+                    fileExtension: ext,
+                    payload: parsedDocument?.payload,
+                    firstPageImage: firstPagePreview,
+                    versionStack: rich.versionStack
+                ) {
+                    render = MediaRender(docCard, text: excerptForAssetRecord)
+                } else if let pageImg = firstPagePreview {
+                    render = MediaRender(pageImg, text: excerptForAssetRecord)
+                } else if render == nil {
+                    render = await Self.quickLook(file)
+                }
             }
         case .designFile:
             render = Self.raster(file)
