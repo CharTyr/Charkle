@@ -72,6 +72,8 @@ struct AssetDetailView: View {
     let allAssets: [AssetRecord]
     let initialInspectorTab: DetailInspectorTab
     let openInspectorImmediately: Bool
+    let initialDocumentMode: MobileDocumentStageMode
+    let initialDiffComparePair: (baseID: UUID, targetID: UUID)?
     let onCurrentAssetChanged: (UUID) -> Void
     let onFilterByColor: (String) -> Void
     let onFilterByTag: (String) -> Void
@@ -96,6 +98,10 @@ struct AssetDetailView: View {
     @State private var activeUtilityDrawer: ActiveUtilityDrawer? = nil
     @State private var confirmPermanentDelete: Bool = false
     @State private var isCurrentAssetZoomed: Bool = false
+    @State private var isDocumentInteractionBlockingPaging: Bool = false
+    @State private var documentStageMode: MobileDocumentStageMode
+    @State private var externalDiffTrigger: MobileDiffLaunchRequest? = nil
+    @State private var isMergeStackSheetPresented: Bool = false
     @State private var isMoveFolderSheetPresented: Bool = false
     @State private var preferLongStripFitWidth: Bool = true
     @State private var isInspectorTextFocused: Bool = false
@@ -106,6 +112,8 @@ struct AssetDetailView: View {
         allAssets: [AssetRecord],
         initialInspectorTab: DetailInspectorTab = .info,
         openInspectorImmediately: Bool = false,
+        initialDocumentMode: MobileDocumentStageMode = .read,
+        initialDiffComparePair: (baseID: UUID, targetID: UUID)? = nil,
         onCurrentAssetChanged: @escaping (UUID) -> Void = { _ in },
         onFilterByColor: @escaping (String) -> Void,
         onFilterByTag: @escaping (String) -> Void
@@ -115,6 +123,8 @@ struct AssetDetailView: View {
         self.allAssets = allAssets
         self.initialInspectorTab = initialInspectorTab
         self.openInspectorImmediately = openInspectorImmediately
+        self.initialDocumentMode = initialDocumentMode
+        self.initialDiffComparePair = initialDiffComparePair
         self.onCurrentAssetChanged = onCurrentAssetChanged
         self.onFilterByColor = onFilterByColor
         self.onFilterByTag = onFilterByTag
@@ -130,6 +140,7 @@ struct AssetDetailView: View {
         _selectedInspectorTab = State(initialValue: initialInspectorTab)
         _isInspectorVisible = State(initialValue: true)
         _isCompactInspectorPresented = State(initialValue: openInspectorImmediately)
+        _documentStageMode = State(initialValue: initialDocumentMode)
     }
 
     private var orderedAssets: [AssetRecord] {
@@ -234,6 +245,12 @@ struct AssetDetailView: View {
                         onSelectAsset: { nextID in
                             navigateToAsset(id: nextID)
                         },
+                        onOpenDiffPair: { baseID, targetID in
+                            openDiffPair(baseID: baseID, targetID: targetID)
+                        },
+                        onRequestMergeSheet: {
+                            isMergeStackSheetPresented = true
+                        },
                         onFilterByColor: onFilterByColor,
                         onFilterByTag: onFilterByTag,
                         onDismissDetail: { dismiss() }
@@ -246,8 +263,18 @@ struct AssetDetailView: View {
         }
         .background(keyboardShortcutsBridge)
         .statusBarHidden(!isChromeVisible)
-        .interactiveDismissDisabled(isCurrentAssetZoomed)
-        .background(ZoomDismissCoordinatorBridge(isZoomedOrZooming: isCurrentAssetZoomed))
+        .interactiveDismissDisabled(isCurrentAssetZoomed || isDocumentInteractionBlockingPaging)
+        .background(ZoomDismissCoordinatorBridge(isZoomedOrZooming: isCurrentAssetZoomed || isDocumentInteractionBlockingPaging))
+        .sheet(isPresented: $isMergeStackSheetPresented) {
+            NavigationStack {
+                MergeIntoVersionStackSheet(
+                    store: store,
+                    sourceAssets: [currentAsset],
+                    onDone: { isMergeStackSheetPresented = false }
+                )
+            }
+            .presentationDetents([.medium, .large])
+        }
         .sheet(isPresented: $isMoveFolderSheetPresented) {
             NavigationStack {
                 HierarchicalFolderPickerSheet(
@@ -281,6 +308,16 @@ struct AssetDetailView: View {
                     onSelectAsset: { nextID in
                         isCompactInspectorPresented = false
                         navigateToAsset(id: nextID)
+                    },
+                    onOpenDiffPair: { baseID, targetID in
+                        isCompactInspectorPresented = false
+                        openDiffPair(baseID: baseID, targetID: targetID)
+                    },
+                    onRequestMergeSheet: {
+                        isCompactInspectorPresented = false
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                            isMergeStackSheetPresented = true
+                        }
                     },
                     onFilterByColor: { hex in
                         isCompactInspectorPresented = false
@@ -332,7 +369,7 @@ struct AssetDetailView: View {
                 currentAssetID = nextID
             }
         }
-        .onChange(of: currentAssetID) { _, nextID in
+        .onChange(of: currentAssetID) { oldID, nextID in
             if pagedAssetID != nextID {
                 pagedAssetID = nextID
             }
@@ -341,6 +378,14 @@ struct AssetDetailView: View {
             }
             if isCurrentAssetZoomed {
                 isCurrentAssetZoomed = false
+            }
+            if isDocumentInteractionBlockingPaging {
+                isDocumentInteractionBlockingPaging = false
+            }
+            let prevGroup = store.liveAsset(id: oldID)?.richMetadata?.versionStack?.groupID
+            let nextGroup = store.liveAsset(id: nextID)?.richMetadata?.versionStack?.groupID
+            if prevGroup == nil || prevGroup != nextGroup {
+                documentStageMode = .read
             }
             preferLongStripFitWidth = true
             onCurrentAssetChanged(nextID)
@@ -458,6 +503,36 @@ struct AssetDetailView: View {
                 Button("拷贝原图", systemImage: "doc.on.doc") {
                     Task { await store.copyAssetToPasteboard(currentAsset) }
                 }
+
+                Divider()
+
+                let siblings = store.stackMembers(for: currentAsset)
+                let primaryInStack = store.primaryVersionAsset(for: currentAsset)
+                if siblings.count >= 2 {
+                    Button("对比版本差异", systemImage: "arrow.left.arrow.right") {
+                        let lastTwo = Array(siblings.suffix(2))
+                        openDiffPair(baseID: lastTwo[0].id, targetID: lastTwo[1].id)
+                    }
+                    if primaryInStack.id != currentAsset.id {
+                        Button("设为主版本（防误发锁定）", systemImage: "checkmark.seal.fill") {
+                            let id = currentAsset.id
+                            Task { await store.setPrimaryVersion(assetID: id) }
+                        }
+                        let curVer = currentAsset.richMetadata?.versionStack?.versionNumber ?? 1
+                        Button("分享当前查看版本 (v\(curVer))", systemImage: "square.and.arrow.up.trianglebadge.exclamationmark") {
+                            Task { await prepareAndShareOriginal(preferExactAsset: true) }
+                        }
+                    }
+                    Button("拆出为独立素材", systemImage: "square.stack.3d.up.slash", role: .destructive) {
+                        let id = currentAsset.id
+                        Task { await store.unstackAsset(assetID: id) }
+                    }
+                }
+                Button("合并入版本叠…", systemImage: "arrow.triangle.merge") {
+                    isMergeStackSheetPresented = true
+                }
+
+                Divider()
 
                 Button(
                     currentAsset.pinnedOffline ? "取消始终保留在本地" : "始终保留在本地",
@@ -888,8 +963,26 @@ struct AssetDetailView: View {
     }
 
     private var subtitleText: String {
-        var parts: [String] = [currentAsset.displayTypeLabel]
-        if currentAsset.pixelWidth > 0 && currentAsset.pixelHeight > 0 {
+        var parts: [String] = []
+        if let stack = currentAsset.richMetadata?.versionStack {
+            let siblings = store.stackMembers(for: currentAsset)
+            let isPrimary = store.primaryVersionAsset(for: currentAsset).id == currentAsset.id
+            if siblings.count > 1 {
+                parts.append(isPrimary ? "v\(stack.versionNumber) 主版" : "v\(stack.versionNumber)/\(siblings.count)")
+            } else {
+                parts.append("v\(stack.versionNumber)")
+            }
+        }
+        parts.append(currentAsset.displayTypeLabel)
+        if let doc = currentAsset.richMetadata?.document {
+            if doc.pageCount > 0 {
+                parts.append("\(doc.pageCount) 页")
+            } else if !doc.sheetNames.isEmpty {
+                parts.append("\(doc.sheetNames.count) 表")
+            } else if doc.wordCount > 0 {
+                parts.append("\(doc.wordCount) 字")
+            }
+        } else if currentAsset.pixelWidth > 0 && currentAsset.pixelHeight > 0 {
             parts.append("\(currentAsset.pixelWidth) × \(currentAsset.pixelHeight)")
         }
         if currentAsset.fileSizeBytes > 0 {
@@ -910,6 +1003,23 @@ struct AssetDetailView: View {
                         transform: isActive ? previewTransform : PreviewTransformState(),
                         isActivePage: isActive,
                         preferLongStripFitWidth: isActive ? preferLongStripFitWidth : true,
+                        documentMode: isActive ? documentStageMode : .read,
+                        initialComparePair: isActive ? initialDiffComparePair : nil,
+                        externalDiffTrigger: isActive ? externalDiffTrigger : nil,
+                        onSelectVersionAsset: { selectedVersion in
+                            navigateToAsset(id: selectedVersion.id)
+                        },
+                        onShareURL: { url in
+                            shareFileURL = url
+                        },
+                        onBlockPagingChanged: { blocked in
+                            if asset.id == currentAssetID {
+                                isDocumentInteractionBlockingPaging = blocked
+                            }
+                        },
+                        onRequestVisualDiff: { baseID, targetID in
+                            openDiffPair(baseID: baseID, targetID: targetID)
+                        },
                         onZoomInteractionChanged: { zoomed in
                             if asset.id == currentAssetID {
                                 isCurrentAssetZoomed = zoomed
@@ -931,6 +1041,7 @@ struct AssetDetailView: View {
             .scrollTargetLayout()
         }
         .scrollTargetBehavior(.paging)
+        .scrollDisabled(isCurrentAssetZoomed || isDocumentInteractionBlockingPaging)
         .scrollPosition(id: $pagedAssetID)
     }
 
@@ -1043,13 +1154,21 @@ struct AssetDetailView: View {
         }
     }
 
-    private func prepareAndShareOriginal() async {
+    private func openDiffPair(baseID: UUID, targetID: UUID) {
+        documentStageMode = .diff
+        externalDiffTrigger = MobileDiffLaunchRequest(baseAssetID: baseID, targetAssetID: targetID)
+    }
+
+    private func prepareAndShareOriginal(preferExactAsset: Bool = false) async {
         isPreparingShare = true
         defer { isPreparingShare = false }
-        if let url = try? await store.engine.originalURL(for: currentAsset.id) {
+        let primary = store.primaryVersionAsset(for: currentAsset)
+        if !preferExactAsset && primary.id != currentAsset.id {
+            let pVer = primary.richMetadata?.versionStack?.versionNumber ?? 1
+            store.showToast("已按防误发保护为您导出主版本 v\(pVer)", tone: .info)
+        }
+        if let url = await store.shareableOriginalURL(for: currentAsset, preferExactAsset: preferExactAsset) {
             shareFileURL = url
-        } else if let thumb = await store.engine.thumbnailURL(for: currentAsset.id, tier: .preview1400) {
-            shareFileURL = thumb
         } else {
             store.showToast("暂无法获取可分享的文件", tone: .warning)
         }
@@ -1148,6 +1267,13 @@ private struct AssetStageContentView: View {
     let transform: PreviewTransformState
     let isActivePage: Bool
     var preferLongStripFitWidth: Bool = true
+    var documentMode: MobileDocumentStageMode = .read
+    var initialComparePair: (baseID: UUID, targetID: UUID)? = nil
+    var externalDiffTrigger: MobileDiffLaunchRequest? = nil
+    let onSelectVersionAsset: (AssetRecord) -> Void
+    let onShareURL: (URL) -> Void
+    let onBlockPagingChanged: (Bool) -> Void
+    let onRequestVisualDiff: (UUID, UUID) -> Void
     let onZoomInteractionChanged: (Bool) -> Void
     let onSingleTap: () -> Void
 
@@ -1213,12 +1339,35 @@ private struct AssetStageContentView: View {
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if asset.mediaKind == .document,
-                      (asset.fileName as NSString).pathExtension.lowercased() == "pdf",
-                      let localOriginalURL {
-                PDFDocumentPreview(url: localOriginalURL)
-                    .clipShape(RoundedRectangle(cornerRadius: MobileTheme.Radius.cardOuter, style: .continuous))
-                    .padding(12)
+            } else if asset.mediaKind == .document
+                        || (isActivePage && documentMode == .diff && store.stackMembers(for: asset).count >= 2) {
+                if isActivePage {
+                    MobileDocumentStageView(
+                        store: store,
+                        asset: asset,
+                        initialMode: documentMode,
+                        initialComparePair: initialComparePair,
+                        externalDiffTrigger: externalDiffTrigger,
+                        onSelectVersionAsset: onSelectVersionAsset,
+                        onShareURL: onShareURL,
+                        onBlockPagingChanged: onBlockPagingChanged
+                    )
+                } else {
+                    ZStack {
+                        if let displayImage {
+                            Image(uiImage: displayImage)
+                                .resizable()
+                                .scaledToFit()
+                                .clipShape(RoundedRectangle(cornerRadius: MobileTheme.Radius.cardOuter, style: .continuous))
+                                .padding(12)
+                        } else {
+                            Image(systemName: MobileTheme.mediaKindSymbol(for: .document))
+                                .font(.system(size: 40, weight: .light))
+                                .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
+                        }
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
             } else if let post = asset.richMetadata?.socialPost {
                 socialPostStage(post, coverImage: displayImage)
             } else if let web = asset.richMetadata?.webPage, web.hasRichSummary || !web.attachments.isEmpty {
@@ -1226,23 +1375,32 @@ private struct AssetStageContentView: View {
             } else if let repo = asset.richMetadata?.githubRepo {
                 githubRepoStage(repo, coverImage: displayImage)
             } else {
-                ZStack {
-                    if let displayImage {
-                        ZoomableImageView(
-                            image: displayImage,
-                            transform: transform,
-                            isActivePage: isActivePage,
-                            fitWidthMode: shouldUseLongStripFitWidth,
-                            onZoomInteractionChanged: onZoomInteractionChanged,
-                            onSingleTap: onSingleTap
-                        )
-                    } else {
-                        ProgressView("正在加载高清预览…")
-                            .font(.system(size: 13))
-                            .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
+                ZStack(alignment: .top) {
+                    ZStack {
+                        if let displayImage {
+                            ZoomableImageView(
+                                image: displayImage,
+                                transform: transform,
+                                isActivePage: isActivePage,
+                                fitWidthMode: shouldUseLongStripFitWidth,
+                                onZoomInteractionChanged: onZoomInteractionChanged,
+                                onSingleTap: onSingleTap
+                            )
+                        } else {
+                            ProgressView("正在加载高清预览…")
+                                .font(.system(size: 13))
+                                .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
+                        }
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                    let siblings = store.stackMembers(for: asset)
+                    if isActivePage && siblings.count >= 2 {
+                        visualVersionStackBar(siblings: siblings)
+                            .padding(.top, 6)
+                            .padding(.horizontal, 14)
                     }
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .task(id: "\(asset.id.uuidString)-\(store.thumbnails.revision)") {
@@ -1268,12 +1426,70 @@ private struct AssetStageContentView: View {
                 if let orig = await store.thumbnails.loadOriginalImage(for: asset) {
                     image = orig
                 }
-            } else if asset.mediaKind == .video || (asset.fileName as NSString).pathExtension.lowercased() == "pdf" {
+            } else if asset.mediaKind == .video {
                 if localOriginalURL == nil {
                     localOriginalURL = try? await store.engine.originalURL(for: asset.id)
                 }
             }
         }
+    }
+
+    @ViewBuilder
+    private func visualVersionStackBar(siblings: [AssetRecord]) -> some View {
+        let primary = store.primaryVersionAsset(for: asset)
+        HStack(spacing: 6) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 4) {
+                    ForEach(Array(siblings.enumerated()), id: \.element.id) { idx, member in
+                        let vNum = member.richMetadata?.versionStack?.versionNumber ?? (idx + 1)
+                        let isSelected = member.id == asset.id
+                        let isPrimary = member.id == primary.id
+                        Button {
+                            MobileHaptics.light()
+                            onSelectVersionAsset(member)
+                        } label: {
+                            HStack(spacing: 3.5) {
+                                Text("v\(vNum)")
+                                    .font(.system(size: 11.5, weight: .bold).monospacedDigit())
+                                if isPrimary {
+                                    Text("主版")
+                                        .font(.system(size: 9.5, weight: .bold))
+                                        .foregroundStyle(isSelected ? .white : MobileTheme.positive(for: colorScheme))
+                                }
+                            }
+                            .foregroundStyle(isSelected ? .white : .primary)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4.5)
+                            .background(
+                                isSelected
+                                    ? MobileTheme.accentButtonFill(for: colorScheme)
+                                    : Color.clear,
+                                in: Capsule()
+                            )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+
+            Divider().frame(height: 16)
+
+            Button {
+                MobileHaptics.light()
+                let lastTwo = Array(siblings.suffix(2))
+                onRequestVisualDiff(lastTwo[0].id, lastTwo[1].id)
+            } label: {
+                Label("对比差异", systemImage: "arrow.left.arrow.right")
+                    .font(.system(size: 11.5, weight: .semibold))
+                    .foregroundStyle(MobileTheme.accent(for: colorScheme))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4.5)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .charkleFloatingCapsule(interactive: true)
     }
 
     private func socialBadgeColor(for platform: SocialPlatform) -> Color {
@@ -2900,6 +3116,8 @@ private struct DetailInspectorPanel: View {
     @Binding var selectedTab: AssetDetailView.DetailInspectorTab
     @Binding var isTextFieldFocused: Bool
     let onSelectAsset: (UUID) -> Void
+    let onOpenDiffPair: (UUID, UUID) -> Void
+    let onRequestMergeSheet: () -> Void
     let onFilterByColor: (String) -> Void
     let onFilterByTag: (String) -> Void
     let onDismissDetail: () -> Void
@@ -3108,6 +3326,18 @@ private struct DetailInspectorPanel: View {
                     ))
                     .font(.system(size: 13))
                 }
+
+                InspectorVersionStackCard(
+                    store: store,
+                    asset: asset,
+                    onSelectVersion: { member in
+                        onSelectAsset(member.id)
+                    },
+                    onOpenDiff: { baseID, targetID in
+                        onOpenDiffPair(baseID, targetID)
+                    },
+                    onRequestMergeSheet: onRequestMergeSheet
+                )
 
                 if let post = asset.richMetadata?.socialPost, (!post.effectiveAttachments.isEmpty || post.isZeroDownloadVideoBookmark) {
                     let attachments = post.effectiveAttachments
@@ -3350,6 +3580,24 @@ private struct DetailInspectorPanel: View {
 
                 inspectorCard("文件与维护") {
                     specRow("文件名", asset.fileName)
+                    if let doc = asset.richMetadata?.document {
+                        specRow("文档格式", doc.parsedFormatFamily.badgeLabel)
+                        if doc.pageCount > 0 {
+                            specRow("页数", "\(doc.pageCount) 页")
+                        }
+                        if doc.wordCount > 0 {
+                            specRow("字数", "\(doc.wordCount) 字")
+                        }
+                        if !doc.sheetNames.isEmpty {
+                            specRow("工作表", doc.sheetNames.joined(separator: "、"))
+                        }
+                        if doc.hasNativeRevisions {
+                            specRow("修订痕迹", "包含原生修订 / 批注")
+                        }
+                        if doc.parsedFormatFamily == .pdf && !doc.hasTextLayer {
+                            specRow("文本层", "扫描件（支持本地 OCR）")
+                        }
+                    }
                     if asset.pixelWidth > 0 && asset.pixelHeight > 0 {
                         specRow("尺寸", "\(asset.pixelWidth) × \(asset.pixelHeight)")
                     }

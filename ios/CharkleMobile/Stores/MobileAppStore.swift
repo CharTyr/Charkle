@@ -68,6 +68,13 @@ final class MobileAppStore {
     var inboxAssets: [AssetRecord] = [] {
         didSet { assetsMutationVersion &+= 1 }
     }
+    private(set) var unfoldedAssets: [AssetRecord] = []
+    private(set) var unfoldedInboxAssets: [AssetRecord] = []
+    private(set) var stackMembersByGroupID: [UUID: [AssetRecord]] = [:]
+    var pendingStackPrompts: [MobilePendingStackPrompt] = []
+    var defaultGalleryLayoutMode: GalleryLayoutMode = .verticalMasonry
+    var scopeLayoutOverrides: [String: GalleryLayoutMode] = [:]
+    var compactBentoColumnOverride: Int? = nil
     var folders: [FolderRecord] = [] {
         didSet { rebuildFolderCaches() }
     }
@@ -90,6 +97,12 @@ final class MobileAppStore {
     private var reloadAssetsGeneration: UInt64 = 0
     @ObservationIgnored
     private var lastHandledPasteboardEnvelopeID: UUID? = nil
+    @ObservationIgnored
+    private var dismissedStackPromptAssetIDs: Set<UUID> = []
+
+    private static let defaultLayoutDefaultsKey = "com.charkle.mobile.defaultGalleryLayoutMode"
+    private static let scopeLayoutDefaultsKey = "com.charkle.mobile.scopeGalleryLayoutOverrides"
+    private static let compactColsDefaultsKey = "com.charkle.mobile.compactBentoColumnOverride"
 
     // MARK: - Search & Filter State
     var criteria: FilterCriteria = FilterCriteria(includeSubfolders: true)
@@ -157,6 +170,24 @@ final class MobileAppStore {
     init(engine: any CharkleEngineProtocol) {
         self.engine = engine
         self.thumbnails = MobileThumbnailCache(engine: engine)
+        let defaults = UserDefaults.standard
+        if let rawDefault = defaults.string(forKey: Self.defaultLayoutDefaultsKey),
+           let parsed = GalleryLayoutMode(rawValue: rawDefault) {
+            self.defaultGalleryLayoutMode = Self.normalizedMobileLayout(parsed)
+        }
+        if let rawDict = defaults.dictionary(forKey: Self.scopeLayoutDefaultsKey) as? [String: String] {
+            var restored: [String: GalleryLayoutMode] = [:]
+            for (k, v) in rawDict {
+                if let parsed = GalleryLayoutMode(rawValue: v) {
+                    restored[k] = Self.normalizedMobileLayout(parsed)
+                }
+            }
+            self.scopeLayoutOverrides = restored
+        }
+        let savedCols = defaults.integer(forKey: Self.compactColsDefaultsKey)
+        if savedCols == 1 || savedCols == 2 {
+            self.compactBentoColumnOverride = savedCols
+        }
         registerNotifications()
     }
 
@@ -195,25 +226,294 @@ final class MobileAppStore {
         cachedFlattenedFolders = flat
     }
 
-    /// Instant live asset lookup across current library scope and Inbox so Quick Look & Inspector
-    /// never display stale snapshots after ratings, tags, folder moves, or EXIF hydration.
+    /// Instant live asset lookup across current library scope, Inbox, and all folded Version Stack siblings
+    /// so Quick Look, Document Diff, and Inspector never display stale snapshots.
     func liveAsset(id: UUID) -> AssetRecord? {
         if let hit = assets.first(where: { $0.id == id }) {
+            return hit
+        }
+        if let hit = unfoldedAssets.first(where: { $0.id == id }) {
             return hit
         }
         if let hit = inboxAssets.first(where: { $0.id == id }) {
             return hit
         }
+        if let hit = unfoldedInboxAssets.first(where: { $0.id == id }) {
+            return hit
+        }
+        for members in stackMembersByGroupID.values {
+            if let hit = members.first(where: { $0.id == id }) {
+                return hit
+            }
+        }
         return nil
     }
 
     func applyHydratedAsset(_ updated: AssetRecord) {
-        if let idx = assets.firstIndex(where: { $0.id == updated.id }) {
-            assets[idx] = updated
+        var touchedUnfolded = false
+        if let idx = unfoldedAssets.firstIndex(where: { $0.id == updated.id }) {
+            unfoldedAssets[idx] = updated
+            touchedUnfolded = true
         }
-        if let idx = inboxAssets.firstIndex(where: { $0.id == updated.id }) {
-            inboxAssets[idx] = updated
+        if let idx = unfoldedInboxAssets.firstIndex(where: { $0.id == updated.id }) {
+            unfoldedInboxAssets[idx] = updated
+            touchedUnfolded = true
         }
+        if let gid = updated.richMetadata?.versionStack?.groupID,
+           var members = stackMembersByGroupID[gid],
+           let mIdx = members.firstIndex(where: { $0.id == updated.id }) {
+            members[mIdx] = updated
+            stackMembersByGroupID[gid] = AssetVersionStackMetadata.sortedVersions(members)
+        }
+        if touchedUnfolded {
+            recomputeFoldedLists()
+        } else {
+            if let idx = assets.firstIndex(where: { $0.id == updated.id }) {
+                assets[idx] = updated
+            }
+            if let idx = inboxAssets.firstIndex(where: { $0.id == updated.id }) {
+                inboxAssets[idx] = updated
+            }
+        }
+    }
+
+    // MARK: - Per-Destination Gallery Layout Memory & Version Stack Helpers
+
+    static func normalizedMobileLayout(_ mode: GalleryLayoutMode) -> GalleryLayoutMode {
+        mode == .compactList ? .compactList : .verticalMasonry
+    }
+
+    func scopeLayoutStorageKey(for targetScope: MobileScope) -> String? {
+        switch targetScope {
+        case .allItems: "allItems"
+        case .inbox: "inbox"
+        case .recent: "recent"
+        case .untagged: "untagged"
+        case .trash: "trash"
+        case .folder(let id): "folder:\(id.uuidString)"
+        case .smartFolder(let id): "smartFolder:\(id.uuidString)"
+        case .tag(let tag): "tag:\(tag.lowercased())"
+        case .moodboardsHome, .moodboard, .pinterest: nil
+        }
+    }
+
+    var activeGalleryLayoutMode: GalleryLayoutMode {
+        if let key = scopeLayoutStorageKey(for: scope),
+           let override = scopeLayoutOverrides[key] {
+            return Self.normalizedMobileLayout(override)
+        }
+        return Self.normalizedMobileLayout(defaultGalleryLayoutMode)
+    }
+
+    var hasScopeSpecificLayoutOverride: Bool {
+        guard let key = scopeLayoutStorageKey(for: scope) else { return false }
+        return scopeLayoutOverrides[key] != nil
+    }
+
+    func setGalleryLayoutMode(_ mode: GalleryLayoutMode, rememberForCurrentScope: Bool = true) {
+        let normalized = Self.normalizedMobileLayout(mode)
+        if rememberForCurrentScope, let key = scopeLayoutStorageKey(for: scope) {
+            scopeLayoutOverrides[key] = normalized
+            persistScopeLayoutOverrides()
+        } else {
+            defaultGalleryLayoutMode = normalized
+            UserDefaults.standard.set(normalized.rawValue, forKey: Self.defaultLayoutDefaultsKey)
+        }
+    }
+
+    func setDefaultGalleryLayoutMode(_ mode: GalleryLayoutMode) {
+        let normalized = Self.normalizedMobileLayout(mode)
+        defaultGalleryLayoutMode = normalized
+        UserDefaults.standard.set(normalized.rawValue, forKey: Self.defaultLayoutDefaultsKey)
+    }
+
+    func resetPerFolderLayoutMemory() {
+        scopeLayoutOverrides.removeAll()
+        UserDefaults.standard.removeObject(forKey: Self.scopeLayoutDefaultsKey)
+        MobileHaptics.light()
+        showToast("已重置各文件夹的独立视图记忆", tone: .info)
+    }
+
+    func setCompactBentoColumnOverride(_ cols: Int?) {
+        let valid = (cols == 1 || cols == 2) ? cols : nil
+        compactBentoColumnOverride = valid
+        if let valid {
+            UserDefaults.standard.set(valid, forKey: Self.compactColsDefaultsKey)
+        } else {
+            UserDefaults.standard.removeObject(forKey: Self.compactColsDefaultsKey)
+        }
+    }
+
+    private func persistScopeLayoutOverrides() {
+        let raw = scopeLayoutOverrides.mapValues(\.rawValue)
+        UserDefaults.standard.set(raw, forKey: Self.scopeLayoutDefaultsKey)
+    }
+
+    /// Collapses assets sharing `richMetadata.versionStack.groupID` into a single displayed representative
+    /// (`AssetVersionStackMetadata.resolvePrimaryAsset`, preferring `isPinnedPrimary`), preserving list sort order.
+    static func foldVersionStacks(_ raw: [AssetRecord]) -> (folded: [AssetRecord], groups: [UUID: [AssetRecord]]) {
+        guard !raw.isEmpty else { return ([], [:]) }
+        var membersByGroup: [UUID: [AssetRecord]] = [:]
+        for item in raw {
+            if let gid = item.richMetadata?.versionStack?.groupID {
+                membersByGroup[gid, default: []].append(item)
+            }
+        }
+        guard !membersByGroup.isEmpty else { return (raw, [:]) }
+
+        var sortedGroups: [UUID: [AssetRecord]] = [:]
+        var representativeByGroup: [UUID: AssetRecord] = [:]
+        for (gid, list) in membersByGroup {
+            let sorted = AssetVersionStackMetadata.sortedVersions(list)
+            sortedGroups[gid] = sorted
+            if let primary = AssetVersionStackMetadata.resolvePrimaryAsset(in: sorted) {
+                representativeByGroup[gid] = primary
+            }
+        }
+
+        var emittedGroups = Set<UUID>()
+        var folded: [AssetRecord] = []
+        folded.reserveCapacity(raw.count)
+        for item in raw {
+            if let gid = item.richMetadata?.versionStack?.groupID {
+                if emittedGroups.insert(gid).inserted, let rep = representativeByGroup[gid] {
+                    folded.append(rep)
+                }
+            } else {
+                folded.append(item)
+            }
+        }
+        return (folded, sortedGroups)
+    }
+
+    private func applyUnfoldedAssets(_ raw: [AssetRecord], mergeIntoStackLookup: Bool = true) {
+        unfoldedAssets = raw
+        let (folded, groups) = Self.foldVersionStacks(raw)
+        if mergeIntoStackLookup {
+            for (gid, members) in groups {
+                if let existing = stackMembersByGroupID[gid], existing.count > members.count {
+                    var combinedByID = Dictionary(uniqueKeysWithValues: existing.map { ($0.id, $0) })
+                    for m in members { combinedByID[m.id] = m }
+                    let merged = AssetVersionStackMetadata.sortedVersions(Array(combinedByID.values.filter { !$0.isTrashed || scope == .trash }))
+                    stackMembersByGroupID[gid] = merged
+                } else {
+                    stackMembersByGroupID[gid] = members
+                }
+            }
+        }
+        // Ensure representative reflects full known stack primary when available
+        let resolvedFolded: [AssetRecord] = folded.map { item in
+            guard !item.isTrashed,
+                  let gid = item.richMetadata?.versionStack?.groupID,
+                  let fullMembers = stackMembersByGroupID[gid],
+                  let primary = AssetVersionStackMetadata.resolvePrimaryAsset(in: fullMembers) else {
+                return item
+            }
+            return primary
+        }
+        if assets != resolvedFolded {
+            assets = resolvedFolded
+        }
+    }
+
+    private func applyUnfoldedInboxAssets(_ raw: [AssetRecord]) {
+        unfoldedInboxAssets = raw
+        let (folded, groups) = Self.foldVersionStacks(raw)
+        for (gid, members) in groups {
+            if let existing = stackMembersByGroupID[gid] {
+                var combinedByID = Dictionary(uniqueKeysWithValues: existing.map { ($0.id, $0) })
+                for m in members { combinedByID[m.id] = m }
+                stackMembersByGroupID[gid] = AssetVersionStackMetadata.sortedVersions(Array(combinedByID.values))
+            } else {
+                stackMembersByGroupID[gid] = members
+            }
+        }
+        if inboxAssets != folded {
+            inboxAssets = folded
+        }
+    }
+
+    private func recomputeFoldedLists() {
+        applyUnfoldedInboxAssets(unfoldedInboxAssets)
+        applyUnfoldedAssets(unfoldedAssets)
+    }
+
+    func stackMembers(for asset: AssetRecord) -> [AssetRecord] {
+        guard let gid = asset.richMetadata?.versionStack?.groupID else {
+            return [asset]
+        }
+        if let members = stackMembersByGroupID[gid], !members.isEmpty {
+            if members.contains(where: { $0.id == asset.id }) {
+                return members
+            }
+            return AssetVersionStackMetadata.sortedVersions(members + [asset])
+        }
+        return [asset]
+    }
+
+    func stackMembers(groupID: UUID) -> [AssetRecord] {
+        stackMembersByGroupID[groupID] ?? []
+    }
+
+    func primaryVersionAsset(for asset: AssetRecord) -> AssetRecord {
+        let members = stackMembers(for: asset)
+        return AssetVersionStackMetadata.resolvePrimaryAsset(in: members) ?? asset
+    }
+
+    func newerThanPrimaryCount(for asset: AssetRecord) -> Int {
+        AssetVersionStackMetadata.newerThanPrimaryCount(in: stackMembers(for: asset))
+    }
+
+    /// Anti-Mis-Send Guarantee: resolves the canonical `isPinnedPrimary` version's original file URL
+    /// (with clean human-readable `fileName` staging so sharing to WeChat iOS never sends an unreviewed draft
+    /// or an opaque hash filename). Pass `preferExactAsset: true` ONLY when explicitly exporting a specific version.
+    func shareableOriginalURL(for asset: AssetRecord, preferExactAsset: Bool = false) async -> URL? {
+        let target = preferExactAsset ? asset : primaryVersionAsset(for: asset)
+        let pendingNewer = preferExactAsset ? 0 : newerThanPrimaryCount(for: asset)
+
+        let rawURL: URL?
+        if let orig = try? await engine.originalURL(for: target.id) {
+            rawURL = orig
+        } else {
+            rawURL = await engine.thumbnailURL(for: target.id, tier: .preview1400)
+        }
+        guard let sourceURL = rawURL else { return nil }
+
+        let exportURL = Self.stageHumanReadableExportURL(sourceURL: sourceURL, desiredFileName: target.fileName) ?? sourceURL
+        if pendingNewer > 0, let verTag = target.richMetadata?.versionStack?.displayVersionTag {
+            showToast("已锁定发送主版本 \(verTag)（自动防误发未审草稿）", tone: .info)
+        }
+        return exportURL
+    }
+
+    nonisolated static func stageHumanReadableExportURL(sourceURL: URL, desiredFileName: String) -> URL? {
+        let trimmed = desiredFileName
+            .replacingOccurrences(of: "/", with: "-")
+            .replacingOccurrences(of: ":", with: "-")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return sourceURL }
+        let ext = sourceURL.pathExtension
+        let finalName: String
+        if (trimmed as NSString).pathExtension.isEmpty && !ext.isEmpty {
+            finalName = "\(trimmed).\(ext)"
+        } else {
+            finalName = trimmed
+        }
+        if sourceURL.lastPathComponent == finalName {
+            return sourceURL
+        }
+        let dir = FileManager.default.temporaryDirectory
+            .appending(path: "CharkleShareExport", directoryHint: .isDirectory)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let dest = dir.appending(path: finalName, directoryHint: .notDirectory)
+        try? FileManager.default.removeItem(at: dest)
+        if (try? FileManager.default.linkItem(at: sourceURL, to: dest)) != nil {
+            return dest
+        }
+        if (try? FileManager.default.copyItem(at: sourceURL, to: dest)) != nil {
+            return dest
+        }
+        return sourceURL
     }
 
     var currentScopeTitle: String {
@@ -313,6 +613,32 @@ final class MobileAppStore {
     }
 
     func handleIncomingURL(_ url: URL) async {
+        if url.isFileURL {
+            if !hasBootstrapped {
+                await bootstrap()
+            }
+            let scoped = url.startAccessingSecurityScopedResource()
+            defer {
+                if scoped { url.stopAccessingSecurityScopedResource() }
+            }
+            let tempDir = FileManager.default.temporaryDirectory
+                .appending(path: "charkle-openin-\(UUID().uuidString)", directoryHint: .isDirectory)
+            try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: tempDir) }
+
+            let cleanName = url.lastPathComponent.isEmpty ? "导入文档.bin" : url.lastPathComponent
+            let stagedURL = tempDir.appending(path: cleanName)
+            if (try? FileManager.default.copyItem(at: url, to: stagedURL)) != nil {
+                _ = await ingestInputs([.fileURL(stagedURL)], targetFolderID: activeFolderIDForCapture)
+            } else if let data = try? Data(contentsOf: url),
+                      (try? data.write(to: stagedURL, options: .atomic)) != nil {
+                _ = await ingestInputs([.fileURL(stagedURL)], targetFolderID: activeFolderIDForCapture)
+            } else {
+                showToast("无法读取外部传入的文件", tone: .error)
+            }
+            return
+        }
+
         guard url.scheme?.lowercased() == MobileLibraryContainer.deepLinkScheme else { return }
         if !hasBootstrapped {
             await loadSyncAndStorageState()
@@ -364,24 +690,25 @@ final class MobileAppStore {
         showToast("正在导入系统分享内容…", tone: .info)
         defer { isIngesting = false }
 
-        var importedTotal = 0
+        var allImported: [AssetRecord] = []
         for entry in batchPayloads {
-            let count = await ingestSingleSharePayload(
+            let created = await ingestSingleSharePayload(
                 entry.payload,
                 stagedFilesDirectory: entry.dir,
                 embeddedFiles: [:]
             )
-            importedTotal += count
+            allImported.append(contentsOf: created)
             try? FileManager.default.removeItem(at: entry.fileURL)
             if let stagedName = entry.payload.stagedFileName {
                 try? FileManager.default.removeItem(at: entry.dir.appending(path: stagedName))
             }
         }
 
-        if importedTotal > 0 {
+        if !allImported.isEmpty {
             await reloadAll()
+            await evaluateStackCandidates(for: allImported)
             MobileHaptics.success()
-            showToast("已接收来自系统分享的 \(importedTotal) 项素材", tone: .success)
+            showToast("已接收来自系统分享的 \(allImported.count) 项素材", tone: .success)
             if hasConnectedCloudBackend {
                 Task { await self.syncNow(quiet: true) }
             }
@@ -398,19 +725,21 @@ final class MobileAppStore {
         showToast("正在解析并导入分享内容…", tone: .info)
         defer { isIngesting = false }
 
-        var importedTotal = 0
+        var allImported: [AssetRecord] = []
         for payload in payloads {
-            importedTotal += await ingestSingleSharePayload(
+            let created = await ingestSingleSharePayload(
                 payload,
                 stagedFilesDirectory: stagedFilesDirectory,
                 embeddedFiles: embeddedFiles
             )
+            allImported.append(contentsOf: created)
         }
 
-        if importedTotal > 0 {
+        if !allImported.isEmpty {
             await reloadAll()
+            await evaluateStackCandidates(for: allImported)
             MobileHaptics.success()
-            showToast("已接收来自系统分享的 \(importedTotal) 项素材", tone: .success)
+            showToast("已接收来自系统分享的 \(allImported.count) 项素材", tone: .success)
             if hasConnectedCloudBackend {
                 Task { await self.syncNow(quiet: true) }
             }
@@ -421,29 +750,45 @@ final class MobileAppStore {
         _ payload: PendingSharePayload,
         stagedFilesDirectory: URL?,
         embeddedFiles: [String: Data]
-    ) async -> Int {
+    ) async -> [AssetRecord] {
         var input: CaptureInput?
-        var tempFileToCleanup: URL?
+        var tempDirToCleanup: URL?
         defer {
-            if let tempFileToCleanup {
-                try? FileManager.default.removeItem(at: tempFileToCleanup)
+            if let tempDirToCleanup {
+                try? FileManager.default.removeItem(at: tempDirToCleanup)
             }
         }
 
         switch payload.kind {
         case .file:
             if let name = payload.stagedFileName {
+                let desiredFileName: String = {
+                    if let orig = payload.originalFileName?.trimmingCharacters(in: .whitespacesAndNewlines),
+                       !orig.isEmpty {
+                        return orig.replacingOccurrences(of: "/", with: "-")
+                    }
+                    return name
+                }()
+                let tempSubdir = FileManager.default.temporaryDirectory
+                    .appending(path: "share-import-\(UUID().uuidString)", directoryHint: .isDirectory)
+                try? FileManager.default.createDirectory(at: tempSubdir, withIntermediateDirectories: true)
+                tempDirToCleanup = tempSubdir
+
                 if let dir = stagedFilesDirectory {
                     let candidate = dir.appending(path: name)
                     if FileManager.default.fileExists(atPath: candidate.path) {
-                        input = .fileURL(candidate)
+                        let namedCopy = tempSubdir.appending(path: desiredFileName)
+                        if (try? FileManager.default.copyItem(at: candidate, to: namedCopy)) != nil {
+                            input = .fileURL(namedCopy)
+                        } else {
+                            input = .fileURL(candidate)
+                        }
                     }
                 }
                 if input == nil, let bytes = embeddedFiles[name] {
-                    let tempURL = FileManager.default.temporaryDirectory.appending(path: "share-import-\(UUID().uuidString)-\(name)")
-                    if (try? bytes.write(to: tempURL, options: .atomic)) != nil {
-                        input = .fileURL(tempURL)
-                        tempFileToCleanup = tempURL
+                    let namedTempURL = tempSubdir.appending(path: desiredFileName)
+                    if (try? bytes.write(to: namedTempURL, options: .atomic)) != nil {
+                        input = .fileURL(namedTempURL)
                     }
                 }
             }
@@ -465,18 +810,20 @@ final class MobileAppStore {
             }
         }
 
-        guard let input else { return 0 }
+        guard let input else { return [] }
         do {
-            let imported = try await engine.ingest([input], targetFolderID: payload.targetFolderID, targetBoardID: nil)
+            var imported = try await engine.ingest([input], targetFolderID: payload.targetFolderID, targetBoardID: nil)
             if !payload.tags.isEmpty, !imported.isEmpty {
-                _ = try? await engine.updateAssets(
+                if let patched = try? await engine.updateAssets(
                     AssetBatchPatch(assetIDs: imported.map(\.id), addTags: payload.tags)
-                )
+                ) {
+                    imported = patched
+                }
             }
-            return imported.count
+            return imported
         } catch {
             showToast("导入分享内容失败：\(error.localizedDescription)", tone: .error)
-            return 0
+            return []
         }
     }
 
@@ -638,9 +985,7 @@ final class MobileAppStore {
                         semantic: scopedSemantic,
                         prioritizeSemantic: report.usedTypeSafeJev || report.usedCloudEmbedding
                     )
-                    if self.assets != merged {
-                        self.assets = merged
-                    }
+                    self.applyUnfoldedAssets(merged)
                     return report
                 } catch {
                     return nil
@@ -713,9 +1058,7 @@ final class MobileAppStore {
                     semantic: scopedSemantic,
                     prioritizeSemantic: report.usedTypeSafeJev || report.usedCloudEmbedding
                 )
-                if self.assets != merged {
-                    self.assets = merged
-                }
+                self.applyUnfoldedAssets(merged)
                 return report
             } catch {
                 return nil
@@ -762,16 +1105,20 @@ final class MobileAppStore {
         async let fetchedSmart = (try? engine.fetchSmartFolders()) ?? []
         async let fetchedBoards = (try? engine.fetchBoards()) ?? []
         async let fetchedTags = (try? engine.fetchTagCounts()) ?? []
-        async let fetchedInbox = (try? engine.inboxCount()) ?? 0
         async let fetchedInboxItems = (try? engine.fetchAssets(matching: FilterCriteria(onlyInbox: true))) ?? []
+        async let fetchedAllForStacks = (try? engine.fetchAssets(matching: FilterCriteria(includeSubfolders: true))) ?? []
         async let fetchedStats = engine.cacheStats()
 
         folders = await fetchedFolders
         smartFolders = await fetchedSmart
         boards = await fetchedBoards
         tagCounts = await fetchedTags
-        inboxCount = await fetchedInbox
-        inboxAssets = await fetchedInboxItems
+        let allActive = await fetchedAllForStacks
+        let (_, globalGroups) = Self.foldVersionStacks(allActive)
+        stackMembersByGroupID = globalGroups
+        let rawInbox = await fetchedInboxItems
+        applyUnfoldedInboxAssets(rawInbox)
+        inboxCount = inboxAssets.count
         cacheStats = await fetchedStats
         publishSharedFoldersSnapshot()
         await reloadAssets()
@@ -808,7 +1155,7 @@ final class MobileAppStore {
             loaded = (try? await engine.fetchAssets(matching: query)) ?? []
         }
         guard gen == reloadAssetsGeneration else { return }
-        assets = loaded
+        applyUnfoldedAssets(loaded)
 
         let trimmedQuery = query.searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmedQuery.isEmpty, let delayMs = semanticEnhancementDelayMs {
@@ -983,6 +1330,8 @@ final class MobileAppStore {
                     showToast("已收藏 \(imported.count) 项素材", tone: .success)
                 }
             }
+
+            await evaluateStackCandidates(for: imported)
 
             if hasConnectedCloudBackend {
                 Task { await self.syncNow(quiet: true) }
@@ -1633,22 +1982,278 @@ final class MobileAppStore {
     }
 
     func copyAssetToPasteboard(_ asset: AssetRecord) async {
-        if asset.isExternalWebLink, let url = asset.externalWebURL {
+        let target = primaryVersionAsset(for: asset)
+        if target.isExternalWebLink, let url = target.externalWebURL {
             UIPasteboard.general.url = url
             MobileHaptics.light()
             showToast("已拷贝网页链接", tone: .success)
             return
         }
-        if let image = await thumbnails.loadOriginalImage(for: asset) {
+        if target.mediaKind == .document,
+           let fileURL = await shareableOriginalURL(for: target, preferExactAsset: true) {
+            UIPasteboard.general.url = fileURL
+            MobileHaptics.light()
+            let verSuffix = target.richMetadata?.versionStack.map { "（主版 \($0.displayVersionTag)）" } ?? ""
+            showToast("已拷贝文档「\(target.title)」\(verSuffix)", tone: .success)
+            return
+        }
+        if let image = await thumbnails.loadOriginalImage(for: target) {
             UIPasteboard.general.image = image
             MobileHaptics.light()
-            showToast("已拷贝图片到剪贴板", tone: .success)
-        } else if let urlStr = asset.sourceURL, let url = URL(string: urlStr) {
+            let verSuffix = target.richMetadata?.versionStack.map { "（主版 \($0.displayVersionTag)）" } ?? ""
+            showToast("已拷贝图片\(verSuffix)到剪贴板", tone: .success)
+        } else if let fileURL = await shareableOriginalURL(for: target, preferExactAsset: true) {
+            UIPasteboard.general.url = fileURL
+            MobileHaptics.light()
+            showToast("已拷贝文件到剪贴板", tone: .success)
+        } else if let urlStr = target.sourceURL, let url = URL(string: urlStr) {
             UIPasteboard.general.url = url
             MobileHaptics.light()
             showToast("已拷贝来源链接", tone: .success)
         } else {
             showToast("暂无法拷贝该素材", tone: .warning)
+        }
+    }
+
+    // MARK: - Version Stack Candidate Detection & Mutations
+
+    func evaluateStackCandidates(for importedAssets: [AssetRecord]) async {
+        for item in importedAssets {
+            guard item.richMetadata?.versionStack == nil,
+                  !dismissedStackPromptAssetIDs.contains(item.id),
+                  !pendingStackPrompts.contains(where: { $0.id == item.id }) else {
+                continue
+            }
+            if let candidate = try? await engine.detectVersionStackCandidate(forAssetID: item.id) {
+                withAnimation(MobileMotion.enterSm) {
+                    if !pendingStackPrompts.contains(where: { $0.id == item.id }) {
+                        pendingStackPrompts.append(
+                            MobilePendingStackPrompt(importedAsset: item, candidate: candidate)
+                        )
+                    }
+                }
+                MobileHaptics.selection()
+            }
+        }
+    }
+
+    func dismissStackPrompt(_ promptID: UUID) {
+        dismissedStackPromptAssetIDs.insert(promptID)
+        withAnimation(MobileMotion.exitSm) {
+            pendingStackPrompts.removeAll { $0.id == promptID }
+        }
+    }
+
+    func confirmStackPrompt(
+        _ prompt: MobilePendingStackPrompt,
+        editorName: String?,
+        changeNote: String?,
+        pinAsPrimary: Bool = false
+    ) async {
+        withAnimation(MobileMotion.exitSm) {
+            pendingStackPrompts.removeAll { $0.id == prompt.id }
+        }
+        await joinVersionStack(
+            assetID: prompt.importedAsset.id,
+            targetAssetOrGroupID: prompt.candidate.existingStackExists
+                ? prompt.candidate.targetGroupID
+                : prompt.candidate.targetAssetID,
+            editorName: editorName,
+            changeNote: changeNote,
+            pinAsPrimary: pinAsPrimary,
+            adoptTargetFolder: true
+        )
+    }
+
+    func importDroppedURLs(
+        _ urls: [URL],
+        ontoStackTargetID: UUID? = nil,
+        targetFolderID: UUID? = nil
+    ) async {
+        guard !urls.isEmpty else { return }
+        var scopedURLs: [URL] = []
+        for url in urls where url.isFileURL {
+            if url.startAccessingSecurityScopedResource() {
+                scopedURLs.append(url)
+            }
+        }
+        defer {
+            for url in scopedURLs {
+                url.stopAccessingSecurityScopedResource()
+            }
+        }
+
+        let tempDir = FileManager.default.temporaryDirectory
+            .appending(path: "charkle-drop-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        var inputs: [CaptureInput] = []
+        for url in urls {
+            if url.isFileURL {
+                let copyDest = tempDir.appending(path: url.lastPathComponent)
+                if (try? FileManager.default.copyItem(at: url, to: copyDest)) != nil {
+                    inputs.append(.fileURL(copyDest))
+                } else {
+                    inputs.append(.fileURL(url))
+                }
+            } else {
+                inputs.append(.webURL(url, title: nil, notes: nil))
+            }
+        }
+        guard !inputs.isEmpty else { return }
+
+        let effectiveFolder = targetFolderID ?? activeFolderIDForCapture
+        if let ontoStackTargetID {
+            do {
+                isIngesting = true
+                defer { isIngesting = false }
+                let created = try await engine.ingest(inputs, targetFolderID: effectiveFolder, targetBoardID: nil)
+                for item in created {
+                    dismissedStackPromptAssetIDs.insert(item.id)
+                    _ = try await engine.manageVersionStack(
+                        .join(
+                            assetID: item.id,
+                            targetAssetOrGroupID: ontoStackTargetID,
+                            adoptTargetFolder: true
+                        )
+                    )
+                }
+                await reloadAll()
+                MobileHaptics.success()
+                showToast("已将 \(created.count) 项直接叠入版本叠", tone: .success)
+                if hasConnectedCloudBackend {
+                    Task { await self.syncNow(quiet: true) }
+                }
+            } catch {
+                MobileHaptics.error()
+                showToast("拖放叠入失败：\(error.localizedDescription)", tone: .error)
+            }
+        } else {
+            _ = await ingestInputs(inputs, targetFolderID: effectiveFolder)
+        }
+    }
+
+    func joinVersionStack(
+        assetID: UUID,
+        targetAssetOrGroupID: UUID,
+        editorName: String? = nil,
+        changeNote: String? = nil,
+        pinAsPrimary: Bool = false,
+        adoptTargetFolder: Bool = true
+    ) async {
+        do {
+            let updated = try await engine.manageVersionStack(
+                .join(
+                    assetID: assetID,
+                    targetAssetOrGroupID: targetAssetOrGroupID,
+                    editorName: editorName,
+                    changeNote: changeNote,
+                    pinAsPrimary: pinAsPrimary,
+                    adoptTargetFolder: adoptTargetFolder
+                )
+            )
+            await reloadAll()
+            MobileHaptics.success()
+            let joinedVer = updated.first(where: { $0.id == assetID })?.richMetadata?.versionStack?.displayVersionTag ?? "新版"
+            showToast(
+                pinAsPrimary
+                    ? "已叠入为 \(joinedVer) 并设为主版本"
+                    : "已叠入为 \(joinedVer)（原主版本锁定不变）",
+                tone: .success
+            )
+            if hasConnectedCloudBackend {
+                Task { await self.syncNow(quiet: true) }
+            }
+        } catch {
+            MobileHaptics.error()
+            showToast("合并版本叠失败：\(error.localizedDescription)", tone: .error)
+        }
+    }
+
+    func createVersionStack(
+        assetIDs: [UUID],
+        primaryAssetID: UUID? = nil,
+        editorName: String? = nil,
+        changeNote: String? = nil
+    ) async {
+        guard assetIDs.count >= 2 else { return }
+        do {
+            _ = try await engine.manageVersionStack(
+                .create(
+                    assetIDs: assetIDs,
+                    primaryAssetID: primaryAssetID,
+                    editorName: editorName,
+                    changeNote: changeNote
+                )
+            )
+            await reloadAll()
+            MobileHaptics.success()
+            showToast("已将 \(assetIDs.count) 项合并为版本叠", tone: .success)
+            if hasConnectedCloudBackend {
+                Task { await self.syncNow(quiet: true) }
+            }
+        } catch {
+            MobileHaptics.error()
+            showToast("创建版本叠失败：\(error.localizedDescription)", tone: .error)
+        }
+    }
+
+    func setPrimaryVersion(assetID: UUID) async {
+        do {
+            let updated = try await engine.manageVersionStack(.setPrimary(assetID: assetID))
+            await reloadAll()
+            MobileHaptics.success()
+            let verTag = updated.first(where: { $0.id == assetID })?.richMetadata?.versionStack?.displayVersionTag ?? "当前版"
+            showToast("已将 \(verTag) 锁定为对外主版本（分享与导出均指向此版）", tone: .success)
+            if hasConnectedCloudBackend {
+                Task { await self.syncNow(quiet: true) }
+            }
+        } catch {
+            MobileHaptics.error()
+            showToast("设置主版本失败：\(error.localizedDescription)", tone: .error)
+        }
+    }
+
+    func unstackAsset(assetID: UUID) async {
+        do {
+            _ = try await engine.manageVersionStack(.unstack(assetID: assetID))
+            await reloadAll()
+            MobileHaptics.light()
+            showToast("已从版本叠拆出为独立素材", tone: .info)
+            if hasConnectedCloudBackend {
+                Task { await self.syncNow(quiet: true) }
+            }
+        } catch {
+            MobileHaptics.error()
+            showToast("拆出版本叠失败：\(error.localizedDescription)", tone: .error)
+        }
+    }
+
+    func updateVersionStackMetadata(
+        assetID: UUID,
+        versionLabel: String?,
+        editorName: String?,
+        changeNote: String?
+    ) async {
+        do {
+            _ = try await engine.manageVersionStack(
+                .updateMeta(
+                    assetID: assetID,
+                    versionLabel: versionLabel,
+                    editorName: editorName,
+                    changeNote: changeNote
+                )
+            )
+            await reloadAll()
+            MobileHaptics.success()
+            showToast("已更新版本信息", tone: .success)
+            if hasConnectedCloudBackend {
+                Task { await self.syncNow(quiet: true) }
+            }
+        } catch {
+            MobileHaptics.error()
+            showToast("更新版本信息失败：\(error.localizedDescription)", tone: .error)
         }
     }
 
@@ -1697,7 +2302,16 @@ final class MobileAppStore {
         scope = targetScope
         await reloadAssets()
 
-        if !assets.contains(where: { $0.id == assetID }) {
+        let targetGroupID = asset.richMetadata?.versionStack?.groupID
+        let matchesTarget: (AssetRecord) -> Bool = { item in
+            if item.id == assetID { return true }
+            if let targetGroupID, item.richMetadata?.versionStack?.groupID == targetGroupID {
+                return true
+            }
+            return false
+        }
+
+        if !assets.contains(where: matchesTarget) {
             criteria.searchQuery = ""
             criteria.clearVisualFilters()
             criteria.tags.removeAll()
@@ -1711,21 +2325,22 @@ final class MobileAppStore {
             await reloadAssets(semanticEnhancementDelayMs: nil)
         }
 
-        if !assets.contains(where: { $0.id == assetID }), targetScope != .allItems {
+        if !assets.contains(where: matchesTarget), targetScope != .allItems {
             scope = .allItems
             label = "全部素材"
             await reloadAssets()
         }
 
-        selectedAssetID = assetID
-        pendingRevealAssetID = assetID
-        highlightedAssetID = assetID
+        let visibleCardID = assets.first(where: matchesTarget)?.id ?? assetID
+        selectedAssetID = visibleCardID
+        pendingRevealAssetID = visibleCardID
+        highlightedAssetID = visibleCardID
         highlightDismissTask?.cancel()
         highlightDismissTask = Task {
             try? await Task.sleep(for: .milliseconds(2600))
             guard !Task.isCancelled else { return }
             withAnimation(MobileMotion.exitSm) {
-                if self.highlightedAssetID == assetID {
+                if self.highlightedAssetID == visibleCardID {
                     self.highlightedAssetID = nil
                 }
             }

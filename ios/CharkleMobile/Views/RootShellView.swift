@@ -58,6 +58,8 @@ struct RootShellView: View {
         let origin: PreviewZoomOrigin
         let initialInspectorTab: AssetDetailView.DetailInspectorTab
         let openInspectorImmediately: Bool
+        let initialDocumentMode: MobileDocumentStageMode
+        let initialDiffComparePair: (baseID: UUID, targetID: UUID)?
     }
 
     @State private var detailPresentation: DetailPresentation?
@@ -90,6 +92,18 @@ struct RootShellView: View {
                 }
             }
 
+            if let firstPrompt = store.pendingStackPrompts.first {
+                MobileVersionStackPromptBanner(store: store, prompt: firstPrompt)
+                    .padding(.horizontal, MobileTheme.Space.md)
+                    .padding(
+                        .bottom,
+                        (horizontalSizeClass == .regular ? 24 : (showsCompactBottomBar ? 82 : 24))
+                            + (store.toast != nil ? 58 : 0)
+                    )
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                    .zIndex(95)
+            }
+
             if let toast = store.toast {
                 toastBanner(toast)
                     .padding(.horizontal, MobileTheme.Space.lg)
@@ -98,6 +112,10 @@ struct RootShellView: View {
                     .zIndex(100)
             }
         }
+        .animation(
+            MobileMotion.accessible(MobileMotion.settleStrong, reduced: reduceMotion),
+            value: store.pendingStackPrompts.first?.id
+        )
         .sheet(isPresented: $isCapturePresented) {
             CaptureSheetView(store: store)
                 .presentationDetents([.medium, .large])
@@ -170,6 +188,8 @@ struct RootShellView: View {
                 origin: presentation.origin,
                 initialInspectorTab: presentation.initialInspectorTab,
                 openInspectorImmediately: presentation.openInspectorImmediately,
+                initialDocumentMode: presentation.initialDocumentMode,
+                initialDiffComparePair: presentation.initialDiffComparePair,
                 zoomNamespace: previewZoomNamespace,
                 onFilterByColor: { hex in
                     detailPresentation = nil
@@ -205,7 +225,7 @@ struct RootShellView: View {
         }
     }
 
-    // MARK: - iPad Regular Layout
+    // MARK: - iPad Regular Layout (Apple Photos-Aligned Full-Bleed Liquid Glass + Adaptive Sidebar)
 
     private var regularIPadShell: some View {
         NavigationSplitView(columnVisibility: $splitVisibility) {
@@ -218,7 +238,7 @@ struct RootShellView: View {
                 onCreateMoodboard: { isCreateBoardSheetPresented = true }
             )
             .navigationTitle("Charkle")
-            .navigationSplitViewColumnWidth(min: 248, ideal: 280, max: 340)
+            .navigationSplitViewColumnWidth(min: 268, ideal: 296, max: 340)
         } detail: {
             NavigationStack {
                 Group {
@@ -228,9 +248,28 @@ struct RootShellView: View {
                             store: store,
                             zoomNamespace: previewZoomNamespace,
                             onOpenAsset: { asset, origin in openAsset(asset, from: origin) },
+                            onOpenDiff: { asset, baseID, targetID, origin in
+                                openAssetDiff(asset, baseID: baseID, targetID: targetID, from: origin)
+                            },
                             onFindSimilar: { asset, origin in openAsset(asset, from: origin, inspectorTab: .similar, openInspector: true) },
                             onOpenCapture: { isCapturePresented = true }
                         )
+                        .navigationTitle("收件箱")
+                        .navigationBarTitleDisplayMode(.inline)
+                        .toolbar {
+                            ToolbarItemGroup(placement: .topBarTrailing) {
+                                Button {
+                                    Task { await store.captureFromPasteboard() }
+                                } label: {
+                                    Label("粘贴收藏", systemImage: "doc.on.clipboard")
+                                }
+                                Button {
+                                    isCapturePresented = true
+                                } label: {
+                                    Label("采集素材", systemImage: "plus")
+                                }
+                            }
+                        }
                     case .moodboardsHome:
                         MoodboardsListView(
                             store: store,
@@ -258,71 +297,86 @@ struct RootShellView: View {
                         MasonryGalleryView(
                             store: store,
                             isCompact: false,
-                            showPhotosFloatingHeader: false,
+                            showPhotosFloatingHeader: true,
                             focusSearchTrigger: iPadSearchFocusTrigger,
                             zoomNamespace: previewZoomNamespace,
                             zoomOrigin: .library,
                             onOpenAsset: { openAsset($0, from: .library) },
+                            onOpenDiff: { asset, baseID, targetID in
+                                openAssetDiff(asset, baseID: baseID, targetID: targetID, from: .library)
+                            },
                             onFindSimilar: { openAsset($0, from: .library, inspectorTab: .similar, openInspector: true) },
                             onOpenCapture: { isCapturePresented = true },
-                            onOpenSyncSettings: { openIPadSettings(jumpToSync: true) },
-                            onOpenFolders: nil
-                        )
-                    }
-                }
-                .navigationTitle(store.currentScopeTitle)
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar {
-                    if !isMoodboardScope(store.scope) && store.scope != .pinterest {
-                        ToolbarItemGroup(placement: .topBarTrailing) {
-                            Button {
-                                iPadSearchFocusTrigger &+= 1
-                            } label: {
-                                Label("搜索素材", systemImage: "magnifyingglass")
-                            }
-                            .keyboardShortcut("f", modifiers: .command)
-
-                            Button {
+                            onOpenSyncSettings: { openIPadSettings(jumpToSync: false) },
+                            onOpenFolders: nil,
+                            onToggleSidebar: {
+                                withAnimation(MobileMotion.drawerEase) {
+                                    splitVisibility = (splitVisibility == .detailOnly) ? .all : .detailOnly
+                                }
+                            },
+                            isSidebarVisible: splitVisibility != .detailOnly,
+                            onPasteCapture: {
                                 Task { await store.captureFromPasteboard() }
-                            } label: {
-                                Label("粘贴收藏", systemImage: "doc.on.clipboard")
-                            }
-                            .keyboardShortcut("v", modifiers: [.command, .shift])
-
-                            Button {
-                                isCapturePresented = true
-                            } label: {
-                                Label("采集素材", systemImage: "plus")
-                            }
-                            .keyboardShortcut("n", modifiers: .command)
-
-                            Button {
+                            },
+                            onSyncNow: {
                                 if store.hasConnectedCloudBackend {
                                     Task { await store.syncNow(quiet: false) }
                                 } else {
                                     openIPadSettings(jumpToSync: true)
                                 }
-                            } label: {
-                                if store.syncStatus.isSyncing || store.isSyncing {
-                                    ProgressView()
-                                        .controlSize(.small)
-                                } else {
-                                    Label(
-                                        store.hasConnectedCloudBackend ? "同步" : "配置云同步",
-                                        systemImage: store.hasConnectedCloudBackend ? "arrow.triangle.2.circlepath" : "icloud.slash"
-                                    )
-                                }
                             }
-                            .keyboardShortcut("r", modifiers: .command)
-
-                            Button {
-                                openIPadSettings(jumpToSync: false)
-                            } label: {
-                                Label("设置", systemImage: "gearshape")
-                            }
-                        }
+                        )
+                        .toolbar(.hidden, for: .navigationBar)
                     }
                 }
+            }
+            .background {
+                // Keep hardware keyboard shortcuts active even when the floating gallery header retracts
+                HStack(spacing: 0) {
+                    Button("") {
+                        iPadSearchFocusTrigger &+= 1
+                    }
+                    .keyboardShortcut("f", modifiers: .command)
+
+                    Button("") {
+                        Task { await store.captureFromPasteboard() }
+                    }
+                    .keyboardShortcut("v", modifiers: [.command, .shift])
+
+                    Button("") {
+                        isCapturePresented = true
+                    }
+                    .keyboardShortcut("n", modifiers: .command)
+
+                    Button("") {
+                        if store.hasConnectedCloudBackend {
+                            Task { await store.syncNow(quiet: false) }
+                        } else {
+                            openIPadSettings(jumpToSync: true)
+                        }
+                    }
+                    .keyboardShortcut("r", modifiers: .command)
+
+                    Button("") {
+                        withAnimation(MobileMotion.drawerEase) {
+                            splitVisibility = (splitVisibility == .detailOnly) ? .all : .detailOnly
+                        }
+                    }
+                    .keyboardShortcut("s", modifiers: [.command, .option])
+
+                    Button("") {
+                        store.setGalleryLayoutMode(.verticalMasonry, rememberForCurrentScope: true)
+                    }
+                    .keyboardShortcut("1", modifiers: .command)
+
+                    Button("") {
+                        store.setGalleryLayoutMode(.compactList, rememberForCurrentScope: true)
+                    }
+                    .keyboardShortcut("5", modifiers: .command)
+                }
+                .opacity(0.001)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
             }
         }
         .navigationSplitViewStyle(.balanced)
@@ -342,6 +396,9 @@ struct RootShellView: View {
                         zoomNamespace: previewZoomNamespace,
                         zoomOrigin: .library,
                         onOpenAsset: { openAsset($0, from: .library) },
+                        onOpenDiff: { asset, baseID, targetID in
+                            openAssetDiff(asset, baseID: baseID, targetID: targetID, from: .library)
+                        },
                         onFindSimilar: { openAsset($0, from: .library, inspectorTab: .similar, openInspector: true) },
                         onOpenCapture: { isCapturePresented = true },
                         onOpenSyncSettings: { openCompactSettings(jumpToSync: true) },
@@ -358,6 +415,9 @@ struct RootShellView: View {
                             store: store,
                             zoomNamespace: previewZoomNamespace,
                             onOpenAsset: { asset, origin in openAsset(asset, from: origin) },
+                            onOpenDiff: { asset, baseID, targetID, origin in
+                                openAssetDiff(asset, baseID: baseID, targetID: targetID, from: origin)
+                            },
                             onFindSimilar: { asset, origin in openAsset(asset, from: origin, inspectorTab: .similar, openInspector: true) },
                             onOpenCapture: { isCapturePresented = true }
                         )
@@ -629,30 +689,50 @@ struct RootShellView: View {
         _ asset: AssetRecord,
         from origin: PreviewZoomOrigin,
         inspectorTab: AssetDetailView.DetailInspectorTab = .info,
-        openInspector: Bool = false
+        openInspector: Bool = false,
+        documentMode: MobileDocumentStageMode = .read,
+        diffComparePair: (baseID: UUID, targetID: UUID)? = nil
     ) {
         Task { await store.engine.markAssetOpened(id: asset.id) }
         let hasRichWebPreview = asset.hasExtractableLinkMedia || (asset.richMetadata?.webPage?.hasRichSummary == true)
-        if !openInspector, asset.isExternalWebLink, !hasRichWebPreview, let url = asset.externalWebURL {
+        if !openInspector, documentMode == .read, asset.isExternalWebLink, !hasRichWebPreview, let url = asset.externalWebURL {
             UIApplication.shared.open(url)
             return
         }
+        let repID = store.primaryVersionAsset(for: asset).id
         let contextAssets: [AssetRecord]
         if (origin == .inboxTriage || origin == .inboxGrid),
-           store.inboxAssets.contains(where: { $0.id == asset.id }) {
-            contextAssets = store.inboxAssets
-        } else if store.assets.contains(where: { $0.id == asset.id }) {
-            contextAssets = store.assets
+           store.inboxAssets.contains(where: { $0.id == asset.id || $0.id == repID }) {
+            contextAssets = store.inboxAssets.map { ($0.id == repID && $0.id != asset.id) ? asset : $0 }
+        } else if store.assets.contains(where: { $0.id == asset.id || $0.id == repID }) {
+            contextAssets = store.assets.map { ($0.id == repID && $0.id != asset.id) ? asset : $0 }
         } else {
             contextAssets = [asset]
         }
         detailPresentation = DetailPresentation(
-            id: asset.id,
+            id: UUID(),
             initialAsset: asset,
             allAssets: contextAssets,
             origin: origin,
             initialInspectorTab: inspectorTab,
-            openInspectorImmediately: openInspector
+            openInspectorImmediately: openInspector,
+            initialDocumentMode: documentMode,
+            initialDiffComparePair: diffComparePair
+        )
+    }
+
+    private func openAssetDiff(
+        _ asset: AssetRecord,
+        baseID: UUID,
+        targetID: UUID,
+        from origin: PreviewZoomOrigin
+    ) {
+        let targetAsset = store.liveAsset(id: targetID) ?? asset
+        openAsset(
+            targetAsset,
+            from: origin,
+            documentMode: .diff,
+            diffComparePair: (baseID: baseID, targetID: targetID)
         )
     }
 
@@ -714,6 +794,8 @@ private struct DetailCoverTransitionHost: View {
     let origin: PreviewZoomOrigin
     let initialInspectorTab: AssetDetailView.DetailInspectorTab
     let openInspectorImmediately: Bool
+    let initialDocumentMode: MobileDocumentStageMode
+    let initialDiffComparePair: (baseID: UUID, targetID: UUID)?
     let zoomNamespace: Namespace.ID
     let onFilterByColor: (String) -> Void
     let onFilterByTag: (String) -> Void
@@ -727,6 +809,8 @@ private struct DetailCoverTransitionHost: View {
         origin: PreviewZoomOrigin,
         initialInspectorTab: AssetDetailView.DetailInspectorTab,
         openInspectorImmediately: Bool,
+        initialDocumentMode: MobileDocumentStageMode = .read,
+        initialDiffComparePair: (baseID: UUID, targetID: UUID)? = nil,
         zoomNamespace: Namespace.ID,
         onFilterByColor: @escaping (String) -> Void,
         onFilterByTag: @escaping (String) -> Void
@@ -737,10 +821,23 @@ private struct DetailCoverTransitionHost: View {
         self.origin = origin
         self.initialInspectorTab = initialInspectorTab
         self.openInspectorImmediately = openInspectorImmediately
+        self.initialDocumentMode = initialDocumentMode
+        self.initialDiffComparePair = initialDiffComparePair
         self.zoomNamespace = zoomNamespace
         self.onFilterByColor = onFilterByColor
         self.onFilterByTag = onFilterByTag
         _activeAssetID = State(initialValue: initialAsset.id)
+    }
+
+    private var zoomAnchorAssetID: UUID {
+        if let live = store.liveAsset(id: activeAssetID), live.richMetadata?.versionStack != nil {
+            let rep = store.primaryVersionAsset(for: live)
+            if store.assets.contains(where: { $0.id == rep.id })
+                || store.inboxAssets.contains(where: { $0.id == rep.id }) {
+                return rep.id
+            }
+        }
+        return activeAssetID
     }
 
     var body: some View {
@@ -750,6 +847,8 @@ private struct DetailCoverTransitionHost: View {
             allAssets: allAssets,
             initialInspectorTab: initialInspectorTab,
             openInspectorImmediately: openInspectorImmediately,
+            initialDocumentMode: initialDocumentMode,
+            initialDiffComparePair: initialDiffComparePair,
             onCurrentAssetChanged: { nextID in
                 if activeAssetID != nextID {
                     activeAssetID = nextID
@@ -760,7 +859,7 @@ private struct DetailCoverTransitionHost: View {
         )
         .navigationTransition(
             .zoom(
-                sourceID: PreviewZoomSourceID(origin: origin, assetID: activeAssetID),
+                sourceID: PreviewZoomSourceID(origin: origin, assetID: zoomAnchorAssetID),
                 in: zoomNamespace
             )
         )

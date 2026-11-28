@@ -141,7 +141,42 @@ struct MobileSettingsView: View {
                 Text("管理 iCloud Drive、Google Drive、WebDAV 与本地目录的多后端并行同步与授权凭据。")
             }
 
-            // 2. Local Storage & Offline Cache
+            // 2. Gallery Layout & Version Stack Preferences
+            Section {
+                Picker(
+                    "默认画廊视图",
+                    selection: Binding(
+                        get: { store.defaultGalleryLayoutMode },
+                        set: { store.setDefaultGalleryLayoutMode($0) }
+                    )
+                ) {
+                    Label("纵向瀑布流", systemImage: "square.grid.2x2")
+                        .tag(GalleryLayoutMode.verticalMasonry)
+                    Label("紧凑视图", systemImage: "list.bullet")
+                        .tag(GalleryLayoutMode.compactList)
+                }
+
+                if !store.scopeLayoutOverrides.isEmpty {
+                    HStack {
+                        Text("已记忆独立视图的目录")
+                        Spacer()
+                        Text("\(store.scopeLayoutOverrides.count) 个位置")
+                            .font(.system(size: 13).monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Button("重置各文件夹的独立视图记忆") {
+                        store.resetPerFolderLayoutMemory()
+                    }
+                    .foregroundStyle(MobileTheme.accent(for: colorScheme))
+                }
+            } header: {
+                Text("画廊视图与文档版本叠")
+            } footer: {
+                Text("切换文件夹视图时会自动按目录单独记忆（例如摄影目录用瀑布流、办公文档目录用紧凑视图）；分享版本叠时默认锁定对外「主版本」，防止误发未审草稿。")
+            }
+
+            // 3. Local Storage & Offline Cache
             Section {
                 metricRow("缩略图缓存", MobileFormatters.byteCount(store.cacheStats.thumbnailBytes))
                 metricRow(
