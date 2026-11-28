@@ -4728,7 +4728,7 @@ internal final class MasonryDocumentView: NSView, NSDraggingSource {
 
             if targets.count >= 2 {
                 menu.addItem(.separator())
-                menu.addItem(makeMenuItem(title: "合并为版本叠（\(targets.count) 项）", symbol: "square.stack.3d.up") { [weak self] in
+                menu.addItem(makeMenuItem(title: "合并版本（\(targets.count) 项）", symbol: "square.stack.3d.up") { [weak self] in
                     self?.callbacks.onMergeIntoVersionStack(targets, asset.id)
                 })
             } else if let stack = asset.richMetadata?.versionStack {
@@ -4741,7 +4741,7 @@ internal final class MasonryDocumentView: NSView, NSDraggingSource {
                         self?.callbacks.onSetPrimaryVersion(asset.id)
                     })
                 }
-                menu.addItem(makeMenuItem(title: "拆出为独立素材", symbol: "rectangle.portrait.and.arrow.right") { [weak self] in
+                menu.addItem(makeMenuItem(title: "拆分为独立素材", symbol: "rectangle.portrait.and.arrow.right") { [weak self] in
                     self?.callbacks.onUnstackVersion(asset.id)
                 })
             }

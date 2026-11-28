@@ -527,12 +527,12 @@ struct AssetDetailView: View {
                             Task { await prepareAndShareOriginal(preferExactAsset: true) }
                         }
                     }
-                    Button("拆出为独立素材", systemImage: "square.stack.3d.up.slash", role: .destructive) {
+                    Button("拆分为独立素材", systemImage: "square.stack.3d.up.slash", role: .destructive) {
                         let id = currentAsset.id
                         Task { await store.unstackAsset(assetID: id) }
                     }
                 }
-                Button("合并入版本叠…", systemImage: "arrow.triangle.merge") {
+                Button("合并版本…", systemImage: "arrow.triangle.merge") {
                     isMergeStackSheetPresented = true
                 }
 

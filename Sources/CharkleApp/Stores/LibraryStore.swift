@@ -2917,7 +2917,7 @@ public final class LibraryStore {
             return ""
         }()
         coordinator.showToast(
-            "已叠入《\(prompt.candidate.targetTitle)》作为 v\(prompt.candidate.nextVersionNumber)\(folderSuffix)",
+            "已归入《\(prompt.candidate.targetTitle)》历史版本 (v\(prompt.candidate.nextVersionNumber))\(folderSuffix)",
             icon: "square.stack.3d.up.fill",
             tone: .success
         )

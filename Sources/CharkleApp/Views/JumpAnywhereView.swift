@@ -187,7 +187,7 @@ public struct JumpAnywhereView: View {
                                                 )
                                             }
                                             .buttonStyle(.plain)
-                                            .help("直接将原文件（版本叠取主版本）拷入剪贴板，切微信直接 ⌘V 发送")
+                                            .help("直接将原文件（多版本素材默认取主版本）拷入剪贴板，切微信直接 ⌘V 发送")
                                         }
                                         Text(kindLabel(for: match.kind))
                                             .font(CharkleTheme.text(.caption, weight: .medium))

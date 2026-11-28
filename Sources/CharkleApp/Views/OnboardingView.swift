@@ -1446,7 +1446,7 @@ public struct OnboardingView: View {
                         galleryModeCard(
                             mode: .compactList,
                             title: "紧凑视图",
-                            subtitle: "双列索引与版本叠",
+                            subtitle: "紧凑列表与历史版本",
                             iconName: "compact-list"
                         )
                     }

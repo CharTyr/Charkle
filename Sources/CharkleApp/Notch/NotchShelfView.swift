@@ -857,7 +857,7 @@ public struct NotchShelfView: View {
                 .font(.system(size: 13.5, weight: .semibold))
                 .foregroundStyle(activeBlue)
 
-            Text("叠入《\(prompt.candidate.targetTitle)》v\(prompt.candidate.nextVersionNumber)？")
+            Text("归入《\(prompt.candidate.targetTitle)》历史版本 (v\(prompt.candidate.nextVersionNumber))？")
                 .font(CharkleTheme.text(.caption, weight: .semibold))
                 .monospacedDigit()
                 .foregroundStyle(.white)
@@ -882,7 +882,7 @@ public struct NotchShelfView: View {
             }
 
             TextField(
-                "备注（回车秒叠入）",
+                "备注（可选）",
                 text: Binding(
                     get: { coordinator.pendingVersionStackPrompt?.changeNoteDraft ?? "" },
                     set: { coordinator.pendingVersionStackPrompt?.changeNoteDraft = $0 }
@@ -902,7 +902,7 @@ public struct NotchShelfView: View {
             Button {
                 Task { _ = await library.confirmPendingVersionStackPrompt(coordinator: coordinator) }
             } label: {
-                Text("叠入 ↵")
+                Text("归入版本 ↵")
                     .font(CharkleTheme.text(.caption, weight: .semibold))
                     .foregroundStyle(.white)
                     .padding(.horizontal, 9)
@@ -914,7 +914,7 @@ public struct NotchShelfView: View {
             Button {
                 library.dismissPendingVersionStackPrompt(coordinator: coordinator, announce: true)
             } label: {
-                Text("独立")
+                Text("单独保留")
                     .font(CharkleTheme.text(.caption, weight: .medium))
                     .foregroundStyle(.white.opacity(0.75))
                     .padding(.horizontal, 7)

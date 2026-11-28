@@ -2121,13 +2121,13 @@ final class MobileAppStore {
                 }
                 await reloadAll()
                 MobileHaptics.success()
-                showToast("已将 \(created.count) 项直接叠入版本叠", tone: .success)
+                showToast("已将 \(created.count) 项归入历史版本", tone: .success)
                 if hasConnectedCloudBackend {
                     Task { await self.syncNow(quiet: true) }
                 }
             } catch {
                 MobileHaptics.error()
-                showToast("拖放叠入失败：\(error.localizedDescription)", tone: .error)
+                showToast("归入历史版本失败：\(error.localizedDescription)", tone: .error)
             }
         } else {
             _ = await ingestInputs(inputs, targetFolderID: effectiveFolder)
@@ -2158,8 +2158,8 @@ final class MobileAppStore {
             let joinedVer = updated.first(where: { $0.id == assetID })?.richMetadata?.versionStack?.displayVersionTag ?? "新版"
             showToast(
                 pinAsPrimary
-                    ? "已叠入为 \(joinedVer) 并设为主版本"
-                    : "已叠入为 \(joinedVer)（原主版本锁定不变）",
+                    ? "已归入历史版本 (\(joinedVer)) 并设为主版本"
+                    : "已归入历史版本 (\(joinedVer))（原主版本锁定不变）",
                 tone: .success
             )
             if hasConnectedCloudBackend {
@@ -2167,7 +2167,7 @@ final class MobileAppStore {
             }
         } catch {
             MobileHaptics.error()
-            showToast("合并版本叠失败：\(error.localizedDescription)", tone: .error)
+            showToast("合并版本失败：\(error.localizedDescription)", tone: .error)
         }
     }
 
@@ -2189,13 +2189,13 @@ final class MobileAppStore {
             )
             await reloadAll()
             MobileHaptics.success()
-            showToast("已将 \(assetIDs.count) 项合并为版本叠", tone: .success)
+            showToast("已将 \(assetIDs.count) 项合并为历史版本", tone: .success)
             if hasConnectedCloudBackend {
                 Task { await self.syncNow(quiet: true) }
             }
         } catch {
             MobileHaptics.error()
-            showToast("创建版本叠失败：\(error.localizedDescription)", tone: .error)
+            showToast("合并版本失败：\(error.localizedDescription)", tone: .error)
         }
     }
 
@@ -2220,13 +2220,13 @@ final class MobileAppStore {
             _ = try await engine.manageVersionStack(.unstack(assetID: assetID))
             await reloadAll()
             MobileHaptics.light()
-            showToast("已从版本叠拆出为独立素材", tone: .info)
+            showToast("已拆分为独立素材", tone: .info)
             if hasConnectedCloudBackend {
                 Task { await self.syncNow(quiet: true) }
             }
         } catch {
             MobileHaptics.error()
-            showToast("拆出版本叠失败：\(error.localizedDescription)", tone: .error)
+            showToast("拆分为独立素材失败：\(error.localizedDescription)", tone: .error)
         }
     }
 

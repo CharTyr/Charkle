@@ -2424,7 +2424,7 @@ struct MasonryGalleryView: View {
                             mergeStackSourceAssets = picked
                         }
                     } label: {
-                        Label("合并为版本叠（\(store.selectedAssetIDs.count) 项）", systemImage: "square.stack.3d.up")
+                        Label("合并版本（\(store.selectedAssetIDs.count) 项）", systemImage: "square.stack.3d.up")
                     }
                     Divider()
                 }
@@ -2804,17 +2804,17 @@ struct GalleryCardView: View {
                 }
                 if let onRequestMergeStack {
                     Button(action: onRequestMergeStack) {
-                        Label("合并其他版本到此叠…", systemImage: "arrow.triangle.merge")
+                        Label("合并其他版本…", systemImage: "arrow.triangle.merge")
                     }
                 }
                 Button {
                     Task { await store.unstackAsset(assetID: primaryAsset.id) }
                 } label: {
-                    Label("拆出当前主版为独立素材", systemImage: "square.stack.3d.up.slash")
+                    Label("拆分为独立素材", systemImage: "square.stack.3d.up.slash")
                 }
             } else if let onRequestMergeStack {
                 Button(action: onRequestMergeStack) {
-                    Label("合并入版本叠…", systemImage: "square.stack.3d.up")
+                    Label("合并版本…", systemImage: "square.stack.3d.up")
                 }
             }
 

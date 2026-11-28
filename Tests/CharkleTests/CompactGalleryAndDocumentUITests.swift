@@ -906,4 +906,58 @@ struct CompactGalleryAndDocumentUITests {
         #expect(v3Doc.plainText.contains("120"))
         #expect(v3Doc.plainText.contains("15"))
     }
+
+    @Test("macOS MediaPipeline renders real A4 990x1400 page thumbnails for .docx files and UI sources contain zero coined jargon")
+    func docxAttributedPageThumbnailAndZeroJargonContracts() async throws {
+        let dir = try BackendFixture.directory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let docxURL = dir.appendingPathComponent("全市文旅推介工作汇报.docx")
+        let attr = NSAttributedString(
+            string: "全市文旅推介工作汇报\n\n一、总体进展与重点数据\n截至本季度末，累计接待游客 326 万人次，重点景区服务满意度达 98.4%。",
+            attributes: [
+                .font: NSFont.boldSystemFont(ofSize: 18),
+                .foregroundColor: NSColor.black
+            ]
+        )
+        let docxData = try attr.data(
+            from: NSRange(location: 0, length: attr.length),
+            documentAttributes: [.documentType: NSAttributedString.DocumentType.officeOpenXML]
+        )
+        try docxData.write(to: docxURL, options: .atomic)
+
+        let pageRender = try #require(MediaPipeline.renderOfficeAttributedPage(url: docxURL, ext: "docx"))
+        #expect(pageRender.width == 990)
+        #expect(pageRender.height == 1_400)
+        #expect(!(pageRender.width == 900 && pageRender.height == 1_240))
+
+        let engine = try BackendFixture.makeEngine(dir)
+        let ingested = try #require(try await engine.ingest([.fileURL(docxURL)], targetFolderID: nil, targetBoardID: nil).first)
+        #expect(ingested.mediaKind == .document)
+        #expect(!(ingested.pixelWidth == 900 && ingested.pixelHeight == 1_240))
+        #expect(ingested.pixelWidth >= 160 && ingested.pixelHeight >= 160)
+        #expect(await engine.thumbnailURL(for: ingested.id, tier: .grid520) != nil)
+    }
+
+    @Test("macOS and iOS Swift UI sources contain zero coined version-stack jargon")
+    func zeroCoinedJargonAcrossMacOSAndIOSSources() throws {
+        let forbiddenJargon = [
+            "文档叠", "版本叠", "折页条", "索引卡", "演进脉络",
+            "微翻纸层", "抽拉版本轨", "挑拣合成净版", "母版外壳", "进入精细对比与取舍"
+        ]
+        for rootRel in ["Sources", "ios"] {
+            let rootURL = Self.repoRoot.appendingPathComponent(rootRel, isDirectory: true)
+            guard let enumerator = FileManager.default.enumerator(
+                at: rootURL,
+                includingPropertiesForKeys: [.isRegularFileKey],
+                options: [.skipsHiddenFiles]
+            ) else { continue }
+            for case let url as URL in enumerator where url.pathExtension == "swift" {
+                let text = try String(contentsOf: url, encoding: .utf8)
+                for term in forbiddenJargon {
+                    #expect(!text.contains(term), "Coined jargon '\(term)' found in \(url.lastPathComponent)")
+                }
+            }
+        }
+    }
 }

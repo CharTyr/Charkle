@@ -171,9 +171,9 @@ struct MobileSettingsView: View {
                     .foregroundStyle(MobileTheme.accent(for: colorScheme))
                 }
             } header: {
-                Text("画廊视图与文档版本叠")
+                Text("画廊视图与历史版本")
             } footer: {
-                Text("切换文件夹视图时会自动按目录单独记忆（例如摄影目录用瀑布流、办公文档目录用紧凑视图）；分享版本叠时默认锁定对外「主版本」，防止误发未审草稿。")
+                Text("切换文件夹视图时会自动按目录单独记忆（例如摄影目录用瀑布流、办公文档目录用紧凑视图）；分享多版本素材时默认锁定对外「主版本」，防止误发未审草稿。")
             }
 
             // 3. Local Storage & Offline Cache

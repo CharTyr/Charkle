@@ -617,7 +617,7 @@ struct InspectorVersionStackCard: View {
                                     )
                             }
                             .buttonStyle(MobileTactileButtonStyle())
-                            .accessibilityLabel("叠入更多版本")
+                            .accessibilityLabel("合并更多历史版本")
                         }
 
                         // Newest-First Vertical Timeline (`vN → v1`)
