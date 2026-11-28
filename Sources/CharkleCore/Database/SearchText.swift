@@ -86,6 +86,18 @@ nonisolated enum SearchText {
                 full.append(word.joined())
                 initials.append(String(word.compactMap(\.first)))
             }
+            // Emit one 8-syllable prefix window per starting character so FTS5 `prefix*` queries
+            // match any 1..8-character mid-sentence Chinese phrase or initialism in O(N) space.
+            let flatContextual = contextual.flatMap { $0 }
+            for syllables in (flatContextual == standard ? [standard] : [standard, flatContextual]) where syllables.count >= 2 {
+                let cap = min(syllables.count, 256)
+                for start in 1..<cap {
+                    let end = min(syllables.count, start + 8)
+                    let window = syllables[start..<end]
+                    full.append(window.joined())
+                    initials.append(String(window.compactMap(\.first)))
+                }
+            }
         }
         let result = (full.joined(separator: " "), initials.joined(separator: " "))
         if text.count <= 128 {

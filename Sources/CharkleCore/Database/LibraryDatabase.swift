@@ -54,6 +54,21 @@ public final actor LibraryDatabase {
                         PRAGMA user_version = 3;
                         """)
                 }
+                if version < 4 {
+                    try connection.script("""
+                        CREATE TABLE IF NOT EXISTS document_content_cache (
+                            asset_id TEXT PRIMARY KEY REFERENCES assets(id) ON DELETE CASCADE,
+                            content_hash TEXT NOT NULL,
+                            schema_version INTEGER NOT NULL DEFAULT 1,
+                            structured_json BLOB NOT NULL,
+                            plain_text TEXT NOT NULL,
+                            simhash64 INTEGER NOT NULL DEFAULT 0,
+                            updated_at REAL NOT NULL
+                        );
+                        CREATE INDEX IF NOT EXISTS document_content_cache_hash ON document_content_cache(content_hash);
+                        PRAGMA user_version = 4;
+                        """)
+                }
                 try connection.script("COMMIT")
             } catch {
                 try? connection.script("ROLLBACK")
@@ -74,7 +89,7 @@ public final actor LibraryDatabase {
 
     public init(url: URL) throws { try self.init(path: url.path) }
 
-    private static let schemaVersion = 3
+    private static let schemaVersion = 4
 
     private static let initialSchema = """
         CREATE TABLE assets (
@@ -115,6 +130,16 @@ public final actor LibraryDatabase {
             asset_id TEXT PRIMARY KEY REFERENCES assets(id) ON DELETE CASCADE,
             accessed_at REAL NOT NULL
         );
+        CREATE TABLE document_content_cache (
+            asset_id TEXT PRIMARY KEY REFERENCES assets(id) ON DELETE CASCADE,
+            content_hash TEXT NOT NULL,
+            schema_version INTEGER NOT NULL DEFAULT 1,
+            structured_json BLOB NOT NULL,
+            plain_text TEXT NOT NULL,
+            simhash64 INTEGER NOT NULL DEFAULT 0,
+            updated_at REAL NOT NULL
+        );
+        CREATE INDEX document_content_cache_hash ON document_content_cache(content_hash);
         PRAGMA user_version = 1;
         """
 
@@ -185,27 +210,57 @@ public final actor LibraryDatabase {
                 try connection.execute("INSERT INTO asset_colors VALUES (?, ?, ?, ?)", [.text(id), .real(color.l), .real(color.a), .real(color.b)])
             }
         }
-        let fields = Self.searchFields(asset)
-        if old.map(Self.searchFields) != fields {
-            let rowID = try connection.query("SELECT rowid FROM assets WHERE id=?", [.text(id)]) { $0.integer(0) }[0]
-            let tokens: [String] = autoreleasepool {
-                let pinyin = fields.map(SearchText.pinyin)
-                return fields.map(SearchText.index) + [
-                    pinyin.map(\.full).joined(separator: " "), pinyin.map(\.initials).joined(separator: " ")
-                ]
-            }
-            if old != nil { try connection.execute("DELETE FROM assets_fts WHERE rowid=?", [.integer(rowID)]) }
-            try connection.execute(
-                "INSERT INTO assets_fts(rowid,title,fileName,notes,tags,ocrText,aiDescription,sourceDomain,pinyin,initials) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                [.integer(rowID)] + tokens.map(SQLValue.text)
-            )
+        let cachedDocText = asset.mediaKind == .document ? try cachedDocumentPlainText(for: asset.id, contentHash: asset.contentHash) : nil
+        let fields = Self.searchFields(asset, cachedDocumentText: cachedDocText)
+        let oldFields = old.map { Self.searchFields($0, cachedDocumentText: cachedDocText) }
+        if oldFields != fields {
+            try rebuildFTSRow(forAssetID: id, fields: fields, hadExistingRow: old != nil)
         }
         assetCache.setObject(CachedAssetBox(asset), forKey: id as NSString, cost: max(256, encodedPayload.count))
         hasWarmAssetCache = true
     }
 
-    private static func searchFields(_ asset: AssetRecord) -> [String] {
+    private func rebuildFTSRow(forAssetID id: String, fields: [String], hadExistingRow: Bool) throws {
+        guard let rowID = try connection.query("SELECT rowid FROM assets WHERE id=?", [.text(id)], read: { $0.integer(0) }).first else {
+            return
+        }
+        let tokens: [String] = autoreleasepool {
+            let pinyin = fields.map { field in
+                // Bound Pinyin phonetic expansion on multi-hundred-page documents while preserving full token indexing.
+                field.count > 16_000 ? SearchText.pinyin(String(field.prefix(16_000))) : SearchText.pinyin(field)
+            }
+            return fields.map { field in
+                field.count > 200_000 ? SearchText.index(String(field.prefix(200_000))) : SearchText.index(field)
+            } + [
+                pinyin.map(\.full).joined(separator: " "), pinyin.map(\.initials).joined(separator: " ")
+            ]
+        }
+        if hadExistingRow { try connection.execute("DELETE FROM assets_fts WHERE rowid=?", [.integer(rowID)]) }
+        try connection.execute(
+            "INSERT INTO assets_fts(rowid,title,fileName,notes,tags,ocrText,aiDescription,sourceDomain,pinyin,initials) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            [.integer(rowID)] + tokens.map(SQLValue.text)
+        )
+    }
+
+    private static func searchFields(_ asset: AssetRecord, cachedDocumentText: String? = nil) -> [String] {
         var extraOCR = asset.ocrText ?? ""
+        if let cachedDocumentText, !cachedDocumentText.isEmpty {
+            extraOCR = extraOCR.isEmpty ? cachedDocumentText : (extraOCR + "\n" + cachedDocumentText)
+        }
+        if let stack = asset.richMetadata?.versionStack {
+            let stackText = [
+                stack.versionLabel ?? "",
+                stack.editorName ?? "",
+                stack.changeNote ?? ""
+            ].filter { !$0.isEmpty }.joined(separator: " ")
+            if !stackText.isEmpty {
+                extraOCR = extraOCR.isEmpty ? stackText : (extraOCR + "\n" + stackText)
+            }
+        }
+        if let doc = asset.richMetadata?.document, !doc.sheetNames.isEmpty {
+            let sheetsText = doc.sheetNames.joined(separator: " ")
+            extraOCR = extraOCR.isEmpty ? sheetsText : (extraOCR + "\n" + sheetsText)
+        }
         if let repo = asset.richMetadata?.githubRepo {
             let repoText = [
                 repo.fullName,
@@ -600,8 +655,9 @@ public final actor LibraryDatabase {
                  OR COALESCE(json_extract(CAST(a.payload AS TEXT), '$.fileName'), '') LIKE ? ESCAPE '\\'
                  OR COALESCE(json_extract(CAST(a.payload AS TEXT), '$.ocrText'), '') LIKE ? ESCAPE '\\'
                  OR COALESCE(json_extract(CAST(a.payload AS TEXT), '$.aiDescription'), '') LIKE ? ESCAPE '\\'
+                 OR EXISTS (SELECT 1 FROM document_content_cache dc WHERE dc.asset_id=a.id AND dc.plain_text LIKE ? ESCAPE '\\')
                  OR EXISTS (SELECT 1 FROM asset_tags t WHERE t.asset_id=a.id AND t.tag LIKE ? ESCAPE '\\'))
-                """, pattern, pattern, pattern, pattern, pattern, pattern)
+                """, pattern, pattern, pattern, pattern, pattern, pattern, pattern)
         }
         let source = query.isEmpty ? "assets a" : "assets_fts JOIN assets a ON a.rowid=assets_fts.rowid"
         let order = switch filters.sortBy {
@@ -998,5 +1054,106 @@ public final actor LibraryDatabase {
         let embedding = row.withBlobBytes(1) { $0.map(precision.decode) }
         return AssetVector(featurePrint: row.blob(0), embedding: embedding,
                            embeddingModel: model.isEmpty ? nil : model, precision: precision)
+    }
+
+    // MARK: - Local Derived Document Content Cache (`document_content_cache`)
+
+    private static let documentCacheSchemaVersion: Int64 = 1
+
+    public func upsertDocumentContentCache(
+        assetID: UUID,
+        contentHash: String,
+        payload: StructuredDocumentPayload,
+        simhash64: Int64,
+        now: Date = Date()
+    ) throws {
+        let id = assetID.uuidString
+        let encoded = try encoder.encode(payload)
+        try connection.execute(
+            """
+            INSERT INTO document_content_cache(asset_id, content_hash, schema_version, structured_json, plain_text, simhash64, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(asset_id) DO UPDATE SET
+                content_hash=excluded.content_hash,
+                schema_version=excluded.schema_version,
+                structured_json=excluded.structured_json,
+                plain_text=excluded.plain_text,
+                simhash64=excluded.simhash64,
+                updated_at=excluded.updated_at
+            """,
+            [
+                .text(id),
+                .text(contentHash),
+                .integer(Self.documentCacheSchemaVersion),
+                .blob(encoded),
+                .text(payload.plainText),
+                .integer(simhash64),
+                .real(now.timeIntervalSince1970)
+            ]
+        )
+        if let currentAsset = try asset(id: assetID) {
+            let fields = Self.searchFields(currentAsset, cachedDocumentText: payload.plainText)
+            try rebuildFTSRow(forAssetID: id, fields: fields, hadExistingRow: true)
+        }
+    }
+
+    public func cachedStructuredDocument(
+        assetID: UUID,
+        expectedContentHash: String
+    ) throws -> (payload: StructuredDocumentPayload, simhash64: Int64)? {
+        let rows = try connection.query(
+            """
+            SELECT content_hash, schema_version, structured_json, simhash64
+            FROM document_content_cache
+            WHERE asset_id = ?
+            """,
+            [.text(assetID.uuidString)]
+        ) { row -> (String, Int64, StructuredDocumentPayload, Int64)? in
+            let hash = row.text(0)
+            let ver = row.integer(1)
+            guard ver == Self.documentCacheSchemaVersion else { return nil }
+            let payload = try decode(StructuredDocumentPayload.self, row, column: 2)
+            let simhash = row.integer(3)
+            return (hash, ver, payload, simhash)
+        }
+        guard let first = rows.first, let entry = first else { return nil }
+        if !expectedContentHash.isEmpty && entry.0 != expectedContentHash {
+            return nil
+        }
+        return (entry.2, entry.3)
+    }
+
+    func cachedDocumentPlainText(for assetID: UUID, contentHash: String) throws -> String? {
+        let rows = try connection.query(
+            "SELECT content_hash, plain_text FROM document_content_cache WHERE asset_id=?",
+            [.text(assetID.uuidString)]
+        ) { ($0.text(0), $0.text(1)) }
+        guard let (storedHash, text) = rows.first else { return nil }
+        if !contentHash.isEmpty && storedHash != contentHash {
+            return nil
+        }
+        return text
+    }
+
+    public func documentSimHashes(excludingAssetID: UUID? = nil) throws -> [UUID: Int64] {
+        let rows = try connection.query(
+            """
+            SELECT c.asset_id, c.simhash64
+            FROM document_content_cache c
+            JOIN assets a ON a.id = c.asset_id
+            WHERE a.trashed = 0 AND c.simhash64 <> 0
+            """
+        ) { row -> (UUID, Int64)? in
+            guard let id = UUID(uuidString: row.text(0)) else { return nil }
+            return (id, row.integer(1))
+        }
+        var map: [UUID: Int64] = [:]
+        map.reserveCapacity(rows.count)
+        for item in rows {
+            if let (id, sh) = item, id != excludingAssetID {
+                map[id] = sh
+            }
+        }
+        return map
     }
 }

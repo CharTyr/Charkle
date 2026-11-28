@@ -236,6 +236,7 @@ public nonisolated struct MediaPipeline: Sendable {
     struct Import: Sendable {
         var asset: AssetRecord
         let original: URL
+        var parsedDocument: DocumentParserEngine.ParsedDocumentBundle?
     }
 
     @concurrent
@@ -319,8 +320,8 @@ public nonisolated struct MediaPipeline: Sendable {
             mimeType: mime, fileSizeBytes: digests.bytes, sourceURL: source?.absoluteString,
             sourceDomain: source?.host(), notes: notes, isLocalOriginalCached: true
         )
-        try await render(file, for: &asset, preferredTitle: title)
-        return Import(asset: asset, original: try installOriginal(file, for: asset))
+        let parsedDoc = try await render(file, for: &asset, preferredTitle: title)
+        return Import(asset: asset, original: try installOriginal(file, for: asset), parsedDocument: parsedDoc)
     }
 
     /// Creates a `.webloc` web bookmark asset from an already-resolved `WebBookmark` in a single pass
@@ -373,9 +374,11 @@ public nonisolated struct MediaPipeline: Sendable {
         return result
     }
 
-    private func render(_ file: URL, for asset: inout AssetRecord, preferredTitle: String?) async throws {
+    @discardableResult
+    private func render(_ file: URL, for asset: inout AssetRecord, preferredTitle: String?) async throws -> DocumentParserEngine.ParsedDocumentBundle? {
         let ext = (asset.fileName as NSString).pathExtension.lowercased()
         var render: MediaRender? = nil
+        var parsedDocument: DocumentParserEngine.ParsedDocumentBundle? = nil
         switch asset.mediaKind {
         case .image, .animatedImage:
             render = Self.raster(file)
@@ -411,22 +414,48 @@ public nonisolated struct MediaPipeline: Sendable {
                 }
             }
         case .document:
-            if ext == "pdf" { render = Self.pdf(file) }
-            if ["md", "markdown", "txt", "rtf", "json", "yaml", "yml", "toml", "csv"].contains(ext) {
-                let handle = try FileHandle(forReadingFrom: file)
-                defer { try? handle.close() }
-                if let data = try handle.read(upToCount: 65_536) {
-                    let text = String(decoding: data, as: UTF8.self)
-                    var rich = asset.richMetadata ?? AssetRichMetadata()
-                    rich.textExcerpt = String(text.prefix(1_200))
-                    rich.isMarkdown = (ext == "md" || ext == "markdown")
-                    asset.richMetadata = rich
-                    if let card = MediaArtwork.card(title: asset.title, label: ext.uppercased(), text: text) {
-                        render = MediaRender(card, text: String(text.prefix(8_000)))
-                    }
+            parsedDocument = try? await DocumentParserEngine.parse(
+                fileURL: file,
+                assetID: asset.id,
+                preferredTitle: preferredTitle ?? asset.title,
+                performOCRIfScanned: false
+            )
+            var rich = asset.richMetadata ?? AssetRichMetadata()
+            if var docMeta = parsedDocument?.richMetadata {
+                // Preserve existing diffSummary if re-rendering an already-stacked version
+                if docMeta.diffSummary == nil {
+                    docMeta.diffSummary = rich.document?.diffSummary
                 }
+                rich.document = docMeta
             }
-            if render == nil { render = await Self.quickLook(file) }
+            let plain = parsedDocument?.payload.plainText ?? ""
+            if !plain.isEmpty {
+                rich.textExcerpt = String(plain.prefix(1_200))
+            }
+            rich.isMarkdown = (ext == "md" || ext == "markdown")
+            asset.richMetadata = rich
+
+            var firstPagePreview: CGImage?
+            if ext == "pdf" {
+                firstPagePreview = Self.pdf(file)?.poster
+            } else if (parsedDocument?.payload.blocks.isEmpty ?? true) && (parsedDocument?.payload.sheets.isEmpty ?? true) {
+                firstPagePreview = await Self.quickLook(file)?.poster
+            }
+
+            let excerptForAssetRecord = plain.isEmpty ? nil : String(plain.prefix(2_000))
+            if let docCard = MediaArtwork.documentCard(
+                title: asset.title,
+                fileExtension: ext,
+                payload: parsedDocument?.payload,
+                firstPageImage: firstPagePreview,
+                versionStack: rich.versionStack
+            ) {
+                render = MediaRender(docCard, text: excerptForAssetRecord)
+            } else if let pageImg = firstPagePreview {
+                render = MediaRender(pageImg, text: excerptForAssetRecord)
+            } else if render == nil {
+                render = await Self.quickLook(file)
+            }
         case .designFile:
             render = Self.raster(file)
             if render == nil { render = await Self.quickLook(file) }
@@ -479,6 +508,7 @@ public nonisolated struct MediaPipeline: Sendable {
                 asset.dominantColors = ColorExtractor.extractDominantColors(from: grid)
             }
         }
+        return parsedDocument
     }
 
     private static func attachExtractedImageMetadata(from file: URL, to asset: inout AssetRecord) {

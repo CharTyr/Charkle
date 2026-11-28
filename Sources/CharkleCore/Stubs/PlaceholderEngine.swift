@@ -469,4 +469,116 @@ public actor PlaceholderCharkleEngine: CharkleEngineProtocol {
     public func syncNow() async throws -> SyncReport { SyncReport() }
 
     public func seedSampleLibraryIfEmpty() async throws -> Bool { false }
+
+    public func manageVersionStack(_ mutation: VersionStackMutation) async throws -> [AssetRecord] {
+        switch mutation.action {
+        case .setPrimary:
+            guard let targetID = mutation.primaryAssetID ?? mutation.assetIDs.first,
+                  let target = assets[targetID] else { return [] }
+            let groupID = target.versionGroupID ?? UUID()
+            var out: [AssetRecord] = []
+            for (id, var item) in assets where item.versionGroupID == groupID || id == targetID {
+                var rich = item.richMetadata ?? AssetRichMetadata()
+                var stack = rich.versionStack ?? AssetVersionStackMetadata(groupID: groupID, versionNumber: 1)
+                stack.isPinnedPrimary = (id == targetID)
+                rich.versionStack = stack
+                item.richMetadata = rich
+                item.updatedAt = Date()
+                assets[id] = item
+                out.append(item)
+            }
+            return AssetVersionStackMetadata.sortedVersions(out)
+
+        case .unstack:
+            var out: [AssetRecord] = []
+            for id in mutation.assetIDs {
+                guard var item = assets[id] else { continue }
+                var rich = item.richMetadata ?? AssetRichMetadata()
+                rich.versionStack = nil
+                item.richMetadata = rich
+                item.updatedAt = Date()
+                assets[id] = item
+                out.append(item)
+            }
+            return out
+
+        case .updateMeta:
+            var out: [AssetRecord] = []
+            for id in mutation.assetIDs {
+                guard var item = assets[id] else { continue }
+                var rich = item.richMetadata ?? AssetRichMetadata()
+                var stack = rich.versionStack ?? AssetVersionStackMetadata(groupID: UUID(), versionNumber: 1)
+                if let label = mutation.versionLabel { stack.versionLabel = label }
+                if let editor = mutation.editorName { stack.editorName = editor }
+                if let note = mutation.changeNote { stack.changeNote = note }
+                rich.versionStack = stack
+                item.richMetadata = rich
+                item.updatedAt = Date()
+                assets[id] = item
+                out.append(item)
+            }
+            return out
+
+        case .create:
+            let groupID = UUID()
+            var out: [AssetRecord] = []
+            for (idx, id) in mutation.assetIDs.enumerated() {
+                guard var item = assets[id] else { continue }
+                var rich = item.richMetadata ?? AssetRichMetadata()
+                rich.versionStack = AssetVersionStackMetadata(
+                    groupID: groupID,
+                    versionNumber: idx + 1,
+                    parentAssetID: idx > 0 ? mutation.assetIDs[idx - 1] : nil,
+                    editorName: mutation.editorName,
+                    changeNote: mutation.changeNote,
+                    isPinnedPrimary: id == mutation.primaryAssetID
+                )
+                item.richMetadata = rich
+                item.updatedAt = Date()
+                assets[id] = item
+                out.append(item)
+            }
+            return out
+
+        case .join:
+            guard let targetKey = mutation.targetAssetOrGroupID else { return [] }
+            let existing = assets.values.filter { $0.versionGroupID == targetKey || $0.id == targetKey }
+            guard !existing.isEmpty else { return [] }
+            let groupID = existing.compactMap(\.versionGroupID).first ?? UUID()
+            var maxVer = 0
+            for var member in existing {
+                if member.versionGroupID == nil {
+                    var rich = member.richMetadata ?? AssetRichMetadata()
+                    rich.versionStack = AssetVersionStackMetadata(groupID: groupID, versionNumber: 1)
+                    member.richMetadata = rich
+                    assets[member.id] = member
+                }
+                maxVer = max(maxVer, member.richMetadata?.versionStack?.versionNumber ?? 1)
+            }
+            let targetFolder = existing.compactMap(\.folderID).first
+            let prevID = AssetVersionStackMetadata.sortedVersions(Array(existing)).last?.id
+            for id in mutation.assetIDs {
+                guard var joining = assets[id] else { continue }
+                maxVer += 1
+                if mutation.adoptTargetFolder, let targetFolder {
+                    joining.folderID = targetFolder
+                }
+                var rich = joining.richMetadata ?? AssetRichMetadata()
+                rich.versionStack = AssetVersionStackMetadata(
+                    groupID: groupID,
+                    versionNumber: maxVer,
+                    parentAssetID: prevID,
+                    versionLabel: mutation.versionLabel,
+                    editorName: mutation.editorName,
+                    changeNote: mutation.changeNote,
+                    isPinnedPrimary: mutation.pinAsPrimary
+                )
+                joining.richMetadata = rich
+                joining.updatedAt = Date()
+                assets[id] = joining
+            }
+            let allMembers = assets.values.filter { $0.versionGroupID == groupID }
+            return AssetVersionStackMetadata.sortedVersions(Array(allMembers))
+        }
+    }
 }

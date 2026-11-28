@@ -1234,6 +1234,36 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
             guard !Task.isCancelled else { break }
             guard let before = try? await database.asset(id: id) else { continue }
             guard before.mediaKind != .audio, before.mediaKind != .model3D else { continue }
+            if before.mediaKind == .document {
+                // Scanned PDFs without an embedded text layer run multi-page offline Vision OCR into `document_content_cache`.
+                if before.richMetadata?.document?.hasTextLayer == false,
+                   (before.fileName as NSString).pathExtension.lowercased() == "pdf",
+                   let orig = media.cachedOriginal(for: before) {
+                    let ocrPayload = await DocumentParserEngine.ocrScannedPDF(
+                        url: orig,
+                        assetID: id,
+                        fallbackTitle: before.title,
+                        maxPages: 12
+                    )
+                    if !Task.isCancelled, !ocrPayload.plainText.isEmpty {
+                        let simhash = DocumentSimHash.compute64(for: ocrPayload)
+                        let saved = try? await database.transaction { store -> AssetRecord? in
+                            guard var current = try store.asset(id: id), current.contentHash == before.contentHash else { return nil }
+                            current.ocrText = String(ocrPayload.plainText.prefix(2_000))
+                            let updated = try store.saveAssetLocally(current)
+                            try store.upsertDocumentContentCache(
+                                assetID: id,
+                                contentHash: updated.contentHash,
+                                payload: ocrPayload,
+                                simhash64: simhash
+                            )
+                            return updated
+                        }
+                        if saved != nil { didChange = true }
+                    }
+                }
+                continue
+            }
             if let existing = before.ocrText, !existing.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 continue
             }
@@ -1561,6 +1591,7 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
     private struct PreparedAsset: Sendable {
         var asset: AssetRecord
         var feature: Data?
+        var parsedDocument: DocumentParserEngine.ParsedDocumentBundle? = nil
     }
 
     private func prepareExpanded(
@@ -1774,7 +1805,7 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
             if shouldComputeFeature, source.asset.mediaKind != .audio {
                 feature = await computeFeaturePrint(for: id)
             }
-            return PreparedAsset(asset: source.asset, feature: feature)
+            return PreparedAsset(asset: source.asset, feature: feature, parsedDocument: source.parsedDocument)
         } catch {
             media.removeFiles(for: AssetRecord(id: id, title: "", fileName: ""))
             throw error
@@ -2169,6 +2200,17 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
     private static func commit(_ prepared: PreparedAsset, in store: isolated LibraryDatabase,
                                syncConfig: DriveSyncConfig) throws -> AssetRecord {
         let asset = try store.saveAssetLocally(prepared.asset)
+        if let docBundle = prepared.parsedDocument {
+            var hydratedPayload = docBundle.payload
+            hydratedPayload.assetID = asset.id
+            hydratedPayload.title = asset.title
+            try store.upsertDocumentContentCache(
+                assetID: asset.id,
+                contentHash: asset.contentHash,
+                payload: hydratedPayload,
+                simhash64: docBundle.simhash64
+            )
+        }
         if !asset.contentHash.isEmpty {
             // Re-importing the same content intentionally clears prior deletion suppression fingerprints.
             if let oldFP = try store.state("deleted.content." + asset.contentHash, as: DeletedAssetFingerprint.self),
