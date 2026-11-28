@@ -178,19 +178,19 @@ public struct CharkleButtonStyle: ButtonStyle {
                 if colorScheme == .dark {
                     if reduceTransparency {
                         return pressed
-                            ? Color(charkleHex: "#323640")
-                            : (hovered ? Color(charkleHex: "#2C3039") : Color(charkleHex: "#252830"))
+                            ? Color(charkleHex: "#32353D")
+                            : (hovered ? Color(charkleHex: "#2E3036") : Color(charkleHex: "#25262B"))
                     }
-                    return Color.white.opacity(pressed ? 0.15 : (hovered ? 0.11 : 0.075))
+                    return Color.white.opacity(pressed ? 0.14 : (hovered ? 0.10 : 0.065))
                 } else {
                     if reduceTransparency {
                         return pressed
-                            ? Color(charkleHex: "#EAE9E5")
-                            : (hovered ? Color(charkleHex: "#F5F4F1") : CharkleTheme.surfaceElevated(for: .light))
+                            ? Color(charkleHex: "#E3E4E7")
+                            : (hovered ? Color(charkleHex: "#EAEBEC") : Color(charkleHex: "#F4F4F5"))
                     }
                     return pressed
-                        ? Color(charkleHex: "#ECEBE7")
-                        : (hovered ? Color(charkleHex: "#F8F8F6") : CharkleTheme.surfaceElevated(for: .light))
+                        ? Color(charkleHex: "#E6E7EA")
+                        : (hovered ? Color(charkleHex: "#EAEBEC") : Color(charkleHex: "#F4F4F5"))
                 }
             case .subtle:
                 guard pressed || hovered else { return .clear }
@@ -487,7 +487,7 @@ public struct CharkleSegmentedControl<Option: Hashable>: View {
                     }
                     .foregroundStyle(
                         isSelected
-                            ? (useAccentForSelected ? accent : Color.primary)
+                            ? (useAccentForSelected ? accent : (colorScheme == .dark ? Color(charkleHex: "#F3F4F6") : Color(charkleHex: "#1D1F23")))
                             : (isHovered ? Color.primary.opacity(0.86) : CharkleTheme.secondaryInk(for: colorScheme))
                     )
                     .padding(.horizontal, isIconOnly ? 8 : 10)
@@ -506,9 +506,9 @@ public struct CharkleSegmentedControl<Option: Hashable>: View {
                                     thumbShape.strokeBorder(thumbStrokeColor, lineWidth: CharkleTheme.hairlineWidth)
                                 )
                                 .shadow(
-                                    color: Color.black.opacity(colorScheme == .dark ? 0.28 : 0.08),
-                                    radius: colorScheme == .dark ? 2 : 1.5,
-                                    y: colorScheme == .dark ? 1 : 0.5
+                                    color: Color.black.opacity(colorScheme == .dark ? 0.28 : 0.06),
+                                    radius: colorScheme == .dark ? 2 : 2,
+                                    y: colorScheme == .dark ? 1 : 1
                                 )
                                 .matchedGeometryEffect(id: "charkle-segmented-thumb", in: thumbNamespace)
                         } else if isHovered {
@@ -543,21 +543,18 @@ public struct CharkleSegmentedControl<Option: Hashable>: View {
     }
 
     private var trackFillColor: Color {
-        if reduceTransparency {
-            return colorScheme == .dark ? Color(charkleHex: "#1A1C21") : CharkleTheme.surfaceSubtle(for: .light)
-        }
-        return colorScheme == .dark ? Color.white.opacity(0.07) : Color.black.opacity(0.055)
+        CharkleTheme.surfaceSubtle(for: colorScheme)
     }
 
     private var thumbFillColor: Color {
-        colorScheme == .dark ? Color(charkleHex: "#2C2F37") : CharkleTheme.surfaceElevated(for: .light)
+        colorScheme == .dark ? Color(charkleHex: "#2C2E34") : Color(charkleHex: "#FFFFFF")
     }
 
     private var thumbStrokeColor: Color {
         if reduceTransparency {
             return colorScheme == .dark ? Color.white.opacity(0.22) : Color.black.opacity(0.16)
         }
-        return colorScheme == .dark ? Color.white.opacity(0.10) : Color.black.opacity(0.06)
+        return colorScheme == .dark ? Color.white.opacity(0.08) : Color.black.opacity(0.05)
     }
 }
 
@@ -590,7 +587,7 @@ public struct CharkleHairlineDivider: View {
     }
 }
 
-/// Subtle 6-dot drag grip handle for reorderable Inspector sections.
+/// Subtle 6-dot drag grip handle for reorderable Inspector sections (invisible at rest, revealed on hover).
 public struct CharkleReorderGrip: View {
     public let isHighlighted: Bool
 
@@ -607,7 +604,7 @@ public struct CharkleReorderGrip: View {
                 }
             }
         }
-        .foregroundStyle(Color.primary.opacity(isHighlighted ? 0.58 : 0.24))
+        .foregroundStyle(Color.primary.opacity(isHighlighted ? 0.45 : 0.0))
         .padding(.horizontal, 3)
         .padding(.vertical, 2)
         .contentShape(Rectangle())
@@ -679,6 +676,10 @@ public struct CharkleInspectorSection<HeaderTrailing: View, Content: View>: View
     @State private var isHeaderHovered: Bool = false
     @State private var isSectionHovered: Bool = false
 
+    private var sectionHeadingFont: Font {
+        .system(size: 12.5, weight: .medium)
+    }
+
     public init(
         _ title: String,
         systemImage: String? = nil,
@@ -688,8 +689,8 @@ public struct CharkleInspectorSection<HeaderTrailing: View, Content: View>: View
         showReorderGrip: Bool = false,
         isReorderHighlighted: Bool = false,
         reorderActions: CharkleSectionReorderActions? = nil,
-        horizontalPadding: CGFloat = 14,
-        verticalPadding: CGFloat = 11,
+        horizontalPadding: CGFloat = 16,
+        verticalPadding: CGFloat = 12,
         contentSpacing: CGFloat = 9,
         @ViewBuilder headerTrailing: () -> HeaderTrailing,
         @ViewBuilder content: () -> Content
@@ -839,19 +840,16 @@ public struct CharkleInspectorSection<HeaderTrailing: View, Content: View>: View
     }
 
     private var headerIdentityLabel: some View {
-        HStack(spacing: 5) {
+        let headingInk = colorScheme == .dark ? Color(charkleHex: "#F3F4F6") : Color(charkleHex: "#1D1F23")
+        return HStack(spacing: 5) {
             if let systemImage {
                 Image(systemName: systemImage)
                     .font(.system(size: 10.5, weight: .semibold))
                     .foregroundStyle(iconColor ?? CharkleTheme.secondaryInk(for: colorScheme))
             }
             Text(title)
-                .font(CharkleTheme.text(.caption, weight: .semibold))
-                .foregroundStyle(
-                    isHeaderHovered
-                        ? Color.primary.opacity(0.92)
-                        : Color.primary.opacity(0.80)
-                )
+                .font(sectionHeadingFont)
+                .foregroundStyle(isHeaderHovered ? headingInk : headingInk.opacity(0.88))
                 .lineLimit(1)
         }
     }
@@ -899,8 +897,8 @@ public extension CharkleInspectorSection where HeaderTrailing == EmptyView {
         showReorderGrip: Bool = false,
         isReorderHighlighted: Bool = false,
         reorderActions: CharkleSectionReorderActions? = nil,
-        horizontalPadding: CGFloat = 14,
-        verticalPadding: CGFloat = 11,
+        horizontalPadding: CGFloat = 16,
+        verticalPadding: CGFloat = 12,
         contentSpacing: CGFloat = 9,
         @ViewBuilder content: () -> Content
     ) {
@@ -918,6 +916,82 @@ public extension CharkleInspectorSection where HeaderTrailing == EmptyView {
             contentSpacing: contentSpacing,
             headerTrailing: { EmptyView() },
             content: content
+        )
+    }
+}
+
+// MARK: - Continuous 1-Row Color Swatch Strip
+
+/// Sleek `24pt`-tall continuous horizontal Color Swatch Strip replacing bulky multi-row `#HEX` boxes.
+public struct CharkleColorSwatchStrip: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    public let hexColors: [String]
+    public let height: CGFloat
+    public let onCopyHex: (String) -> Void
+    public let onFilterByColor: ((String) -> Void)?
+
+    @State private var hoveredHex: String? = nil
+
+    public init(
+        hexColors: [String],
+        height: CGFloat = 24,
+        onCopyHex: @escaping (String) -> Void,
+        onFilterByColor: ((String) -> Void)? = nil
+    ) {
+        self.hexColors = hexColors.map { $0.uppercased() }
+        self.height = height
+        self.onCopyHex = onCopyHex
+        self.onFilterByColor = onFilterByColor
+    }
+
+    public var body: some View {
+        let stripShape = RoundedRectangle(cornerRadius: CharkleTheme.Radius.sm, style: .continuous)
+
+        HStack(spacing: 1.5) {
+            ForEach(Array(hexColors.enumerated()), id: \.offset) { _, hex in
+                let isHovered = hoveredHex == hex
+                Button {
+                    onCopyHex(hex)
+                } label: {
+                    Rectangle()
+                        .fill(Color(charkleHex: hex))
+                        .frame(maxWidth: .infinity)
+                        .frame(height: height)
+                        .overlay {
+                            if isHovered {
+                                Rectangle()
+                                    .fill(Color.white.opacity(0.14))
+                            }
+                        }
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .onHover { hovering in
+                    withAnimation(CharkleMotion.accessible(CharkleMotion.hoverPress, reduced: reduceMotion)) {
+                        hoveredHex = hovering ? hex : (hoveredHex == hex ? nil : hoveredHex)
+                    }
+                }
+                .contextMenu {
+                    Button("复制 \(hex)") {
+                        onCopyHex(hex)
+                    }
+                    if let onFilterByColor {
+                        Button("以此色筛选素材库") {
+                            onFilterByColor(hex)
+                        }
+                    }
+                }
+                .help(onFilterByColor != nil ? "点击复制 \(hex)，右键按色彩筛选" : "点击复制 \(hex)")
+            }
+        }
+        .clipShape(stripShape)
+        .overlay(
+            stripShape.strokeBorder(
+                CharkleTheme.hairline(for: colorScheme),
+                lineWidth: CharkleTheme.hairlineWidth
+            )
         )
     }
 }
@@ -1427,7 +1501,7 @@ public extension CharkleTokenSearchField where FilterTrigger == EmptyView {
 public struct CharkleColorFilterPopover: View {
     public static let defaultStudioSwatches: [String] = [
         "#1E2024", "#5C6B73", "#3D5A80", "#4E7D96", "#6B8E76",
-        "#D4A373", "#BA6B55", "#E5B243", "#C8B8A6", "#F0EEE9"
+        "#D4A373", "#BA6B55", "#E5B243", "#C8B8A6", "#F4F4F5"
     ]
 
     @Environment(\.colorScheme) private var colorScheme

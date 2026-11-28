@@ -56,12 +56,16 @@ public struct InspectorView: View {
     @State private var isVersionStackExpanded: Bool = true
     @State private var versionEditorDraft: String = ""
     @State private var versionNoteDraft: String = ""
+    @State private var isTitleHovered: Bool = false
+    @State private var isOCRExpanded: Bool = false
 
     @FocusState private var isTitleFocused: Bool
     @FocusState private var isNotesFocused: Bool
     @FocusState private var isBoardTitleFocused: Bool
     @FocusState private var isBoardSubtitleFocused: Bool
     @FocusState private var isBoardRefinementFocused: Bool
+
+    private static let heroTitleFont: Font = .system(size: 13.5, weight: .semibold)
 
     private static let mediaTimestampFormatter: DateFormatter = {
         let fmt = DateFormatter()
@@ -129,21 +133,6 @@ public struct InspectorView: View {
             if !isQuickLookHosted && coordinator.quickLookAssetID != nil {
                 Color.clear
             } else {
-                // Subtle low-saturation ambient tint ONLY for Single Asset Inspector
-                let ambientAsset: AssetRecord? = pinnedAsset ?? (!coordinator.isViewingMoodboard ? library.primarySelectedAsset : nil)
-                if let asset = ambientAsset {
-                    LinearGradient(
-                        colors: [
-                            CharkleTheme.ambientTint(from: asset.dominantColors.first?.hex, scheme: colorScheme),
-                            .clear
-                        ],
-                        startPoint: .top,
-                        endPoint: .center
-                    )
-                    .frame(height: 200)
-                    .allowsHitTesting(false)
-                }
-
                 if let pinnedAsset {
                     singleAssetInspector(pinnedAsset)
                 } else if coordinator.isViewingMoodboard, let board = moodboards.activeBoard {
@@ -217,7 +206,7 @@ public struct InspectorView: View {
                     }
                 }
             )
-            .padding(.horizontal, 14)
+            .padding(.horizontal, 16)
             .padding(.top, 10)
             .padding(.bottom, 9)
             .background {
@@ -237,8 +226,14 @@ public struct InspectorView: View {
         .onAppear {
             titleDraft = asset.title
             notesDraft = asset.notes
-            versionEditorDraft = asset.richMetadata?.versionStack?.editorName ?? ""
-            versionNoteDraft = asset.richMetadata?.versionStack?.changeNote ?? ""
+            versionEditorDraft = Self.cleanVersionEditorName(
+                asset.richMetadata?.versionStack?.editorName,
+                alreadyShownNote: nil
+            ) ?? ""
+            versionNoteDraft = Self.cleanVersionTimelineNote(
+                changeNote: asset.richMetadata?.versionStack?.changeNote,
+                versionLabel: nil
+            ) ?? ""
             if isActive, isQuickLookHosted || coordinator.isInspectorVisible || coordinator.selectedDestination == .inbox {
                 library.refreshInspectorContext(for: asset.id)
             }
@@ -250,8 +245,14 @@ public struct InspectorView: View {
             flushPendingNotesSave()
             titleDraft = asset.title
             notesDraft = asset.notes
-            versionEditorDraft = asset.richMetadata?.versionStack?.editorName ?? ""
-            versionNoteDraft = asset.richMetadata?.versionStack?.changeNote ?? ""
+            versionEditorDraft = Self.cleanVersionEditorName(
+                asset.richMetadata?.versionStack?.editorName,
+                alreadyShownNote: nil
+            ) ?? ""
+            versionNoteDraft = Self.cleanVersionTimelineNote(
+                changeNote: asset.richMetadata?.versionStack?.changeNote,
+                versionLabel: nil
+            ) ?? ""
             if isActive, isQuickLookHosted || coordinator.isInspectorVisible || coordinator.selectedDestination == .inbox {
                 library.refreshInspectorContext(for: newID)
             }
@@ -580,8 +581,8 @@ public struct InspectorView: View {
         showsTopDivider: Bool
     ) -> some View {
         CharkleInspectorSection(
-            "素材预览",
-            systemImage: "photo",
+            "预览",
+            systemImage: nil,
             showsTopDivider: showsTopDivider,
             isReorderHighlighted: isSectionHighlighted(.previewIdentity),
             reorderActions: reorderActions(for: .previewIdentity, visibleSections: visibleSections)
@@ -589,49 +590,64 @@ public struct InspectorView: View {
             VStack(alignment: .leading, spacing: 10) {
                 let naturalRatio = max(0.35, min(3.2, CGFloat(asset.aspectRatio)))
                 let previewContentWidth = max(160, panelWidth - 44)
-                let fittedHeight = min(272, max(104, (previewContentWidth / naturalRatio).rounded()))
+                let fittedHeight = min(264, max(104, (previewContentWidth / naturalRatio).rounded()))
                 let fittedWidth = min(previewContentWidth, (fittedHeight * naturalRatio).rounded())
+                let previewShape = RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous)
 
-                ZStack {
-                    AssetThumbnailSurface(
-                        asset: asset,
-                        loader: library.thumbnailLoader,
-                        tier: .preview1400,
-                        cornerRadius: CharkleTheme.Radius.concentricInner(outer: CharkleTheme.Radius.cardOuter, padding: 8),
-                        contentMode: .fit
-                    )
-                    .frame(width: fittedWidth, height: fittedHeight)
-                }
-                .padding(8)
-                .frame(maxWidth: .infinity)
-                .background(
-                    CharkleTheme.inspectorFieldSurface(for: colorScheme),
-                    in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.cardOuter, style: .continuous)
+                AssetThumbnailSurface(
+                    asset: asset,
+                    loader: library.thumbnailLoader,
+                    tier: .preview1400,
+                    cornerRadius: CharkleTheme.Radius.chip,
+                    contentMode: .fit
                 )
-                .contentShape(RoundedRectangle(cornerRadius: CharkleTheme.Radius.cardOuter, style: .continuous))
+                .frame(width: fittedWidth, height: fittedHeight)
+                .overlay(
+                    previewShape.strokeBorder(
+                        Color.primary.opacity(0.08),
+                        lineWidth: CharkleTheme.hairlineWidth
+                    )
+                )
+                .shadow(
+                    color: .black.opacity(colorScheme == .dark ? 0.30 : 0.09),
+                    radius: 7,
+                    y: 2.5
+                )
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 4)
+                .contentShape(Rectangle())
                 .onTapGesture {
                     if !isQuickLookHosted {
                         onOpenQuickLook(asset)
                     }
                 }
-                .help(isQuickLookHosted ? asset.title : (asset.isExternalWebLink ? "点击在默认浏览器中打开" : "点击打开 Quick Look 全屏预览"))
+                .help(isQuickLookHosted ? asset.title : (asset.isExternalWebLink ? "点击在默认浏览器中打开" : "点击打开全屏预览"))
 
                 VStack(alignment: .leading, spacing: 8) {
+                    let titleShape = RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous)
                     TextField("素材标题", text: $titleDraft)
                         .textFieldStyle(.plain)
-                        .font(CharkleTheme.text(.body, weight: .semibold))
+                        .font(Self.heroTitleFont)
                         .focused($isTitleFocused)
                         .onSubmit { commitSingleAssetTitle(asset) }
-                        .padding(.horizontal, 9)
-                        .padding(.vertical, 6)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 5)
                         .background(
-                            CharkleTheme.inspectorFieldSurface(for: colorScheme),
-                            in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous)
+                            (isTitleFocused || isTitleHovered)
+                                ? CharkleTheme.inspectorFieldSurface(for: colorScheme)
+                                : Color.clear,
+                            in: titleShape
                         )
                         .overlay(
-                            RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous)
-                                .strokeBorder(isTitleFocused ? accentBorder : Color.clear, lineWidth: 1)
+                            titleShape.strokeBorder(
+                                isTitleFocused
+                                    ? accentBorder
+                                    : (isTitleHovered ? CharkleTheme.hairline(for: colorScheme) : Color.clear),
+                                lineWidth: isTitleFocused ? 1.0 : CharkleTheme.hairlineWidth
+                            )
                         )
+                        .padding(.horizontal, -8)
+                        .onHover { isTitleHovered = $0 }
 
                     HStack(spacing: 8) {
                         HStack(spacing: 3) {
@@ -641,8 +657,12 @@ public struct InspectorView: View {
                                     Task { await library.setRating(target, for: [asset.id]) }
                                 } label: {
                                     Image(systemName: star <= asset.rating ? "star.fill" : "star")
-                                        .font(.system(size: 12.5))
-                                        .foregroundStyle(star <= asset.rating ? Color(charkleHex: "#E5B243") : .secondary.opacity(0.42))
+                                        .font(.system(size: 12))
+                                        .foregroundStyle(
+                                            star <= asset.rating
+                                                ? Color(charkleHex: "#E5B243")
+                                                : Color.primary.opacity(0.24)
+                                        )
                                         .scaleEffect(star == asset.rating && !reduceMotion ? 1.08 : 1.0)
                                         .animation(CharkleMotion.accessible(CharkleMotion.microOvershoot, reduced: reduceMotion), value: asset.rating)
                                 }
@@ -667,7 +687,7 @@ public struct InspectorView: View {
                                     Image(systemName: "arrow.down.circle")
                                         .symbolVariant(asset.pinnedOffline ? .fill : .none)
                                         .font(.system(size: 11))
-                                    Text(asset.pinnedOffline ? "已保留本地" : "保留在本地")
+                                    Text(asset.pinnedOffline ? "已保留本地" : "保留本地")
                                         .font(CharkleTheme.text(.caption, weight: .medium))
                                 }
                                 .foregroundStyle(asset.pinnedOffline ? accentColor : CharkleTheme.secondaryInk(for: colorScheme))
@@ -694,7 +714,7 @@ public struct InspectorView: View {
     ) -> some View {
         CharkleInspectorSection(
             asset.isTrashed ? "废纸篓操作" : "快捷操作",
-            systemImage: asset.isTrashed ? "trash" : "bolt",
+            systemImage: nil,
             showsTopDivider: showsTopDivider,
             isReorderHighlighted: isSectionHighlighted(.quickActions),
             reorderActions: reorderActions(for: .quickActions, visibleSections: visibleSections)
@@ -736,32 +756,9 @@ public struct InspectorView: View {
                     }
                 }
             } else {
-                VStack(spacing: 7) {
-                    HStack(spacing: 7) {
-                        Menu {
-                            ForEach(moodboards.boards) { board in
-                                Button(board.title) {
-                                    Task {
-                                        await moodboards.addAssetsToSpecificBoard(boardID: board.id, assets: [asset])
-                                        coordinator.showToast("已加入情绪板「\(board.title)」", icon: "rectangle.3.group")
-                                    }
-                                }
-                            }
-                            Divider()
-                            Button("以此图快速生成新情绪板…") {
-                                library.selectedAssetIDs = [asset.id]
-                                if isQuickLookHosted {
-                                    onRequestCloseQuickLook?()
-                                }
-                                coordinator.presentMoodboardGenerator(entry: .seedAssets)
-                            }
-                        } label: {
-                            inspectorStandardMenuLabel(title: "加入情绪板", systemImage: "rectangle.3.group", showsChevron: true)
-                        }
-                        .menuStyle(.button)
-                        .buttonStyle(CharkleButtonStyle(.standard, size: .sm, fullWidth: true))
-                        .menuIndicator(.hidden)
-
+                let row2ContainerShape = RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous)
+                VStack(spacing: 6) {
+                    HStack(spacing: 6) {
                         Menu {
                             CharkleHierarchicalFolderMenuContent(
                                 folders: library.folders,
@@ -779,9 +776,33 @@ public struct InspectorView: View {
                         .buttonStyle(CharkleButtonStyle(.standard, size: .sm, fullWidth: true))
                         .menuIndicator(.hidden)
                         .help(asset.folderID.map { "当前所在：\(library.folderDisplayPath(for: $0))" } ?? "当前所在：收件箱")
+
+                        Menu {
+                            ForEach(moodboards.boards) { board in
+                                Button(board.title) {
+                                    Task {
+                                        await moodboards.addAssetsToSpecificBoard(boardID: board.id, assets: [asset])
+                                        coordinator.showToast("已加入情绪板「\(board.title)」", icon: "rectangle.3.group")
+                                    }
+                                }
+                            }
+                            Divider()
+                            Button("以此素材新建情绪板…") {
+                                library.selectedAssetIDs = [asset.id]
+                                if isQuickLookHosted {
+                                    onRequestCloseQuickLook?()
+                                }
+                                coordinator.presentMoodboardGenerator(entry: .seedAssets)
+                            }
+                        } label: {
+                            inspectorStandardMenuLabel(title: "情绪板", systemImage: "rectangle.3.group", showsChevron: true)
+                        }
+                        .menuStyle(.button)
+                        .buttonStyle(CharkleButtonStyle(.standard, size: .sm, fullWidth: true))
+                        .menuIndicator(.hidden)
                     }
 
-                    HStack(spacing: 6) {
+                    HStack(spacing: 4) {
                         Button {
                             Task {
                                 let ok = await library.revealInFinder(assetID: asset.id)
@@ -790,10 +811,10 @@ public struct InspectorView: View {
                                 }
                             }
                         } label: {
-                            Label("在访达中显示", systemImage: "folder")
+                            Label("访达", systemImage: "folder")
                                 .lineLimit(1)
                         }
-                        .buttonStyle(.charkle(.standard, size: .xs, fullWidth: true))
+                        .buttonStyle(.charkle(.subtle, size: .xs, fullWidth: true))
 
                         Button {
                             Task {
@@ -802,9 +823,9 @@ public struct InspectorView: View {
                             }
                         } label: {
                             Label("拷贝", systemImage: "doc.on.doc")
+                                .lineLimit(1)
                         }
-                        .buttonStyle(.charkle(.standard, size: .xs))
-                        .fixedSize()
+                        .buttonStyle(.charkle(.subtle, size: .xs, fullWidth: true))
 
                         Button {
                             Task {
@@ -813,10 +834,18 @@ public struct InspectorView: View {
                             }
                         } label: {
                             Label("剪切", systemImage: "scissors")
+                                .lineLimit(1)
                         }
-                        .buttonStyle(.charkle(.standard, size: .xs))
-                        .fixedSize()
+                        .buttonStyle(.charkle(.subtle, size: .xs, fullWidth: true))
                     }
+                    .padding(2)
+                    .background(CharkleTheme.inspectorFieldSurface(for: colorScheme), in: row2ContainerShape)
+                    .overlay(
+                        row2ContainerShape.strokeBorder(
+                            CharkleTheme.hairline(for: colorScheme),
+                            lineWidth: CharkleTheme.hairlineWidth
+                        )
+                    )
                 }
             }
         }
@@ -827,18 +856,21 @@ public struct InspectorView: View {
         visibleSections: [InspectorInfoSection],
         showsTopDivider: Bool
     ) -> some View {
-        CharkleInspectorSection(
-            "色板与标签",
-            systemImage: "swatchpalette",
+        let showsPalette = asset.mediaKind != .document
+            && (!asset.dominantColors.isEmpty || asset.mediaKind == .image || asset.mediaKind == .webBookmark || asset.mediaKind == .designFile)
+
+        return CharkleInspectorSection(
+            showsPalette ? "色彩与标签" : "标签",
+            systemImage: nil,
             showsTopDivider: showsTopDivider,
             isReorderHighlighted: isSectionHighlighted(.colorsAndTags),
             reorderActions: reorderActions(for: .colorsAndTags, visibleSections: visibleSections)
         ) {
             VStack(alignment: .leading, spacing: 10) {
-                if !asset.dominantColors.isEmpty || asset.mediaKind == .image || asset.mediaKind == .webBookmark {
+                if showsPalette {
                     VStack(alignment: .leading, spacing: 7) {
                         HStack(spacing: 6) {
-                            Text("提取色板")
+                            Text("主色")
                                 .font(CharkleTheme.text(.caption, weight: .medium))
                                 .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
                             Spacer()
@@ -862,55 +894,28 @@ public struct InspectorView: View {
                                         .foregroundStyle(accentColor)
                                 }
                                 .buttonStyle(.plain)
-                                .help("先自动锁定画面主体再提取去背景色板（优先使用已配置的视觉定位增强，否则使用本机 Apple Vision）")
+                                .help("先自动锁定画面主体再提取去背景色板")
                             }
                         }
 
                         if !asset.dominantColors.isEmpty {
-                            CharkleFlowLayout(spacing: 6, lineSpacing: 6) {
-                                ForEach(asset.dominantColors.prefix(6), id: \.hex) { swatch in
-                                    let hex = swatch.hex.uppercased()
-                                    Button {
-                                        onCopyHex(hex)
-                                    } label: {
-                                        HStack(spacing: 5) {
-                                            RoundedRectangle(cornerRadius: CharkleTheme.Radius.xs, style: .continuous)
-                                                .fill(Color(charkleHex: hex))
-                                                .frame(width: 13, height: 13)
-                                                .overlay(
-                                                    RoundedRectangle(cornerRadius: CharkleTheme.Radius.xs, style: .continuous)
-                                                        .strokeBorder(Color.primary.opacity(0.14), lineWidth: CharkleTheme.hairlineWidth)
-                                                )
-                                            Text(hex)
-                                                .font(CharkleTheme.text(.caption, weight: .medium, design: .monospaced))
-                                                .monospacedDigit()
-                                        }
-                                        .padding(.horizontal, 7)
-                                        .padding(.vertical, 4)
-                                        .background(
-                                            CharkleTheme.inspectorFieldSurface(for: colorScheme),
-                                            in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous)
-                                        )
-                                    }
-                                    .buttonStyle(CharkleTactileButtonStyle())
-                                    .contextMenu {
-                                        Button("复制 \(hex)") { onCopyHex(hex) }
-                                        Button("以此色筛选素材库") { onFilterByColor(hex) }
-                                    }
-                                    .help("点击复制 HEX，右键按色彩筛选")
-                                }
-                            }
+                            CharkleColorSwatchStrip(
+                                hexColors: asset.dominantColors.prefix(6).map(\.hex),
+                                height: 24,
+                                onCopyHex: onCopyHex,
+                                onFilterByColor: onFilterByColor
+                            )
                         }
                     }
-
-                    CharkleHairlineDivider()
                 }
 
                 VStack(alignment: .leading, spacing: 7) {
                     HStack(spacing: 6) {
-                        Text("标签")
-                            .font(CharkleTheme.text(.caption, weight: .medium))
-                            .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
+                        if showsPalette {
+                            Text("标签")
+                                .font(CharkleTheme.text(.caption, weight: .medium))
+                                .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
+                        }
                         Spacer()
                         if !asset.isTrashed {
                             let isRetaggingThis = library.enrichingAssetIDs.contains(asset.id)
@@ -925,7 +930,7 @@ public struct InspectorView: View {
                                     } else {
                                         Image(systemName: asset.suggestedTags.isEmpty ? "sparkles" : "arrow.clockwise")
                                             .font(.system(size: 9.5, weight: .semibold))
-                                        Text(asset.suggestedTags.isEmpty ? "AI 打标" : "重新打标")
+                                        Text(asset.suggestedTags.isEmpty ? "智能打标" : "重新打标")
                                     }
                                 }
                                 .font(CharkleTheme.text(.caption, weight: .medium))
@@ -933,7 +938,7 @@ public struct InspectorView: View {
                             }
                             .buttonStyle(.plain)
                             .disabled(isRetaggingThis)
-                            .help("使用 Jev 闭集打标或云端 AI 重新生成标签（优先零幻觉复用已有规范标签，保留已采纳标签）")
+                            .help("重新生成建议标签（保留已添加标签）")
                         }
                     }
 
@@ -972,8 +977,8 @@ public struct InspectorView: View {
                     if !asset.suggestedTags.isEmpty {
                         VStack(alignment: .leading, spacing: 5) {
                             HStack(spacing: 8) {
-                                Text("AI 建议标签")
-                                    .font(CharkleTheme.text(.caption, weight: .semibold))
+                                Text("建议标签")
+                                    .font(CharkleTheme.text(.caption, weight: .medium))
                                     .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
                                 Spacer()
                                 Button("清空") {
@@ -985,7 +990,6 @@ public struct InspectorView: View {
                                 .font(CharkleTheme.text(.caption, weight: .medium))
                                 .buttonStyle(.plain)
                                 .foregroundStyle(.secondary)
-                                .help("忽略并清空当前未采纳的建议标签")
 
                                 Button("全部采纳") {
                                     Task { await library.acceptAllSuggestedTags(for: [asset.id]) }
@@ -1035,9 +1039,11 @@ public struct InspectorView: View {
         visibleSections: [InspectorInfoSection],
         showsTopDivider: Bool
     ) -> some View {
-        CharkleInspectorSection(
-            "备注与识别文本",
-            systemImage: "note.text",
+        let notesShape = RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous)
+
+        return CharkleInspectorSection(
+            "备注",
+            systemImage: nil,
             showsTopDivider: showsTopDivider,
             isReorderHighlighted: isSectionHighlighted(.notesAndOCR),
             reorderActions: reorderActions(for: .notesAndOCR, visibleSections: visibleSections)
@@ -1045,7 +1051,7 @@ public struct InspectorView: View {
             VStack(alignment: .leading, spacing: 9) {
                 ZStack(alignment: .topLeading) {
                     if notesDraft.isEmpty {
-                        Text("添加灵感备注、构图笔记或来源说明…")
+                        Text("添加备注或来源说明…")
                             .font(CharkleTheme.text(.caption))
                             .foregroundStyle(.tertiary)
                             .padding(.horizontal, 10)
@@ -1061,13 +1067,12 @@ public struct InspectorView: View {
                         .padding(.horizontal, 5)
                         .padding(.vertical, 4)
                 }
-                .background(
-                    CharkleTheme.inspectorFieldSurface(for: colorScheme),
-                    in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous)
-                )
+                .background(CharkleTheme.inspectorFieldSurface(for: colorScheme), in: notesShape)
                 .overlay(
-                    RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous)
-                        .strokeBorder(isNotesFocused ? accentBorder : Color.clear, lineWidth: 1)
+                    notesShape.strokeBorder(
+                        isNotesFocused ? accentBorder : CharkleTheme.hairline(for: colorScheme),
+                        lineWidth: isNotesFocused ? 1.0 : CharkleTheme.hairlineWidth
+                    )
                 )
                 .onChange(of: notesDraft) { _, newValue in
                     if newValue != asset.notes {
@@ -1076,16 +1081,21 @@ public struct InspectorView: View {
                 }
 
                 if let ocr = asset.ocrText, !ocr.isEmpty {
-                    CharkleHairlineDivider()
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("OCR 识别文字")
-                            .font(CharkleTheme.text(.caption, weight: .semibold))
-                            .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
+                    CharkleDisclosureGroup(
+                        isExpanded: $isOCRExpanded,
+                        showsTopDivider: true,
+                        accentChevronWhenExpanded: true
+                    ) {
                         Text(ocr)
                             .font(CharkleTheme.text(.caption))
                             .foregroundStyle(.secondary)
                             .textSelection(.enabled)
-                            .lineLimit(4)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.top, 4)
+                    } label: {
+                        Text("识别文本")
+                            .font(CharkleTheme.text(.caption, weight: .medium))
+                            .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
                     }
                 }
 
@@ -1093,7 +1103,7 @@ public struct InspectorView: View {
                     CharkleHairlineDivider()
                     VStack(alignment: .leading, spacing: 4) {
                         Text("画面描述")
-                            .font(CharkleTheme.text(.caption, weight: .semibold))
+                            .font(CharkleTheme.text(.caption, weight: .medium))
                             .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
                         Text(aiDesc)
                             .font(CharkleTheme.text(.caption))
@@ -1105,6 +1115,20 @@ public struct InspectorView: View {
         }
     }
 
+    private func documentExtentSummary(for asset: AssetRecord) -> String? {
+        guard let doc = asset.richMetadata?.document else { return nil }
+        var parts: [String] = []
+        if !doc.sheetNames.isEmpty {
+            parts.append("\(doc.sheetNames.count) 工作表")
+        } else if doc.pageCount > 0 {
+            parts.append("\(doc.pageCount) 页")
+        }
+        if doc.wordCount > 0 {
+            parts.append("\(doc.wordCount.formatted()) 字")
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
     private func singleAssetMediaSpecsSection(
         _ asset: AssetRecord,
         resolvedExif: PhotoExifMetadata?,
@@ -1112,32 +1136,37 @@ public struct InspectorView: View {
         showsTopDivider: Bool
     ) -> some View {
         CharkleInspectorSection(
-            "媒体信息",
-            systemImage: "info.circle",
+            "信息",
+            systemImage: nil,
             showsTopDivider: showsTopDivider,
             isReorderHighlighted: isSectionHighlighted(.mediaSpecs),
             reorderActions: reorderActions(for: .mediaSpecs, visibleSections: visibleSections)
         ) {
-            VStack(spacing: 0) {
+            VStack(spacing: 2) {
                 CharkleSpecRow("格式", value: asset.displayTypeLabel)
-                CharkleHairlineDivider()
-                CharkleSpecRow(
-                    "尺寸",
-                    value: "\(asset.pixelWidth) × \(asset.pixelHeight) (\(asset.aspectShape.localizedLabel))",
-                    copyable: true,
-                    copyValue: "\(asset.pixelWidth)×\(asset.pixelHeight)"
-                ) { _ in
-                    coordinator.showToast("已复制尺寸 \(asset.pixelWidth)×\(asset.pixelHeight)", icon: "doc.on.doc")
+
+                if asset.mediaKind == .document {
+                    if let docExtent = documentExtentSummary(for: asset) {
+                        CharkleSpecRow("篇幅", value: docExtent)
+                    }
+                } else {
+                    CharkleSpecRow(
+                        "尺寸",
+                        value: "\(asset.pixelWidth) × \(asset.pixelHeight) (\(asset.aspectShape.localizedLabel))",
+                        copyable: true,
+                        copyValue: "\(asset.pixelWidth)×\(asset.pixelHeight)"
+                    ) { _ in
+                        coordinator.showToast("已复制尺寸 \(asset.pixelWidth)×\(asset.pixelHeight)", icon: "doc.on.doc")
+                    }
                 }
-                CharkleHairlineDivider()
+
                 CharkleSpecRow("大小", value: ByteCountFormatter.string(fromByteCount: asset.fileSizeBytes, countStyle: .file))
+
                 if let duration = asset.durationSeconds {
-                    CharkleHairlineDivider()
                     CharkleSpecRow("时长", value: CanvasFormatters.durationString(duration))
                 }
                 if let exif = resolvedExif, !exif.hasMeaningfulCameraExif {
                     if let profile = exif.colorProfile {
-                        CharkleHairlineDivider()
                         CharkleSpecRow("色彩空间", value: profile)
                     }
                     if exif.bitDepth != nil || exif.dpiWidth != nil {
@@ -1146,17 +1175,14 @@ public struct InspectorView: View {
                             exif.dpiWidth.map { "\($0) DPI" }
                         ].compactMap { $0 }.joined(separator: " / ")
                         if !depthDPI.isEmpty {
-                            CharkleHairlineDivider()
                             CharkleSpecRow("色深 / 分辨率", value: depthDPI)
                         }
                     }
                 }
-                CharkleHairlineDivider()
                 CharkleSpecRow("添加时间", value: Self.mediaTimestampFormatter.string(from: asset.createdAt))
-                CharkleHairlineDivider()
                 CharkleSpecRow("原文件状态", value: asset.isLocalOriginalCached ? "已缓存本地" : "云端按需拉取")
+
                 if let urlStr = asset.sourceURL, let url = URL(string: urlStr) {
-                    CharkleHairlineDivider()
                     HStack(alignment: .firstTextBaseline, spacing: 10) {
                         Text("来源")
                             .font(CharkleTheme.text(.caption))
@@ -1208,19 +1234,17 @@ public struct InspectorView: View {
         showsTopDivider: Bool
     ) -> some View {
         CharkleInspectorSection(
-            "GitHub 仓库信息",
-            systemImage: "chevron.left.forwardslash.chevron.right",
+            "仓库信息",
+            systemImage: nil,
             showsTopDivider: showsTopDivider,
             isReorderHighlighted: isSectionHighlighted(.githubRepo),
             reorderActions: reorderActions(for: .githubRepo, visibleSections: visibleSections)
         ) {
             VStack(alignment: .leading, spacing: 8) {
-                VStack(spacing: 0) {
+                VStack(spacing: 2) {
                     CharkleSpecRow("Stars", value: "\(repo.stars)")
-                    CharkleHairlineDivider()
                     CharkleSpecRow("Forks", value: "\(repo.forks)")
                     if let lang = repo.language, !lang.isEmpty {
-                        CharkleHairlineDivider()
                         CharkleSpecRow("主要语言", value: lang)
                     }
                 }
@@ -1228,7 +1252,7 @@ public struct InspectorView: View {
                 Button {
                     onOpenQuickLook(asset)
                 } label: {
-                    Label("在应用内阅读完整 README", systemImage: "doc.richtext")
+                    Label("阅读完整 README", systemImage: "doc.richtext")
                 }
                 .buttonStyle(.charkle(.standard, size: .sm, fullWidth: true))
             }
@@ -1243,8 +1267,8 @@ public struct InspectorView: View {
     ) -> some View {
         let attachments = post.effectiveAttachments
         return CharkleInspectorSection(
-            "推文媒体提取",
-            systemImage: "photo.on.rectangle.angled",
+            "媒体提取",
+            systemImage: nil,
             showsTopDivider: showsTopDivider,
             isReorderHighlighted: isSectionHighlighted(.socialMediaExtract),
             reorderActions: reorderActions(for: .socialMediaExtract, visibleSections: visibleSections)
@@ -1276,7 +1300,7 @@ public struct InspectorView: View {
                     }
                     .padding(8)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Color.accentColor.opacity(0.07), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous))
+                    .background(CharkleTheme.inspectorFieldSurface(for: colorScheme), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous))
                 }
 
                 Text(
@@ -1338,8 +1362,8 @@ public struct InspectorView: View {
     ) -> some View {
         let attachments = web.attachments
         return CharkleInspectorSection(
-            "网页摘要与媒体提取",
-            systemImage: "globe",
+            "网页内容",
+            systemImage: nil,
             showsTopDivider: showsTopDivider,
             isReorderHighlighted: isSectionHighlighted(.socialMediaExtract),
             reorderActions: reorderActions(for: .socialMediaExtract, visibleSections: visibleSections)
@@ -1353,7 +1377,7 @@ public struct InspectorView: View {
                         .textSelection(.enabled)
                         .padding(8)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(Color.accentColor.opacity(0.06), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous))
+                        .background(CharkleTheme.inspectorFieldSurface(for: colorScheme), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous))
                 }
 
                 if attachments.count > 1 {
@@ -1407,8 +1431,8 @@ public struct InspectorView: View {
         showsTopDivider: Bool
     ) -> some View {
         CharkleInspectorSection(
-            "AI 生图信息",
-            systemImage: "sparkles.rectangle.stack",
+            "生成参数",
+            systemImage: nil,
             showsTopDivider: showsTopDivider,
             isReorderHighlighted: isSectionHighlighted(.aiGeneration),
             reorderActions: reorderActions(for: .aiGeneration, visibleSections: visibleSections)
@@ -1427,8 +1451,8 @@ public struct InspectorView: View {
                 if let prompt = aiGen.prompt, !prompt.isEmpty {
                     VStack(alignment: .leading, spacing: 5) {
                         HStack {
-                            Text("正向提示词 (Prompt)")
-                                .font(CharkleTheme.text(.caption, weight: .semibold))
+                            Text("正向提示词")
+                                .font(CharkleTheme.text(.caption, weight: .medium))
                                 .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
                             Spacer()
                             Button {
@@ -1458,8 +1482,8 @@ public struct InspectorView: View {
                 if let neg = aiGen.negativePrompt, !neg.isEmpty {
                     VStack(alignment: .leading, spacing: 5) {
                         HStack {
-                            Text("负向提示词 (Negative)")
-                                .font(CharkleTheme.text(.caption, weight: .semibold))
+                            Text("负向提示词")
+                                .font(CharkleTheme.text(.caption, weight: .medium))
                                 .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
                             Spacer()
                             Button {
@@ -1516,9 +1540,8 @@ public struct InspectorView: View {
                 }()
 
                 if !paramRows.isEmpty {
-                    VStack(spacing: 0) {
-                        ForEach(Array(paramRows.enumerated()), id: \.offset) { idx, row in
-                            if idx > 0 { CharkleHairlineDivider() }
+                    VStack(spacing: 2) {
+                        ForEach(Array(paramRows.enumerated()), id: \.offset) { _, row in
                             CharkleSpecRow(
                                 row.label,
                                 value: row.value,
@@ -1570,8 +1593,8 @@ public struct InspectorView: View {
         showsTopDivider: Bool
     ) -> some View {
         CharkleInspectorSection(
-            "拍摄参数 (EXIF)",
-            systemImage: "camera.aperture",
+            "拍摄参数",
+            systemImage: nil,
             showsTopDivider: showsTopDivider,
             isReorderHighlighted: isSectionHighlighted(.photoExif),
             reorderActions: reorderActions(for: .photoExif, visibleSections: visibleSections)
@@ -1591,7 +1614,7 @@ public struct InspectorView: View {
                         )
                 }
 
-                VStack(spacing: 0) {
+                VStack(spacing: 2) {
                     let rows: [(String, String)] = {
                         var list: [(String, String)] = []
                         if let cam = exif.cameraDisplayName { list.append(("相机", cam)) }
@@ -1621,13 +1644,11 @@ public struct InspectorView: View {
                         return list
                     }()
 
-                    ForEach(Array(rows.enumerated()), id: \.offset) { idx, row in
-                        if idx > 0 { CharkleHairlineDivider() }
+                    ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
                         CharkleSpecRow(row.0, value: row.1)
                     }
 
                     if let lat = exif.latitude, let lon = exif.longitude {
-                        if !rows.isEmpty { CharkleHairlineDivider() }
                         let coordText = String(format: "%.5f, %.5f", lat, lon)
                         let mapsURL = URL(string: "https://maps.apple.com/?ll=\(lat),\(lon)")
                         HStack(alignment: .firstTextBaseline, spacing: 10) {
@@ -1725,22 +1746,22 @@ public struct InspectorView: View {
                                 Task {
                                     let merged = await library.mergeAssetsIntoVersionStack(ids, targetAssetID: anchorID)
                                     if !merged.isEmpty {
-                                        coordinator.showToast("已将 \(ids.count) 项合并为版本叠", icon: "square.stack.3d.up.fill", tone: .success)
+                                        coordinator.showToast("已将 \(ids.count) 项合并为历史版本", icon: "square.stack.3d.up.fill", tone: .success)
                                     }
                                 }
                             } label: {
-                                Label("合并为版本叠（\(ids.count) 项）", systemImage: "square.stack.3d.up")
+                                Label("合并版本（\(ids.count) 项）", systemImage: "square.stack.3d.up")
                             }
                             .buttonStyle(.charkle(.standard, size: .sm, fullWidth: true))
                         }
                     }
                 }
-                .padding(.horizontal, 14)
+                .padding(.horizontal, 16)
                 .padding(.vertical, 12)
 
                 if !isTrashSelection {
                     // Section 2: Bulk Organize
-                    CharkleInspectorSection("批量整理", systemImage: "tray.full", showsTopDivider: true) {
+                    CharkleInspectorSection("批量整理", systemImage: nil, showsTopDivider: true) {
                         VStack(alignment: .leading, spacing: 10) {
                             VStack(alignment: .leading, spacing: 5) {
                                 Text("移动到文件夹")
@@ -1877,7 +1898,7 @@ public struct InspectorView: View {
                     }
 
                     // Section 3: Offline & Destructive Actions
-                    CharkleInspectorSection("本地与操作", systemImage: "slider.horizontal.3", showsTopDivider: true) {
+                    CharkleInspectorSection("本地与操作", systemImage: nil, showsTopDivider: true) {
                         let allKeptLocally = !selectedAssets.isEmpty && selectedAssets.allSatisfy(\.pinnedOffline)
                         VStack(spacing: 7) {
                             Button {
@@ -2023,7 +2044,7 @@ public struct InspectorView: View {
                         .help(board.pinnedOffline ? "整板素材已始终保留在本机，离线可用" : "始终将此情绪板引用的素材保留在本机")
                     }
                 }
-                .padding(.horizontal, 14)
+                .padding(.horizontal, 16)
                 .padding(.vertical, 12)
 
                 // Section 2: In-Canvas AI Curator Assistant
@@ -2031,9 +2052,8 @@ public struct InspectorView: View {
 
                 // Section 3: Candidate Swap Pool
                 CharkleInspectorSection(
-                    isSwapping ? "候选替换池" : "同方向候选池",
-                    systemImage: isSwapping ? "arrow.triangle.2.circlepath" : "photo.stack",
-                    iconColor: isSwapping ? accentColor : nil,
+                    isSwapping ? "候选替换" : "候选素材",
+                    systemImage: nil,
                     showsTopDivider: true
                 ) {
                     if isSwapping {
@@ -2131,11 +2151,11 @@ public struct InspectorView: View {
                 }
 
                 // Section 4: Board Harmonious Palette Strip
-                CharkleInspectorSection("全板和谐色板", systemImage: "paintpalette", showsTopDivider: true) {
+                CharkleInspectorSection("全板色板", systemImage: nil, showsTopDivider: true) {
                     Button {
                         Task {
                             await moodboards.syncBoardPalette()
-                            coordinator.showToast("已重新提取全板和谐色卡", icon: "paintpalette")
+                            coordinator.showToast("已重新提取全板色板", icon: "paintpalette")
                         }
                     } label: {
                         HStack(spacing: 3) {
@@ -2147,41 +2167,23 @@ public struct InspectorView: View {
                         .foregroundStyle(.secondary)
                     }
                     .buttonStyle(.plain)
-                    .help("重新分析板内素材并更新和谐色板")
+                    .help("重新分析板内素材并更新色板")
                 } content: {
                     if board.extractedPalette.isEmpty {
-                        Text("加入素材后将自动提取全板和谐色卡。")
+                        Text("加入素材后将自动提取全板色板。")
                             .font(CharkleTheme.text(.caption))
                             .foregroundStyle(.tertiary)
                     } else {
-                        let swatchRadius = CharkleTheme.Radius.concentricInner(outer: CharkleTheme.Radius.chip, padding: 4)
-                        HStack(spacing: 5) {
-                            ForEach(board.extractedPalette.prefix(7), id: \.hex) { swatch in
-                                Button {
-                                    onCopyHex(swatch.hex.uppercased())
-                                } label: {
-                                    RoundedRectangle(cornerRadius: swatchRadius, style: .continuous)
-                                        .fill(Color(charkleHex: swatch.hex))
-                                        .frame(height: 28)
-                                        .overlay(
-                                            RoundedRectangle(cornerRadius: swatchRadius, style: .continuous)
-                                                .strokeBorder(Color.primary.opacity(0.12), lineWidth: CharkleTheme.hairlineWidth)
-                                        )
-                                }
-                                .buttonStyle(CharkleTactileButtonStyle())
-                                .help("点击复制 \(swatch.hex.uppercased())")
-                            }
-                        }
-                        .padding(4)
-                        .background(
-                            CharkleTheme.inspectorFieldSurface(for: colorScheme),
-                            in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous)
+                        CharkleColorSwatchStrip(
+                            hexColors: board.extractedPalette.prefix(7).map(\.hex),
+                            height: 24,
+                            onCopyHex: onCopyHex
                         )
                     }
                 }
 
                 // Section 5: Quick Add from Library Search
-                CharkleInspectorSection("从素材库快速拉图", systemImage: "plus.square.on.square", showsTopDivider: true) {
+                CharkleInspectorSection("添加素材", systemImage: nil, showsTopDivider: true) {
                     VStack(alignment: .leading, spacing: 8) {
                         inspectorTextField(placeholder: "搜索标题、标签或域名…", text: $quickAddQuery, systemImage: "magnifyingglass")
 
@@ -2232,7 +2234,7 @@ public struct InspectorView: View {
                 }
 
                 // Section 6: Export & Delivery (including Figma / FigJam Editable Bridge)
-                CharkleInspectorSection("导出与交付", systemImage: "square.and.arrow.up", showsTopDivider: true) {
+                CharkleInspectorSection("导出与交付", systemImage: nil, showsTopDivider: true) {
                     Button {
                         onOpenFigmaPluginGuide()
                     } label: {
@@ -2352,7 +2354,7 @@ public struct InspectorView: View {
 
     @ViewBuilder
     private func moodboardCuratorSection(_ board: MoodboardDocument) -> some View {
-        CharkleInspectorSection("AI 策展助手", systemImage: "sparkles", iconColor: accentColor, showsTopDivider: true) {
+        CharkleInspectorSection("智能编排", systemImage: nil, showsTopDivider: true) {
             if moodboards.canUndo && !moodboards.isRefiningActiveBoard {
                 Button {
                     moodboards.undo()
@@ -2603,9 +2605,10 @@ public struct InspectorView: View {
         .frame(height: 28)
         .background(CharkleTheme.inspectorFieldSurface(for: colorScheme), in: shape)
         .overlay {
-            if reduceTransparency {
-                shape.strokeBorder(CharkleTheme.hairline(for: colorScheme), lineWidth: 1.0)
-            }
+            shape.strokeBorder(
+                CharkleTheme.hairline(for: colorScheme),
+                lineWidth: reduceTransparency ? 1.0 : CharkleTheme.hairlineWidth
+            )
         }
     }
 
@@ -2732,15 +2735,66 @@ public struct InspectorView: View {
 
     // MARK: - Universal Version Stack Section (Shared 1:1 Between Main Workspace & Quick Look)
 
+    private static let versionShortTimestampFormatter: DateFormatter = {
+        let fmt = DateFormatter()
+        fmt.dateFormat = "MM-dd HH:mm"
+        return fmt
+    }()
+
+    private static let boilerplateVersionStrings: Set<String> = [
+        "基于差异审阅合成",
+        "本机",
+        "初稿",
+        "修订版"
+    ]
+
+    public static func cleanVersionTimelineNote(
+        changeNote: String?,
+        versionLabel: String?
+    ) -> String? {
+        for rawCandidate in [changeNote, versionLabel] {
+            guard let raw = rawCandidate else { continue }
+            var cleaned = AssetVersionStackMetadata.strippingRedundantVersionPrefix(raw)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if cleaned.hasPrefix("(") && cleaned.hasSuffix(")") && cleaned.count >= 2 {
+                cleaned = String(cleaned.dropFirst().dropLast()).trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            if cleaned.hasPrefix("（") && cleaned.hasSuffix("）") && cleaned.count >= 2 {
+                cleaned = String(cleaned.dropFirst().dropLast()).trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            guard !cleaned.isEmpty,
+                  !cleaned.contains("净版"),
+                  !boilerplateVersionStrings.contains(cleaned) else { continue }
+            return cleaned
+        }
+        return nil
+    }
+
+    public static func cleanVersionEditorName(
+        _ rawEditor: String?,
+        alreadyShownNote: String?
+    ) -> String? {
+        guard let rawEditor else { return nil }
+        let trimmed = rawEditor.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              !trimmed.contains("净版"),
+              !boilerplateVersionStrings.contains(trimmed) else { return nil }
+        if let alreadyShownNote,
+           trimmed.compare(alreadyShownNote, options: [.caseInsensitive, .diacriticInsensitive]) == .orderedSame {
+            return nil
+        }
+        return trimmed
+    }
+
     private func singleAssetVersionStackSection(_ asset: AssetRecord, siblings: [AssetRecord]) -> some View {
         let resolvedPrimary = library.primaryVersionAsset(for: asset.id) ?? asset
         let primaryVer = resolvedPrimary.richMetadata?.versionStack?.versionNumber ?? 1
         let newerCount = library.newerThanPrimaryCount(for: asset.id)
-        let warnInk = colorScheme == .dark ? Color(charkleHex: "#FBBF24") : Color(charkleHex: "#B45309")
-        let warnBg = colorScheme == .dark ? Color(charkleHex: "#F2B23E").opacity(0.18) : Color(charkleHex: "#C98212").opacity(0.14)
+        let warnInk = CharkleTheme.warning(for: colorScheme)
         let positiveInk = CharkleTheme.positive(for: colorScheme)
+        let newestFirstEntries = Array(siblings.enumerated()).reversed()
 
-        return CharkleInspectorSection("版本叠", systemImage: "square.stack.3d.up", showsTopDivider: true) {
+        return CharkleInspectorSection("历史版本", systemImage: nil, showsTopDivider: true) {
             CharkleDisclosureGroup(isExpanded: $isVersionStackExpanded, accentChevronWhenExpanded: true) {
                 VStack(alignment: .leading, spacing: 9) {
                     if siblings.count >= 2 {
@@ -2763,16 +2817,16 @@ public struct InspectorView: View {
                                     playlist: playlist
                                 )
                             } label: {
-                                Label("对比版本差异", systemImage: "arrow.left.arrow.right")
+                                Label("对比差异", systemImage: "arrow.left.arrow.right")
                             }
-                            .buttonStyle(.charkle(.accent, size: .xs, fullWidth: true))
+                            .buttonStyle(.charkle(.standard, size: .xs, fullWidth: true))
 
                             if asset.id != resolvedPrimary.id {
                                 Button {
                                     Task {
                                         _ = await library.setPrimaryVersion(asset.id)
                                         let vNum = asset.richMetadata?.versionStack?.versionNumber ?? 1
-                                        coordinator.showToast("已将 v\(vNum) 锁定为主版本", icon: "pin.fill", tone: .success)
+                                        coordinator.showToast("已将 v\(vNum) 设为主版本", icon: "pin.fill", tone: .success)
                                     }
                                 } label: {
                                     Label("设为主版", systemImage: "pin.fill")
@@ -2783,168 +2837,212 @@ public struct InspectorView: View {
                         }
                     }
 
-                    VStack(spacing: 5) {
-                        ForEach(Array(siblings.enumerated()), id: \.element.id) { idx, ver in
+                    // Clean Newest-First Vertical Timeline Spine (vN at top -> v1 at bottom)
+                    VStack(spacing: 0) {
+                        ForEach(Array(newestFirstEntries.enumerated()), id: \.element.element.id) { timelineIdx, entry in
+                            let ascIdx = entry.offset
+                            let ver = entry.element
                             let vMeta = ver.richMetadata?.versionStack
-                            let vNum = vMeta?.versionNumber ?? (idx + 1)
+                            let vNum = vMeta?.versionNumber ?? (ascIdx + 1)
                             let isPrimary = ver.id == resolvedPrimary.id
                             let isCurrent = ver.id == asset.id
-                            let editor = (vMeta?.editorName?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 }
-                            let note = (vMeta?.changeNote?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 }
-                            let cleanRowTitle: String = {
-                                if let note {
-                                    let stripped = AssetVersionStackMetadata.strippingRedundantVersionPrefix(note)
-                                    if !stripped.isEmpty { return stripped }
-                                }
-                                if let label = vMeta?.versionLabel {
-                                    let stripped = AssetVersionStackMetadata.strippingRedundantVersionPrefix(label)
-                                    if !stripped.isEmpty { return stripped }
-                                }
-                                let strippedTitle = AssetVersionStackMetadata.strippingRedundantVersionPrefix(ver.title)
-                                return strippedTitle.isEmpty ? ver.title : strippedTitle
-                            }()
+                            let isFirst = timelineIdx == 0
+                            let isLast = timelineIdx == siblings.count - 1
+                            let cleanNote = Self.cleanVersionTimelineNote(
+                                changeNote: vMeta?.changeNote,
+                                versionLabel: vMeta?.versionLabel
+                            )
+                            let cleanEditor = Self.cleanVersionEditorName(
+                                vMeta?.editorName,
+                                alreadyShownNote: cleanNote
+                            )
+                            let changedBlocks = ver.richMetadata?.document?.diffSummary?.totalChangedBlocks ?? 0
+                            let prevSibling: AssetRecord? = ascIdx > 0 ? siblings[ascIdx - 1] : nil
 
-                            HStack(spacing: 8) {
-                                Button {
-                                    if isQuickLookHosted {
-                                        var playlist = coordinator.quickLookPlaylist
-                                        if !playlist.contains(ver.id) {
-                                            playlist.append(ver.id)
-                                        }
-                                        coordinator.openQuickLook(assetID: ver.id, playlist: playlist)
+                            HStack(alignment: .center, spacing: 6) {
+                                // Left 16pt vertical timeline spine + 7.5pt node
+                                ZStack {
+                                    VStack(spacing: 0) {
+                                        Rectangle()
+                                            .fill(isFirst ? Color.clear : CharkleTheme.hairline(for: colorScheme))
+                                            .frame(width: 1)
+                                            .frame(maxHeight: .infinity)
+                                        Rectangle()
+                                            .fill(isLast ? Color.clear : CharkleTheme.hairline(for: colorScheme))
+                                            .frame(width: 1)
+                                            .frame(maxHeight: .infinity)
+                                    }
+
+                                    if isPrimary {
+                                        Circle()
+                                            .fill(accentColor)
+                                            .frame(width: 7.5, height: 7.5)
                                     } else {
-                                        onOpenQuickLook(ver)
+                                        Circle()
+                                            .fill(CharkleTheme.inspectorBackground(for: colorScheme))
+                                            .frame(width: 7.5, height: 7.5)
+                                            .overlay(
+                                                Circle()
+                                                    .strokeBorder(
+                                                        isCurrent ? accentColor : Color.secondary.opacity(0.50),
+                                                        lineWidth: 1.5
+                                                    )
+                                            )
                                     }
-                                } label: {
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        HStack(spacing: 5) {
-                                            Text("v\(vNum)")
-                                                .font(CharkleTheme.text(.caption, weight: .bold))
-                                                .monospacedDigit()
-                                                .foregroundStyle(isCurrent ? accentColor : .primary)
-
-                                            Text(cleanRowTitle)
-                                                .font(CharkleTheme.text(.caption, weight: isCurrent ? .semibold : .medium))
-                                                .foregroundStyle(.primary)
-                                                .lineLimit(1)
-
-                                            if isPrimary {
-                                                Text("主版")
-                                                    .font(CharkleTheme.text(.caption, weight: .bold))
-                                                    .foregroundStyle(positiveInk)
-                                                    .padding(.horizontal, 4.5)
-                                                    .padding(.vertical, 1)
-                                                    .background(positiveInk.opacity(0.14), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.xs, style: .continuous))
-                                            }
-                                        }
-
-                                        HStack(spacing: 4) {
-                                            if let editor {
-                                                Text(editor)
-                                            }
-                                            Text(Self.mediaTimestampFormatter.string(from: ver.updatedAt))
-                                                .monospacedDigit()
-                                            if let diff = ver.richMetadata?.document?.diffSummary,
-                                               (idx > 0 || diff.totalChangedBlocks > 0) {
-                                                Text(diff.compactBridgeLabel)
-                                                    .monospacedDigit()
-                                                    .foregroundStyle(warnInk)
-                                            }
-                                        }
-                                        .font(CharkleTheme.text(.caption))
-                                        .foregroundStyle(.tertiary)
-                                        .lineLimit(1)
-                                    }
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .contentShape(Rectangle())
                                 }
-                                .buttonStyle(.plain)
+                                .frame(width: 16)
 
-                                if !isPrimary {
+                                HStack(spacing: 5) {
                                     Button {
-                                        Task {
-                                            _ = await library.setPrimaryVersion(ver.id)
-                                            coordinator.showToast("已将 v\(vNum) 锁定为主版本", icon: "pin.fill", tone: .success)
+                                        if isQuickLookHosted {
+                                            var playlist = coordinator.quickLookPlaylist
+                                            if !playlist.contains(ver.id) {
+                                                playlist.append(ver.id)
+                                            }
+                                            coordinator.openQuickLook(assetID: ver.id, playlist: playlist)
+                                        } else {
+                                            onOpenQuickLook(ver)
                                         }
                                     } label: {
-                                        Image(systemName: "pin")
-                                            .font(.system(size: 10.5, weight: .medium))
-                                            .foregroundStyle(.secondary)
-                                            .frame(width: 22, height: 22)
-                                            .background(Color.primary.opacity(0.06), in: Circle())
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            HStack(spacing: 5) {
+                                                Text("v\(vNum)")
+                                                    .font(CharkleTheme.text(.caption, weight: .bold))
+                                                    .monospacedDigit()
+                                                    .foregroundStyle(isCurrent ? accentColor : .primary)
+
+                                                if let cleanNote {
+                                                    Text(cleanNote)
+                                                        .font(CharkleTheme.text(.caption, weight: isCurrent ? .semibold : .regular))
+                                                        .foregroundStyle(.primary)
+                                                        .lineLimit(1)
+                                                }
+
+                                                if isPrimary {
+                                                    Text("主版")
+                                                        .font(CharkleTheme.text(.caption, weight: .semibold))
+                                                        .foregroundStyle(positiveInk)
+                                                        .padding(.horizontal, 4.5)
+                                                        .padding(.vertical, 1)
+                                                        .background(
+                                                            positiveInk.opacity(0.14),
+                                                            in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.xs, style: .continuous)
+                                                        )
+                                                }
+
+                                                Spacer(minLength: 0)
+                                            }
+
+                                            HStack(spacing: 5) {
+                                                if let cleanEditor {
+                                                    Text(cleanEditor)
+                                                        .lineLimit(1)
+                                                }
+                                                Text(Self.versionShortTimestampFormatter.string(from: ver.updatedAt))
+                                                    .monospacedDigit()
+                                            }
+                                            .font(CharkleTheme.text(.caption))
+                                            .foregroundStyle(.tertiary)
+                                            .lineLimit(1)
+                                        }
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .contentShape(Rectangle())
                                     }
                                     .buttonStyle(.plain)
-                                    .help("将 v\(vNum) 锁定为对外发送主版本")
+
+                                    if changedBlocks > 0 {
+                                        Button {
+                                            let baseID = prevSibling?.id ?? ver.richMetadata?.document?.diffSummary?.comparedToAssetID
+                                            let playlist = coordinator.quickLookPlaylist.isEmpty ? library.assets.map(\.id) : coordinator.quickLookPlaylist
+                                            coordinator.openQuickLookInDiff(
+                                                assetID: ver.id,
+                                                baseAssetID: baseID,
+                                                targetAssetID: ver.id,
+                                                playlist: playlist
+                                            )
+                                        } label: {
+                                            Text("Δ \(changedBlocks)")
+                                                .font(CharkleTheme.text(.caption, weight: .semibold))
+                                                .monospacedDigit()
+                                                .foregroundStyle(accentColor)
+                                                .padding(.horizontal, 5.5)
+                                                .padding(.vertical, 2)
+                                                .background(
+                                                    accentSoft,
+                                                    in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.xs, style: .continuous)
+                                                )
+                                        }
+                                        .buttonStyle(.plain)
+                                        .fixedSize()
+                                        .help("查看与上一版本的 \(changedBlocks) 处差异")
+                                    }
+
+                                    if !isPrimary {
+                                        Button {
+                                            Task {
+                                                _ = await library.setPrimaryVersion(ver.id)
+                                                coordinator.showToast("已将 v\(vNum) 设为主版本", icon: "pin.fill", tone: .success)
+                                            }
+                                        } label: {
+                                            Image(systemName: "pin")
+                                                .font(.system(size: 10.5, weight: .medium))
+                                        }
+                                        .buttonStyle(.charkle(.subtle, size: .icon, iconDimension: 22))
+                                        .help("设为主版本")
+                                    }
                                 }
+                                .padding(.horizontal, 7)
+                                .padding(.vertical, 5.5)
+                                .background(
+                                    isCurrent ? accentSoft : Color.clear,
+                                    in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous)
+                                )
                             }
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 6)
-                            .background(
-                                isCurrent
-                                    ? accentSoft
-                                    : CharkleTheme.inspectorFieldSurface(for: colorScheme),
-                                in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous)
-                            )
-                            .overlay(
-                                RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous)
-                                    .strokeBorder(
-                                        isCurrent ? accentBorder : CharkleTheme.hairline(for: colorScheme),
-                                        lineWidth: CharkleTheme.hairlineWidth
-                                    )
-                            )
                         }
                     }
 
-                    // Current version editor & note quick fields
-                    VStack(alignment: .leading, spacing: 5) {
-                        Text("当前版本修订备注")
-                            .font(CharkleTheme.text(.caption, weight: .medium))
-                            .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
+                    // Compact quick metadata row without extra sub-headers
+                    HStack(spacing: 6) {
+                        TextField("修改人", text: $versionEditorDraft)
+                            .textFieldStyle(.plain)
+                            .font(CharkleTheme.text(.caption))
+                            .padding(.horizontal, 8)
+                            .frame(width: 78, height: 26)
+                            .background(
+                                CharkleTheme.inspectorFieldSurface(for: colorScheme),
+                                in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.sm, style: .continuous)
+                            )
+                            .onSubmit { commitVersionMeta(for: asset) }
 
-                        HStack(spacing: 6) {
-                            TextField("修改人", text: $versionEditorDraft)
-                                .textFieldStyle(.plain)
-                                .font(CharkleTheme.text(.caption))
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 5)
-                                .frame(width: 82)
-                                .background(
-                                    CharkleTheme.inspectorFieldSurface(for: colorScheme),
-                                    in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.sm, style: .continuous)
-                                )
-                                .onSubmit { commitVersionMeta(for: asset) }
+                        TextField("备注（回车保存）", text: $versionNoteDraft)
+                            .textFieldStyle(.plain)
+                            .font(CharkleTheme.text(.caption))
+                            .padding(.horizontal, 8)
+                            .frame(height: 26)
+                            .background(
+                                CharkleTheme.inspectorFieldSurface(for: colorScheme),
+                                in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.sm, style: .continuous)
+                            )
+                            .onSubmit { commitVersionMeta(for: asset) }
 
-                            TextField("版本备注（回车保存）", text: $versionNoteDraft)
-                                .textFieldStyle(.plain)
-                                .font(CharkleTheme.text(.caption))
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 5)
-                                .background(
-                                    CharkleTheme.inspectorFieldSurface(for: colorScheme),
-                                    in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.sm, style: .continuous)
-                                )
-                                .onSubmit { commitVersionMeta(for: asset) }
-
-                            Button {
-                                commitVersionMeta(for: asset)
-                            } label: {
-                                Image(systemName: "checkmark")
-                                    .font(.system(size: 10.5, weight: .bold))
-                                    .frame(width: 24, height: 24)
-                            }
-                            .buttonStyle(.charkle(.standard, size: .icon, iconDimension: 24))
-                            .help("保存修改人与备注")
+                        Button {
+                            commitVersionMeta(for: asset)
+                        } label: {
+                            Image(systemName: "checkmark")
+                                .font(.system(size: 10.5, weight: .bold))
                         }
+                        .buttonStyle(.charkle(.standard, size: .icon, iconDimension: 26))
+                        .help("保存修改人与备注")
                     }
 
                     if siblings.count > 1 {
                         Button {
                             Task {
                                 _ = await library.unstackVersion(asset.id)
-                                coordinator.showToast("已将当前版本拆出为独立素材", icon: "rectangle.portrait.and.arrow.right")
+                                coordinator.showToast("已拆分为独立素材", icon: "rectangle.portrait.and.arrow.right")
                             }
                         } label: {
-                            Label("拆出为独立素材", systemImage: "rectangle.portrait.and.arrow.right")
+                            Label("拆分为独立素材", systemImage: "rectangle.portrait.and.arrow.right")
                         }
                         .buttonStyle(.charkle(.subtle, size: .xs))
                     }
@@ -2952,19 +3050,19 @@ public struct InspectorView: View {
                 .padding(.top, 6)
             } label: {
                 HStack(spacing: 6) {
-                    Text("共 \(siblings.count) 版 / 主版 v\(primaryVer)")
+                    Text("共 \(siblings.count) 版 · 主版 v\(primaryVer)")
                         .font(CharkleTheme.text(.caption, weight: .semibold))
                         .monospacedDigit()
                         .foregroundStyle(.primary)
 
                     if newerCount > 0 {
-                        Text("+\(newerCount) 新版")
+                        Text("+\(newerCount)")
                             .font(CharkleTheme.text(.caption, weight: .semibold))
                             .monospacedDigit()
                             .foregroundStyle(warnInk)
                             .padding(.horizontal, 5)
                             .padding(.vertical, 1)
-                            .background(warnBg, in: Capsule(style: .continuous))
+                            .background(warnInk.opacity(0.15), in: Capsule(style: .continuous))
                     }
                     Spacer(minLength: 0)
                 }

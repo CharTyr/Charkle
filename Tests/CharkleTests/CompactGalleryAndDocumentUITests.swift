@@ -498,15 +498,13 @@ struct CompactGalleryAndDocumentUITests {
         #expect(settings.contains("setDefaultGalleryLayoutMode"))
         #expect(appEntry.contains("画廊视图排布"))
 
-        // 2. CompactIndexGalleryView V2 visual & interaction fidelity
-        #expect(compactView.contains("双列索引卡"))
-        #expect(compactView.contains("单列折页条"))
-        #expect(compactView.contains("CompactMicroFolioArtifact"))
-        #expect(compactView.contains("rotation3DEffect"))
-        #expect(compactView.contains("revisionRailSection("))
-        #expect(compactView.contains("设为主版"))
+        // 2. CompactIndexGalleryView core interaction & primary-version drag invariants
+        #expect(compactView.contains("struct CompactIndexGalleryView"))
+        #expect(compactView.contains("effectiveColumns"))
+        #expect(compactView.contains("headerInteractiveStageRects"))
+        #expect(compactView.contains("onSetPrimaryVersion"))
+        #expect(compactView.contains("onOpenDiff"))
         #expect(compactView.contains("cachedPrimaryDragFileURL"))
-        #expect(compactView.contains("CompactCardStackDropDelegate"))
 
         // 3. LibraryStore Version Stack folding & Primary Version file drag/copy invariant
         #expect(libraryStore.contains("foldVersionStacks("))
@@ -516,31 +514,95 @@ struct CompactGalleryAndDocumentUITests {
         #expect(libraryStore.contains("ingestAndDetectStackPrompt("))
         #expect(libraryStore.contains("confirmPendingVersionStackPrompt("))
 
-        // 4. Active drop stacking prompt in both MainWindowView and NotchShelfView + Inspector CharkleDisclosureGroup
+        // 4. Active drop stacking prompt in both MainWindowView and NotchShelfView + Inspector vertical timeline
         #expect(mainWindow.contains("versionStackDropPromptBanner("))
         #expect(notchView.contains("notchVersionStackPromptBar("))
         #expect(notchCtrl.contains("ingestAndDetectStackPrompt("))
         #expect(inspector.contains("singleAssetVersionStackSection("))
-        #expect(inspector.contains("CharkleInspectorSection(\"版本叠\""))
+        #expect(inspector.contains("CharkleInspectorSection(\"历史版本\", systemImage: nil"))
         #expect(inspector.contains("CharkleDisclosureGroup(isExpanded: $isVersionStackExpanded"))
+        #expect(inspector.contains("siblings.enumerated()).reversed()"))
+        #expect(inspector.contains("Label(\"对比差异\""))
+        #expect(inspector.contains("Label(\"设为主版\""))
+        #expect(inspector.contains("Label(\"拆分为独立素材\""))
+        #expect(inspector.contains("CharkleColorSwatchStrip("))
+        #expect(inspector.contains("isExpanded: $isOCRExpanded"))
+        #expect(inspector.contains("cleanVersionTimelineNote("))
+        #expect(inspector.contains("cleanVersionEditorName("))
+        #expect(!inspector.contains("当前版本修订备注"))
+        #expect(!inspector.contains("CharkleTheme.ambientTint("))
 
         // 5. JumpAnywhere Cmd+C copies Primary Version original file directly to NSPasteboard.general
         #expect(jumpView.contains("copyAssetMatchToPasteboard("))
         #expect(jumpView.contains("preferStackPrimary: true"))
         #expect(jumpView.contains("切微信直接 ⌘V 发送"))
 
-        // 6. Quick Look Document Studio: true-layout QLPreviewView + readers, High-Risk Radar, Split Curtain Wipe, Red-Cyan Overlay, and 2-Way Merge
+        // 6. Quick Look Document Studio: single 46pt header, full-bleed readers, continuous paper diff, split sheet, and paper merge
         #expect(qlOverlay.contains("QuickLookDocumentStudioView("))
         #expect(docStudio.contains("NativeOfficeQLPreviewRepresentable"))
         #expect(docStudio.contains("QLPreviewView"))
+        #expect(docStudio.contains("CharkleSegmentedControl("))
+        #expect(docStudio.contains(".init(.reader, title: \"阅读\")"))
+        #expect(docStudio.contains(".init(.diff, title: \"对比\""))
+        #expect(docStudio.contains(".init(.merge, title: \"合并\")"))
+        #expect(docStudio.contains("设当前版为主版本"))
+        #expect(docStudio.contains("Label(\"打开\", systemImage: \"arrow.up.forward.app\")"))
         #expect(docStudio.contains("原版版式"))
-        #expect(docStudio.contains("结构与批注"))
-        #expect(docStudio.contains("结构化表格"))
+        #expect(docStudio.contains("正文批注"))
+        #expect(docStudio.contains("数据表格"))
+        #expect(docStudio.contains("提取正文"))
+        #expect(docStudio.contains(".charkleLiquidGlass("))
+        #expect(docStudio.contains("⋯ 省略未改动段落"))
+        #expect(docStudio.contains("frame(maxWidth: 780"))
+        #expect(docStudio.contains("frame(maxWidth: 980"))
         #expect(docStudio.contains("PDFSplitCurtainComparisonView"))
         #expect(docStudio.contains("PDFVisualDiffRenderer.renderComparisonPages"))
-        #expect(docStudio.contains("按差异合成新版本"))
-        #expect(docStudio.contains("仅看改动段落"))
-        #expect(docStudio.contains("用默认应用打开"))
+        #expect(docStudio.contains("mergeNoteDraft: String = \"\""))
+        #expect(docStudio.contains("以新版为准"))
+        #expect(docStudio.contains("以旧版为准"))
+        #expect(docStudio.contains("合并预览"))
+        #expect(docStudio.contains("保存为新版本"))
+        #expect(docStudio.contains("仅看改动"))
+        #expect(!docStudio.contains("Color(charkleHex:"))
+        #expect(!docStudio.contains("PDF 原生页面视图"))
+        #expect(!docStudio.contains("原版纸面版式预览"))
+        #expect(!docStudio.contains("左右拖动中间分割卷帘"))
+    }
+
+    @Test("Studio and Inspector static contracts: native Office layout detection, skipped-block fold separator, selective inline tokens, and non-boilerplate version hygiene")
+    func studioAndInspectorStaticRedesignContracts() throws {
+        let docStudio = try readSource("Sources/CharkleApp/Views/QuickLookDocumentStudioView.swift")
+        let inspector = try readSource("Sources/CharkleApp/Views/InspectorView.swift")
+
+        // Verify all required static contract entry points remain exposed on QuickLookDocumentStudioView & InspectorView
+        #expect(docStudio.contains("public static func supportsNativeOfficeLayoutPreview("))
+        #expect(docStudio.contains("public static func makeBaseDiffAttributedString("))
+        #expect(docStudio.contains("public static func makeTargetDiffAttributedString("))
+        #expect(docStudio.contains("public static func filterDiffHunks("))
+        #expect(docStudio.contains("public static func hasSkippedBlocksBefore("))
+        #expect(docStudio.contains("public static func cleanVersionDescriptor("))
+        #expect(inspector.contains("public static func cleanVersionTimelineNote("))
+        #expect(inspector.contains("public static func cleanVersionEditorName("))
+        #expect(inspector.contains("documentExtentSummary(for:"))
+        #expect(inspector.contains("CharkleSpecRow(\"篇幅\""))
+
+        // Core format classification & radar hunk filtering invariants
+        #expect(DocumentFormatFamily.detect(fileExtension: "docx") == .docx)
+        #expect(DocumentFormatFamily.detect(fileExtension: "xlsx") == .xlsx)
+        #expect(DocumentFormatFamily.detect(fileExtension: "pptx") == .pptx)
+        #expect(DocumentFormatFamily.detect(fileExtension: "pdf") == .pdf)
+        #expect(DocumentFormatFamily.detect(fileExtension: "md") == .markdown)
+
+        let h0 = DocumentDiffHunk(id: "h0", hunkIndex: 0, changeKind: .modified, baseText: "A", targetText: "A1")
+        let h1 = DocumentDiffHunk(id: "h1", hunkIndex: 1, changeKind: .unchanged, baseText: "B", targetText: "B")
+        let h4 = DocumentDiffHunk(id: "h4", hunkIndex: 4, changeKind: .added, targetText: "E")
+        let filteredChanged = DocumentRadarFilterEngine.filterDiffHunks([h0, h1, h4], radar: .all, onlyChanged: true)
+        #expect(filteredChanged.map(\.id) == ["h0", "h4"])
+        #expect(filteredChanged[1].hunkIndex > filteredChanged[0].hunkIndex + 1)
+
+        // Version prefix stripping hygiene
+        #expect(AssetVersionStackMetadata.strippingRedundantVersionPrefix("v2 · 法务审定") == "法务审定")
+        #expect(AssetVersionStackMetadata.strippingRedundantVersionPrefix("v3 v3: 调整违约金") == "调整违约金")
     }
 
     @Test("QuickLookDocumentStudioView enforces NativeOfficeQLPreviewRepresentable teardown, selective Base/Target inline-token highlighting, and icon-gutter diff/merge rows")
