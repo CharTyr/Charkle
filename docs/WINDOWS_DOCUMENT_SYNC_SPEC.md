@@ -440,6 +440,7 @@ All archive reads MUST enforce strict safety bounds (`MAX_ZIP_ENTRIES = 4_096`, 
 ### 3.3 High-Readability Masonry Document Poster Card (`MediaArtwork::document_card` — Exact `900×1240` Parity)
 
 Match `Sources/CharkleCore/Media/MediaArtwork.swift` (`a33de79`) pixel-for-pixel in `windows/crates/charkle-core/src/media/artwork.rs` (`render_svg_with_fonts`):
+- **PDF Natural-Aspect Guardrail (`MediaPipeline.swift` Parity)**: Keep `ext == "pdf"` rendering its direct first-page raster (`IShellItemImageFactory` / PDF page dimensions) so native PDF `cropBox` `pixel_width` / `pixel_height` remain intact; apply `MediaArtwork::document_card` (`900 × 1240`) to non-PDF documents (`ext != "pdf"`, e.g. `.docx / .xlsx / .pptx / .md / .txt / .doc / .wps / .xls / .et`) and fallback unrendered PDFs.
 - **Dimensions**: `900 × 1240` (`stageHeight = 980` warm studio paper `#F3F2EE` on top + `footerHeight = 260` crisp `#FFFFFF` strip on bottom, `2px #E7E6E1` divider, outer `2px #E5E7EB` frame).
 - **Format Accent Palette (`documentAccentHex`)**:
   - `is_red_header_style == true` or `pdf` / `ofd` -> `#C83E37`
