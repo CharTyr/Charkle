@@ -45,6 +45,18 @@ public struct AssetVersionStackMetadata: Codable, Hashable, Sendable {
         options: [.caseInsensitive]
     )
 
+    private static let pureVersionTokenRegex = try! NSRegularExpression(
+        pattern: #"^(?:v|ver|version)\s*\d+(?:\.\d+)?$"#,
+        options: [.caseInsensitive]
+    )
+
+    private static let ignoredBoilerplateDescriptors: Set<String> = [
+        "本机", "初稿", "修订版", "挑拣合成" + "净版", "基于差异审阅合成"
+    ]
+
+    private static let descriptorTrimCharacters: CharacterSet =
+        CharacterSet(charactersIn: "·•:：-—_ ").union(.whitespacesAndNewlines)
+
     /// Strips any redundant leading `v1`, `v2 · `, `v2: `, or repeated `v2 v2 · ` prefixes from a label or note
     /// so UI badges combining `v\(versionNumber)` with a label/note never render `"v1 v1"` or `"v2 v2 · Name"`.
     public static func strippingRedundantVersionPrefix(_ raw: String) -> String {
@@ -59,6 +71,92 @@ public struct AssetVersionStackMetadata: Codable, Hashable, Sendable {
             current = String(current[swiftRange.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
         }
         return current
+    }
+
+    private static func unwrapOuterParentheses(_ text: String) -> String {
+        let pairs: [(Character, Character)] = [("(", ")"), ("（", "）")]
+        for (open, close) in pairs {
+            guard text.count >= 2, text.first == open, text.last == close else { continue }
+            var depth = 0
+            var balancedToEnd = true
+            for (idx, ch) in text.enumerated() {
+                if ch == open {
+                    depth += 1
+                } else if ch == close {
+                    depth -= 1
+                    if depth == 0 && idx < text.count - 1 {
+                        balancedToEnd = false
+                        break
+                    }
+                }
+            }
+            if balancedToEnd && depth == 0 {
+                return String(text.dropFirst().dropLast())
+            }
+        }
+        return text
+    }
+
+    private static func sanitizeDescriptorCandidate(_ raw: String?) -> String? {
+        guard let raw else { return nil }
+        var current = raw.trimmingCharacters(in: descriptorTrimCharacters)
+        for _ in 0..<4 {
+            guard !current.isEmpty else { return nil }
+            let next = unwrapOuterParentheses(strippingRedundantVersionPrefix(current))
+                .trimmingCharacters(in: descriptorTrimCharacters)
+            if next == current { break }
+            current = next
+        }
+        guard !current.isEmpty else { return nil }
+        if ignoredBoilerplateDescriptors.contains(current) { return nil }
+        let fullRange = NSRange(current.startIndex..., in: current)
+        if pureVersionTokenRegex.firstMatch(in: current, range: fullRange) != nil {
+            return nil
+        }
+        return current
+    }
+
+    /// Resolves a single clean, non-boilerplate descriptor for timeline rows:
+    /// strips redundant `vN` prefixes and outer parentheses, filters out default synthesis/device placeholders,
+    /// and deduplicates against `editorName`.
+    public static func cleanDisplayDescriptor(
+        changeNote: String?,
+        versionLabel: String?,
+        editorName: String?
+    ) -> String? {
+        let cleanedEditor = sanitizeDescriptorCandidate(editorName)
+
+        if let note = sanitizeDescriptorCandidate(changeNote) {
+            if let ed = cleanedEditor, note.caseInsensitiveCompare(ed) == .orderedSame {
+                // Skip pure repetition of editorName
+            } else {
+                return note
+            }
+        }
+
+        if let label = sanitizeDescriptorCandidate(versionLabel) {
+            if let ed = cleanedEditor {
+                if label.caseInsensitiveCompare(ed) == .orderedSame {
+                    return nil
+                }
+                if label.lowercased().hasPrefix(ed.lowercased()) {
+                    let afterEditorIdx = label.index(label.startIndex, offsetBy: ed.count)
+                    if afterEditorIdx < label.endIndex,
+                       let firstScalar = label[afterEditorIdx].unicodeScalars.first,
+                       descriptorTrimCharacters.union(CharacterSet(charactersIn: "()（）")).contains(firstScalar) {
+                        let remainder = String(label[afterEditorIdx...])
+                        if let stripped = sanitizeDescriptorCandidate(remainder),
+                           stripped.caseInsensitiveCompare(ed) != .orderedSame {
+                            return stripped
+                        }
+                        return nil
+                    }
+                }
+            }
+            return label
+        }
+
+        return nil
     }
 
     public var displayVersionTag: String {

@@ -906,7 +906,7 @@ public struct MainWindowView: View {
                     onUnstackVersion: { assetID in
                         Task {
                             _ = await library.unstackVersion(assetID)
-                            coordinator.showToast("已拆出为独立素材", icon: "rectangle.portrait.and.arrow.right")
+                            coordinator.showToast("已拆分为独立素材", icon: "rectangle.portrait.and.arrow.right")
                         }
                     },
                     onRetagAssets: { ids in
@@ -1064,7 +1064,7 @@ public struct MainWindowView: View {
                         onUnstackVersion: { assetID in
                             Task {
                                 _ = await library.unstackVersion(assetID)
-                                coordinator.showToast("已拆出为独立素材", icon: "rectangle.portrait.and.arrow.right")
+                                coordinator.showToast("已拆分为独立素材", icon: "rectangle.portrait.and.arrow.right")
                             }
                         },
                         onOpenVersionDiff: { asset in
@@ -2038,7 +2038,7 @@ public struct MainWindowView: View {
         case .horizontalJustified: "横向等高瀑布流（竖图自动对齐，2）"
         case .galleryFilmstrip: "画廊视图（底部胶片挑图，3）"
         case .ringGallery: "环形画廊（3D 外圈景深浏览，4）"
-        case .compactList: "紧凑视图（双列索引卡 / 单列折页条，5）"
+        case .compactList: "紧凑视图（单列列表 / 双列网格，5）"
         }
     }
 
@@ -2738,14 +2738,14 @@ public struct MainWindowView: View {
                                 .font(.system(size: 12.5, weight: .medium))
                                 .frame(width: 26, height: 26)
                         } else {
-                            Label("合并版本叠", systemImage: "square.stack.3d.up")
+                            Label("合并版本", systemImage: "square.stack.3d.up")
                                 .font(CharkleTheme.text(.caption, weight: .medium))
                                 .padding(.horizontal, 8)
                                 .padding(.vertical, 5)
                         }
                     }
                     .buttonStyle(.plain)
-                    .help("将所选素材合并为一个版本叠")
+                    .help("将所选素材合并为历史版本")
 
                     Menu {
                         CharkleHierarchicalFolderMenuContent(
@@ -4078,7 +4078,7 @@ public struct MainWindowView: View {
         Task {
             let merged = await library.mergeAssetsIntoVersionStack(ids, targetAssetID: anchorID)
             if !merged.isEmpty {
-                coordinator.showToast("已将 \(ids.count) 项合并为版本叠", icon: "square.stack.3d.up.fill", tone: .success)
+                coordinator.showToast("已将 \(ids.count) 项合并为历史版本", icon: "square.stack.3d.up.fill", tone: .success)
             }
         }
     }
@@ -4101,7 +4101,7 @@ public struct MainWindowView: View {
             _ = await library.mergeAssetsIntoVersionStack(idsToMerge, targetAssetID: targetAsset.id)
             let nextCount = library.versionStackSiblings(for: targetAsset.id).count
             coordinator.showToast(
-                "已叠入《\(targetAsset.title)》（共 \(nextCount) 版）",
+                "已归入《\(targetAsset.title)》历史版本（共 \(nextCount) 版）",
                 icon: "square.stack.3d.up.fill",
                 tone: .success
             )
@@ -4110,26 +4110,19 @@ public struct MainWindowView: View {
 
     private func versionStackDropPromptBanner(_ prompt: AppCoordinatorStore.PendingVersionStackPrompt) -> some View {
         let folderHint: String? = prompt.candidate.targetFolderID.flatMap { fid in
-            library.folder(byID: fid).map { "自动归入「\($0.name)」" }
+            library.folder(byID: fid).map { "归入「\($0.name)」" }
         }
-        return HStack(spacing: 9) {
+        return HStack(spacing: 8) {
             Image(systemName: "square.stack.3d.up.fill")
-                .font(.system(size: 13.5, weight: .semibold))
+                .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(activeAccent)
 
             VStack(alignment: .leading, spacing: 1) {
-                HStack(spacing: 5) {
-                    Text("叠入《\(prompt.candidate.targetTitle)》作为 v\(prompt.candidate.nextVersionNumber)？")
-                        .font(CharkleTheme.text(.caption, weight: .semibold))
-                        .monospacedDigit()
-                        .lineLimit(1)
-                    Text(prompt.candidate.matchReason.localizedLabel)
-                        .font(CharkleTheme.text(.caption, weight: .medium))
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 5.5)
-                        .padding(.vertical, 1)
-                        .background(Color.primary.opacity(0.06), in: Capsule(style: .continuous))
-                }
+                Text("归入《\(prompt.candidate.targetTitle)》历史版本 (v\(prompt.candidate.nextVersionNumber))？")
+                    .font(CharkleTheme.text(.caption, weight: .semibold))
+                    .monospacedDigit()
+                    .lineLimit(1)
+
                 if let folderHint {
                     Text(folderHint)
                         .font(CharkleTheme.text(.caption))
@@ -4148,15 +4141,18 @@ public struct MainWindowView: View {
             .textFieldStyle(.plain)
             .font(CharkleTheme.text(.caption))
             .padding(.horizontal, 8)
-            .padding(.vertical, 4.5)
-            .frame(width: 88)
-            .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.sm, style: .continuous))
+            .padding(.vertical, 4)
+            .frame(width: 84)
+            .background(
+                CharkleTheme.surfaceSubtle(for: colorScheme),
+                in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.sm, style: .continuous)
+            )
             .onSubmit {
                 Task { _ = await library.confirmPendingVersionStackPrompt(coordinator: coordinator) }
             }
 
             TextField(
-                "1 行可选备注（回车秒确认）",
+                "备注（可选）",
                 text: Binding(
                     get: { coordinator.pendingVersionStackPrompt?.changeNoteDraft ?? "" },
                     set: { coordinator.pendingVersionStackPrompt?.changeNoteDraft = $0 }
@@ -4165,9 +4161,12 @@ public struct MainWindowView: View {
             .textFieldStyle(.plain)
             .font(CharkleTheme.text(.caption))
             .padding(.horizontal, 8)
-            .padding(.vertical, 4.5)
-            .frame(minWidth: 120, maxWidth: 220)
-            .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.sm, style: .continuous))
+            .padding(.vertical, 4)
+            .frame(minWidth: 112, maxWidth: 200)
+            .background(
+                CharkleTheme.surfaceSubtle(for: colorScheme),
+                in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.sm, style: .continuous)
+            )
             .onSubmit {
                 Task { _ = await library.confirmPendingVersionStackPrompt(coordinator: coordinator) }
             }
@@ -4177,19 +4176,19 @@ public struct MainWindowView: View {
             Button {
                 Task { _ = await library.confirmPendingVersionStackPrompt(coordinator: coordinator) }
             } label: {
-                Text("确认叠入 ↵")
+                Text("归入版本 ↵")
             }
-            .buttonStyle(CharkleButtonStyle(.accent, size: .xs, cornerRadius: 999))
+            .buttonStyle(.charkle(.accent, size: .xs))
 
             Button {
                 library.dismissPendingVersionStackPrompt(coordinator: coordinator, announce: true)
             } label: {
-                Text("作为独立文件保留")
+                Text("单独保留")
             }
-            .buttonStyle(CharkleButtonStyle(.standard, size: .xs, cornerRadius: 999))
+            .buttonStyle(.charkle(.standard, size: .xs))
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, 6.5)
+        .padding(.vertical, 6)
         .charkleLiquidGlass(.regular, in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.cardOuter, style: .continuous))
     }
 

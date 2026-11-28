@@ -237,7 +237,7 @@ extension LiveCharkleEngine {
 
     private func executeJoinVersionStack(_ mutation: VersionStackMutation) async throws -> [AssetRecord] {
         guard let targetKey = mutation.targetAssetOrGroupID else {
-            throw LibraryDatabaseError("缺少目标版本叠或目标素材 ID。")
+            throw LibraryDatabaseError("缺少目标历史版本或目标素材 ID。")
         }
         let joiningIDs = Self.deduplicatedUUIDs(mutation.assetIDs).filter { $0 != targetKey }
         guard !joiningIDs.isEmpty else {
@@ -936,8 +936,21 @@ extension LiveCharkleEngine {
 
         let owningFolderID = targetAsset.folderID ?? baseAsset.folderID
         let imported = try await ingest([.fileURL(outputURL)], targetFolderID: owningFolderID, targetBoardID: nil)
-        guard let created = imported.first else {
+        guard var created = imported.first else {
             throw LibraryDatabaseError("合成新版本入库失败。")
+        }
+
+        // Keep the synthesized asset's display `title` equal to `cleanTitle` (avoiding `_v3` accumulation),
+        // while `fileName` stays `\(safeBaseName).\(ext)`.
+        if created.title != cleanTitle {
+            let createdID = created.id
+            if let retitled = try? await database.transaction({ store -> AssetRecord? in
+                guard var latest = try store.asset(id: createdID) else { return nil }
+                latest.title = cleanTitle
+                return try store.saveAssetLocally(latest)
+            }) {
+                created = retitled
+            }
         }
 
         // Ensure base & target form a stack first if they were standalone assets
@@ -947,7 +960,7 @@ extension LiveCharkleEngine {
             stackTargetKey = formed.first?.versionGroupID ?? targetAsset.id
         }
 
-        let resolvedNote = changeNote?.nonEmptyTrimmed ?? "基于差异审阅合成"
+        let resolvedNote = changeNote?.nonEmptyTrimmed
         let updatedStack = try await manageVersionStack(
             .join(
                 assetID: created.id,
