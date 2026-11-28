@@ -181,30 +181,38 @@ public enum CharkleTheme {
         return 0.2126 * linearize(r) + 0.7152 * linearize(g) + 0.0722 * linearize(b)
     }
 
-    // MARK: - Gallery-First Neutral Surfaces (Zero Violet / Neon Slop)
+    // MARK: - Gallery-First Pure Neutral Studio Surfaces (Zero Yellow / Beige / Violet)
 
     public static func galleryGround(for scheme: ColorScheme) -> Color {
-        scheme == .dark ? Color(charkleHex: "#141517") : Color(charkleHex: "#F6F6F5")
+        scheme == .dark ? Color(charkleHex: "#141518") : Color(charkleHex: "#F5F5F6")
     }
 
     public static func surfaceElevated(for scheme: ColorScheme) -> Color {
-        scheme == .dark ? Color(charkleHex: "#1E2025") : Color(charkleHex: "#FFFFFF")
+        scheme == .dark ? Color(charkleHex: "#1C1D20") : Color(charkleHex: "#FFFFFF")
     }
 
     public static func surfaceSubtle(for scheme: ColorScheme) -> Color {
-        scheme == .dark ? Color(charkleHex: "#24272C") : Color(charkleHex: "#EDEDE9")
+        scheme == .dark ? Color(charkleHex: "#25262B") : Color(charkleHex: "#F4F4F5")
+    }
+
+    public static func surfaceSubtleHover(for scheme: ColorScheme) -> Color {
+        scheme == .dark ? Color(charkleHex: "#2E3036") : Color(charkleHex: "#EAEBEC")
+    }
+
+    public static func sidebarFallback(for scheme: ColorScheme) -> Color {
+        scheme == .dark ? Color(charkleHex: "#16171A") : Color(charkleHex: "#F2F2F3")
     }
 
     public static func inspectorBackground(for scheme: ColorScheme) -> Color {
-        scheme == .dark ? Color(charkleHex: "#131519") : Color(charkleHex: "#F1F0EC")
+        scheme == .dark ? Color(charkleHex: "#1C1D20") : Color(charkleHex: "#FFFFFF")
     }
 
     public static func inspectorFieldSurface(for scheme: ColorScheme) -> Color {
-        scheme == .dark ? Color(charkleHex: "#16181D") : Color(charkleHex: "#F6F5F1")
+        scheme == .dark ? Color(charkleHex: "#25262B") : Color(charkleHex: "#F4F4F5")
     }
 
     public static func hairline(for scheme: ColorScheme) -> Color {
-        scheme == .dark ? Color.white.opacity(0.09) : Color.black.opacity(0.08)
+        scheme == .dark ? Color.white.opacity(0.075) : Color.black.opacity(0.065)
     }
 
     public static func secondaryInk(for scheme: ColorScheme) -> Color {

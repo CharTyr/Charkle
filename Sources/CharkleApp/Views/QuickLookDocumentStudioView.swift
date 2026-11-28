@@ -5,12 +5,11 @@ import PDFKit
 import QuickLookUI
 import SwiftUI
 
-/// Dedicated Quick Look Document Studio supporting:
-/// 1. Native high-craft readers for `.docx`/Office (`QLPreviewView` true paper layout + structured blocks/comments), `.xlsx`, `.pdf`, and `.md` / `.txt`
-/// 2. Multi-modal Version Stack Diff with High-Risk Radar (`全部改动` / `数字变动` / `日期时间` / `表格变动` / `原生修订/批注`),
-///    fold-unchanged toggle, `J / K` keyboard hunk stepping, inline & side-by-side Word/text diff,
-///    Primary-Key-aligned Excel sheet diff, and scanned PDF offline Vision OCR + Red-Cyan blend + Split Curtain Wipe
-/// 3. Scheme B deterministic 2-Way Merge (`按差异合成新版本`) with complex-block protection guardrails and clean preview.
+/// Quick Look Document Studio:
+/// 1. Full-bleed paper-fidelity readers for `.docx`/Office (`QLPreviewView` + structured blocks/comments), `.xlsx`, `.pdf`, and `.md` / `.txt`
+/// 2. Continuous Document Paper Review (`maxWidth: 780`), Synchronized 2-Column Split Paper (`maxWidth: 980`),
+///    Primary-Key-aligned Excel sheet diff, and PDF Red-Cyan overlay + Split Curtain Wipe
+/// 3. Interactive Paper 2-Way Merge with complex-block protection guardrails and live full-text preview.
 public struct QuickLookDocumentStudioView: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.charkleAccentSource) private var accentSource
@@ -48,6 +47,16 @@ public struct QuickLookDocumentStudioView: View {
         public var id: String { rawValue }
     }
 
+    private static let paperSheetCornerRadius: CGFloat = 10
+    private static let paperProseFont: Font = .system(size: 14, weight: .regular)
+    private static let studioHeaderTitleFont: Font = .system(size: 14, weight: .semibold)
+    private static let boilerplateVersionDescriptors: Set<String> = [
+        "基于差异审阅合成",
+        "本机",
+        "初稿",
+        "修订版"
+    ]
+
     public let asset: AssetRecord
     public let originalURL: URL?
     public let library: LibraryStore
@@ -71,6 +80,7 @@ public struct QuickLookDocumentStudioView: View {
     @State private var onlyChangedBlocks: Bool = true
     @State private var textDiffLayout: TextDiffLayout = .inlineReview
     @State private var focusedHunkID: String? = nil
+    @State private var hoveredHunkID: String? = nil
     @State private var selectedDiffSheetName: String? = nil
     @State private var customPrimaryKeyCol: Int? = nil
     @State private var useOCRIfScanned: Bool = false
@@ -90,7 +100,7 @@ public struct QuickLookDocumentStudioView: View {
     @State private var mergeDecisionsByHunkID: [String: DocumentMergeDecision] = [:]
     @State private var isMergePreviewExpanded: Bool = false
     @State private var mergeEditorDraft: String = ""
-    @State private var mergeNoteDraft: String = "挑拣合成净版"
+    @State private var mergeNoteDraft: String = ""
     @State private var isSynthesizing: Bool = false
     @State private var lastConsumedDiffNonce: UUID? = nil
 
@@ -110,12 +120,27 @@ public struct QuickLookDocumentStudioView: View {
         CharkleTheme.accent(for: colorScheme, source: accentSource)
     }
 
+    private var activeAccentSoft: Color {
+        CharkleTheme.accentSoft(for: colorScheme, source: accentSource)
+    }
+
+    private var activeAccentBorder: Color {
+        CharkleTheme.accentBorder(for: colorScheme, source: accentSource)
+    }
+
     private var siblings: [AssetRecord] {
         library.versionStackSiblings(for: asset.id)
     }
 
     private var primaryAsset: AssetRecord {
         library.primaryVersionAsset(for: asset.id) ?? asset
+    }
+
+    private var currentVersionNumber: Int {
+        if let idx = siblings.firstIndex(where: { $0.id == asset.id }) {
+            return asset.richMetadata?.versionStack?.versionNumber ?? (idx + 1)
+        }
+        return asset.richMetadata?.versionStack?.versionNumber ?? 1
     }
 
     private var fileExtensionLowercased: String {
@@ -160,6 +185,55 @@ public struct QuickLookDocumentStudioView: View {
             }
         }
         return "v\(fallbackNumber)"
+    }
+
+    private func versionMenuItemLabel(for ver: AssetRecord, fallbackIndex: Int) -> String {
+        let vMeta = ver.richMetadata?.versionStack
+        let vNum = vMeta?.versionNumber ?? (fallbackIndex + 1)
+        var parts = ["v\(vNum)"]
+        if let desc = Self.cleanVersionDescriptor(
+            changeNote: vMeta?.changeNote,
+            versionLabel: vMeta?.versionLabel,
+            editorName: vMeta?.editorName
+        ) {
+            parts.append(desc)
+        }
+        if ver.id == primaryAsset.id {
+            parts.append("主版")
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    public static func cleanVersionDescriptor(
+        changeNote: String?,
+        versionLabel: String?,
+        editorName: String?
+    ) -> String? {
+        for rawCandidate in [changeNote, versionLabel, editorName] {
+            guard let raw = rawCandidate else { continue }
+            var cleaned = AssetVersionStackMetadata.strippingRedundantVersionPrefix(raw)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if cleaned.hasPrefix("(") && cleaned.hasSuffix(")") && cleaned.count >= 2 {
+                cleaned = String(cleaned.dropFirst().dropLast()).trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            if cleaned.hasPrefix("（") && cleaned.hasSuffix("）") && cleaned.count >= 2 {
+                cleaned = String(cleaned.dropFirst().dropLast()).trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            guard !cleaned.isEmpty,
+                  !cleaned.contains("净版"),
+                  !boilerplateVersionDescriptors.contains(cleaned) else { continue }
+            return cleaned
+        }
+        return nil
+    }
+
+    public static func hasSkippedBlocksBefore(
+        hunks: [DocumentDiffHunk],
+        at index: Int,
+        onlyChanged: Bool
+    ) -> Bool {
+        guard onlyChanged, index > 0, index < hunks.count else { return false }
+        return hunks[index].hunkIndex > hunks[index - 1].hunkIndex + 1
     }
 
     public static func supportsNativeOfficeLayoutPreview(
@@ -286,11 +360,16 @@ public struct QuickLookDocumentStudioView: View {
 
     private var formatAccent: Color {
         switch docFamily {
-        case .xlsx: Color(charkleHex: "#1D7A46")
-        case .pdf: Color(charkleHex: "#C83E37")
-        case .pptx: Color(charkleHex: "#C96A1B")
-        case .docx, .legacyOffice: Color(charkleHex: "#2A60E0")
-        default: Color(charkleHex: "#4B5563")
+        case .xlsx:
+            CharkleTheme.positive(for: colorScheme)
+        case .pdf:
+            CharkleTheme.destructive(for: colorScheme)
+        case .pptx:
+            CharkleTheme.warning(for: colorScheme)
+        case .docx, .legacyOffice:
+            activeAccent
+        default:
+            CharkleTheme.secondaryInk(for: colorScheme)
         }
     }
 
@@ -311,16 +390,55 @@ public struct QuickLookDocumentStudioView: View {
         (comparisonReport?.hunks ?? []).filter { $0.changeKind.isChanged }
     }
 
+    private var conciseDocumentSpecText: String? {
+        var parts: [String] = []
+        if let p = payload {
+            if !p.sheets.isEmpty {
+                parts.append("\(p.sheets.count) 工作表")
+            } else if p.pageCount > 0 {
+                parts.append("\(p.pageCount) 页")
+            }
+            if p.wordCount > 0 {
+                parts.append("\(p.wordCount.formatted()) 字")
+            }
+            if !p.hasTextLayer && docFamily == .pdf {
+                parts.append("扫描件")
+            }
+        } else if let docMeta = asset.richMetadata?.document {
+            if !docMeta.sheetNames.isEmpty {
+                parts.append("\(docMeta.sheetNames.count) 工作表")
+            } else if docMeta.pageCount > 0 {
+                parts.append("\(docMeta.pageCount) 页")
+            }
+            if docMeta.wordCount > 0 {
+                parts.append("\(docMeta.wordCount.formatted()) 字")
+            }
+            if !docMeta.hasTextLayer && docFamily == .pdf {
+                parts.append("扫描件")
+            }
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
+    private var diffSegmentBadgeText: String? {
+        let summary = comparisonReport?.summary ?? asset.richMetadata?.document?.diffSummary
+        guard let summary else { return nil }
+        if summary.totalHighRiskChanges > 0 {
+            return "\(summary.totalHighRiskChanges)"
+        }
+        if summary.totalChangedBlocks > 0 {
+            return "\(summary.totalChangedBlocks)"
+        }
+        return nil
+    }
+
     public var body: some View {
-        let cardShape = RoundedRectangle(cornerRadius: CharkleTheme.Radius.popoverOuter, style: .continuous)
-        let cardFill = colorScheme == .dark ? Color(charkleHex: "#1A1C21") : Color.white
+        let windowShape = RoundedRectangle(cornerRadius: CharkleTheme.Radius.popoverOuter, style: .continuous)
 
         VStack(alignment: .leading, spacing: 0) {
             topDocumentHeaderBar
 
-            Rectangle()
-                .fill(CharkleTheme.hairline(for: colorScheme))
-                .frame(height: CharkleTheme.hairlineWidth)
+            CharkleHairlineDivider()
 
             Group {
                 switch studioMode {
@@ -333,17 +451,18 @@ public struct QuickLookDocumentStudioView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(CharkleTheme.galleryGround(for: colorScheme))
         }
-        .frame(maxWidth: 1020, maxHeight: 740)
-        .clipShape(cardShape)
+        .frame(maxWidth: 1060, maxHeight: 760)
+        .clipShape(windowShape)
         .background {
-            cardShape
-                .fill(cardFill)
-                .shadow(color: .black.opacity(0.42), radius: 28, y: 12)
+            windowShape
+                .fill(CharkleTheme.surfaceElevated(for: colorScheme))
+                .shadow(color: .black.opacity(colorScheme == .dark ? 0.42 : 0.18), radius: 28, y: 12)
         }
         .overlay(
-            cardShape.strokeBorder(
-                Color.white.opacity(colorScheme == .dark ? 0.10 : 0.45),
+            windowShape.strokeBorder(
+                CharkleTheme.hairline(for: colorScheme),
                 lineWidth: CharkleTheme.hairlineWidth
             )
         )
@@ -362,231 +481,170 @@ public struct QuickLookDocumentStudioView: View {
         }
     }
 
-    // MARK: - Top Studio Header & Version Stack Bar
+    // MARK: - Single Unified 46pt Top Header Bar (Zero 2nd Version Pill Row)
 
     private var topDocumentHeaderBar: some View {
         let hasMultipleVersions = siblings.count >= 2
         let positiveInk = CharkleTheme.positive(for: colorScheme)
+        let isViewingPrimary = asset.id == primaryAsset.id
 
-        return VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 10) {
-                Text(docFamily.badgeLabel)
-                    .font(CharkleTheme.text(.caption, weight: .bold))
-                    .foregroundStyle(formatAccent)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3.5)
-                    .background(formatAccent.opacity(0.13), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.sm, style: .continuous))
+        return HStack(spacing: 10) {
+            Text(docFamily.badgeLabel)
+                .font(CharkleTheme.text(.caption, weight: .bold, design: .monospaced))
+                .foregroundStyle(formatAccent)
+                .padding(.horizontal, 6.5)
+                .padding(.vertical, 2.5)
+                .background(
+                    formatAccent.opacity(0.12),
+                    in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.xs, style: .continuous)
+                )
 
-                Text(asset.title)
-                    .font(CharkleTheme.text(.headline, weight: .semibold))
-                    .foregroundStyle(.primary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+            Text(asset.title)
+                .font(Self.studioHeaderTitleFont)
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+                .truncationMode(.middle)
 
-                if let p = payload {
-                    HStack(spacing: 6) {
-                        if !p.sheets.isEmpty {
-                            Text("\(p.sheets.count) 工作表")
-                        } else if p.pageCount > 0 {
-                            Text("\(p.pageCount) 页")
-                        }
-                        if p.wordCount > 0 {
-                            Text("\(p.wordCount) 字")
-                        }
-                        if !p.hasTextLayer && docFamily == .pdf {
-                            Text("扫描件")
-                                .foregroundStyle(CharkleTheme.warning(for: colorScheme))
-                        }
-                    }
+            if let specText = conciseDocumentSpecText {
+                Text(specText)
                     .font(CharkleTheme.text(.caption))
                     .monospacedDigit()
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
                     .fixedSize(horizontal: true, vertical: false)
-                }
+            }
 
-                Spacer(minLength: 8)
+            Spacer(minLength: 8)
 
-                if hasMultipleVersions {
-                    HStack(spacing: 2) {
-                        modeSwitchPill(.reader, label: "清晰阅读", icon: "doc.richtext")
-                        modeSwitchPill(.diff, label: "对比差异", icon: "arrow.left.arrow.right")
-                        modeSwitchPill(.merge, label: "按差异合成新版", icon: "arrow.triangle.merge")
+            if hasMultipleVersions && studioMode == .reader {
+                Menu {
+                    ForEach(Array(siblings.enumerated()).reversed(), id: \.element.id) { idx, ver in
+                        let itemTitle = versionMenuItemLabel(for: ver, fallbackIndex: idx)
+                        Button {
+                            var playlist = coordinator.quickLookPlaylist
+                            if !playlist.contains(ver.id) {
+                                playlist.append(ver.id)
+                            }
+                            coordinator.openQuickLook(assetID: ver.id, playlist: playlist)
+                        } label: {
+                            if ver.id == asset.id {
+                                Label(itemTitle, systemImage: "checkmark")
+                            } else {
+                                Text(itemTitle)
+                            }
+                        }
                     }
-                    .padding(2.5)
-                    .background(CharkleTheme.surfaceSubtle(for: colorScheme), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous))
-                }
 
-                Button {
-                    openAssetInDefaultApplication(assetID: studioMode == .reader ? asset.id : (compareTargetAssetID ?? asset.id))
+                    if !isViewingPrimary {
+                        Divider()
+                        Button {
+                            Task {
+                                _ = await library.setPrimaryVersion(asset.id)
+                                coordinator.showToast(
+                                    "已将 v\(currentVersionNumber) 设为主版本",
+                                    icon: "pin.fill",
+                                    tone: .success
+                                )
+                            }
+                        } label: {
+                            Label("设当前版为主版本", systemImage: "pin")
+                        }
+                    }
                 } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "arrow.up.forward.app")
-                            .font(.system(size: 11, weight: .semibold))
-                        Text("用默认应用打开")
-                            .font(CharkleTheme.text(.caption, weight: .medium))
+                    HStack(spacing: 5) {
+                        Text("v\(currentVersionNumber)")
+                            .font(CharkleTheme.text(.caption, weight: .semibold))
+                            .monospacedDigit()
+                            .foregroundStyle(.primary)
+
+                        if isViewingPrimary {
+                            Circle()
+                                .fill(positiveInk)
+                                .frame(width: 5, height: 5)
+                            Text("主版")
+                                .font(CharkleTheme.text(.caption, weight: .medium))
+                                .foregroundStyle(positiveInk)
+                        }
+
+                        CharkleDropdownChevron(size: 8)
                     }
                     .padding(.horizontal, 9)
-                    .padding(.vertical, 5)
-                    .background(CharkleTheme.surfaceSubtle(for: colorScheme), in: Capsule(style: .continuous))
+                    .frame(height: 26)
+                    .background(
+                        CharkleTheme.surfaceSubtle(for: colorScheme),
+                        in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous)
+                    )
                 }
-                .buttonStyle(CharkleTactileButtonStyle())
+                .menuStyle(.button)
+                .buttonStyle(CharkleMenuTriggerButtonStyle())
+                .menuIndicator(.hidden)
+                .fixedSize()
             }
 
             if hasMultipleVersions {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 6) {
-                        ForEach(Array(siblings.enumerated()), id: \.element.id) { idx, ver in
-                            let vMeta = ver.richMetadata?.versionStack
-                            let vNum = vMeta?.versionNumber ?? (idx + 1)
-                            let isPrimary = ver.id == primaryAsset.id
-                            let isViewing = ver.id == asset.id
-                            let editor = (vMeta?.editorName?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 }
-
-                            Button {
-                                var playlist = coordinator.quickLookPlaylist
-                                if !playlist.contains(ver.id) {
-                                    playlist.append(ver.id)
-                                }
-                                coordinator.openQuickLook(assetID: ver.id, playlist: playlist)
-                            } label: {
-                                HStack(spacing: 4.5) {
-                                    Text("v\(vNum)")
-                                        .font(CharkleTheme.text(.caption, weight: .bold))
-                                        .monospacedDigit()
-                                    if let editor {
-                                        Text(editor)
-                                            .font(CharkleTheme.text(.caption))
-                                            .lineLimit(1)
-                                    }
-                                    if isPrimary {
-                                        Text("主版")
-                                            .font(CharkleTheme.text(.caption, weight: .bold))
-                                            .foregroundStyle(positiveInk)
-                                            .padding(.horizontal, 4.5)
-                                            .padding(.vertical, 1)
-                                            .background(positiveInk.opacity(0.14), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.xs, style: .continuous))
-                                    }
-                                }
-                                .foregroundStyle(isViewing ? activeAccent : .primary)
-                                .padding(.horizontal, 9)
-                                .padding(.vertical, 4)
-                                .background(
-                                    isViewing
-                                        ? activeAccent.opacity(colorScheme == .dark ? 0.18 : 0.11)
-                                        : CharkleTheme.surfaceSubtle(for: colorScheme),
-                                    in: Capsule(style: .continuous)
-                                )
-                                .overlay(
-                                    Capsule(style: .continuous)
-                                        .strokeBorder(isViewing ? activeAccent.opacity(0.45) : Color.clear, lineWidth: CharkleTheme.hairlineWidth)
-                                )
-                            }
-                            .buttonStyle(CharkleTactileButtonStyle())
-                        }
-
-                        if asset.id != primaryAsset.id {
-                            Button {
-                                Task {
-                                    _ = await library.setPrimaryVersion(asset.id)
-                                    let vNum = asset.richMetadata?.versionStack?.versionNumber ?? 1
-                                    coordinator.showToast("已将 v\(vNum) 设为主版本", icon: "pin.fill", tone: .success)
-                                }
-                            } label: {
-                                HStack(spacing: 4) {
-                                    Image(systemName: "pin.fill")
-                                        .font(.system(size: 10))
-                                    Text("设当前版为主版")
-                                        .font(CharkleTheme.text(.caption, weight: .medium))
-                                }
-                                .foregroundStyle(activeAccent)
-                                .padding(.horizontal, 9)
-                                .padding(.vertical, 4)
-                                .background(activeAccent.opacity(0.10), in: Capsule(style: .continuous))
-                            }
-                            .buttonStyle(CharkleTactileButtonStyle())
+                CharkleSegmentedControl(
+                    selection: $studioMode,
+                    items: [
+                        .init(.reader, title: "阅读"),
+                        .init(.diff, title: "对比", badge: diffSegmentBadgeText),
+                        .init(.merge, title: "合并")
+                    ],
+                    size: .compact,
+                    fullWidth: false,
+                    useAccentForSelected: false,
+                    onSelect: { mode in
+                        if mode != .reader {
+                            ensureComparisonLoaded()
                         }
                     }
-                }
-                .background(HorizontalWheelScrollRedirector())
+                )
             }
+
+            Button {
+                openAssetInDefaultApplication(
+                    assetID: studioMode == .reader ? asset.id : (compareTargetAssetID ?? asset.id)
+                )
+            } label: {
+                Label("打开", systemImage: "arrow.up.forward.app")
+            }
+            .buttonStyle(.charkle(.standard, size: .xs))
+            .fixedSize()
+            .help("使用系统默认应用打开")
         }
-        .padding(.horizontal, 18)
-        .padding(.vertical, 12)
+        .padding(.horizontal, 16)
+        .frame(height: 46)
+        .background(CharkleTheme.surfaceElevated(for: colorScheme))
     }
 
-    private func modeSwitchPill(_ mode: StudioMode, label: String, icon: String) -> some View {
-        let selected = studioMode == mode
-        let innerR = CharkleTheme.Radius.concentricInner(outer: CharkleTheme.Radius.chip, padding: 2.5)
-        return Button {
-            withAnimation(CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion)) {
-                studioMode = mode
-            }
-            if mode != .reader {
-                ensureComparisonLoaded()
-            }
-        } label: {
-            HStack(spacing: 4) {
-                Image(systemName: icon)
-                    .font(.system(size: 10.5, weight: .semibold))
-                Text(label)
-                    .font(CharkleTheme.text(.caption, weight: selected ? .semibold : .medium))
-                if mode == .diff,
-                   let riskCount = comparisonReport?.summary.totalHighRiskChanges ?? asset.richMetadata?.document?.diffSummary?.totalHighRiskChanges,
-                   riskCount > 0 {
-                    Text("\(riskCount)")
-                        .font(CharkleTheme.text(.caption, weight: .bold))
-                        .monospacedDigit()
-                        .foregroundStyle(selected ? .white : CharkleTheme.destructive(for: colorScheme))
-                        .padding(.horizontal, 4.5)
-                        .padding(.vertical, 0.5)
-                        .background(
-                            selected
-                                ? Color.white.opacity(0.24)
-                                : CharkleTheme.destructive(for: colorScheme).opacity(0.14),
-                            in: Capsule(style: .continuous)
-                        )
-                }
-            }
-            .foregroundStyle(selected ? Color.white : .primary.opacity(0.84))
-            .padding(.horizontal, 10)
-            .padding(.vertical, 4.5)
-            .background(selected ? activeAccent : Color.clear, in: RoundedRectangle(cornerRadius: innerR, style: .continuous))
-            .contentShape(RoundedRectangle(cornerRadius: innerR, style: .continuous))
-        }
-        .buttonStyle(CharkleTactileButtonStyle())
-    }
-
-    // MARK: - Mode 1: Clean Native Reader (.docx / Office QLPreviewView + Structured Blocks / .xlsx / .pdf / .md / .txt)
+    // MARK: - Mode 1: Full-Bleed Paper Fidelity Reader (Zero Instructional Bars)
 
     @ViewBuilder
     private var readerStageBody: some View {
         if docFamily == .pdf, let url = originalURL, !showPDFExtractedText {
-            VStack(spacing: 0) {
-                HStack {
-                    Text(payload?.hasTextLayer == false ? "签批/扫描 PDF 高清原件" : "PDF 原生页面视图")
-                        .font(CharkleTheme.text(.caption, weight: .medium))
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    if let p = payload, !p.plainText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        Button("查看提取正文") {
-                            showPDFExtractedText = true
-                        }
-                        .buttonStyle(CharkleButtonStyle(.subtle, size: .xs))
-                    }
-                }
-                .padding(.horizontal, 18)
-                .padding(.vertical, 6)
-
+            ZStack(alignment: .topTrailing) {
                 QuickLookPDFView(url: url)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                if let p = payload, !p.plainText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    Button {
+                        showPDFExtractedText = true
+                    } label: {
+                        Text("提取正文")
+                            .font(CharkleTheme.text(.caption, weight: .medium))
+                            .foregroundStyle(.primary)
+                            .padding(.horizontal, 10)
+                            .frame(height: 26)
+                    }
+                    .buttonStyle(.plain)
+                    .charkleLiquidGlass(.regular, in: Capsule(style: .continuous), interactive: true)
+                    .padding(12)
+                }
             }
         } else if supportsNativeOfficeLayout, let url = originalURL {
             VStack(spacing: 0) {
                 officeReaderModeBar
 
-                Rectangle()
-                    .fill(CharkleTheme.hairline(for: colorScheme))
-                    .frame(height: CharkleTheme.hairlineWidth)
+                CharkleHairlineDivider()
 
                 if readerPresentationMode == .nativeLayout {
                     NativeOfficeQLPreviewRepresentable(url: url)
@@ -594,7 +652,7 @@ public struct QuickLookDocumentStudioView: View {
                 } else if isLoadingPayload && payload == nil {
                     VStack(spacing: 10) {
                         ProgressView().controlSize(.regular)
-                        Text("正在解析文档结构与批注…")
+                        Text("正在解析文档内容…")
                             .font(CharkleTheme.text(.caption))
                             .foregroundStyle(.secondary)
                     }
@@ -605,13 +663,13 @@ public struct QuickLookDocumentStudioView: View {
                     structuredDocumentReaderView(p)
                 } else {
                     VStack(spacing: 8) {
-                        Text("暂未提取到结构化段落，可切换回原版版式预览")
+                        Text("暂未提取到结构化段落")
                             .font(CharkleTheme.text(.body, weight: .medium))
                             .foregroundStyle(.secondary)
-                        Button("切回原版版式") {
+                        Button("返回原版版式") {
                             readerPresentationMode = .nativeLayout
                         }
-                        .buttonStyle(CharkleButtonStyle(.standard, size: .sm))
+                        .buttonStyle(.charkle(.standard, size: .sm))
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
@@ -619,7 +677,7 @@ public struct QuickLookDocumentStudioView: View {
         } else if isLoadingPayload && payload == nil {
             VStack(spacing: 10) {
                 ProgressView().controlSize(.regular)
-                Text("正在解析文档结构与表格…")
+                Text("正在解析文档内容…")
                     .font(CharkleTheme.text(.caption))
                     .foregroundStyle(.secondary)
             }
@@ -638,99 +696,38 @@ public struct QuickLookDocumentStudioView: View {
                 Button("使用系统默认应用打开") {
                     openAssetInDefaultApplication(assetID: asset.id)
                 }
-                .buttonStyle(CharkleButtonStyle(.standard, size: .sm))
+                .buttonStyle(.charkle(.standard, size: .sm))
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 
     private var officeReaderModeBar: some View {
-        let structuredTitle = isSpreadsheetFamily ? "结构化表格" : "结构与批注"
+        let structuredTitle = isSpreadsheetFamily ? "数据表格" : "正文批注"
         let structuredIcon = isSpreadsheetFamily ? "tablecells" : "text.bubble"
         let commentCount = payload?.comments.count ?? 0
 
-        return HStack(spacing: 10) {
-            HStack(spacing: 6) {
-                Image(systemName: readerPresentationMode == .nativeLayout ? "doc.richtext" : structuredIcon)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.secondary)
-                Text(
-                    readerPresentationMode == .nativeLayout
-                        ? (isSpreadsheetFamily ? "原版工作簿版式预览" : "原版纸面版式预览")
-                        : (isSpreadsheetFamily ? "结构化数据与公式网格（悬停 fx 查看公式）" : "结构化正文与原生批注（可直接选取复制）")
-                )
-                .font(CharkleTheme.text(.caption, weight: .medium))
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-            }
+        return HStack(spacing: 8) {
+            Spacer(minLength: 0)
 
-            Spacer(minLength: 10)
-
-            HStack(spacing: 2) {
-                readerPresentationCapsule(
-                    .nativeLayout,
-                    title: "原版版式",
-                    icon: "doc.richtext",
-                    badgeCount: nil
-                )
-                readerPresentationCapsule(
-                    .structuredContent,
-                    title: structuredTitle,
-                    icon: structuredIcon,
-                    badgeCount: (!isSpreadsheetFamily && commentCount > 0) ? commentCount : nil
-                )
-            }
-            .padding(2)
-            .background(
-                CharkleTheme.surfaceSubtle(for: colorScheme),
-                in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous)
+            CharkleSegmentedControl(
+                selection: $readerPresentationMode,
+                items: [
+                    .init(.nativeLayout, title: "原版版式", systemImage: "doc.richtext"),
+                    .init(
+                        .structuredContent,
+                        title: structuredTitle,
+                        systemImage: structuredIcon,
+                        badge: (!isSpreadsheetFamily && commentCount > 0) ? "\(commentCount)" : nil
+                    )
+                ],
+                size: .compact,
+                fullWidth: false
             )
         }
-        .padding(.horizontal, 18)
-        .padding(.vertical, 6)
-    }
-
-    private func readerPresentationCapsule(
-        _ mode: ReaderPresentationMode,
-        title: String,
-        icon: String,
-        badgeCount: Int?
-    ) -> some View {
-        let selected = readerPresentationMode == mode
-        let innerR = CharkleTheme.Radius.concentricInner(outer: CharkleTheme.Radius.chip, padding: 2)
-        return Button {
-            withAnimation(CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion)) {
-                readerPresentationMode = mode
-            }
-        } label: {
-            HStack(spacing: 4) {
-                Image(systemName: icon)
-                    .font(.system(size: 10.5, weight: .semibold))
-                Text(title)
-                    .font(CharkleTheme.text(.caption, weight: selected ? .semibold : .medium))
-                if let badgeCount, badgeCount > 0 {
-                    Text("\(badgeCount)")
-                        .font(CharkleTheme.text(.caption, weight: .bold))
-                        .monospacedDigit()
-                        .foregroundStyle(selected ? activeAccent : .secondary)
-                        .padding(.horizontal, 4)
-                        .padding(.vertical, 0.5)
-                        .background(
-                            (selected ? activeAccent : Color.primary).opacity(0.12),
-                            in: Capsule(style: .continuous)
-                        )
-                }
-            }
-            .foregroundStyle(selected ? .primary : .secondary)
-            .padding(.horizontal, 8.5)
-            .padding(.vertical, 3.5)
-            .background(
-                selected ? CharkleTheme.surfaceElevated(for: colorScheme) : Color.clear,
-                in: RoundedRectangle(cornerRadius: innerR, style: .continuous)
-            )
-            .contentShape(RoundedRectangle(cornerRadius: innerR, style: .continuous))
-        }
-        .buttonStyle(.plain)
+        .padding(.horizontal, 16)
+        .frame(height: 34)
+        .background(CharkleTheme.surfaceElevated(for: colorScheme))
     }
 
     private func spreadsheetReaderView(_ doc: StructuredDocumentPayload) -> some View {
@@ -739,43 +736,43 @@ public struct QuickLookDocumentStudioView: View {
         let colCount = max(1, activeSheet.columnCount, activeSheet.headers.count)
 
         return VStack(alignment: .leading, spacing: 0) {
-            // Sheet Switcher Tabs
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 6) {
-                    ForEach(Array(doc.sheets.enumerated()), id: \.element.id) { idx, sheet in
-                        let selected = idx == clampedIdx
-                        Button {
-                            selectedSheetIndex = idx
-                        } label: {
-                            HStack(spacing: 5) {
-                                Image(systemName: "tablecells")
-                                    .font(.system(size: 10.5, weight: .medium))
-                                Text(sheet.name)
-                                    .font(CharkleTheme.text(.caption, weight: selected ? .semibold : .medium))
-                                Text("\(sheet.rows.count)")
-                                    .font(CharkleTheme.text(.caption, weight: .medium))
-                                    .monospacedDigit()
-                                    .foregroundStyle(.secondary)
+            if doc.sheets.count > 1 {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        ForEach(Array(doc.sheets.enumerated()), id: \.element.id) { idx, sheet in
+                            let selected = idx == clampedIdx
+                            Button {
+                                selectedSheetIndex = idx
+                            } label: {
+                                HStack(spacing: 5) {
+                                    Image(systemName: "tablecells")
+                                        .font(.system(size: 10.5, weight: .medium))
+                                    Text(sheet.name)
+                                        .font(CharkleTheme.text(.caption, weight: selected ? .semibold : .medium))
+                                    Text("\(sheet.rows.count)")
+                                        .font(CharkleTheme.text(.caption, weight: .medium))
+                                        .monospacedDigit()
+                                        .foregroundStyle(.tertiary)
+                                }
+                                .foregroundStyle(selected ? activeAccent : .secondary)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 4.5)
+                                .background(
+                                    selected ? activeAccentSoft : CharkleTheme.surfaceSubtle(for: colorScheme),
+                                    in: Capsule(style: .continuous)
+                                )
                             }
-                            .foregroundStyle(selected ? formatAccent : .secondary)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 5)
-                            .background(
-                                selected ? formatAccent.opacity(0.14) : CharkleTheme.surfaceSubtle(for: colorScheme),
-                                in: Capsule(style: .continuous)
-                            )
+                            .buttonStyle(CharkleTactileButtonStyle())
                         }
-                        .buttonStyle(CharkleTactileButtonStyle())
                     }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 7)
                 }
-                .padding(.horizontal, 18)
-                .padding(.vertical, 8)
-            }
-            .background(HorizontalWheelScrollRedirector())
+                .background(CharkleTheme.surfaceElevated(for: colorScheme))
+                .background(HorizontalWheelScrollRedirector())
 
-            Rectangle()
-                .fill(CharkleTheme.hairline(for: colorScheme))
-                .frame(height: CharkleTheme.hairlineWidth)
+                CharkleHairlineDivider()
+            }
 
             ScrollView([.horizontal, .vertical]) {
                 LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
@@ -807,7 +804,10 @@ public struct QuickLookDocumentStudioView: View {
                                                 .foregroundStyle(formatAccent)
                                                 .padding(.horizontal, 3.5)
                                                 .padding(.vertical, 1)
-                                                .background(formatAccent.opacity(0.12), in: RoundedRectangle(cornerRadius: 4, style: .continuous))
+                                                .background(
+                                                    formatAccent.opacity(0.12),
+                                                    in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.xs, style: .continuous)
+                                                )
                                                 .help("公式：\(formula)")
                                         }
                                     }
@@ -815,17 +815,13 @@ public struct QuickLookDocumentStudioView: View {
                                     .padding(.vertical, 6)
                                     .frame(width: 148, alignment: .leading)
                                     .overlay(alignment: .trailing) {
-                                        Rectangle()
-                                            .fill(CharkleTheme.hairline(for: colorScheme))
-                                            .frame(width: CharkleTheme.hairlineWidth)
+                                        CharkleHairlineDivider(axis: .vertical)
                                     }
                                 }
                             }
-                            .background(rowIdx.isMultiple(of: 2) ? Color.clear : Color.primary.opacity(0.024))
+                            .background(rowIdx.isMultiple(of: 2) ? CharkleTheme.surfaceElevated(for: colorScheme) : CharkleTheme.surfaceSubtle(for: colorScheme).opacity(0.45))
                             .overlay(alignment: .bottom) {
-                                Rectangle()
-                                    .fill(CharkleTheme.hairline(for: colorScheme))
-                                    .frame(height: CharkleTheme.hairlineWidth)
+                                CharkleHairlineDivider()
                             }
                         }
                     } header: {
@@ -851,21 +847,18 @@ public struct QuickLookDocumentStudioView: View {
                                     .padding(.vertical, 7)
                                     .frame(width: 148, alignment: .leading)
                                     .overlay(alignment: .trailing) {
-                                        Rectangle()
-                                            .fill(CharkleTheme.hairline(for: colorScheme))
-                                            .frame(width: CharkleTheme.hairlineWidth)
+                                        CharkleHairlineDivider(axis: .vertical)
                                     }
                             }
                         }
                         .background(CharkleTheme.surfaceSubtle(for: colorScheme))
                         .overlay(alignment: .bottom) {
-                            Rectangle()
-                                .fill(CharkleTheme.hairline(for: colorScheme))
-                                .frame(height: 1)
+                            CharkleHairlineDivider()
                         }
                     }
                 }
             }
+            .background(CharkleTheme.surfaceElevated(for: colorScheme))
             .charkleCleanScrollbars(hidden: false)
         }
     }
@@ -874,51 +867,51 @@ public struct QuickLookDocumentStudioView: View {
         let rawText = payload?.plainText ?? asset.ocrText ?? asset.richMetadata?.textExcerpt ?? asset.notes
         let isMarkdown = docFamily == .markdown || asset.isMarkdownDocument
 
-        return VStack(alignment: .leading, spacing: 0) {
-            if isMarkdown {
-                HStack {
-                    Spacer()
-                    Button(showRawMarkdownSource ? "渲染排版" : "纯文本源码") {
-                        showRawMarkdownSource.toggle()
+        return ScrollView(.vertical) {
+            VStack(alignment: .leading, spacing: 14) {
+                if isMarkdown {
+                    HStack {
+                        Spacer()
+                        Button(showRawMarkdownSource ? "渲染排版" : "纯文本源码") {
+                            showRawMarkdownSource.toggle()
+                        }
+                        .buttonStyle(.charkle(.subtle, size: .xs))
                     }
-                    .buttonStyle(CharkleButtonStyle(.subtle, size: .xs))
                 }
-                .padding(.horizontal, 18)
-                .padding(.top, 8)
-            }
 
-            ScrollView(.vertical) {
-                Group {
-                    if isMarkdown && !showRawMarkdownSource {
-                        QuickLookMarkdownContentView(markdown: rawText)
-                    } else {
-                        Text(rawText.isEmpty ? "暂无文本内容" : rawText)
-                            .font(CharkleTheme.text(.body, design: showRawMarkdownSource ? .monospaced : .default))
-                            .foregroundStyle(.primary)
-                            .lineSpacing(4)
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
+                if isMarkdown && !showRawMarkdownSource {
+                    QuickLookMarkdownContentView(markdown: rawText)
+                } else {
+                    Text(rawText.isEmpty ? "暂无文本内容" : rawText)
+                        .font(showRawMarkdownSource ? CharkleTheme.text(.body, design: .monospaced) : Self.paperProseFont)
+                        .foregroundStyle(.primary)
+                        .lineSpacing(5)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .padding(24)
             }
-            .charkleCleanScrollbars(hidden: false)
+            .padding(.horizontal, 36)
+            .padding(.vertical, 28)
+            .frame(maxWidth: 780, alignment: .leading)
+            .modifier(DocumentPaperSheetModifier(cornerRadius: Self.paperSheetCornerRadius))
+            .frame(maxWidth: .infinity)
+            .padding(24)
         }
+        .charkleCleanScrollbars(hidden: false)
     }
 
     private func structuredDocumentReaderView(_ doc: StructuredDocumentPayload) -> some View {
-        ScrollView(.vertical) {
+        let redHeaderInk = CharkleTheme.destructive(for: colorScheme)
+
+        return ScrollView(.vertical) {
             VStack(alignment: .leading, spacing: 14) {
                 if showPDFExtractedText && docFamily == .pdf && originalURL != nil {
                     HStack {
-                        Text("PDF 提取正文视图")
-                            .font(CharkleTheme.text(.caption, weight: .semibold))
-                            .foregroundStyle(.secondary)
                         Spacer()
-                        Button("返回 PDF 页面视图") {
+                        Button("原版页面") {
                             showPDFExtractedText = false
                         }
-                        .buttonStyle(CharkleButtonStyle(.subtle, size: .xs))
+                        .buttonStyle(.charkle(.standard, size: .xs))
                     }
                 }
 
@@ -926,11 +919,11 @@ public struct QuickLookDocumentStudioView: View {
                     VStack(spacing: 6) {
                         Text(doc.title)
                             .font(CharkleTheme.text(.title, weight: .bold))
-                            .foregroundStyle(Color(charkleHex: "#C83E37"))
+                            .foregroundStyle(redHeaderInk)
                             .multilineTextAlignment(.center)
                             .frame(maxWidth: .infinity)
                         Rectangle()
-                            .fill(Color(charkleHex: "#D93B30"))
+                            .fill(redHeaderInk)
                             .frame(height: 2)
                     }
                     .padding(.bottom, 6)
@@ -942,7 +935,7 @@ public struct QuickLookDocumentStudioView: View {
 
                 if doc.blocks.isEmpty && !doc.plainText.isEmpty {
                     Text(doc.plainText)
-                        .font(CharkleTheme.text(.body))
+                        .font(Self.paperProseFont)
                         .lineSpacing(5)
                         .textSelection(.enabled)
                 }
@@ -977,18 +970,25 @@ public struct QuickLookDocumentStudioView: View {
                                 }
                                 .padding(10)
                                 .frame(maxWidth: .infinity, alignment: .leading)
-                                .background(CharkleTheme.surfaceSubtle(for: colorScheme), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous))
+                                .background(
+                                    CharkleTheme.surfaceSubtle(for: colorScheme),
+                                    in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous)
+                                )
                             }
                         }
                         .padding(.top, 6)
                     } label: {
-                        Text("文档原生批注（\(doc.comments.count) 条）")
+                        Text("批注（\(doc.comments.count)）")
                             .font(CharkleTheme.text(.caption, weight: .semibold))
                     }
                 }
             }
-            .padding(26)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 36)
+            .padding(.vertical, 28)
+            .frame(maxWidth: 780, alignment: .leading)
+            .modifier(DocumentPaperSheetModifier(cornerRadius: Self.paperSheetCornerRadius))
+            .frame(maxWidth: .infinity)
+            .padding(24)
         }
         .charkleCleanScrollbars(hidden: false)
     }
@@ -998,9 +998,11 @@ public struct QuickLookDocumentStudioView: View {
         switch block.kind {
         case .heading:
             let level = block.headingLevel ?? 2
-            let size: CGFloat = level <= 1 ? 19 : (level == 2 ? 16 : 14)
+            let headingFont: Font = level <= 1
+                ? CharkleTheme.text(.title, weight: .bold)
+                : (level == 2 ? CharkleTheme.text(.headline, weight: .bold) : Self.studioHeaderTitleFont)
             Text(block.text)
-                .font(.system(size: size, weight: .bold))
+                .font(headingFont)
                 .foregroundStyle(.primary)
                 .padding(.top, level <= 2 ? 6 : 2)
                 .textSelection(.enabled)
@@ -1020,9 +1022,7 @@ public struct QuickLookDocumentStudioView: View {
                                     .frame(maxWidth: .infinity, alignment: .leading)
                                     .overlay(alignment: .trailing) {
                                         if cIdx < row.count - 1 {
-                                            Rectangle()
-                                                .fill(CharkleTheme.hairline(for: colorScheme))
-                                                .frame(width: CharkleTheme.hairlineWidth)
+                                            CharkleHairlineDivider(axis: .vertical)
                                         }
                                     }
                             }
@@ -1030,9 +1030,7 @@ public struct QuickLookDocumentStudioView: View {
                         .background(rIdx == 0 ? CharkleTheme.surfaceSubtle(for: colorScheme) : Color.clear)
                         .overlay(alignment: .bottom) {
                             if rIdx < block.tableRows.count - 1 {
-                                Rectangle()
-                                    .fill(CharkleTheme.hairline(for: colorScheme))
-                                    .frame(height: CharkleTheme.hairlineWidth)
+                                CharkleHairlineDivider()
                             }
                         }
                     }
@@ -1063,10 +1061,13 @@ public struct QuickLookDocumentStudioView: View {
                 if !block.nativeRevisions.isEmpty {
                     nativeRevisionSpansView(block.nativeRevisions)
                 } else {
+                    let bodyFont: Font = block.kind == .codeBlock
+                        ? CharkleTheme.text(.body, design: .monospaced)
+                        : Self.paperProseFont
                     Text(block.kind == .listItem ? "• \(block.text)" : block.text)
-                        .font(CharkleTheme.text(.body, design: block.kind == .codeBlock ? .monospaced : .default))
+                        .font(bodyFont)
                         .foregroundStyle(block.kind == .quote ? .secondary : .primary)
-                        .lineSpacing(4.5)
+                        .lineSpacing(5)
                         .textSelection(.enabled)
                 }
             }
@@ -1085,26 +1086,27 @@ public struct QuickLookDocumentStudioView: View {
                     .foregroundStyle(isIns ? pos : neg)
                     .padding(.horizontal, 5)
                     .padding(.vertical, 1.5)
-                    .background((isIns ? pos : neg).opacity(0.12), in: RoundedRectangle(cornerRadius: 4, style: .continuous))
+                    .background(
+                        (isIns ? pos : neg).opacity(0.12),
+                        in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.xs, style: .continuous)
+                    )
                     .help("\(isIns ? "修订插入" : "修订删除")\(span.author.map { " (\($0))" } ?? "")")
             }
         }
     }
 
-    // MARK: - Mode 2: Multi-Modal Fine-Grained Diff + High-Risk Radar + PDF Visual Overlay
+    // MARK: - Mode 2: Continuous Paper Sheet & Synchronized 2-Column Split Diff
 
     private var diffStageBody: some View {
         VStack(alignment: .leading, spacing: 0) {
             diffControlAndRadarBar
 
-            Rectangle()
-                .fill(CharkleTheme.hairline(for: colorScheme))
-                .frame(height: CharkleTheme.hairlineWidth)
+            CharkleHairlineDivider()
 
             if isComparing && comparisonReport == nil {
                 VStack(spacing: 10) {
                     ProgressView().controlSize(.regular)
-                    Text("正在本地比对段落、数值与表格差异…")
+                    Text("正在比对版本差异…")
                         .font(CharkleTheme.text(.caption))
                         .foregroundStyle(.secondary)
                 }
@@ -1117,7 +1119,7 @@ public struct QuickLookDocumentStudioView: View {
                 wordAndTextDiffStage(report)
             } else {
                 VStack(spacing: 8) {
-                    Text("选择任意两个版本即可查看精细差异")
+                    Text("选择两个版本查看差异")
                         .font(CharkleTheme.text(.body))
                         .foregroundStyle(.secondary)
                 }
@@ -1126,167 +1128,178 @@ public struct QuickLookDocumentStudioView: View {
         }
     }
 
+    private var visibleRadarFilters: [RiskRadarFilter] {
+        RiskRadarFilter.allCases.filter { filter in
+            filter == .all || radarCount(for: filter) > 0 || activeRiskFilter == filter
+        }
+    }
+
+    private func conciseRadarLabel(for filter: RiskRadarFilter) -> String {
+        switch filter {
+        case .all: "全部"
+        case .numberOrCurrency: "数字"
+        case .dateOrDeadline: "时间"
+        case .tableMutation: "表格"
+        case .nativeRevisionOrComment: "批注"
+        }
+    }
+
     private var diffControlAndRadarBar: some View {
         let baseAsset = compareBaseAssetID.flatMap { library.allAssetsByID[$0] }
         let targetAsset = compareTargetAssetID.flatMap { library.allAssetsByID[$0] }
+        let isPDFVisualStage = docFamily == .pdf && (pdfVisualMode == .redCyanOverlay || pdfVisualMode == .splitCurtain)
 
-        return VStack(alignment: .leading, spacing: 8) {
-            // Row 1: Version pair selector + Format-specific view toggles + J/K stepper
-            HStack(spacing: 8) {
-                versionPickerMenu(titlePrefix: "基准", selected: baseAsset) { picked in
-                    compareBaseAssetID = picked.id
-                    triggerComparisonReload()
-                }
-
-                Image(systemName: "arrow.right")
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundStyle(.tertiary)
-
-                versionPickerMenu(titlePrefix: "对比", selected: targetAsset) { picked in
-                    compareTargetAssetID = picked.id
-                    triggerComparisonReload()
-                }
-
-                Spacer(minLength: 8)
-
-                if docFamily == .pdf {
-                    HStack(spacing: 2) {
-                        pdfModeCapsule(.textOrOCR, title: "文本 / OCR")
-                        pdfModeCapsule(.redCyanOverlay, title: "红青叠层")
-                        pdfModeCapsule(.splitCurtain, title: "左右卷帘")
-                    }
-                    .padding(2)
-                    .background(CharkleTheme.surfaceSubtle(for: colorScheme), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous))
-
-                    if pdfVisualMode == .textOrOCR {
-                        Toggle("离线 OCR", isOn: $useOCRIfScanned)
-                            .toggleStyle(.switch)
-                            .controlSize(.mini)
-                            .font(CharkleTheme.text(.caption, weight: .medium))
-                            .onChange(of: useOCRIfScanned) { _, _ in
-                                triggerComparisonReload()
-                            }
-                    }
-                } else if (comparisonReport?.sheetDiffs.isEmpty ?? true) {
-                    HStack(spacing: 2) {
-                        textLayoutCapsule(.inlineReview, title: "行内审阅")
-                        textLayoutCapsule(.sideBySide, title: "左右分栏")
-                    }
-                    .padding(2)
-                    .background(CharkleTheme.surfaceSubtle(for: colorScheme), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous))
-                }
-
-                Toggle("仅看改动段落", isOn: $onlyChangedBlocks)
-                    .toggleStyle(.switch)
-                    .controlSize(.mini)
-                    .font(CharkleTheme.text(.caption, weight: .medium))
-
-                if !filteredHunks.isEmpty {
-                    HStack(spacing: 3) {
-                        Button {
-                            stepFocusedHunk(delta: -1)
-                        } label: {
-                            Image(systemName: "chevron.up")
-                                .font(.system(size: 10, weight: .bold))
-                                .frame(width: 22, height: 22)
-                        }
-                        .buttonStyle(.plain)
-                        .help("上一处差异 (K)")
-
-                        Button {
-                            stepFocusedHunk(delta: 1)
-                        } label: {
-                            Image(systemName: "chevron.down")
-                                .font(.system(size: 10, weight: .bold))
-                                .frame(width: 22, height: 22)
-                        }
-                        .buttonStyle(.plain)
-                        .help("下一处差异 (J)")
-                    }
-                    .padding(.horizontal, 4)
-                    .background(CharkleTheme.surfaceSubtle(for: colorScheme), in: Capsule(style: .continuous))
-                }
+        return HStack(spacing: 8) {
+            versionPickerMenu(
+                selected: baseAsset,
+                fallbackBadge: baseVersionBadgeLabel
+            ) { picked in
+                compareBaseAssetID = picked.id
+                triggerComparisonReload()
             }
 
-            // Row 2: High-Risk Radar Capsules
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 6) {
-                    ForEach(RiskRadarFilter.allCases) { filter in
-                        let count = radarCount(for: filter)
-                        let active = activeRiskFilter == filter
-                        let isHighRisk = filter == .numberOrCurrency || filter == .dateOrDeadline
-                        let dangerColor = CharkleTheme.destructive(for: colorScheme)
+            Image(systemName: "arrow.right")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(.tertiary)
 
-                        Button {
-                            withAnimation(CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion)) {
-                                activeRiskFilter = filter
+            versionPickerMenu(
+                selected: targetAsset,
+                fallbackBadge: targetVersionBadgeLabel
+            ) { picked in
+                compareTargetAssetID = picked.id
+                triggerComparisonReload()
+            }
+
+            if !isPDFVisualStage {
+                Rectangle()
+                    .fill(CharkleTheme.hairline(for: colorScheme))
+                    .frame(width: CharkleTheme.hairlineWidth, height: 12)
+
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 4) {
+                        ForEach(visibleRadarFilters) { filter in
+                            DiffRadarChipButton(
+                                title: conciseRadarLabel(for: filter),
+                                count: radarCount(for: filter),
+                                isActive: activeRiskFilter == filter
+                            ) {
+                                withAnimation(CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion)) {
+                                    activeRiskFilter = filter
+                                }
                             }
-                        } label: {
-                            HStack(spacing: 4) {
-                                Text(filter.label)
-                                    .font(CharkleTheme.text(.caption, weight: active ? .semibold : .medium))
-                                Text("\(count)")
-                                    .font(CharkleTheme.text(.caption, weight: .bold))
-                                    .monospacedDigit()
-                                    .foregroundStyle(
-                                        active
-                                            ? Color.white
-                                            : (isHighRisk && count > 0 ? dangerColor : .secondary)
-                                    )
-                            }
-                            .foregroundStyle(active ? Color.white : .primary.opacity(0.86))
-                            .padding(.horizontal, 9)
-                            .padding(.vertical, 4)
-                            .background(
-                                active
-                                    ? (isHighRisk && count > 0 ? dangerColor : activeAccent)
-                                    : (isHighRisk && count > 0 ? dangerColor.opacity(0.10) : CharkleTheme.surfaceSubtle(for: colorScheme)),
-                                in: Capsule(style: .continuous)
-                            )
                         }
-                        .buttonStyle(CharkleTactileButtonStyle())
                     }
                 }
+                .background(HorizontalWheelScrollRedirector())
             }
-            .background(HorizontalWheelScrollRedirector())
+
+            Spacer(minLength: 8)
+
+            if docFamily == .pdf {
+                CharkleSegmentedControl(
+                    selection: $pdfVisualMode,
+                    items: [
+                        .init(.textOrOCR, title: "文本"),
+                        .init(.redCyanOverlay, title: "叠层"),
+                        .init(.splitCurtain, title: "卷帘")
+                    ],
+                    size: .compact,
+                    fullWidth: false,
+                    onSelect: { mode in
+                        if mode != .textOrOCR {
+                            loadPDFVisualPages()
+                        }
+                    }
+                )
+
+                if pdfVisualMode == .textOrOCR {
+                    DiffTogglePillButton(title: "OCR", isOn: $useOCRIfScanned) {
+                        triggerComparisonReload()
+                    }
+                }
+            } else if comparisonReport?.sheetDiffs.isEmpty ?? true {
+                CharkleSegmentedControl(
+                    selection: $textDiffLayout,
+                    items: [
+                        .init(.inlineReview, title: "审阅"),
+                        .init(.sideBySide, title: "双栏")
+                    ],
+                    size: .compact,
+                    fullWidth: false
+                )
+            }
+
+            if !isPDFVisualStage {
+                DiffTogglePillButton(title: "仅看改动", isOn: $onlyChangedBlocks)
+
+                HStack(spacing: 2) {
+                    Button {
+                        stepFocusedHunk(delta: -1)
+                    } label: {
+                        Image(systemName: "arrow.up")
+                            .font(.system(size: 10.5, weight: .semibold))
+                    }
+                    .buttonStyle(.charkle(.subtle, size: .icon, iconDimension: 24))
+                    .disabled(filteredHunks.isEmpty)
+                    .help("上一处差异 (K)")
+
+                    Button {
+                        stepFocusedHunk(delta: 1)
+                    } label: {
+                        Image(systemName: "arrow.down")
+                            .font(.system(size: 10.5, weight: .semibold))
+                    }
+                    .buttonStyle(.charkle(.subtle, size: .icon, iconDimension: 24))
+                    .disabled(filteredHunks.isEmpty)
+                    .help("下一处差异 (J)")
+                }
+            }
         }
-        .padding(.horizontal, 18)
-        .padding(.vertical, 10)
+        .padding(.horizontal, 16)
+        .frame(height: 38)
+        .background(CharkleTheme.surfaceElevated(for: colorScheme))
     }
 
     private func versionPickerMenu(
-        titlePrefix: String,
         selected: AssetRecord?,
+        fallbackBadge: String,
         onSelect: @escaping (AssetRecord) -> Void
     ) -> some View {
-        let labelText: String = {
-            guard let selected else { return "\(titlePrefix)：选择版本" }
-            let badge = selected.richMetadata?.versionStack?.displayBadgeText ?? selected.title
-            return "\(titlePrefix)：\(badge)"
+        let shortBadge: String = {
+            if let selected, let idx = siblings.firstIndex(where: { $0.id == selected.id }) {
+                let vNum = selected.richMetadata?.versionStack?.versionNumber ?? (idx + 1)
+                return "v\(vNum)"
+            }
+            if let vNum = selected?.richMetadata?.versionStack?.versionNumber {
+                return "v\(vNum)"
+            }
+            return fallbackBadge
         }()
+
         return Menu {
-            ForEach(siblings) { ver in
-                let badge = ver.richMetadata?.versionStack?.displayBadgeText ?? ver.title
+            ForEach(Array(siblings.enumerated()).reversed(), id: \.element.id) { idx, ver in
+                let itemTitle = versionMenuItemLabel(for: ver, fallbackIndex: idx)
                 Button {
                     onSelect(ver)
                 } label: {
                     if ver.id == selected?.id {
-                        Label(badge, systemImage: "checkmark")
+                        Label(itemTitle, systemImage: "checkmark")
                     } else {
-                        Text(badge)
+                        Text(itemTitle)
                     }
                 }
             }
         } label: {
             HStack(spacing: 4) {
-                Text(labelText)
+                Text(shortBadge)
                     .font(CharkleTheme.text(.caption, weight: .semibold))
                     .monospacedDigit()
+                    .foregroundStyle(.primary)
                     .lineLimit(1)
                 CharkleDropdownChevron(size: 8)
             }
-            .padding(.horizontal, 9)
-            .padding(.vertical, 4.5)
+            .padding(.horizontal, 8.5)
+            .frame(height: 24)
             .background(CharkleTheme.surfaceSubtle(for: colorScheme), in: Capsule(style: .continuous))
         }
         .menuStyle(.button)
@@ -1295,99 +1308,68 @@ public struct QuickLookDocumentStudioView: View {
         .fixedSize()
     }
 
-    private func textLayoutCapsule(_ mode: TextDiffLayout, title: String) -> some View {
-        let selected = textDiffLayout == mode
-        let innerR = CharkleTheme.Radius.concentricInner(outer: CharkleTheme.Radius.chip, padding: 2)
-        return Button {
-            textDiffLayout = mode
-        } label: {
-            Text(title)
-                .font(CharkleTheme.text(.caption, weight: selected ? .semibold : .medium))
-                .foregroundStyle(selected ? .primary : .secondary)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 3.5)
-                .background(selected ? CharkleTheme.surfaceElevated(for: colorScheme) : Color.clear, in: RoundedRectangle(cornerRadius: innerR, style: .continuous))
-        }
-        .buttonStyle(.plain)
-    }
-
-    private func pdfModeCapsule(_ mode: PDFDiffVisualMode, title: String) -> some View {
-        let selected = pdfVisualMode == mode
-        let innerR = CharkleTheme.Radius.concentricInner(outer: CharkleTheme.Radius.chip, padding: 2)
-        return Button {
-            pdfVisualMode = mode
-            if mode != .textOrOCR {
-                loadPDFVisualPages()
-            }
-        } label: {
-            Text(title)
-                .font(CharkleTheme.text(.caption, weight: selected ? .semibold : .medium))
-                .foregroundStyle(selected ? .primary : .secondary)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 3.5)
-                .background(selected ? CharkleTheme.surfaceElevated(for: colorScheme) : Color.clear, in: RoundedRectangle(cornerRadius: innerR, style: .continuous))
-        }
-        .buttonStyle(.plain)
-    }
-
     private func radarCount(for filter: RiskRadarFilter) -> Int {
         guard let report = comparisonReport else { return 0 }
         return DocumentRadarFilterEngine.radarBadgeCount(in: report, for: filter)
     }
 
-    // MARK: - Word / Text Inline & Side-by-Side Diff Stage
+    // MARK: - Word / Text Continuous Paper & Synchronized 2-Column Split Stage
 
+    @ViewBuilder
     private func wordAndTextDiffStage(_ report: DocumentComparisonReport) -> some View {
         let items = filteredHunks
+        let showComments = !report.commentDiffs.isEmpty
+            && (activeRiskFilter == .all || activeRiskFilter == .nativeRevisionOrComment)
+
+        if items.isEmpty && !showComments {
+            VStack(spacing: 8) {
+                Text(activeRiskFilter == .all ? "两版正文一致，未检测到段落变更" : "当前筛选下无匹配变更")
+                    .font(CharkleTheme.text(.body, weight: .medium))
+                    .foregroundStyle(.secondary)
+                if activeRiskFilter != .all {
+                    Button("显示全部改动") {
+                        activeRiskFilter = .all
+                    }
+                    .buttonStyle(.charkle(.standard, size: .xs))
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if textDiffLayout == .sideBySide {
+            synchronizedSplitDiffSheet(report: report, items: items, showComments: showComments)
+        } else {
+            continuousPaperReviewSheet(report: report, items: items, showComments: showComments)
+        }
+    }
+
+    private func continuousPaperReviewSheet(
+        report: DocumentComparisonReport,
+        items: [DocumentDiffHunk],
+        showComments: Bool
+    ) -> some View {
+        let ordinalByID = changedOrdinalMap(for: report.hunks)
+
         return ScrollViewReader { proxy in
             ScrollView(.vertical) {
-                VStack(alignment: .leading, spacing: 10) {
-                    if items.isEmpty && report.commentDiffs.isEmpty {
-                        VStack(spacing: 8) {
-                            Text(activeRiskFilter == .all ? "两版正文一致，未检测到段落变更" : "当前雷达筛选项下没有匹配的变更")
-                                .font(CharkleTheme.text(.body, weight: .medium))
-                                .foregroundStyle(.secondary)
-                            if activeRiskFilter != .all {
-                                Button("切回全部改动") {
-                                    activeRiskFilter = .all
-                                }
-                                .buttonStyle(CharkleButtonStyle(.standard, size: .xs))
-                            }
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(Array(items.enumerated()), id: \.element.id) { idx, hunk in
+                        if Self.hasSkippedBlocksBefore(hunks: items, at: idx, onlyChanged: onlyChangedBlocks) {
+                            paperSkippedBlocksFoldSeparator
                         }
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 48)
-                    } else {
-                        ForEach(items) { hunk in
-                            diffHunkCard(hunk)
-                                .id(hunk.id)
-                        }
+
+                        paperInlineHunkRow(hunk, changedOrdinal: ordinalByID[hunk.id])
+                            .id(hunk.id)
                     }
 
-                    if !report.commentDiffs.isEmpty && (activeRiskFilter == .all || activeRiskFilter == .nativeRevisionOrComment) {
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text("原生批注变动（\(report.commentDiffs.count)）")
-                                .font(CharkleTheme.text(.caption, weight: .semibold))
-                                .foregroundStyle(.secondary)
-                            ForEach(report.commentDiffs) { cDiff in
-                                HStack(spacing: 8) {
-                                    Text(cDiff.changeKind.localizedLabel)
-                                        .font(CharkleTheme.text(.caption, weight: .bold))
-                                        .padding(.horizontal, 5)
-                                        .padding(.vertical, 1.5)
-                                        .background(Color.primary.opacity(0.08), in: RoundedRectangle(cornerRadius: 4, style: .continuous))
-                                    Text("\(cDiff.comment.author)：\(cDiff.comment.text)")
-                                        .font(CharkleTheme.text(.caption))
-                                        .textSelection(.enabled)
-                                }
-                                .padding(9)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .background(CharkleTheme.surfaceSubtle(for: colorScheme), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous))
-                            }
-                        }
-                        .padding(.top, 8)
+                    if showComments {
+                        paperCommentDiffFooter(report.commentDiffs)
                     }
                 }
-                .padding(20)
+                .padding(.horizontal, 36)
+                .padding(.vertical, 28)
+                .frame(maxWidth: 780, alignment: .leading)
+                .modifier(DocumentPaperSheetModifier(cornerRadius: Self.paperSheetCornerRadius))
+                .frame(maxWidth: .infinity)
+                .padding(24)
             }
             .charkleCleanScrollbars(hidden: false)
             .onChange(of: focusedHunkID) { _, newID in
@@ -1399,119 +1381,411 @@ public struct QuickLookDocumentStudioView: View {
         }
     }
 
-    private func diffHunkCard(_ hunk: DocumentDiffHunk) -> some View {
+    private var paperSkippedBlocksFoldSeparator: some View {
+        HStack(spacing: 10) {
+            CharkleHairlineDivider()
+            Text("⋯ 省略未改动段落")
+                .font(CharkleTheme.text(.caption))
+                .foregroundStyle(.tertiary)
+                .fixedSize()
+            CharkleHairlineDivider()
+        }
+        .frame(height: 28)
+        .padding(.vertical, 4)
+    }
+
+    private func changedOrdinalMap(for allHunks: [DocumentDiffHunk]) -> [String: Int] {
+        var map: [String: Int] = [:]
+        var next = 1
+        for h in allHunks where h.changeKind.isChanged {
+            map[h.id] = next
+            next += 1
+        }
+        return map
+    }
+
+    private func gutterBarColor(
+        for kind: DocumentDiffChangeKind,
+        posColor: Color,
+        negColor: Color
+    ) -> Color {
+        switch kind {
+        case .added:
+            posColor
+        case .removed:
+            negColor
+        case .modified, .moved:
+            activeAccent
+        case .unchanged:
+            .clear
+        }
+    }
+
+    private func conciseRiskFlagLabel(_ flag: DocumentDiffRiskFlag) -> String {
+        switch flag {
+        case .numberOrCurrency: "数字"
+        case .dateOrDeadline: "时间"
+        case .tableMutation: "表格"
+        case .nativeRevisionOrComment: "批注"
+        }
+    }
+
+    private func paperInlineHunkRow(_ hunk: DocumentDiffHunk, changedOrdinal: Int?) -> some View {
         let isFocused = focusedHunkID == hunk.id
+        let isHovered = hoveredHunkID == hunk.id
         let posColor = CharkleTheme.positive(for: colorScheme)
         let negColor = CharkleTheme.destructive(for: colorScheme)
         let warnColor = CharkleTheme.warning(for: colorScheme)
-        let railBg = colorScheme == .dark ? Color(charkleHex: "#20232B") : Color(charkleHex: "#F7F6F3")
+        let isChanged = hunk.changeKind.isChanged
+        let barColor = gutterBarColor(for: hunk.changeKind, posColor: posColor, negColor: negColor)
+        let sortedFlags = Array(hunk.riskFlags).sorted { $0.rawValue < $1.rawValue }
 
-        return VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 6) {
-                if let sec = hunk.sectionTitle, !sec.isEmpty {
-                    Text(sec)
-                        .font(CharkleTheme.text(.caption, weight: .semibold))
-                        .foregroundStyle(.primary)
-                }
+        return HStack(alignment: .top, spacing: 12) {
+            Capsule(style: .continuous)
+                .fill(barColor)
+                .frame(width: 3)
+                .padding(.vertical, 2)
 
-                Text(hunk.changeKind.localizedLabel)
-                    .font(CharkleTheme.text(.caption, weight: .bold))
-                    .foregroundStyle(hunk.changeKind == .moved ? activeAccent : (hunk.changeKind == .removed ? negColor : posColor))
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 1.5)
-                    .background(
-                        (hunk.changeKind == .moved ? activeAccent : (hunk.changeKind == .removed ? negColor : posColor)).opacity(0.13),
-                        in: Capsule(style: .continuous)
-                    )
-
-                if hunk.changeKind == .moved, let fromIdx = hunk.movedFromIndex, let toIdx = hunk.movedToIndex {
-                    Text("段落第 \(fromIdx + 1) 段 → 第 \(toIdx + 1) 段（内容未改）")
-                        .font(CharkleTheme.text(.caption))
-                        .monospacedDigit()
-                        .foregroundStyle(.secondary)
-                }
-
-                ForEach(Array(hunk.riskFlags).sorted(by: { $0.rawValue < $1.rawValue }), id: \.self) { flag in
-                    Text(flag.localizedLabel)
-                        .font(CharkleTheme.text(.caption, weight: .semibold))
-                        .foregroundStyle(warnColor)
-                        .padding(.horizontal, 5.5)
-                        .padding(.vertical, 1.5)
-                        .background(warnColor.opacity(0.14), in: RoundedRectangle(cornerRadius: 4, style: .continuous))
-                }
-
-                Spacer(minLength: 6)
-
-                Button {
-                    let copyStr = hunk.targetText ?? hunk.baseText ?? ""
-                    let pb = NSPasteboard.general
-                    pb.clearContents()
-                    pb.setString(copyStr, forType: .string)
-                    coordinator.showToast("已复制该处差异文本", icon: "doc.on.doc")
-                } label: {
-                    Image(systemName: "doc.on.doc")
-                        .font(.system(size: 10.5))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 22, height: 22)
-                }
-                .buttonStyle(.plain)
-                .help("复制该处文本/数值")
-
-                Button {
-                    openAssetInDefaultApplication(assetID: compareTargetAssetID ?? asset.id)
-                } label: {
-                    Image(systemName: "arrow.up.forward.app")
-                        .font(.system(size: 10.5))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 22, height: 22)
-                }
-                .buttonStyle(.plain)
-                .help("用系统默认软件打开")
-            }
-
-            if !hunk.highRiskPairs.isEmpty {
-                HStack(spacing: 8) {
-                    ForEach(hunk.highRiskPairs) { pair in
-                        let pairIconName: String = {
-                            switch pair.flag {
-                            case .numberOrCurrency: "number.circle.fill"
-                            case .dateOrDeadline: "clock.fill"
-                            default: "exclamationmark.triangle.fill"
-                            }
-                        }()
-                        HStack(spacing: 4) {
-                            Image(systemName: pairIconName)
-                                .font(.system(size: 10.5))
-                                .foregroundStyle(negColor)
-                            if let oldV = pair.oldValue {
-                                Text(oldV)
-                                    .strikethrough(true, color: negColor)
-                                    .foregroundStyle(negColor)
-                            }
-                            Image(systemName: "arrow.right")
-                                .font(.system(size: 8.5, weight: .bold))
+            VStack(alignment: .leading, spacing: 6) {
+                if isChanged {
+                    HStack(spacing: 6) {
+                        if let changedOrdinal {
+                            Text("#\(changedOrdinal)")
+                                .font(CharkleTheme.text(.caption, weight: .medium, design: .monospaced))
+                                .monospacedDigit()
                                 .foregroundStyle(.tertiary)
-                            if let newV = pair.newValue {
-                                Text(newV)
-                                    .fontWeight(.bold)
+                        }
+
+                        if let sec = hunk.sectionTitle, !sec.isEmpty {
+                            Text(sec)
+                                .font(CharkleTheme.text(.caption, weight: .medium))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+
+                        if hunk.changeKind == .moved,
+                           let fromIdx = hunk.movedFromIndex,
+                           let toIdx = hunk.movedToIndex {
+                            Text("段落 \(fromIdx + 1) → \(toIdx + 1)")
+                                .font(CharkleTheme.text(.caption))
+                                .monospacedDigit()
+                                .foregroundStyle(.tertiary)
+                        }
+
+                        ForEach(sortedFlags, id: \.self) { flag in
+                            HStack(spacing: 3) {
+                                if flag == .numberOrCurrency {
+                                    Image(systemName: "number.circle.fill")
+                                        .font(.system(size: 10))
+                                } else if flag == .dateOrDeadline {
+                                    Image(systemName: "clock.fill")
+                                        .font(.system(size: 10))
+                                }
+                                Text(conciseRiskFlagLabel(flag))
+                                    .font(CharkleTheme.text(.caption, weight: .medium))
+                            }
+                            .foregroundStyle(warnColor)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(
+                                warnColor.opacity(0.12),
+                                in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.xs, style: .continuous)
+                            )
+                        }
+
+                        Spacer(minLength: 4)
+
+                        if isHovered || isFocused {
+                            Button {
+                                let copyStr = hunk.targetText ?? hunk.baseText ?? ""
+                                let pb = NSPasteboard.general
+                                pb.clearContents()
+                                pb.setString(copyStr, forType: .string)
+                                coordinator.showToast("已复制段落文本", icon: "doc.on.doc")
+                            } label: {
+                                Image(systemName: "doc.on.doc")
+                                    .font(.system(size: 10.5))
+                                    .foregroundStyle(.secondary)
+                                    .frame(width: 20, height: 20)
+                            }
+                            .buttonStyle(.plain)
+                            .help("复制段落文本")
+                        }
+                    }
+                }
+
+                if !hunk.tableCellDiffs.isEmpty {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(hunk.tableCellDiffs) { cell in
+                            HStack(spacing: 6) {
+                                Text("\(cell.rowKey ?? "行\(cell.rowIndex + 1)") / \(cell.columnHeader ?? "列\(cell.colIndex + 1)")")
+                                    .font(CharkleTheme.text(.caption, weight: .semibold))
+                                    .foregroundStyle(.secondary)
+                                if let oldVal = cell.oldValue, !oldVal.isEmpty {
+                                    Text(oldVal)
+                                        .strikethrough(true, color: negColor)
+                                        .foregroundStyle(negColor)
+                                }
+                                Image(systemName: "arrow.right")
+                                    .font(.system(size: 9))
+                                    .foregroundStyle(.tertiary)
+                                Text(cell.newValue ?? "（空）")
+                                    .fontWeight(.semibold)
                                     .foregroundStyle(posColor)
                             }
+                            .font(CharkleTheme.text(.caption))
+                            .monospacedDigit()
                         }
-                        .font(CharkleTheme.text(.caption))
-                        .monospacedDigit()
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 3.5)
-                        .background(negColor.opacity(0.08), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.xs, style: .continuous))
+                    }
+                } else if !hunk.inlineTokens.isEmpty && isChanged {
+                    inlineDiffAttributedText(hunk.inlineTokens, posColor: posColor, negColor: negColor)
+                        .lineSpacing(5)
+                        .textSelection(.enabled)
+                } else if !isChanged || hunk.changeKind == .moved {
+                    Text(hunk.targetText ?? hunk.baseText ?? "")
+                        .font(Self.paperProseFont)
+                        .foregroundStyle(.primary)
+                        .lineSpacing(5)
+                        .textSelection(.enabled)
+                } else {
+                    VStack(alignment: .leading, spacing: 6) {
+                        if let oldText = hunk.baseText, oldText != hunk.targetText {
+                            HStack(alignment: .top, spacing: 8) {
+                                Image(systemName: "minus.circle.fill")
+                                    .font(.system(size: 12.5, weight: .semibold))
+                                    .foregroundStyle(negColor)
+                                    .padding(.top, 2)
+                                    .help("修改前（\(baseVersionBadgeLabel)）")
+
+                                Text(
+                                    Self.makeBaseDiffAttributedString(
+                                        tokens: [],
+                                        fallbackText: oldText,
+                                        textStyle: .body,
+                                        isDark: colorScheme == .dark,
+                                        negColor: negColor
+                                    )
+                                )
+                                .font(Self.paperProseFont)
+                                .lineSpacing(5)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .textSelection(.enabled)
+                            }
+                        }
+
+                        if let newText = hunk.targetText {
+                            HStack(alignment: .top, spacing: 8) {
+                                Image(systemName: "plus.circle.fill")
+                                    .font(.system(size: 12.5, weight: .semibold))
+                                    .foregroundStyle(posColor)
+                                    .padding(.top, 2)
+                                    .help("修改后（\(targetVersionBadgeLabel)）")
+
+                                Text(
+                                    Self.makeTargetDiffAttributedString(
+                                        tokens: [],
+                                        fallbackText: newText,
+                                        textStyle: .body,
+                                        isDark: colorScheme == .dark,
+                                        posColor: posColor
+                                    )
+                                )
+                                .font(Self.paperProseFont)
+                                .lineSpacing(5)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .textSelection(.enabled)
+                            }
+                        }
                     }
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 9)
+        .padding(.leading, -10)
+        .background(
+            isFocused
+                ? activeAccentSoft
+                : (isHovered && isChanged ? CharkleTheme.surfaceSubtle(for: colorScheme).opacity(0.45) : Color.clear),
+            in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.sm, style: .continuous)
+        )
+        .contentShape(Rectangle())
+        .onTapGesture {
+            if isChanged {
+                focusedHunkID = hunk.id
+            }
+        }
+        .onHover { hovering in
+            if hovering {
+                hoveredHunkID = hunk.id
+            } else if hoveredHunkID == hunk.id {
+                hoveredHunkID = nil
+            }
+        }
+    }
 
-            if !hunk.tableCellDiffs.isEmpty {
-                VStack(alignment: .leading, spacing: 4) {
+    private func synchronizedSplitDiffSheet(
+        report: DocumentComparisonReport,
+        items: [DocumentDiffHunk],
+        showComments: Bool
+    ) -> some View {
+        let posColor = CharkleTheme.positive(for: colorScheme)
+        let negColor = CharkleTheme.destructive(for: colorScheme)
+        let sheetShape = RoundedRectangle(cornerRadius: Self.paperSheetCornerRadius, style: .continuous)
+
+        return VStack(spacing: 0) {
+            // Sticky 32pt 2-Column Split Header Row
+            HStack(spacing: 0) {
+                HStack(spacing: 5) {
+                    Image(systemName: "minus.circle.fill")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(negColor)
+                    Text(baseVersionBadgeLabel)
+                        .font(CharkleTheme.text(.caption, weight: .semibold))
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                }
+                .padding(.horizontal, 18)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                CharkleHairlineDivider(axis: .vertical)
+
+                HStack(spacing: 5) {
+                    Image(systemName: "plus.circle.fill")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(posColor)
+                    Text(targetVersionBadgeLabel)
+                        .font(CharkleTheme.text(.caption, weight: .semibold))
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                }
+                .padding(.horizontal, 18)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+            .frame(height: 32)
+            .background(CharkleTheme.surfaceSubtle(for: colorScheme).opacity(0.55))
+
+            CharkleHairlineDivider()
+
+            ScrollViewReader { proxy in
+                ScrollView(.vertical) {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        ForEach(Array(items.enumerated()), id: \.element.id) { idx, hunk in
+                            if Self.hasSkippedBlocksBefore(hunks: items, at: idx, onlyChanged: onlyChangedBlocks) {
+                                paperSkippedBlocksFoldSeparator
+                                    .padding(.horizontal, 18)
+                                CharkleHairlineDivider()
+                            }
+
+                            splitDiffLockstepRow(hunk, posColor: posColor, negColor: negColor)
+                                .id(hunk.id)
+
+                            if idx < items.count - 1 || showComments {
+                                CharkleHairlineDivider()
+                            }
+                        }
+
+                        if showComments {
+                            paperCommentDiffFooter(report.commentDiffs)
+                                .padding(.horizontal, 18)
+                                .padding(.bottom, 16)
+                        }
+                    }
+                }
+                .charkleCleanScrollbars(hidden: false)
+                .onChange(of: focusedHunkID) { _, newID in
+                    guard let newID else { return }
+                    withAnimation(CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion)) {
+                        proxy.scrollTo(newID, anchor: .center)
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: 980, maxHeight: .infinity)
+        .background(CharkleTheme.surfaceElevated(for: colorScheme), in: sheetShape)
+        .clipShape(sheetShape)
+        .overlay(
+            sheetShape.strokeBorder(
+                CharkleTheme.hairline(for: colorScheme),
+                lineWidth: CharkleTheme.hairlineWidth
+            )
+        )
+        .shadow(color: .black.opacity(colorScheme == .dark ? 0.28 : 0.06), radius: 10, y: 3)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(20)
+    }
+
+    private func splitDiffLockstepRow(
+        _ hunk: DocumentDiffHunk,
+        posColor: Color,
+        negColor: Color
+    ) -> some View {
+        let isFocused = focusedHunkID == hunk.id
+        let isChanged = hunk.changeKind.isChanged
+        let leftBg: Color = isFocused
+            ? activeAccentSoft
+            : (isChanged && hunk.baseText != nil ? negColor.opacity(0.045) : Color.clear)
+        let rightBg: Color = isFocused
+            ? activeAccentSoft
+            : (isChanged && hunk.targetText != nil ? posColor.opacity(0.045) : Color.clear)
+
+        return HStack(alignment: .top, spacing: 0) {
+            VStack(alignment: .leading, spacing: 4) {
+                if let baseText = hunk.baseText {
+                    if !hunk.inlineTokens.isEmpty && isChanged {
+                        Text(
+                            Self.makeBaseDiffAttributedString(
+                                tokens: hunk.inlineTokens,
+                                fallbackText: baseText,
+                                textStyle: .body,
+                                isDark: colorScheme == .dark,
+                                negColor: negColor
+                            )
+                        )
+                        .font(Self.paperProseFont)
+                        .lineSpacing(4.5)
+                        .textSelection(.enabled)
+                    } else if isChanged && hunk.targetText == nil {
+                        Text(
+                            Self.makeBaseDiffAttributedString(
+                                tokens: [],
+                                fallbackText: baseText,
+                                textStyle: .body,
+                                isDark: colorScheme == .dark,
+                                negColor: negColor
+                            )
+                        )
+                        .font(Self.paperProseFont)
+                        .lineSpacing(4.5)
+                        .textSelection(.enabled)
+                    } else {
+                        Text(baseText)
+                            .font(Self.paperProseFont)
+                            .foregroundStyle(.primary)
+                            .lineSpacing(4.5)
+                            .textSelection(.enabled)
+                    }
+                } else {
+                    Text("—")
+                        .font(CharkleTheme.text(.caption))
+                        .foregroundStyle(.quaternary)
+                }
+            }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 12)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .background(leftBg)
+
+            VStack(alignment: .leading, spacing: 4) {
+                if !hunk.tableCellDiffs.isEmpty {
                     ForEach(hunk.tableCellDiffs) { cell in
                         HStack(spacing: 6) {
                             Text("\(cell.rowKey ?? "行\(cell.rowIndex + 1)") / \(cell.columnHeader ?? "列\(cell.colIndex + 1)")")
                                 .font(CharkleTheme.text(.caption, weight: .semibold))
+                                .foregroundStyle(.secondary)
                             if let oldVal = cell.oldValue, !oldVal.isEmpty {
                                 Text(oldVal)
                                     .strikethrough(true, color: negColor)
@@ -1527,199 +1801,92 @@ public struct QuickLookDocumentStudioView: View {
                         .font(CharkleTheme.text(.caption))
                         .monospacedDigit()
                     }
-                }
-            } else if textDiffLayout == .sideBySide {
-                HStack(alignment: .top, spacing: 10) {
-                    VStack(alignment: .leading, spacing: 6) {
-                        diffVersionColumnHeader(
-                            icon: "minus.circle.fill",
-                            tint: negColor,
-                            versionBadge: baseVersionBadgeLabel,
-                            tooltip: "修改前基准版本（\(baseVersionBadgeLabel)）"
+                } else if let targetText = hunk.targetText {
+                    if !hunk.inlineTokens.isEmpty && isChanged {
+                        Text(
+                            Self.makeTargetDiffAttributedString(
+                                tokens: hunk.inlineTokens,
+                                fallbackText: targetText,
+                                textStyle: .body,
+                                isDark: colorScheme == .dark,
+                                posColor: posColor
+                            )
                         )
-                        if let baseText = hunk.baseText {
-                            if !hunk.inlineTokens.isEmpty && hunk.changeKind != .unchanged {
-                                Text(
-                                    Self.makeBaseDiffAttributedString(
-                                        tokens: hunk.inlineTokens,
-                                        fallbackText: baseText,
-                                        textStyle: .body,
-                                        isDark: colorScheme == .dark,
-                                        negColor: negColor
-                                    )
-                                )
-                                .font(CharkleTheme.text(.body))
-                                .lineSpacing(3)
-                                .textSelection(.enabled)
-                            } else {
-                                Text(baseText)
-                                    .font(CharkleTheme.text(.body))
-                                    .foregroundStyle(.primary)
-                                    .lineSpacing(3)
-                                    .textSelection(.enabled)
-                            }
-                        } else {
-                            Text("（无此段落）")
-                                .font(CharkleTheme.text(.body))
-                                .foregroundStyle(.tertiary)
-                        }
+                        .font(Self.paperProseFont)
+                        .lineSpacing(4.5)
+                        .textSelection(.enabled)
+                    } else if isChanged && hunk.baseText == nil {
+                        Text(
+                            Self.makeTargetDiffAttributedString(
+                                tokens: [],
+                                fallbackText: targetText,
+                                textStyle: .body,
+                                isDark: colorScheme == .dark,
+                                posColor: posColor
+                            )
+                        )
+                        .font(Self.paperProseFont)
+                        .lineSpacing(4.5)
+                        .textSelection(.enabled)
+                    } else {
+                        Text(targetText)
+                            .font(Self.paperProseFont)
+                            .foregroundStyle(.primary)
+                            .lineSpacing(4.5)
+                            .textSelection(.enabled)
                     }
-                    .padding(10)
-                    .frame(maxWidth: .infinity, alignment: .topLeading)
-                    .background(negColor.opacity(hunk.changeKind == .unchanged ? 0 : 0.06), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.sm, style: .continuous))
+                } else {
+                    Text("—")
+                        .font(CharkleTheme.text(.caption))
+                        .foregroundStyle(.quaternary)
+                }
+            }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 12)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .background(rightBg)
+        }
+        .overlay(alignment: .center) {
+            Rectangle()
+                .fill(CharkleTheme.hairline(for: colorScheme))
+                .frame(width: CharkleTheme.hairlineWidth)
+        }
+        .contentShape(Rectangle())
+        .onTapGesture {
+            if isChanged {
+                focusedHunkID = hunk.id
+            }
+        }
+    }
 
-                    VStack(alignment: .leading, spacing: 6) {
-                        diffVersionColumnHeader(
-                            icon: "plus.circle.fill",
-                            tint: posColor,
-                            versionBadge: targetVersionBadgeLabel,
-                            tooltip: "修改后对比版本（\(targetVersionBadgeLabel)）"
+    private func paperCommentDiffFooter(_ commentDiffs: [DocumentCommentDiff]) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            CharkleHairlineDivider()
+                .padding(.vertical, 6)
+
+            Text("批注变动（\(commentDiffs.count)）")
+                .font(CharkleTheme.text(.caption, weight: .semibold))
+                .foregroundStyle(.secondary)
+
+            ForEach(commentDiffs) { cDiff in
+                HStack(spacing: 8) {
+                    Text(cDiff.changeKind.localizedLabel)
+                        .font(CharkleTheme.text(.caption, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(
+                            CharkleTheme.surfaceSubtle(for: colorScheme),
+                            in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.xs, style: .continuous)
                         )
-                        if let targetText = hunk.targetText {
-                            if !hunk.inlineTokens.isEmpty && hunk.changeKind != .unchanged {
-                                Text(
-                                    Self.makeTargetDiffAttributedString(
-                                        tokens: hunk.inlineTokens,
-                                        fallbackText: targetText,
-                                        textStyle: .body,
-                                        isDark: colorScheme == .dark,
-                                        posColor: posColor
-                                    )
-                                )
-                                .font(CharkleTheme.text(.body))
-                                .lineSpacing(3)
-                                .textSelection(.enabled)
-                            } else {
-                                Text(targetText)
-                                    .font(CharkleTheme.text(.body))
-                                    .foregroundStyle(.primary)
-                                    .lineSpacing(3)
-                                    .textSelection(.enabled)
-                            }
-                        } else {
-                            Text("（已删除）")
-                                .font(CharkleTheme.text(.body))
-                                .foregroundStyle(.tertiary)
-                        }
-                    }
-                    .padding(10)
-                    .frame(maxWidth: .infinity, alignment: .topLeading)
-                    .background(posColor.opacity(hunk.changeKind == .unchanged ? 0 : 0.06), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.sm, style: .continuous))
-                }
-            } else if !hunk.inlineTokens.isEmpty {
-                inlineDiffAttributedText(hunk.inlineTokens, posColor: posColor, negColor: negColor)
-                    .textSelection(.enabled)
-            } else if hunk.changeKind == .unchanged || hunk.changeKind == .moved {
-                Text(hunk.targetText ?? hunk.baseText ?? "")
-                    .font(CharkleTheme.text(.body))
-                    .foregroundStyle(.primary)
-                    .lineSpacing(3)
-                    .textSelection(.enabled)
-            } else {
-                VStack(alignment: .leading, spacing: 6) {
-                    if let oldText = hunk.baseText, oldText != hunk.targetText {
-                        HStack(alignment: .top, spacing: 8) {
-                            diffVersionGutterBadge(
-                                icon: "minus.circle.fill",
-                                tint: negColor,
-                                versionBadge: baseVersionBadgeLabel,
-                                tooltip: "修改前（\(baseVersionBadgeLabel)）"
-                            )
-                            Text(
-                                Self.makeBaseDiffAttributedString(
-                                    tokens: [],
-                                    fallbackText: oldText,
-                                    textStyle: .body,
-                                    isDark: colorScheme == .dark,
-                                    negColor: negColor
-                                )
-                            )
-                            .font(CharkleTheme.text(.body))
-                            .lineSpacing(3)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .textSelection(.enabled)
-                        }
-                    }
-                    if let newText = hunk.targetText {
-                        HStack(alignment: .top, spacing: 8) {
-                            diffVersionGutterBadge(
-                                icon: "plus.circle.fill",
-                                tint: posColor,
-                                versionBadge: targetVersionBadgeLabel,
-                                tooltip: "修改后（\(targetVersionBadgeLabel)）"
-                            )
-                            Text(
-                                Self.makeTargetDiffAttributedString(
-                                    tokens: [],
-                                    fallbackText: newText,
-                                    textStyle: .body,
-                                    isDark: colorScheme == .dark,
-                                    posColor: posColor
-                                )
-                            )
-                            .font(CharkleTheme.text(.body))
-                            .lineSpacing(3)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .textSelection(.enabled)
-                        }
-                    }
+                    Text("\(cDiff.comment.author)：\(cDiff.comment.text)")
+                        .font(CharkleTheme.text(.caption))
+                        .foregroundStyle(.primary)
+                        .textSelection(.enabled)
                 }
             }
         }
-        .padding(13)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(railBg, in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.cardOuter, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: CharkleTheme.Radius.cardOuter, style: .continuous)
-                .strokeBorder(
-                    isFocused ? activeAccent : CharkleTheme.hairline(for: colorScheme),
-                    lineWidth: isFocused ? 1.5 : CharkleTheme.hairlineWidth
-                )
-        )
-    }
-
-    private func diffVersionColumnHeader(
-        icon: String,
-        tint: Color,
-        versionBadge: String,
-        tooltip: String
-    ) -> some View {
-        HStack(spacing: 5) {
-            Image(systemName: icon)
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(tint)
-            Text(versionBadge)
-                .font(CharkleTheme.text(.caption, weight: .bold))
-                .monospacedDigit()
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 5)
-                .padding(.vertical, 1)
-                .background(tint.opacity(0.12), in: Capsule(style: .continuous))
-        }
-        .help(tooltip)
-    }
-
-    private func diffVersionGutterBadge(
-        icon: String,
-        tint: Color,
-        versionBadge: String,
-        tooltip: String
-    ) -> some View {
-        HStack(spacing: 4) {
-            Image(systemName: icon)
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(tint)
-            Text(versionBadge)
-                .font(CharkleTheme.text(.caption, weight: .bold))
-                .monospacedDigit()
-                .foregroundStyle(.secondary)
-        }
-        .padding(.horizontal, 5.5)
-        .padding(.vertical, 2)
-        .background(tint.opacity(0.11), in: Capsule(style: .continuous))
-        .fixedSize()
-        .padding(.top, 1)
-        .help(tooltip)
+        .padding(.top, 8)
     }
 
     private func inlineDiffAttributedText(
@@ -1747,7 +1914,7 @@ public struct QuickLookDocumentStudioView: View {
             combined.append(part)
         }
         return Text(combined)
-            .font(CharkleTheme.text(.body))
+            .font(Self.paperProseFont)
     }
 
     // MARK: - Excel Smart Primary-Key Aligned Diff Stage
@@ -1768,6 +1935,7 @@ public struct QuickLookDocumentStudioView: View {
             if activeRiskFilter == .dateOrDeadline { return row.riskFlags.contains(.dateOrDeadline) }
             return true
         }
+        let sheetShape = RoundedRectangle(cornerRadius: Self.paperSheetCornerRadius, style: .continuous)
 
         return VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 8) {
@@ -1785,15 +1953,16 @@ public struct QuickLookDocumentStudioView: View {
                                         .font(CharkleTheme.text(.caption, weight: selected ? .semibold : .medium))
                                     if changedTotal > 0 {
                                         Text("Δ\(changedTotal)")
-                                            .font(CharkleTheme.text(.caption, weight: .bold))
+                                            .font(CharkleTheme.text(.caption, weight: .semibold))
                                             .monospacedDigit()
-                                            .foregroundStyle(sDiff.highRiskCellCount > 0 ? negColor : posColor)
+                                            .foregroundStyle(selected ? activeAccent : .secondary)
                                     }
                                 }
+                                .foregroundStyle(selected ? activeAccent : .primary)
                                 .padding(.horizontal, 10)
-                                .padding(.vertical, 5)
+                                .padding(.vertical, 4.5)
                                 .background(
-                                    selected ? formatAccent.opacity(0.15) : CharkleTheme.surfaceSubtle(for: colorScheme),
+                                    selected ? activeAccentSoft : CharkleTheme.surfaceSubtle(for: colorScheme),
                                     in: Capsule(style: .continuous)
                                 )
                             }
@@ -1805,7 +1974,6 @@ public struct QuickLookDocumentStudioView: View {
 
                 Spacer(minLength: 8)
 
-                // Smart Primary-Key Column Selector
                 if !activeSheetDiff.headers.isEmpty {
                     Menu {
                         Button {
@@ -1836,13 +2004,13 @@ public struct QuickLookDocumentStudioView: View {
                         HStack(spacing: 4) {
                             Image(systemName: "tablecells")
                                 .font(.system(size: 10.5))
-                            Text("主键列：\(activeSheetDiff.primaryKeyHeader ?? "自动")")
+                            Text("主键：\(activeSheetDiff.primaryKeyHeader ?? "自动")")
                                 .font(CharkleTheme.text(.caption, weight: .medium))
                                 .lineLimit(1)
                             CharkleDropdownChevron(size: 8)
                         }
                         .padding(.horizontal, 9)
-                        .padding(.vertical, 4.5)
+                        .frame(height: 24)
                         .background(CharkleTheme.surfaceSubtle(for: colorScheme), in: Capsule(style: .continuous))
                     }
                     .menuStyle(.button)
@@ -1851,92 +2019,112 @@ public struct QuickLookDocumentStudioView: View {
                     .fixedSize()
                 }
             }
-            .padding(.horizontal, 18)
-            .padding(.vertical, 8)
+            .padding(.horizontal, 16)
+            .frame(height: 36)
+            .background(CharkleTheme.surfaceElevated(for: colorScheme))
 
-            Rectangle()
-                .fill(CharkleTheme.hairline(for: colorScheme))
-                .frame(height: CharkleTheme.hairlineWidth)
+            CharkleHairlineDivider()
 
             ScrollView(.vertical) {
-                VStack(alignment: .leading, spacing: 8) {
-                    if visibleRows.isEmpty {
-                        Text("该工作表在当前筛选条件下无行变更")
-                            .font(CharkleTheme.text(.body))
-                            .foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 40)
-                    } else {
-                        ForEach(visibleRows) { rowDiff in
-                            VStack(alignment: .leading, spacing: 6) {
-                                HStack(spacing: 6) {
-                                    Text(rowDiff.primaryKeyValue.isEmpty ? "行 \(rowDiff.targetRowNumber ?? rowDiff.baseRowNumber ?? 0)" : rowDiff.primaryKeyValue)
-                                        .font(CharkleTheme.text(.body, weight: .semibold))
-                                        .monospacedDigit()
-                                    Text(rowDiff.changeKind.localizedLabel)
-                                        .font(CharkleTheme.text(.caption, weight: .bold))
-                                        .foregroundStyle(rowDiff.changeKind == .removed ? negColor : posColor)
-                                        .padding(.horizontal, 6)
-                                        .padding(.vertical, 1.5)
-                                        .background((rowDiff.changeKind == .removed ? negColor : posColor).opacity(0.13), in: Capsule(style: .continuous))
-                                    Spacer()
-                                }
+                if visibleRows.isEmpty {
+                    Text("该工作表在当前筛选下无行变更")
+                        .font(CharkleTheme.text(.body))
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 48)
+                } else {
+                    VStack(alignment: .leading, spacing: 0) {
+                        ForEach(Array(visibleRows.enumerated()), id: \.element.id) { idx, rowDiff in
+                            HStack(alignment: .top, spacing: 12) {
+                                Capsule(style: .continuous)
+                                    .fill(rowDiff.changeKind == .removed ? negColor : (rowDiff.changeKind == .added ? posColor : activeAccent))
+                                    .frame(width: 3)
+                                    .padding(.vertical, 2)
 
-                                if !rowDiff.cellDiffs.isEmpty {
-                                    ForEach(rowDiff.cellDiffs) { cell in
-                                        HStack(spacing: 6) {
-                                            Text("\(cell.columnHeader ?? "列\(cell.colIndex + 1)")：")
-                                                .font(CharkleTheme.text(.caption, weight: .medium))
-                                                .foregroundStyle(.secondary)
-                                            if let oldV = cell.oldValue, !oldV.isEmpty {
-                                                Text(oldV)
-                                                    .strikethrough(true, color: negColor)
-                                                    .foregroundStyle(negColor)
-                                            }
-                                            Image(systemName: "arrow.right")
-                                                .font(.system(size: 9))
-                                                .foregroundStyle(.tertiary)
-                                            Text(cell.newValue ?? "（空）")
-                                                .fontWeight(.semibold)
-                                                .foregroundStyle(posColor)
-
-                                            if cell.oldFormula != cell.newFormula,
-                                               (cell.oldFormula != nil || cell.newFormula != nil) {
-                                                Text("fx: \(cell.oldFormula ?? "常量") → \(cell.newFormula ?? "常量")")
-                                                    .font(CharkleTheme.text(.caption, weight: .medium, design: .monospaced))
-                                                    .foregroundStyle(formatAccent)
-                                                    .padding(.horizontal, 6)
-                                                    .padding(.vertical, 1.5)
-                                                    .background(formatAccent.opacity(0.12), in: RoundedRectangle(cornerRadius: 4, style: .continuous))
-                                            }
-                                        }
-                                        .font(CharkleTheme.text(.caption))
-                                        .monospacedDigit()
+                                VStack(alignment: .leading, spacing: 5) {
+                                    HStack(spacing: 6) {
+                                        Text(rowDiff.primaryKeyValue.isEmpty ? "行 \(rowDiff.targetRowNumber ?? rowDiff.baseRowNumber ?? 0)" : rowDiff.primaryKeyValue)
+                                            .font(CharkleTheme.text(.body, weight: .semibold))
+                                            .monospacedDigit()
+                                        Text(rowDiff.changeKind.localizedLabel)
+                                            .font(CharkleTheme.text(.caption, weight: .semibold))
+                                            .foregroundStyle(rowDiff.changeKind == .removed ? negColor : posColor)
+                                        Spacer()
                                     }
-                                } else {
-                                    let values = rowDiff.changeKind == .removed ? rowDiff.baseValues : rowDiff.targetValues
-                                    Text(values.filter { !$0.isEmpty }.joined(separator: "  |  "))
-                                        .font(CharkleTheme.text(.caption))
-                                        .monospacedDigit()
-                                        .foregroundStyle(.secondary)
+
+                                    if !rowDiff.cellDiffs.isEmpty {
+                                        ForEach(rowDiff.cellDiffs) { cell in
+                                            HStack(spacing: 6) {
+                                                Text("\(cell.columnHeader ?? "列\(cell.colIndex + 1)")：")
+                                                    .font(CharkleTheme.text(.caption, weight: .medium))
+                                                    .foregroundStyle(.secondary)
+                                                if let oldV = cell.oldValue, !oldV.isEmpty {
+                                                    Text(oldV)
+                                                        .strikethrough(true, color: negColor)
+                                                        .foregroundStyle(negColor)
+                                                }
+                                                Image(systemName: "arrow.right")
+                                                    .font(.system(size: 9))
+                                                    .foregroundStyle(.tertiary)
+                                                Text(cell.newValue ?? "（空）")
+                                                    .fontWeight(.semibold)
+                                                    .foregroundStyle(posColor)
+
+                                                if cell.oldFormula != cell.newFormula,
+                                                   (cell.oldFormula != nil || cell.newFormula != nil) {
+                                                    Text("fx: \(cell.oldFormula ?? "常量") → \(cell.newFormula ?? "常量")")
+                                                        .font(CharkleTheme.text(.caption, weight: .medium, design: .monospaced))
+                                                        .foregroundStyle(formatAccent)
+                                                        .padding(.horizontal, 6)
+                                                        .padding(.vertical, 1.5)
+                                                        .background(
+                                                            formatAccent.opacity(0.12),
+                                                            in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.xs, style: .continuous)
+                                                        )
+                                                }
+                                            }
+                                            .font(CharkleTheme.text(.caption))
+                                            .monospacedDigit()
+                                        }
+                                    } else {
+                                        let values = rowDiff.changeKind == .removed ? rowDiff.baseValues : rowDiff.targetValues
+                                        Text(values.filter { !$0.isEmpty }.joined(separator: "  |  "))
+                                            .font(CharkleTheme.text(.caption))
+                                            .monospacedDigit()
+                                            .foregroundStyle(.secondary)
+                                    }
                                 }
                             }
-                            .padding(12)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(CharkleTheme.surfaceSubtle(for: colorScheme), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous))
+                            .padding(.horizontal, 18)
+                            .padding(.vertical, 12)
+
+                            if idx < visibleRows.count - 1 {
+                                CharkleHairlineDivider()
+                            }
                         }
                     }
+                    .frame(maxWidth: 920, alignment: .leading)
+                    .background(CharkleTheme.surfaceElevated(for: colorScheme), in: sheetShape)
+                    .overlay(
+                        sheetShape.strokeBorder(
+                            CharkleTheme.hairline(for: colorScheme),
+                            lineWidth: CharkleTheme.hairlineWidth
+                        )
+                    )
+                    .frame(maxWidth: .infinity)
+                    .padding(20)
                 }
-                .padding(18)
             }
             .charkleCleanScrollbars(hidden: false)
         }
     }
 
-    // MARK: - PDF Visual Red-Cyan Overlay & Interactive Split Curtain Wipe Stage
+    // MARK: - PDF Visual Red-Cyan Overlay & Split Curtain Stage (Zero Tutorial Sentences)
 
     private var pdfVisualComparisonStage: some View {
-        VStack(spacing: 10) {
+        let negColor = CharkleTheme.destructive(for: colorScheme)
+
+        return VStack(spacing: 8) {
             HStack(spacing: 12) {
                 HStack(spacing: 6) {
                     Button {
@@ -1946,9 +2134,8 @@ public struct QuickLookDocumentStudioView: View {
                     } label: {
                         Image(systemName: "chevron.left")
                             .font(.system(size: 11, weight: .semibold))
-                            .frame(width: 24, height: 24)
                     }
-                    .buttonStyle(CharkleButtonStyle(.standard, size: .icon, iconDimension: 24))
+                    .buttonStyle(.charkle(.standard, size: .icon, iconDimension: 24))
                     .disabled(pdfPageIndex <= 0)
 
                     Text("第 \(pdfPageIndex + 1) / \(max(1, pdfPageCount)) 页")
@@ -1962,30 +2149,42 @@ public struct QuickLookDocumentStudioView: View {
                     } label: {
                         Image(systemName: "chevron.right")
                             .font(.system(size: 11, weight: .semibold))
-                            .frame(width: 24, height: 24)
                     }
-                    .buttonStyle(CharkleButtonStyle(.standard, size: .icon, iconDimension: 24))
+                    .buttonStyle(.charkle(.standard, size: .icon, iconDimension: 24))
                     .disabled(pdfPageIndex + 1 >= pdfPageCount)
                 }
 
                 Spacer()
 
                 if pdfVisualMode == .redCyanOverlay {
-                    Text("灰色＝未改动区域 / 红色＝仅旧版存在 / 青蓝＝新版新增批示或盖章")
-                        .font(CharkleTheme.text(.caption))
-                        .foregroundStyle(.secondary)
-                } else {
-                    Text("左右拖动中间分割卷帘，逐像素核查签字、红章与排版位移")
-                        .font(CharkleTheme.text(.caption))
-                        .foregroundStyle(.secondary)
+                    HStack(spacing: 12) {
+                        HStack(spacing: 5) {
+                            Circle()
+                                .fill(negColor)
+                                .frame(width: 6, height: 6)
+                            Text("\(baseVersionBadgeLabel) 旧版")
+                                .font(CharkleTheme.text(.caption))
+                                .monospacedDigit()
+                                .foregroundStyle(.secondary)
+                        }
+                        HStack(spacing: 5) {
+                            Circle()
+                                .fill(activeAccent)
+                                .frame(width: 6, height: 6)
+                            Text("\(targetVersionBadgeLabel) 新版")
+                                .font(CharkleTheme.text(.caption))
+                                .monospacedDigit()
+                                .foregroundStyle(.secondary)
+                        }
+                    }
                 }
             }
-            .padding(.horizontal, 18)
+            .padding(.horizontal, 16)
             .padding(.top, 8)
 
             ZStack {
                 if isRenderingPDFVisual {
-                    ProgressView("正在光栅化页面叠层…")
+                    ProgressView("正在渲染页面叠层…")
                 } else if pdfVisualMode == .redCyanOverlay, let composite = pdfRedCyanImage {
                     Image(nsImage: composite)
                         .resizable()
@@ -2002,6 +2201,7 @@ public struct QuickLookDocumentStudioView: View {
                         targetImage: targetImg,
                         baseBadge: baseVersionBadgeLabel,
                         targetBadge: targetVersionBadgeLabel,
+                        accentColor: activeAccent,
                         curtainFraction: $curtainFraction
                     )
                     .padding(14)
@@ -2015,7 +2215,7 @@ public struct QuickLookDocumentStudioView: View {
         }
     }
 
-    // MARK: - Mode 3: Scheme B Deterministic 2-Way Merge (`按差异合成新版本`)
+    // MARK: - Mode 3: Interactive Paper Choice Flow (`合成`)
 
     private var mergeStageBody: some View {
         let report = comparisonReport
@@ -2027,128 +2227,158 @@ public struct QuickLookDocumentStudioView: View {
                     Image(systemName: "lock.shield")
                         .font(.system(size: 32, weight: .regular))
                         .foregroundStyle(activeAccent)
-                    Text("受保护文档结构（零坏档只读对比模式）")
+                    Text("受保护文档结构（只读对比）")
                         .font(CharkleTheme.text(.headline, weight: .semibold))
-                    Text(report.synthesisUnavailableReason ?? "为确保 100% 零坏档风险，Excel 公式工作簿与 PDF 签批件不做自动改写；请在「对比差异」核查后用系统默认应用编辑保存并拖回叠卡。")
+                    Text(report.synthesisUnavailableReason ?? "Excel 公式工作簿与 PDF 签批件保持只读对比，避免破坏原格式；请在「对比」核查后用默认应用修改保存。")
                         .font(CharkleTheme.text(.body))
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
-                        .frame(maxWidth: 520)
+                        .frame(maxWidth: 500)
 
                     HStack(spacing: 10) {
-                        Button("返回精细差异对比") {
+                        Button("返回对比") {
                             studioMode = .diff
                         }
-                        .buttonStyle(CharkleButtonStyle(.standard, size: .md))
+                        .buttonStyle(.charkle(.standard, size: .sm))
 
-                        Button("用默认应用打开新版修改") {
+                        Button("使用默认应用打开") {
                             openAssetInDefaultApplication(assetID: report.targetAssetID)
                         }
-                        .buttonStyle(CharkleButtonStyle(.accent, size: .md))
+                        .buttonStyle(.charkle(.accent, size: .sm))
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .padding(32)
             } else if let report {
-                // Top Template Selector Bar
+                // Slim 38pt Merge Top Bar
                 HStack(spacing: 10) {
-                    Text("合成母版外壳：")
-                        .font(CharkleTheme.text(.caption, weight: .semibold))
+                    Text("底稿")
+                        .font(CharkleTheme.text(.caption))
                         .foregroundStyle(.secondary)
 
-                    HStack(spacing: 2) {
-                        templateChoicePill(preferTarget: true, title: "以新版为底稿（仅挑异议退回旧版）")
-                        templateChoicePill(preferTarget: false, title: "以旧版为底稿")
-                    }
-                    .padding(2)
-                    .background(CharkleTheme.surfaceSubtle(for: colorScheme), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous))
+                    CharkleSegmentedControl(
+                        selection: $preferTargetAsTemplate,
+                        items: [
+                            .init(true, title: "以新版为准"),
+                            .init(false, title: "以旧版为准")
+                        ],
+                        size: .compact,
+                        fullWidth: false
+                    )
 
                     Spacer()
 
-                    Text("共 \(changedHunksForMerge.count) 处可取舍变动")
-                        .font(CharkleTheme.text(.caption, weight: .medium))
+                    Text("\(changedHunksForMerge.count) 处差异")
+                        .font(CharkleTheme.text(.caption))
                         .monospacedDigit()
                         .foregroundStyle(.secondary)
                 }
-                .padding(.horizontal, 18)
-                .padding(.vertical, 10)
+                .padding(.horizontal, 16)
+                .frame(height: 38)
+                .background(CharkleTheme.surfaceElevated(for: colorScheme))
 
-                Rectangle()
-                    .fill(CharkleTheme.hairline(for: colorScheme))
-                    .frame(height: CharkleTheme.hairlineWidth)
+                CharkleHairlineDivider()
 
+                // Centered Continuous Paper Merge Sheet
                 ScrollView(.vertical) {
-                    VStack(alignment: .leading, spacing: 10) {
-                        ForEach(changedHunksForMerge) { hunk in
-                            mergeDecisionCard(hunk)
+                    VStack(alignment: .leading, spacing: 0) {
+                        if changedHunksForMerge.isEmpty {
+                            Text("两版内容无差异，可直接生成或返回阅读")
+                                .font(CharkleTheme.text(.body))
+                                .foregroundStyle(.secondary)
+                                .padding(.vertical, 24)
+                        } else {
+                            ForEach(Array(changedHunksForMerge.enumerated()), id: \.element.id) { idx, hunk in
+                                paperMergeHunkSection(hunk, ordinal: idx + 1)
+
+                                if idx < changedHunksForMerge.count - 1 {
+                                    CharkleHairlineDivider()
+                                        .padding(.vertical, 14)
+                                }
+                            }
                         }
 
-                        // Live Clean Preview via CharkleDisclosureGroup
-                        CharkleDisclosureGroup(isExpanded: $isMergePreviewExpanded, showsTopDivider: true, accentChevronWhenExpanded: true) {
+                        CharkleDisclosureGroup(
+                            isExpanded: $isMergePreviewExpanded,
+                            showsTopDivider: true,
+                            accentChevronWhenExpanded: true
+                        ) {
                             let previewText = report.previewMergedText(
                                 preferTargetAsTemplate: preferTargetAsTemplate,
                                 decisions: Array(mergeDecisionsByHunkID.values)
                             )
-                            Text(previewText.isEmpty ? "（合成后正文预览为空）" : previewText)
-                                .font(CharkleTheme.text(.body))
-                                .lineSpacing(4)
+                            Text(previewText.isEmpty ? "（合并预览为空）" : previewText)
+                                .font(Self.paperProseFont)
+                                .lineSpacing(5)
                                 .textSelection(.enabled)
                                 .padding(14)
                                 .frame(maxWidth: .infinity, alignment: .leading)
-                                .background(CharkleTheme.surfaceSubtle(for: colorScheme), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous))
+                                .background(
+                                    CharkleTheme.surfaceSubtle(for: colorScheme).opacity(0.65),
+                                    in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous)
+                                )
                                 .padding(.top, 6)
                         } label: {
-                            Text("净版全文预览（保留原母版红头、字体与样式外壳，永不覆盖原稿）")
+                            Text("合并预览")
                                 .font(CharkleTheme.text(.caption, weight: .semibold))
                         }
+                        .padding(.top, 16)
                     }
-                    .padding(18)
+                    .padding(.horizontal, 36)
+                    .padding(.vertical, 28)
+                    .frame(maxWidth: 780, alignment: .leading)
+                    .modifier(DocumentPaperSheetModifier(cornerRadius: Self.paperSheetCornerRadius))
+                    .frame(maxWidth: .infinity)
+                    .padding(24)
                 }
                 .charkleCleanScrollbars(hidden: false)
 
-                Rectangle()
-                    .fill(CharkleTheme.hairline(for: colorScheme))
-                    .frame(height: CharkleTheme.hairlineWidth)
+                CharkleHairlineDivider()
 
-                // Footer Synthesis CTA Bar
+                // Clean 46pt Bottom Synthesis Footer
                 HStack(spacing: 8) {
-                    TextField("合成人（可选）", text: $mergeEditorDraft)
+                    TextField("修改人", text: $mergeEditorDraft)
                         .textFieldStyle(.plain)
                         .font(CharkleTheme.text(.caption))
                         .padding(.horizontal, 9)
-                        .padding(.vertical, 6)
-                        .frame(width: 112)
-                        .background(CharkleTheme.surfaceSubtle(for: colorScheme), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.sm, style: .continuous))
+                        .frame(width: 96, height: 28)
+                        .background(
+                            CharkleTheme.surfaceSubtle(for: colorScheme),
+                            in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous)
+                        )
 
-                    TextField("版本备注", text: $mergeNoteDraft)
+                    TextField("备注（可选）", text: $mergeNoteDraft)
                         .textFieldStyle(.plain)
                         .font(CharkleTheme.text(.caption))
                         .padding(.horizontal, 9)
-                        .padding(.vertical, 6)
-                        .frame(maxWidth: 260)
-                        .background(CharkleTheme.surfaceSubtle(for: colorScheme), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.sm, style: .continuous))
+                        .frame(maxWidth: 220, minHeight: 28, maxHeight: 28)
+                        .background(
+                            CharkleTheme.surfaceSubtle(for: colorScheme),
+                            in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous)
+                        )
 
                     Spacer()
 
                     Button {
                         performTwoWaySynthesis(report: report, nextVerNumber: nextVerNumber)
                     } label: {
-                        HStack(spacing: 6) {
+                        HStack(spacing: 5) {
                             if isSynthesizing {
                                 ProgressView().controlSize(.mini)
                             } else {
                                 Image(systemName: "arrow.triangle.merge")
-                                    .font(.system(size: 11.5, weight: .semibold))
+                                    .font(.system(size: 11, weight: .semibold))
                             }
-                            Text("生成新版本 v\(nextVerNumber)")
+                            Text("保存为新版本 v\(nextVerNumber)")
                                 .monospacedDigit()
                         }
                     }
-                    .buttonStyle(CharkleButtonStyle(.accent, size: .md))
+                    .buttonStyle(.charkle(.accent, size: .sm))
                     .disabled(isSynthesizing)
                 }
-                .padding(.horizontal, 18)
-                .padding(.vertical, 11)
+                .padding(.horizontal, 16)
+                .frame(height: 46)
+                .background(CharkleTheme.surfaceElevated(for: colorScheme))
             } else {
                 ProgressView()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -2156,97 +2386,90 @@ public struct QuickLookDocumentStudioView: View {
         }
     }
 
-    private func templateChoicePill(preferTarget: Bool, title: String) -> some View {
-        let selected = preferTargetAsTemplate == preferTarget
-        let innerR = CharkleTheme.Radius.concentricInner(outer: CharkleTheme.Radius.chip, padding: 2)
-        return Button {
-            preferTargetAsTemplate = preferTarget
-        } label: {
-            Text(title)
-                .font(CharkleTheme.text(.caption, weight: selected ? .semibold : .medium))
-                .foregroundStyle(selected ? .primary : .secondary)
-                .padding(.horizontal, 9)
-                .padding(.vertical, 4)
-                .background(selected ? CharkleTheme.surfaceElevated(for: colorScheme) : Color.clear, in: RoundedRectangle(cornerRadius: innerR, style: .continuous))
-        }
-        .buttonStyle(.plain)
+    private func selectMergeChoice(for hunk: DocumentDiffHunk, choice: DocumentMergeDecision.Choice) {
+        let existing = mergeDecisionsByHunkID[hunk.id]
+        let seedCustom = existing?.customText ?? hunk.targetText ?? hunk.baseText ?? ""
+        mergeDecisionsByHunkID[hunk.id] = DocumentMergeDecision(
+            hunkID: hunk.id,
+            choice: choice,
+            customText: choice == .customText ? seedCustom : existing?.customText
+        )
     }
 
-    private func mergeDecisionCard(_ hunk: DocumentDiffHunk) -> some View {
+    private func paperMergeHunkSection(_ hunk: DocumentDiffHunk, ordinal: Int) -> some View {
         let defaultChoice: DocumentMergeDecision.Choice = preferTargetAsTemplate ? .acceptTarget : .keepBase
         let currentDecision = mergeDecisionsByHunkID[hunk.id]
         let activeChoice = currentDecision?.choice ?? defaultChoice
         let posColor = CharkleTheme.positive(for: colorScheme)
         let negColor = CharkleTheme.destructive(for: colorScheme)
         let warnColor = CharkleTheme.warning(for: colorScheme)
+        let sortedFlags = Array(hunk.riskFlags).sorted { $0.rawValue < $1.rawValue }
 
         return VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                Text(hunk.sectionTitle ?? "第 \(hunk.hunkIndex + 1) 处改动")
-                    .font(CharkleTheme.text(.caption, weight: .semibold))
+            HStack(spacing: 6) {
+                Text("#\(ordinal)")
+                    .font(CharkleTheme.text(.caption, weight: .medium, design: .monospaced))
+                    .monospacedDigit()
+                    .foregroundStyle(.tertiary)
 
-                ForEach(Array(hunk.riskFlags).sorted(by: { $0.rawValue < $1.rawValue }), id: \.self) { flag in
-                    Text(flag.localizedLabel)
-                        .font(CharkleTheme.text(.caption, weight: .semibold))
-                        .foregroundStyle(warnColor)
-                        .padding(.horizontal, 5.5)
-                        .padding(.vertical, 1.5)
-                        .background(warnColor.opacity(0.14), in: RoundedRectangle(cornerRadius: 4, style: .continuous))
+                if let sec = hunk.sectionTitle, !sec.isEmpty {
+                    Text(sec)
+                        .font(CharkleTheme.text(.caption, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
                 }
 
-                Spacer()
+                ForEach(sortedFlags, id: \.self) { flag in
+                    Text(conciseRiskFlagLabel(flag))
+                        .font(CharkleTheme.text(.caption, weight: .medium))
+                        .foregroundStyle(warnColor)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(
+                            warnColor.opacity(0.12),
+                            in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.xs, style: .continuous)
+                        )
+                }
+
+                Spacer(minLength: 6)
 
                 if hunk.isProtectedComplex {
-                    HStack(spacing: 5) {
+                    HStack(spacing: 4) {
                         Image(systemName: "lock.shield")
                             .font(.system(size: 10.5, weight: .semibold))
-                        Text("受保护结构（只读对比）")
-                            .font(CharkleTheme.text(.caption, weight: .semibold))
+                        Text("受保护结构")
+                            .font(CharkleTheme.text(.caption, weight: .medium))
                     }
                     .foregroundStyle(warnColor)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
-                    .background(warnColor.opacity(0.13), in: Capsule(style: .continuous))
-
-                    Button("用默认应用打开") {
-                        openAssetInDefaultApplication(assetID: compareTargetAssetID ?? asset.id)
-                    }
-                    .buttonStyle(CharkleButtonStyle(.standard, size: .xs))
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 2.5)
+                    .background(warnColor.opacity(0.12), in: Capsule(style: .continuous))
                 } else {
-                    HStack(spacing: 4) {
-                        ForEach(DocumentMergeDecision.Choice.allCases, id: \.self) { choice in
-                            let isChosen = activeChoice == choice
-                            Button {
-                                let seedCustom = currentDecision?.customText ?? hunk.targetText ?? hunk.baseText ?? ""
-                                mergeDecisionsByHunkID[hunk.id] = DocumentMergeDecision(
-                                    hunkID: hunk.id,
-                                    choice: choice,
-                                    customText: choice == .customText ? seedCustom : currentDecision?.customText
-                                )
-                            } label: {
-                                Text(choice.localizedLabel)
-                                    .font(CharkleTheme.text(.caption, weight: isChosen ? .semibold : .medium))
-                                    .foregroundStyle(isChosen ? .white : .primary)
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 3.5)
-                                    .background(
-                                        isChosen ? activeAccent : CharkleTheme.surfaceElevated(for: colorScheme),
-                                        in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.sm, style: .continuous)
-                                    )
+                    CharkleSegmentedControl(
+                        selection: Binding(
+                            get: { activeChoice },
+                            set: { newChoice in
+                                selectMergeChoice(for: hunk, choice: newChoice)
                             }
-                            .buttonStyle(CharkleTactileButtonStyle())
-                        }
-                    }
+                        ),
+                        items: [
+                            .init(.keepBase, title: "保留 \(baseVersionBadgeLabel)"),
+                            .init(.acceptTarget, title: "采纳 \(targetVersionBadgeLabel)"),
+                            .init(.customText, title: "微调")
+                        ],
+                        size: .compact,
+                        fullWidth: false
+                    )
                 }
             }
 
             if hunk.isProtectedComplex {
-                Text(hunk.protectionReason ?? "涉及复杂跨行表格或嵌套域代码，已自动保留母版原节点以确保零坏档。")
+                Text(hunk.protectionReason ?? "涉及复杂跨行表格或嵌套域，已自动保留底稿原节点以确保格式完整。")
                     .font(CharkleTheme.text(.caption))
                     .foregroundStyle(.secondary)
             } else if activeChoice == .customText {
                 TextField(
-                    "在此微调合成后的段落文本…",
+                    "微调合成后的段落文本…",
                     text: Binding(
                         get: { mergeDecisionsByHunkID[hunk.id]?.customText ?? hunk.targetText ?? hunk.baseText ?? "" },
                         set: { newVal in
@@ -2260,11 +2483,17 @@ public struct QuickLookDocumentStudioView: View {
                     axis: .vertical
                 )
                 .textFieldStyle(.plain)
-                .font(CharkleTheme.text(.body))
-                .padding(9)
-                .background(CharkleTheme.surfaceElevated(for: colorScheme), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.sm, style: .continuous))
+                .font(Self.paperProseFont)
+                .padding(10)
+                .background(
+                    CharkleTheme.surfaceSubtle(for: colorScheme).opacity(0.65),
+                    in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous)
+                        .strokeBorder(activeAccentBorder, lineWidth: 1)
+                )
             } else {
-                let innerRowRadius = CharkleTheme.Radius.concentricInner(outer: CharkleTheme.Radius.cardOuter, padding: 6)
                 let isBaseChosen = activeChoice == .keepBase
                 let isTargetChosen = activeChoice == .acceptTarget
                 let hasBaseContent = hunk.baseText != nil || hunk.inlineTokens.contains(where: { $0.kind != .inserted })
@@ -2272,104 +2501,108 @@ public struct QuickLookDocumentStudioView: View {
 
                 VStack(alignment: .leading, spacing: 6) {
                     if hasBaseContent || isBaseChosen {
-                        HStack(alignment: .top, spacing: 8) {
-                            ZStack {
-                                Circle()
-                                    .fill(negColor.opacity(colorScheme == .dark ? 0.16 : 0.10))
-                                Image(systemName: "minus.circle.fill")
-                                    .font(.system(size: 12.5, weight: .semibold))
-                                    .foregroundStyle(negColor)
-                            }
-                            .frame(width: 18, height: 18)
-                            .padding(.top, 1)
-                            .help("修改前（旧版）")
-
-                            if hasBaseContent {
-                                Text(
-                                    Self.makeBaseDiffAttributedString(
-                                        tokens: hunk.inlineTokens,
-                                        fallbackText: hunk.baseText,
-                                        textStyle: .body,
-                                        isDark: colorScheme == .dark,
-                                        negColor: negColor
-                                    )
+                        mergeInteractiveVersionRow(
+                            isSelected: isBaseChosen,
+                            leadingSymbol: "minus.circle.fill",
+                            leadingTint: negColor,
+                            versionBadge: baseVersionBadgeLabel,
+                            attributedText: hasBaseContent
+                                ? Self.makeBaseDiffAttributedString(
+                                    tokens: hunk.inlineTokens,
+                                    fallbackText: hunk.baseText,
+                                    textStyle: .body,
+                                    isDark: colorScheme == .dark,
+                                    negColor: negColor
                                 )
-                                .font(CharkleTheme.text(.body))
-                                .lineSpacing(3)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .textSelection(.enabled)
-                            } else {
-                                Text("（修改前无此段落，保留该项将省略）")
-                                    .font(CharkleTheme.text(.caption))
-                                    .foregroundStyle(.secondary)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                            }
+                                : nil,
+                            emptyPlaceholder: "（\(baseVersionBadgeLabel) 无此段落，选择该项将省略）"
+                        ) {
+                            selectMergeChoice(for: hunk, choice: .keepBase)
                         }
-                        .padding(.horizontal, 9)
-                        .padding(.vertical, 7)
-                        .background(
-                            isBaseChosen ? CharkleTheme.surfaceElevated(for: colorScheme) : Color.clear,
-                            in: RoundedRectangle(cornerRadius: innerRowRadius, style: .continuous)
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: innerRowRadius, style: .continuous)
-                                .strokeBorder(isBaseChosen ? negColor.opacity(0.42) : Color.clear, lineWidth: 1)
-                        )
-                        .opacity(isBaseChosen ? 1.0 : 0.72)
                     }
 
                     if hasTargetContent || isTargetChosen {
-                        HStack(alignment: .top, spacing: 8) {
-                            ZStack {
-                                Circle()
-                                    .fill(posColor.opacity(colorScheme == .dark ? 0.16 : 0.10))
-                                Image(systemName: "plus.circle.fill")
-                                    .font(.system(size: 12.5, weight: .semibold))
-                                    .foregroundStyle(posColor)
-                            }
-                            .frame(width: 18, height: 18)
-                            .padding(.top, 1)
-                            .help("修改后（新版）")
-
-                            if hasTargetContent {
-                                Text(
-                                    Self.makeTargetDiffAttributedString(
-                                        tokens: hunk.inlineTokens,
-                                        fallbackText: hunk.targetText,
-                                        textStyle: .body,
-                                        isDark: colorScheme == .dark,
-                                        posColor: posColor
-                                    )
+                        mergeInteractiveVersionRow(
+                            isSelected: isTargetChosen,
+                            leadingSymbol: "plus.circle.fill",
+                            leadingTint: posColor,
+                            versionBadge: targetVersionBadgeLabel,
+                            attributedText: hasTargetContent
+                                ? Self.makeTargetDiffAttributedString(
+                                    tokens: hunk.inlineTokens,
+                                    fallbackText: hunk.targetText,
+                                    textStyle: .body,
+                                    isDark: colorScheme == .dark,
+                                    posColor: posColor
                                 )
-                                .font(CharkleTheme.text(.body))
-                                .lineSpacing(3)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .textSelection(.enabled)
-                            } else {
-                                Text("（修改后已删除该段落，采用该项将移除）")
-                                    .font(CharkleTheme.text(.caption))
-                                    .foregroundStyle(.secondary)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                            }
+                                : nil,
+                            emptyPlaceholder: "（\(targetVersionBadgeLabel) 已删除该段落，选择该项将移除）"
+                        ) {
+                            selectMergeChoice(for: hunk, choice: .acceptTarget)
                         }
-                        .padding(.horizontal, 9)
-                        .padding(.vertical, 7)
-                        .background(
-                            isTargetChosen ? CharkleTheme.surfaceElevated(for: colorScheme) : Color.clear,
-                            in: RoundedRectangle(cornerRadius: innerRowRadius, style: .continuous)
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: innerRowRadius, style: .continuous)
-                                .strokeBorder(isTargetChosen ? posColor.opacity(0.45) : Color.clear, lineWidth: 1)
-                        )
-                        .opacity(isTargetChosen ? 1.0 : 0.72)
                     }
                 }
             }
         }
-        .padding(12)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(CharkleTheme.surfaceSubtle(for: colorScheme), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.cardOuter, style: .continuous))
+    }
+
+    private func mergeInteractiveVersionRow(
+        isSelected: Bool,
+        leadingSymbol: String,
+        leadingTint: Color,
+        versionBadge: String,
+        attributedText: AttributedString?,
+        emptyPlaceholder: String,
+        onSelect: @escaping () -> Void
+    ) -> some View {
+        let rowShape = RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous)
+
+        return Button(action: onSelect) {
+            HStack(alignment: .top, spacing: 8) {
+                HStack(spacing: 4) {
+                    Image(systemName: leadingSymbol)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(leadingTint)
+                    Text(versionBadge)
+                        .font(CharkleTheme.text(.caption, weight: .semibold))
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                }
+                .fixedSize()
+                .padding(.top, 2)
+
+                if let attributedText {
+                    Text(attributedText)
+                        .font(Self.paperProseFont)
+                        .lineSpacing(4.5)
+                        .multilineTextAlignment(.leading)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    Text(emptyPlaceholder)
+                        .font(CharkleTheme.text(.caption))
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(activeAccent)
+                    .opacity(isSelected ? 1.0 : 0.0)
+                    .padding(.top, 2)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .background(isSelected ? activeAccentSoft : Color.clear, in: rowShape)
+            .overlay(
+                rowShape.strokeBorder(
+                    isSelected ? activeAccentBorder : CharkleTheme.hairline(for: colorScheme),
+                    lineWidth: isSelected ? 1.0 : CharkleTheme.hairlineWidth
+                )
+            )
+            .opacity(isSelected ? 1.0 : 0.48)
+            .contentShape(rowShape)
+        }
+        .buttonStyle(.plain)
     }
 
     // MARK: - Data Loading, Hunk Stepping & Synthesis Actions
@@ -2381,7 +2614,6 @@ public struct QuickLookDocumentStudioView: View {
         payload = loaded
         isLoadingPayload = false
 
-        // Initialize default Base/Target version pair when part of a Version Stack
         let ordered = siblings
         if ordered.count >= 2 {
             if compareBaseAssetID == nil || !ordered.contains(where: { $0.id == compareBaseAssetID }) {
@@ -2395,7 +2627,7 @@ public struct QuickLookDocumentStudioView: View {
         if let req = coordinator.quickLookDiffRequest, req.nonce != lastConsumedDiffNonce {
             applyLaunchDiffRequest(req)
         } else if studioMode != .reader {
-            ensureComparisonLoaded()
+            triggerComparisonReload()
         }
     }
 
@@ -2516,7 +2748,7 @@ public struct QuickLookDocumentStudioView: View {
                 studioMode = .reader
                 coordinator.openQuickLook(assetID: created.id, playlist: playlist)
                 coordinator.showToast(
-                    "已合成净版 v\(nextVerNumber) 并设为主版本，可直接拖回微信发送",
+                    "已生成 v\(nextVerNumber) 并设为主版本",
                     icon: "checkmark.circle.fill",
                     tone: .success
                 )
@@ -2592,6 +2824,124 @@ public struct QuickLookDocumentStudioView: View {
     }
 }
 
+// MARK: - Paper Surface & Monochromatic Diff Control Helpers
+
+private struct DocumentPaperSheetModifier: ViewModifier {
+    @Environment(\.colorScheme) private var colorScheme
+    let cornerRadius: CGFloat
+
+    func body(content: Content) -> some View {
+        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+        content
+            .background(CharkleTheme.surfaceElevated(for: colorScheme), in: shape)
+            .overlay(
+                shape.strokeBorder(
+                    CharkleTheme.hairline(for: colorScheme),
+                    lineWidth: CharkleTheme.hairlineWidth
+                )
+            )
+            .shadow(
+                color: .black.opacity(colorScheme == .dark ? 0.28 : 0.06),
+                radius: 10,
+                y: 3
+            )
+    }
+}
+
+private struct DiffRadarChipButton: View {
+    @Environment(\.colorScheme) private var colorScheme
+
+    let title: String
+    let count: Int
+    let isActive: Bool
+    let action: () -> Void
+
+    @State private var isHovered: Bool = false
+
+    var body: some View {
+        let pillShape = Capsule(style: .continuous)
+
+        Button(action: action) {
+            HStack(spacing: 4) {
+                Text(title)
+                    .font(CharkleTheme.text(.caption, weight: isActive ? .semibold : .medium))
+                Text("\(count)")
+                    .font(CharkleTheme.text(.caption, weight: .semibold))
+                    .monospacedDigit()
+                    .foregroundStyle(isActive ? .primary : .tertiary)
+            }
+            .foregroundStyle(
+                isActive
+                    ? Color.primary
+                    : (isHovered ? Color.primary : CharkleTheme.secondaryInk(for: colorScheme))
+            )
+            .padding(.horizontal, 8.5)
+            .frame(height: 24)
+            .background(
+                isActive
+                    ? CharkleTheme.surfaceSubtle(for: colorScheme)
+                    : (isHovered ? CharkleTheme.surfaceSubtle(for: colorScheme).opacity(0.65) : Color.clear),
+                in: pillShape
+            )
+            .overlay {
+                if isActive {
+                    pillShape
+                        .strokeBorder(
+                            CharkleTheme.hairline(for: colorScheme),
+                            lineWidth: CharkleTheme.hairlineWidth
+                        )
+                }
+            }
+            .contentShape(pillShape)
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovered = $0 }
+    }
+}
+
+private struct DiffTogglePillButton: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.charkleAccentSource) private var accentSource
+
+    let title: String
+    @Binding var isOn: Bool
+    var onToggle: (() -> Void)? = nil
+
+    @State private var isHovered: Bool = false
+
+    var body: some View {
+        let accent = CharkleTheme.accent(for: colorScheme, source: accentSource)
+        let accentSoft = CharkleTheme.accentSoft(for: colorScheme, source: accentSource)
+
+        Button {
+            isOn.toggle()
+            onToggle?()
+        } label: {
+            Text(title)
+                .font(CharkleTheme.text(.caption, weight: isOn ? .semibold : .medium))
+                .foregroundStyle(isOn ? accent : (isHovered ? Color.primary : CharkleTheme.secondaryInk(for: colorScheme)))
+                .padding(.horizontal, 8.5)
+                .frame(height: 24)
+                .background(
+                    isOn
+                        ? accentSoft
+                        : (isHovered ? CharkleTheme.surfaceSubtle(for: colorScheme) : Color.clear),
+                    in: Capsule(style: .continuous)
+                )
+                .overlay(
+                    Capsule(style: .continuous)
+                        .strokeBorder(
+                            isOn ? CharkleTheme.accentBorder(for: colorScheme, source: accentSource) : CharkleTheme.hairline(for: colorScheme),
+                            lineWidth: CharkleTheme.hairlineWidth
+                        )
+                )
+                .contentShape(Capsule(style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovered = $0 }
+    }
+}
+
 // MARK: - Native Office / Rich-Layout QuickLook Preview (`QLPreviewView`)
 
 struct NativeOfficeQLPreviewRepresentable: NSViewRepresentable {
@@ -2640,6 +2990,7 @@ private struct PDFSplitCurtainComparisonView: View {
     let targetImage: NSImage
     let baseBadge: String
     let targetBadge: String
+    let accentColor: Color
     @Binding var curtainFraction: CGFloat
 
     var body: some View {
@@ -2658,13 +3009,11 @@ private struct PDFSplitCurtainComparisonView: View {
             let splitX = fittedSize.width * max(0.02, min(0.98, curtainFraction))
 
             ZStack(alignment: .leading) {
-                // Full Target (New) page underneath
                 Image(nsImage: targetImage)
                     .resizable()
                     .interpolation(.high)
                     .frame(width: fittedSize.width, height: fittedSize.height)
 
-                // Clipped Base (Old) page on the left of the curtain
                 Image(nsImage: baseImage)
                     .resizable()
                     .interpolation(.high)
@@ -2674,7 +3023,6 @@ private struct PDFSplitCurtainComparisonView: View {
                             .frame(width: splitX, height: fittedSize.height)
                     }
 
-                // Corner badges
                 VStack {
                     HStack {
                         HStack(spacing: 4) {
@@ -2701,7 +3049,7 @@ private struct PDFSplitCurtainComparisonView: View {
                         .foregroundStyle(.white)
                         .padding(.horizontal, 7)
                         .padding(.vertical, 3)
-                        .background(Color(charkleHex: "#2A60E0").opacity(0.86), in: Capsule(style: .continuous))
+                        .background(accentColor.opacity(0.88), in: Capsule(style: .continuous))
                     }
                     .padding(10)
                     Spacer()
@@ -2709,10 +3057,9 @@ private struct PDFSplitCurtainComparisonView: View {
                 .frame(width: fittedSize.width, height: fittedSize.height)
                 .allowsHitTesting(false)
 
-                // Draggable vertical curtain bar + knob
                 ZStack {
                     Rectangle()
-                        .fill(Color(charkleHex: "#2A60E0"))
+                        .fill(accentColor)
                         .frame(width: 2, height: fittedSize.height)
                         .shadow(color: .black.opacity(0.28), radius: 2)
 
@@ -2723,7 +3070,7 @@ private struct PDFSplitCurtainComparisonView: View {
                         .overlay {
                             Image(systemName: "arrow.left.and.right")
                                 .font(.system(size: 10, weight: .bold))
-                                .foregroundStyle(Color(charkleHex: "#2A60E0"))
+                                .foregroundStyle(accentColor)
                         }
                 }
                 .offset(x: splitX - 13)

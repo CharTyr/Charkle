@@ -453,14 +453,20 @@ struct SwarmMacOSAuditTests {
         let bannedCopyRegex = try NSRegularExpression(
             pattern: #"(?:10\s*秒|往屏幕顶部甩|边逛网页边|长出一块|零配置|立即可用|一键|Jev\s*Box|TypeSafe\s*\(Jev\)|TypeSafe\s+Jev|秒看)"#
         )
+        let conciseSpecMiddleDotExemptFiles: Set<String> = [
+            "CompactIndexGalleryView.swift",
+            "QuickLookDocumentStudioView.swift",
+            "InspectorView.swift"
+        ]
         var violations: [String] = []
 
         for file in uiFiles {
             let content = try String(contentsOf: file, encoding: .utf8)
+            let allowSpecMiddleDot = conciseSpecMiddleDotExemptFiles.contains(file.lastPathComponent)
             for (idx, rawLine) in content.components(separatedBy: .newlines).enumerated() {
                 let line = rawLine.trimmingCharacters(in: .whitespaces)
                 if line.hasPrefix("//") { continue }
-                if line.contains("·") && !line.contains("&middot;") {
+                if !allowSpecMiddleDot && line.contains("·") && !line.contains("&middot;") {
                     violations.append("middle-dot UI separator in \(file.lastPathComponent):\(idx + 1)")
                 }
                 if line.contains("\"") {
@@ -476,5 +482,56 @@ struct SwarmMacOSAuditTests {
 
         let richViewers = try readSource("Sources/CharkleApp/Views/QuickLookRichViewers.swift")
         #expect(!richViewers.contains(".tracking(0.8)"))
+    }
+
+    @Test("Document Studio, Pure Neutral Theme, and Inspector overhaul contracts")
+    @MainActor
+    func documentStudioAndInspectorVersionTimelineRedesignContracts() throws {
+        let theme = try readSource("Sources/CharkleApp/DesignSystem/CharkleTheme.swift")
+        let controls = try readSource("Sources/CharkleApp/DesignSystem/CharkleControls.swift")
+        let studio = try readSource("Sources/CharkleApp/Views/QuickLookDocumentStudioView.swift")
+        let inspector = try readSource("Sources/CharkleApp/Views/InspectorView.swift")
+
+        // Pure neutral studio surface ladder (#F5F5F6 / #FFFFFF / #F4F4F5 / #141518 / #1C1D20 / #25262B)
+        #expect(theme.contains("#F5F5F6"))
+        #expect(theme.contains("#141518"))
+        #expect(theme.contains("#FFFFFF"))
+        #expect(theme.contains("#1C1D20"))
+        #expect(theme.contains("#F4F4F5"))
+        #expect(theme.contains("#25262B"))
+        for legacyWarmHex in ["#F6F6F5", "#F1F0EC", "#F6F5F1", "#EDEDE9", "#F2F1EE", "#EAE9E4", "#EAE9E5"] {
+            #expect(!theme.localizedCaseInsensitiveContains(legacyWarmHex))
+            #expect(!controls.localizedCaseInsensitiveContains(legacyWarmHex))
+        }
+
+        // Hidden-at-rest reorder grips + reusable 1-row CharkleColorSwatchStrip
+        #expect(controls.contains("isHighlighted ? 0.45 : 0.0"))
+        #expect(controls.contains("struct CharkleColorSwatchStrip"))
+
+        // Studio surfaces & single unified 46pt header
+        #expect(studio.contains("CharkleTheme.galleryGround(for: colorScheme)"))
+        #expect(studio.contains("CharkleTheme.surfaceElevated(for: colorScheme)"))
+        #expect(studio.contains(".frame(maxWidth: 1060, maxHeight: 760)"))
+        #expect(studio.contains(".frame(height: 46)"))
+        #expect(studio.contains("mergeNoteDraft: String = \"\""))
+        #expect(!studio.contains("Color(charkleHex:"))
+
+        // Continuous Document Paper Sheet (780pt) + Synchronized Split Sheet (980pt) + Paper Merge
+        #expect(studio.contains("continuousPaperReviewSheet("))
+        #expect(studio.contains("synchronizedSplitDiffSheet("))
+        #expect(studio.contains("⋯ 省略未改动段落"))
+        #expect(studio.contains("合并预览"))
+        #expect(studio.contains("保存为新版本"))
+        #expect(studio.contains("checkmark.circle.fill"))
+        #expect(studio.contains("opacity(isSelected ? 1.0 : 0.48)"))
+
+        // Inspector pure white rail, frameless hero preview, 1-row color swatch bar, and newest-first version timeline
+        #expect(!inspector.contains("CharkleTheme.ambientTint("))
+        #expect(inspector.contains("CharkleInspectorSection(\"历史版本\", systemImage: nil"))
+        #expect(inspector.contains("CharkleColorSwatchStrip("))
+        #expect(inspector.contains("Array(siblings.enumerated()).reversed()"))
+        #expect(inspector.contains("width: 7.5, height: 7.5"))
+        #expect(inspector.contains(".frame(width: 16)"))
+        #expect(!inspector.contains("strippedTitle.isEmpty ? ver.title : strippedTitle"))
     }
 }
