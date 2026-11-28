@@ -93,7 +93,7 @@ private final class NotchDropHostingView: NSHostingView<NotchShelfView> {
         let count = pasteboard.changeCount
         guard count != cachedDragChangeCount else { return }
         cachedDragChangeCount = count
-        if let rawString = pasteboard.string(forType: .string), CharkleDragIdentifiers.isInternalDrag(rawString) {
+        if CharkleDragPasteboardResolver.isInternalDrag(pasteboard: pasteboard) {
             cachedDragIsInternal = true
             cachedDragItemCount = 0
         } else {
@@ -236,7 +236,7 @@ private final class NotchSensorView: NSView {
         let count = pasteboard.changeCount
         guard count != cachedSensorChangeCount else { return }
         cachedSensorChangeCount = count
-        if let rawString = pasteboard.string(forType: .string), CharkleDragIdentifiers.isInternalDrag(rawString) {
+        if CharkleDragPasteboardResolver.isInternalDrag(pasteboard: pasteboard) {
             cachedSensorIsInternal = true
             cachedSensorItemCount = 0
         } else {

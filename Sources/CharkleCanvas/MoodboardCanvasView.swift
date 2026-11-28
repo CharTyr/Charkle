@@ -2817,6 +2817,24 @@ public struct MoodboardCanvasView: View {
     private func handleCanvasDrop(providers: [NSItemProvider], screenLocation: CGPoint) -> Bool {
         guard !providers.isEmpty else { return false }
         let dropPoint: BoardPoint? = BoardPoint(screenToWorld(screenLocation))
+        let resolveCachedID: (URL) -> UUID? = { url in
+            CharkleDragIdentifiers.decodeInternalCacheAssetID(from: url).flatMap { assetsByID[$0]?.id }
+        }
+        let syncPayload = CharkleDragPasteboardResolver.resolveSynchronously(
+            from: NSPasteboard(name: .drag),
+            resolveCachedAssetID: resolveCachedID
+        )
+        if !syncPayload.folderIDs.isEmpty {
+            return false
+        }
+        if !syncPayload.assetIDs.isEmpty {
+            callbacks.onDropLibraryAssetIDs(syncPayload.assetIDs, dropPoint)
+            return true
+        }
+        if !syncPayload.externalFileURLs.isEmpty {
+            callbacks.onDropExternalInputs(syncPayload.externalFileURLs.map { .fileURL($0) }, dropPoint)
+            return true
+        }
 
         Task {
             var internalIDs: [UUID] = []
@@ -2836,13 +2854,21 @@ public struct MoodboardCanvasView: View {
                 guard internalIDs.isEmpty else { continue }
                 if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier),
                    let url = await loadURL(provider: provider, type: UTType.fileURL) {
-                    externalInputs.append(.fileURL(url))
+                    if let cachedID = resolveCachedID(url) {
+                        internalIDs.append(cachedID)
+                    } else {
+                        externalInputs.append(.fileURL(url))
+                    }
                     continue
                 }
                 if provider.hasItemConformingToTypeIdentifier(UTType.url.identifier),
                    let url = await loadURL(provider: provider, type: UTType.url) {
                     if url.isFileURL {
-                        externalInputs.append(.fileURL(url))
+                        if let cachedID = resolveCachedID(url) {
+                            internalIDs.append(cachedID)
+                        } else {
+                            externalInputs.append(.fileURL(url))
+                        }
                     } else if WebBookmark.isWebURL(url) {
                         externalInputs.append(.webURL(url, title: nil, notes: nil))
                     }

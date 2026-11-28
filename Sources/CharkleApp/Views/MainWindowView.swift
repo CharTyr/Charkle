@@ -544,6 +544,7 @@ public struct MainWindowView: View {
             coordinator.presentOnboardingIfFirstLaunch()
         }
         .onChange(of: searchDraft) { _, newValue in
+            guard newValue != library.filter.searchQuery else { return }
             searchDebounceTask?.cancel()
             library.filter.searchQuery = newValue
             if newValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -556,6 +557,12 @@ public struct MainWindowView: View {
                     guard !Task.isCancelled else { return }
                     await library.refreshAssets(semanticEnhancementDelayMs: 300)
                 }
+            }
+        }
+        .onChange(of: library.filter.searchQuery) { _, newValue in
+            if searchDraft != newValue {
+                searchDebounceTask?.cancel()
+                searchDraft = newValue
             }
         }
         .onDisappear {
@@ -1111,15 +1118,44 @@ public struct MainWindowView: View {
         }
     }
 
+    private var isGalleryFiltered: Bool {
+        library.filter.hasActiveVisualFilters
+            || !library.filter.searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private func currentDestinationUnfilteredCount(activeFolderID: UUID?) -> Int? {
+        if let folderID = activeFolderID {
+            return library.subtreeAssetCount(for: folderID)
+        }
+        switch coordinator.selectedDestination {
+        case .allItems:
+            return library.activeAssetCount
+        case .inbox:
+            return library.inboxCount
+        case .untagged:
+            return library.untaggedAssetCount
+        case .smartFolder(let id):
+            return library.smartFolders.first(where: { $0.id == id }).map { library.matchingCount(for: $0) }
+        default:
+            return nil
+        }
+    }
+
     @ViewBuilder
     private func topContextHeader(activeFolderID: UUID?, showInlineSubfolderButton: Bool) -> some View {
+        let countLabel = CharkleLibraryCountFormatting.headerCountLabel(
+            visibleCount: library.assets.count,
+            unfilteredTotal: currentDestinationUnfilteredCount(activeFolderID: activeFolderID),
+            isFiltered: isGalleryFiltered
+        )
+
         if let folderID = activeFolderID {
             let crumbs = library.folderBreadcrumbs(for: folderID)
 
             HStack(spacing: 5) {
                 folderBreadcrumbPath(folderID: folderID, crumbs: crumbs)
 
-                Text("\(library.assets.count)")
+                Text(countLabel)
                     .font(CharkleTheme.text(.caption, weight: .medium))
                     .monospacedDigit()
                     .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
@@ -1154,7 +1190,7 @@ public struct MainWindowView: View {
                     .lineLimit(1)
                     .truncationMode(.tail)
 
-                Text("\(library.assets.count)")
+                Text(countLabel)
                     .font(CharkleTheme.text(.caption, weight: .medium))
                     .monospacedDigit()
                     .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
@@ -2516,12 +2552,14 @@ public struct MainWindowView: View {
                 HStack(spacing: 10) {
                     if isFiltered {
                         Button("清除筛选条件") {
+                            searchDebounceTask?.cancel()
+                            library.filter.searchQuery = ""
                             searchDraft = ""
                             library.filter.clearVisualFilters()
                             if case .tag = coordinator.selectedDestination {
                                 coordinator.selectedDestination = .allItems
                             }
-                            Task { await library.refreshAssets() }
+                            Task { await library.refreshAssets(semanticEnhancementDelayMs: nil) }
                         }
                         .buttonStyle(CharkleButtonStyle(.standard, size: .md))
                     }
@@ -3345,6 +3383,13 @@ public struct MainWindowView: View {
         case .pinterest:
             Task { await pinterestController.bootstrap(engine: library.engine) }
         default:
+            searchDebounceTask?.cancel()
+            if !library.filter.searchQuery.isEmpty {
+                library.filter.searchQuery = ""
+            }
+            if !searchDraft.isEmpty {
+                searchDraft = ""
+            }
             Task { await library.applyDestination(destination) }
         }
     }

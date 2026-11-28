@@ -1274,6 +1274,10 @@ private struct FilmstripScrubberBar<ContextMenuContent: View>: View {
             let ids = effectiveTargetIDs(item)
             let provider = NSItemProvider()
             let encoded = CharkleDragIdentifiers.encode(assetIDs: ids)
+            provider.registerDataRepresentation(forTypeIdentifier: CharkleDragIdentifiers.internalPasteboardType.rawValue, visibility: .ownProcess) { completion in
+                completion(Data(encoded.utf8), nil)
+                return nil
+            }
             provider.registerDataRepresentation(forTypeIdentifier: UTType.plainText.identifier, visibility: .all) { completion in
                 completion(Data(encoded.utf8), nil)
                 return nil

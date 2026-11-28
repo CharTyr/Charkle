@@ -1452,7 +1452,16 @@ public struct SidebarView: View {
                 controller: expandedHoverController
             )
             .onDrag {
-                NSItemProvider(object: CharkleDragIdentifiers.encode(folderIDs: targetFolderIDs) as NSString)
+                let encoded = CharkleDragIdentifiers.encode(folderIDs: targetFolderIDs)
+                let provider = NSItemProvider(object: encoded as NSString)
+                provider.registerDataRepresentation(
+                    forTypeIdentifier: CharkleDragIdentifiers.internalPasteboardType.rawValue,
+                    visibility: .ownProcess
+                ) { completion in
+                    completion(Data(encoded.utf8), nil)
+                    return nil
+                }
+                return provider
             } preview: {
                 HStack(spacing: 7) {
                     CharkleFolderIcon(
@@ -2117,28 +2126,39 @@ extension SidebarView {
 
     private func handleFolderHeaderDrop(providers: [NSItemProvider]) -> Bool {
         guard !providers.isEmpty else { return false }
+        let syncPayload = CharkleDragPasteboardResolver.resolveSynchronously(
+            from: NSPasteboard(name: .drag),
+            resolveCachedAssetID: { library.resolveInternalCachedAssetID(for: $0) }
+        )
         Task {
-            var draggedFolderIDs: [UUID] = []
-            var internalAssetIDs: [UUID] = []
-            var externalInputs: [CaptureInput] = []
-            for provider in providers {
-                if provider.hasItemConformingToTypeIdentifier(UTType.plainText.identifier),
-                   let str = await loadText(provider) {
-                    if let fids = CharkleDragIdentifiers.decodeFolderIDs(from: str) {
-                        draggedFolderIDs.append(contentsOf: fids)
-                        continue
+            var draggedFolderIDs: [UUID] = syncPayload.folderIDs
+            var internalAssetIDs: [UUID] = syncPayload.assetIDs
+            var externalInputs: [CaptureInput] = syncPayload.externalFileURLs.map { .fileURL($0) }
+
+            if syncPayload.isEmpty {
+                for provider in providers {
+                    if provider.hasItemConformingToTypeIdentifier(UTType.plainText.identifier),
+                       let str = await loadText(provider) {
+                        if let fids = CharkleDragIdentifiers.decodeFolderIDs(from: str) {
+                            draggedFolderIDs.append(contentsOf: fids)
+                            continue
+                        }
+                        if let aids = CharkleDragIdentifiers.decodeAssetIDs(from: str) {
+                            internalAssetIDs.append(contentsOf: aids)
+                            continue
+                        }
                     }
-                    if let aids = CharkleDragIdentifiers.decodeAssetIDs(from: str) {
-                        internalAssetIDs.append(contentsOf: aids)
-                        continue
+                    // Short-circuit `.fileURL` providers once internal folder/asset IDs are decoded so
+                    // internal gallery drags NEVER re-import cached thumbnails as duplicate assets.
+                    guard draggedFolderIDs.isEmpty && internalAssetIDs.isEmpty else { continue }
+                    if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier),
+                       let url = await loadURL(provider, type: .fileURL) {
+                        if let cachedID = library.resolveInternalCachedAssetID(for: url) {
+                            internalAssetIDs.append(cachedID)
+                        } else {
+                            externalInputs.append(.fileURL(url))
+                        }
                     }
-                }
-                // Short-circuit `.fileURL` providers once internal folder/asset IDs are decoded so
-                // internal gallery drags NEVER re-import cached thumbnails as duplicate assets.
-                guard draggedFolderIDs.isEmpty && internalAssetIDs.isEmpty else { continue }
-                if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier),
-                   let url = await loadURL(provider, type: .fileURL) {
-                    externalInputs.append(.fileURL(url))
                 }
             }
             if !draggedFolderIDs.isEmpty {
@@ -2167,28 +2187,39 @@ extension SidebarView {
 
     private func handleFolderSlotDrop(providers: [NSItemProvider], parentID: UUID?, insertIndex: Int) -> Bool {
         guard !providers.isEmpty else { return false }
+        let syncPayload = CharkleDragPasteboardResolver.resolveSynchronously(
+            from: NSPasteboard(name: .drag),
+            resolveCachedAssetID: { library.resolveInternalCachedAssetID(for: $0) }
+        )
         Task {
-            var draggedFolderIDs: [UUID] = []
-            var internalAssetIDs: [UUID] = []
-            var externalInputs: [CaptureInput] = []
-            for provider in providers {
-                if provider.hasItemConformingToTypeIdentifier(UTType.plainText.identifier),
-                   let str = await loadText(provider) {
-                    if let fids = CharkleDragIdentifiers.decodeFolderIDs(from: str) {
-                        draggedFolderIDs.append(contentsOf: fids)
-                        continue
+            var draggedFolderIDs: [UUID] = syncPayload.folderIDs
+            var internalAssetIDs: [UUID] = syncPayload.assetIDs
+            var externalInputs: [CaptureInput] = syncPayload.externalFileURLs.map { .fileURL($0) }
+
+            if syncPayload.isEmpty {
+                for provider in providers {
+                    if provider.hasItemConformingToTypeIdentifier(UTType.plainText.identifier),
+                       let str = await loadText(provider) {
+                        if let fids = CharkleDragIdentifiers.decodeFolderIDs(from: str) {
+                            draggedFolderIDs.append(contentsOf: fids)
+                            continue
+                        }
+                        if let aids = CharkleDragIdentifiers.decodeAssetIDs(from: str) {
+                            internalAssetIDs.append(contentsOf: aids)
+                            continue
+                        }
                     }
-                    if let aids = CharkleDragIdentifiers.decodeAssetIDs(from: str) {
-                        internalAssetIDs.append(contentsOf: aids)
-                        continue
+                    // Short-circuit `.fileURL` providers once internal folder/asset IDs are decoded so
+                    // internal gallery drags NEVER re-import cached thumbnails as duplicate assets.
+                    guard draggedFolderIDs.isEmpty && internalAssetIDs.isEmpty else { continue }
+                    if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier),
+                       let url = await loadURL(provider, type: .fileURL) {
+                        if let cachedID = library.resolveInternalCachedAssetID(for: url) {
+                            internalAssetIDs.append(cachedID)
+                        } else {
+                            externalInputs.append(.fileURL(url))
+                        }
                     }
-                }
-                // Short-circuit `.fileURL` providers once internal folder/asset IDs are decoded so
-                // internal gallery drags NEVER re-import cached thumbnails as duplicate assets.
-                guard draggedFolderIDs.isEmpty && internalAssetIDs.isEmpty else { continue }
-                if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier),
-                   let url = await loadURL(provider, type: .fileURL) {
-                    externalInputs.append(.fileURL(url))
                 }
             }
 
@@ -2241,52 +2272,67 @@ extension SidebarView {
 
     private func handleDrop(providers: [NSItemProvider], folderID: UUID?, boardID: UUID?) -> Bool {
         guard !providers.isEmpty else { return false }
+        let syncPayload = CharkleDragPasteboardResolver.resolveSynchronously(
+            from: NSPasteboard(name: .drag),
+            resolveCachedAssetID: { library.resolveInternalCachedAssetID(for: $0) }
+        )
         Task {
-            var draggedFolderIDs: [UUID] = []
-            var internalIDs: [UUID] = []
-            var externalInputs: [CaptureInput] = []
+            var draggedFolderIDs: [UUID] = syncPayload.folderIDs
+            var internalIDs: [UUID] = syncPayload.assetIDs
+            var externalInputs: [CaptureInput] = syncPayload.externalFileURLs.map { .fileURL($0) }
 
-            for provider in providers {
-                var plainTextCandidate: String?
-                if provider.hasItemConformingToTypeIdentifier(UTType.plainText.identifier),
-                   let str = await loadText(provider) {
-                    if let fids = CharkleDragIdentifiers.decodeFolderIDs(from: str) {
-                        draggedFolderIDs.append(contentsOf: fids)
+            if syncPayload.isEmpty {
+                for provider in providers {
+                    var plainTextCandidate: String?
+                    if provider.hasItemConformingToTypeIdentifier(UTType.plainText.identifier),
+                       let str = await loadText(provider) {
+                        if let fids = CharkleDragIdentifiers.decodeFolderIDs(from: str) {
+                            draggedFolderIDs.append(contentsOf: fids)
+                            continue
+                        }
+                        if let ids = CharkleDragIdentifiers.decodeAssetIDs(from: str) {
+                            internalIDs.append(contentsOf: ids)
+                            continue
+                        }
+                        plainTextCandidate = str
+                    }
+                    // Once internal folder/asset IDs are already recognized from item 0, skip extra `.fileURL`
+                    // providers attached for external Finder export so internal drags NEVER duplicate files!
+                    guard draggedFolderIDs.isEmpty && internalIDs.isEmpty else { continue }
+                    if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier),
+                       let url = await loadURL(provider, type: .fileURL) {
+                        if let cachedID = library.resolveInternalCachedAssetID(for: url) {
+                            internalIDs.append(cachedID)
+                        } else {
+                            externalInputs.append(.fileURL(url))
+                        }
                         continue
                     }
-                    if let ids = CharkleDragIdentifiers.decodeAssetIDs(from: str) {
-                        internalIDs.append(contentsOf: ids)
+                    if provider.hasItemConformingToTypeIdentifier(UTType.url.identifier),
+                       let url = await loadURL(provider, type: .url) {
+                        if url.isFileURL {
+                            if let cachedID = library.resolveInternalCachedAssetID(for: url) {
+                                internalIDs.append(cachedID)
+                            } else {
+                                externalInputs.append(.fileURL(url))
+                            }
+                        } else if WebBookmark.isWebURL(url) {
+                            externalInputs.append(.webURL(url, title: nil, notes: nil))
+                        }
                         continue
                     }
-                    plainTextCandidate = str
-                }
-                // Once internal folder/asset IDs are already recognized from item 0, skip extra `.fileURL`
-                // providers attached for external Finder export so internal drags NEVER duplicate files!
-                guard draggedFolderIDs.isEmpty && internalIDs.isEmpty else { continue }
-                if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier),
-                   let url = await loadURL(provider, type: .fileURL) {
-                    externalInputs.append(.fileURL(url))
-                    continue
-                }
-                if provider.hasItemConformingToTypeIdentifier(UTType.url.identifier),
-                   let url = await loadURL(provider, type: .url) {
-                    if url.isFileURL { externalInputs.append(.fileURL(url)) }
-                    else if WebBookmark.isWebURL(url) {
-                        externalInputs.append(.webURL(url, title: nil, notes: nil))
+                    if provider.hasItemConformingToTypeIdentifier(UTType.image.identifier),
+                       let data = await loadData(provider, type: .image) {
+                        let ext = Self.detectedImageExtension(for: data)
+                        externalInputs.append(.imageData(data, suggestedName: "SidebarDrop-\(UUID().uuidString.prefix(8)).\(ext)", sourceURL: nil))
+                        continue
                     }
-                    continue
-                }
-                if provider.hasItemConformingToTypeIdentifier(UTType.image.identifier),
-                   let data = await loadData(provider, type: .image) {
-                    let ext = Self.detectedImageExtension(for: data)
-                    externalInputs.append(.imageData(data, suggestedName: "SidebarDrop-\(UUID().uuidString.prefix(8)).\(ext)", sourceURL: nil))
-                    continue
-                }
-                if let text = plainTextCandidate,
-                   let webURL = SocialPostURLParser.extractPostURL(from: text)
-                    ?? GitHubRepoURLParser.extractRepoURL(from: text)
-                    ?? WebURLParser.extractWebURL(from: text) {
-                    externalInputs.append(.webURL(webURL, title: nil, notes: nil))
+                    if let text = plainTextCandidate,
+                       let webURL = SocialPostURLParser.extractPostURL(from: text)
+                        ?? GitHubRepoURLParser.extractRepoURL(from: text)
+                        ?? WebURLParser.extractWebURL(from: text) {
+                        externalInputs.append(.webURL(webURL, title: nil, notes: nil))
+                    }
                 }
             }
 

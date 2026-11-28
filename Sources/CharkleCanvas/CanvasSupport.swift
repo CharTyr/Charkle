@@ -14,6 +14,7 @@ public enum CharkleDragIdentifiers {
     public static let multipleAssetsPrefix = "charkle-assets:"
     public static let folderPrefix = "charkle-folder:"
     public static let multipleFoldersPrefix = "charkle-folders:"
+    public static let internalPasteboardType = NSPasteboard.PasteboardType("com.charkle.internal-drag")
 
     public static func encode(assetIDs: [UUID]) -> String {
         if assetIDs.count == 1, let first = assetIDs.first {
@@ -66,6 +67,158 @@ public enum CharkleDragIdentifiers {
 
     public static func isInternalDrag(_ raw: String) -> Bool {
         decodeAssetIDs(from: raw) != nil || decodeFolderIDs(from: raw) != nil
+    }
+
+    /// Extracts an asset UUID candidate when a file URL points inside Charkle's own cache directories
+    /// (`Originals/<UUID>.<ext>`, `Thumbnails/<UUID>.jpg`, `Previews/<UUID>.jpg`).
+    public static func decodeInternalCacheAssetID(from fileURL: URL) -> UUID? {
+        guard fileURL.isFileURL else { return nil }
+        let standardized = fileURL.standardizedFileURL
+        let parentName = standardized.deletingLastPathComponent().lastPathComponent
+        guard parentName == "Originals" || parentName == "Thumbnails" || parentName == "Previews" else {
+            return nil
+        }
+        let stem = standardized.deletingPathExtension().lastPathComponent
+        return UUID(uuidString: stem)
+    }
+}
+
+/// Synchronously resolved drag payload extracted from `NSPasteboard(name: .drag)` inside `.onDrop`.
+public struct CharkleSynchronousDragPayload: Sendable, Equatable {
+    public var folderIDs: [UUID]
+    public var assetIDs: [UUID]
+    public var externalFileURLs: [URL]
+
+    public init(folderIDs: [UUID] = [], assetIDs: [UUID] = [], externalFileURLs: [URL] = []) {
+        self.folderIDs = folderIDs
+        self.assetIDs = assetIDs
+        self.externalFileURLs = externalFileURLs
+    }
+
+    public var hasInternalPayload: Bool { !folderIDs.isEmpty || !assetIDs.isEmpty }
+    public var isEmpty: Bool { folderIDs.isEmpty && assetIDs.isEmpty && externalFileURLs.isEmpty }
+}
+
+/// Resolves internal Charkle drag IDs and real Finder file URLs synchronously from the AppKit drag pasteboard.
+/// On macOS 27, SwiftUI's `_PlatformDraggingDestinationView` replaces `NSItemProvider` representations of
+/// image `.fileURL` pasteboard items with only `["public.png"]`/`["public.jpeg"]` whenever `.image` is in
+/// `.onDrop(of:)`, stripping both `public.utf8-plain-text` (`charkle-asset:...`) and `public.file-url`.
+public enum CharkleDragPasteboardResolver {
+    public static func isInternalDrag(pasteboard: NSPasteboard) -> Bool {
+        if let raw = pasteboard.string(forType: CharkleDragIdentifiers.internalPasteboardType),
+           CharkleDragIdentifiers.isInternalDrag(raw) {
+            return true
+        }
+        if let raw = pasteboard.string(forType: .string),
+           CharkleDragIdentifiers.isInternalDrag(raw) {
+            return true
+        }
+        for item in pasteboard.pasteboardItems ?? [] {
+            if let raw = item.string(forType: CharkleDragIdentifiers.internalPasteboardType),
+               CharkleDragIdentifiers.isInternalDrag(raw) {
+                return true
+            }
+            if let raw = item.string(forType: .string),
+               CharkleDragIdentifiers.isInternalDrag(raw) {
+                return true
+            }
+        }
+        return false
+    }
+
+    public static func resolveSynchronously(
+        from pasteboard: NSPasteboard = NSPasteboard(name: .drag),
+        resolveCachedAssetID: ((URL) -> UUID?)? = nil
+    ) -> CharkleSynchronousDragPayload {
+        var folderIDs: [UUID] = []
+        var seenFolders = Set<UUID>()
+        var assetIDs: [UUID] = []
+        var seenAssets = Set<UUID>()
+
+        func consumeInternalString(_ raw: String?) {
+            guard let raw else { return }
+            if let fids = CharkleDragIdentifiers.decodeFolderIDs(from: raw) {
+                for fid in fids where seenFolders.insert(fid).inserted {
+                    folderIDs.append(fid)
+                }
+            } else if let aids = CharkleDragIdentifiers.decodeAssetIDs(from: raw) {
+                for aid in aids where seenAssets.insert(aid).inserted {
+                    assetIDs.append(aid)
+                }
+            }
+        }
+
+        // Pass 1: Internal folder/asset identifiers (custom type first, then plain string)
+        let items = pasteboard.pasteboardItems ?? []
+        for item in items {
+            consumeInternalString(item.string(forType: CharkleDragIdentifiers.internalPasteboardType))
+            consumeInternalString(item.string(forType: .string))
+        }
+        if folderIDs.isEmpty && assetIDs.isEmpty {
+            consumeInternalString(pasteboard.string(forType: CharkleDragIdentifiers.internalPasteboardType))
+            consumeInternalString(pasteboard.string(forType: .string))
+        }
+        if !folderIDs.isEmpty || !assetIDs.isEmpty {
+            return CharkleSynchronousDragPayload(folderIDs: folderIDs, assetIDs: assetIDs, externalFileURLs: [])
+        }
+
+        // Pass 2: Local file URLs (preserves real Finder filenames even when SwiftUI strips `.fileURL` to `public.png`,
+        // and catches any cached internal file URLs as defense-in-depth against accidental duplication).
+        var candidateURLs: [URL] = []
+        var seenPaths = Set<String>()
+        func appendFileURL(_ rawURL: URL?) {
+            guard let rawURL, rawURL.isFileURL else { return }
+            let resolved = rawURL.standardizedFileURL
+            guard FileManager.default.fileExists(atPath: resolved.path) else { return }
+            if seenPaths.insert(resolved.path).inserted {
+                candidateURLs.append(resolved)
+            }
+        }
+
+        for item in items {
+            if let raw = item.string(forType: .fileURL) {
+                appendFileURL(URL(string: raw))
+            }
+        }
+        if candidateURLs.isEmpty,
+           let readURLs = pasteboard.readObjects(
+               forClasses: [NSURL.self],
+               options: [.urlReadingFileURLsOnly: true]
+           ) as? [URL] {
+            for url in readURLs {
+                appendFileURL(url)
+            }
+        }
+
+        var externalURLs: [URL] = []
+        for url in candidateURLs {
+            if let cachedID = resolveCachedAssetID?(url) {
+                if seenAssets.insert(cachedID).inserted {
+                    assetIDs.append(cachedID)
+                }
+            } else {
+                externalURLs.append(url)
+            }
+        }
+
+        if !assetIDs.isEmpty {
+            return CharkleSynchronousDragPayload(folderIDs: [], assetIDs: assetIDs, externalFileURLs: [])
+        }
+        return CharkleSynchronousDragPayload(folderIDs: [], assetIDs: [], externalFileURLs: externalURLs)
+    }
+}
+
+/// Shared pure count formatting so top-bar headers stay unambiguous when search or visual filters are active.
+public nonisolated enum CharkleLibraryCountFormatting {
+    public static func headerCountLabel(
+        visibleCount: Int,
+        unfilteredTotal: Int?,
+        isFiltered: Bool
+    ) -> String {
+        if isFiltered, let total = unfilteredTotal {
+            return "\(visibleCount) / \(total)"
+        }
+        return "\(visibleCount)"
     }
 }
 

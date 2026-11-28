@@ -4292,7 +4292,9 @@ internal final class MasonryDocumentView: NSView, NSDraggingSource {
         for (idx, id) in ids.prefix(maxExternalDragItems).enumerated() {
             let pbItem = NSPasteboardItem()
             if idx == 0 {
-                pbItem.setString(CharkleDragIdentifiers.encode(assetIDs: ids), forType: .string)
+                let encoded = CharkleDragIdentifiers.encode(assetIDs: ids)
+                pbItem.setString(encoded, forType: CharkleDragIdentifiers.internalPasteboardType)
+                pbItem.setString(encoded, forType: .string)
             }
             if let localURL = callbacks.onResolveDragFileURL(id) {
                 pbItem.setString(localURL.absoluteString, forType: .fileURL)
@@ -4330,11 +4332,7 @@ internal final class MasonryDocumentView: NSView, NSDraggingSource {
         let changeCount = pasteboard.changeCount
         if changeCount != cachedDragChangeCount {
             cachedDragChangeCount = changeCount
-            if let str = pasteboard.string(forType: .string), CharkleDragIdentifiers.isInternalDrag(str) {
-                cachedDragIsInternal = true
-            } else {
-                cachedDragIsInternal = false
-            }
+            cachedDragIsInternal = CharkleDragPasteboardResolver.isInternalDrag(pasteboard: pasteboard)
         }
         return cachedDragIsInternal
     }

@@ -347,7 +347,7 @@ public final class LibraryStore {
         }
     }
 
-    public func applyDestination(_ destination: SidebarDestination) async {
+    public func applyDestination(_ destination: SidebarDestination, clearSearch: Bool = true) async {
         semanticSearchGeneration &+= 1
         semanticEnhancementDelayTask?.cancel()
         semanticEnhancementDelayTask = nil
@@ -365,6 +365,9 @@ public final class LibraryStore {
         nextFilter.onlyTrashed = false
         nextFilter.includeTrashed = false
         nextFilter.tags.removeAll()
+        if clearSearch {
+            nextFilter.searchQuery = ""
+        }
         if activeSmartFolderID != nil {
             activeSmartFolderID = nil
         }
@@ -2164,6 +2167,25 @@ public final class LibraryStore {
                 // Non-fatal in inspector context
             }
         }
+    }
+
+    /// Resolves a dropped local file URL back to its existing `AssetRecord.id` if it points directly to
+    /// Charkle's own `Originals/` or `Thumbnails/` cache file on disk, preventing accidental duplication.
+    public func resolveInternalCachedAssetID(for url: URL) -> UUID? {
+        guard let candidateID = CharkleDragIdentifiers.decodeInternalCacheAssetID(from: url),
+              let asset = allAssetsByID[candidateID] else {
+            return nil
+        }
+        let targetPath = url.standardizedFileURL.path
+        if let orig = engine.cachedOriginalURL(for: asset)?.standardizedFileURL.path, orig == targetPath {
+            return asset.id
+        }
+        for tier in [ThumbnailTier.preview1400, .grid520] {
+            if let thumb = engine.cachedThumbnailURL(for: asset.id, tier: tier)?.standardizedFileURL.path, thumb == targetPath {
+                return asset.id
+            }
+        }
+        return nil
     }
 
     /// Synchronously resolves EXIF & AI generation metadata on Frame 0 (from DB, memory cache,
