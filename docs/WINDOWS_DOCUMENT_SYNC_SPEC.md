@@ -563,6 +563,28 @@ Match `Sources/CharkleCore/Media/MediaPipeline.swift`, `LiveCharkleEngine+Docume
    - **Ingest & Stack Attachment**:
      - Save as `<clean_stem>_v{next_v}.docx` (or `.md`/`.txt`), ingest into the stack's `folder_id`, attach `AssetVersionStackMetadata` (`group_id`, `version_number = next_v`, `parent_asset_id = Some(target.id)`, `editor_name`, `change_note`, `is_pinned_primary = true`), clear `is_pinned_primary` on older siblings, compute `diff_summary` against `target.id`, and record normal HLC `SyncOperation`s!
 
+### 3.7 Version Stack Folder & Trash Atomicity, Stack-Folded Inbox Count & Split-Stack Self-Healing
+
+To prevent ghost Inbox items (moving a collapsed stack's primary version out of Inbox leaving older `folder_id = NULL` siblings behind) and whack-a-mole deletion (trashing `v3` immediately exposing `v2`, then `v1`), `charkle-core` and `libraryStore.ts` MUST enforce stack-wide folder and trash invariants matching `LiveCharkleEngine.swift`, `LiveCharkleEngine+Documents.swift`, and `LibraryDatabase.swift`:
+
+1. **`AssetBatchPatch.propagate_to_version_stack` (`bool`, default `true`)**:
+   - Add `#[serde(default = "default_true")] pub propagate_to_version_stack: bool` on `AssetBatchPatch` (`default_true() -> true` so existing IPC/JSON payloads default to `true`).
+   - Inside `update_assets` and `update_assets_batch` SQLite transactions: when `patch.propagate_to_version_stack` is `true` and `(patch.folder_assignment != FolderAssignment::Unchanged || patch.is_trashed.is_some())`:
+     - Collect all `version_stack.group_id`s of the explicit `patch.asset_ids`, load all siblings in SQLite sharing those `group_id`s, and apply the full `patch` (`title`, `notes`, `rating`, `tags`, `folder_assignment`, `pinned_offline`, `is_trashed`) to explicit `patch.asset_ids` while propagating **only** `folder_assignment` and `is_trashed` (`true` marks all non-trashed siblings trashed; `false` restores all trashed siblings) across the remaining siblings in the same transaction.
+2. **Unified `folder_id` on Version Stack Join & Create**:
+   - `execute_join_version_stack`: when `mutation.adopt_target_folder` is `true`, compute `unified_folder_id = ordered_existing.iter().find_map(|a| a.folder_id).or_else(|| joining_assets.iter().find_map(|a| a.folder_id))`. When `Some(fid)`, set `folder_id = Some(fid)` on **both** `ordered_existing` members whose `folder_id != Some(fid)` and `joining` members so cross-Inbox/Folder joins never leave an unfiled sibling in Inbox.
+   - `execute_create_version_stack`: when `mutation.adopt_target_folder` is `true`, resolve `target_folder` from `primary_asset_id`'s `folder_id` (falling back to the first non-null `folder_id` in `ordered_input`) and assign `folder_id = Some(target_folder)` on **all** members in `ordered_input` whose `folder_id != Some(target_folder)`.
+3. **Stack-Folded `inbox_count()` & Scope-Safe Primary Substitution**:
+   - `LibraryDatabase::inbox_count()` MUST count each unfiled Version Stack once (matching the collapsed Inbox gallery card count 1:1):
+     ```sql
+     SELECT COUNT(DISTINCT COALESCE(json_extract(CAST(payload AS TEXT), '$.richMetadata.versionStack.groupID'), id))
+     FROM assets
+     WHERE folder_id IS NULL AND trashed = 0
+     ```
+   - When folding Version Stacks in UI stores (`libraryStore.ts`), `versionStacksByGroupId[gid]` primary substitution MUST verify compatibility with the active destination scope (e.g., in Inbox `onlyInbox == true`, never substitute a sibling with `folder_id != null` or `is_trashed == true`; fall back to `resolve_primary_asset(in_list_group_members)`), and trashing/restoring a stack MUST purge all sibling IDs from selection and cut/copy clipboard state.
+4. **Idempotent Startup Split-Stack Self-Healing (`heal_split_version_stacks_if_needed`)**:
+   - Once per engine lifetime (on startup and before the first `fetch_assets` / `inbox_count` query), query stacked assets (`json_extract(CAST(payload AS TEXT), '$.richMetadata.versionStack.groupID') IS NOT NULL`), group by `group_id`, and for any group containing both `folder_id IS NULL` member(s) and at least one sibling whose `folder_id` exists in `folders` (preferring non-trashed pinned/highest version, then trashed pinned/highest version), update the `folder_id IS NULL` sibling(s) to that authoritative `folder_id` via `save_asset_locally`.
+
 ---
 
 ## 4. Tauri v2 IPC & Fluent 2 React UI (`windows/src-tauri` + `windows/ui`)

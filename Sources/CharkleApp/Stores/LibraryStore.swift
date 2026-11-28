@@ -587,7 +587,11 @@ public final class LibraryStore {
                    self.filter == requestedFilter,
                    self.activeSmartFolderID == requestedSmartID {
                     let filtered = self.applyActiveSmartFolderIfNeeded(visible)
-                    let folded = self.foldVersionStacks(filtered, onlyTrashed: requestedFilter.onlyTrashed)
+                    let folded = self.foldVersionStacks(
+                        filtered,
+                        onlyTrashed: requestedFilter.onlyTrashed,
+                        criteria: requestedFilter
+                    )
                     let canonical = self.canonicalizeAssetsAgainstCache(folded)
                     self.assets = canonical
                     let trimmedQuery = requestedFilter.searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -654,7 +658,11 @@ public final class LibraryStore {
                 if changedAny {
                     self.allAssetsByID = nextByID
                 }
-                let folded = self.foldVersionStacks(filtered, onlyTrashed: requestedFilter.onlyTrashed)
+                let folded = self.foldVersionStacks(
+                    filtered,
+                    onlyTrashed: requestedFilter.onlyTrashed,
+                    criteria: requestedFilter
+                )
                 let canonical = self.canonicalizeAssetsAgainstCache(folded)
                 self.assets = canonical
 
@@ -1687,43 +1695,31 @@ public final class LibraryStore {
     }
 
     /// Collapses non-trashed assets sharing `versionStack.groupID` into a single displayed representative
-    /// (always preferring `isPinnedPrimary == true`, or highest `versionNumber` if none is pinned).
-    public func foldVersionStacks(_ list: [AssetRecord], onlyTrashed: Bool = false) -> [AssetRecord] {
+    /// (always preferring `isPinnedPrimary == true`, or highest `versionNumber` if none is pinned),
+    /// guarding that `cachedPrimaryAssetByGroupID` is only substituted when compatible with the active scope.
+    public func foldVersionStacks(
+        _ list: [AssetRecord],
+        onlyTrashed: Bool = false,
+        criteria: FilterCriteria? = nil
+    ) -> [AssetRecord] {
         guard !onlyTrashed, !list.isEmpty else { return list }
-        var localGroups: [UUID: [AssetRecord]]? = nil
-        var seenGroups = Set<UUID>()
-        var result: [AssetRecord] = []
-        result.reserveCapacity(list.count)
-
-        for asset in list {
-            if asset.isTrashed {
-                result.append(asset)
-                continue
-            }
-            guard let gid = asset.richMetadata?.versionStack?.groupID else {
-                result.append(asset)
-                continue
-            }
-            guard seenGroups.insert(gid).inserted else {
-                continue
-            }
-            if let cachedPrimary = cachedPrimaryAssetByGroupID[gid] {
-                result.append(cachedPrimary)
-            } else {
-                if localGroups == nil {
-                    var built: [UUID: [AssetRecord]] = [:]
-                    for item in list where !item.isTrashed {
-                        if let g = item.richMetadata?.versionStack?.groupID {
-                            built[g, default: []].append(item)
-                        }
-                    }
-                    localGroups = built
-                }
-                let primary = localGroups?[gid].flatMap { AssetVersionStackMetadata.resolvePrimaryAsset(in: $0) } ?? asset
-                result.append(primary)
-            }
+        let allowedSubtree: Set<UUID>? = {
+            guard let fid = criteria?.folderID, criteria?.includeSubfolders == true else { return nil }
+            return Set(descendantFolderIDsPostOrder(rootID: fid))
+        }()
+        let smartRule: SmartFolderRule? = activeSmartFolderID.flatMap { smartID in
+            smartFolders.first(where: { $0.id == smartID })?.rule
         }
-        return result
+        return AssetRecord.foldVersionStacks(
+            list,
+            onlyTrashed: onlyTrashed,
+            criteria: criteria,
+            cachedPrimaryByGroupID: cachedPrimaryAssetByGroupID,
+            allowedFolderSubtreeIDs: allowedSubtree,
+            additionalCompatibilityPredicate: smartRule.map { rule in
+                { candidate in rule.matches(candidate) }
+            }
+        )
     }
 
     /// Ordered non-trashed siblings belonging to the same Version Stack as `assetID` (or `[asset]` if standalone).
@@ -2247,17 +2243,34 @@ public final class LibraryStore {
         await applyPatch(AssetBatchPatch(assetIDs: ids, pinnedOffline: pinned))
     }
 
+    private func expandedStackAndTargetIDs(for ids: [UUID]) -> Set<UUID> {
+        var expanded = Set(ids)
+        let groupIDs = Set(ids.compactMap { allAssetsByID[$0]?.richMetadata?.versionStack?.groupID })
+        guard !groupIDs.isEmpty else { return expanded }
+        for asset in allAssetsByID.values {
+            if let gid = asset.richMetadata?.versionStack?.groupID, groupIDs.contains(gid) {
+                expanded.insert(asset.id)
+            }
+        }
+        return expanded
+    }
+
     public func trashAssets(_ ids: [UUID]) async {
+        let preAffected = expandedStackAndTargetIDs(for: ids)
         guard await applyPatch(AssetBatchPatch(assetIDs: ids, isTrashed: true)) else { return }
-        let idSet = Set(ids)
-        selectedAssetIDs.subtract(idSet)
-        cutAssetIDs.subtract(idSet)
-        copiedAssetIDs.removeAll { idSet.contains($0) }
+        let allAffected = preAffected.union(expandedStackAndTargetIDs(for: ids))
+        selectedAssetIDs.subtract(allAffected)
+        cutAssetIDs.subtract(allAffected)
+        copiedAssetIDs.removeAll { allAffected.contains($0) }
     }
 
     public func restoreAssets(_ ids: [UUID]) async {
+        let preAffected = expandedStackAndTargetIDs(for: ids)
         guard await applyPatch(AssetBatchPatch(assetIDs: ids, isTrashed: false)) else { return }
-        selectedAssetIDs.subtract(ids)
+        let allAffected = preAffected.union(expandedStackAndTargetIDs(for: ids))
+        selectedAssetIDs.subtract(allAffected)
+        cutAssetIDs.subtract(allAffected)
+        copiedAssetIDs.removeAll { allAffected.contains($0) }
     }
 
     public func permanentlyDeleteAssets(_ ids: [UUID]) async {
@@ -2662,7 +2675,7 @@ public final class LibraryStore {
         if changedAny {
             allAssetsByID = nextByID
         }
-        let folded = foldVersionStacks(list, onlyTrashed: filter.onlyTrashed)
+        let folded = foldVersionStacks(list, onlyTrashed: filter.onlyTrashed, criteria: filter)
         let canonical = canonicalizeAssetsAgainstCache(folded)
         if assets != canonical {
             assets = canonical

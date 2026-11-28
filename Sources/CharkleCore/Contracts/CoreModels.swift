@@ -2137,6 +2137,89 @@ public struct FilterCriteria: Codable, Hashable, Sendable {
         tags.removeAll()
         onlyPinnedOffline = false
     }
+
+    /// Verifies whether a candidate stack primary asset may represent a Version Stack inside this filter's scope.
+    /// Prevents cross-scope ghost cards (such as substituting a filed `folderID != nil` primary into an `onlyInbox` query).
+    public func isCompatibleWithFoldedPrimary(
+        _ candidate: AssetRecord,
+        allowedFolderSubtreeIDs: Set<UUID>? = nil
+    ) -> Bool {
+        if onlyTrashed {
+            guard candidate.isTrashed else { return false }
+        } else if !includeTrashed {
+            guard !candidate.isTrashed else { return false }
+        }
+        if onlyInbox {
+            guard candidate.folderID == nil && !candidate.isTrashed else { return false }
+        }
+        if let folderID {
+            if let allowedFolderSubtreeIDs {
+                guard let fid = candidate.folderID, allowedFolderSubtreeIDs.contains(fid) else { return false }
+            } else {
+                guard candidate.folderID == folderID else { return false }
+            }
+        }
+        if onlyUntagged && candidate.tags.contains(where: { !$0.isEmpty }) {
+            return false
+        }
+        if onlyPinnedOffline && !candidate.pinnedOffline {
+            return false
+        }
+        return true
+    }
+}
+
+public extension AssetRecord {
+    /// Collapses non-trashed assets sharing `richMetadata.versionStack.groupID` into a single representative,
+    /// substituting `cachedPrimaryByGroupID[gid]` ONLY when compatible with `criteria` (falling back to
+    /// `AssetVersionStackMetadata.resolvePrimaryAsset(in: inListGroupMembers)` otherwise).
+    static func foldVersionStacks(
+        _ list: [AssetRecord],
+        onlyTrashed: Bool = false,
+        criteria: FilterCriteria? = nil,
+        cachedPrimaryByGroupID: [UUID: AssetRecord] = [:],
+        allowedFolderSubtreeIDs: Set<UUID>? = nil,
+        additionalCompatibilityPredicate: ((AssetRecord) -> Bool)? = nil
+    ) -> [AssetRecord] {
+        guard !onlyTrashed, !list.isEmpty else { return list }
+        var localGroups: [UUID: [AssetRecord]]? = nil
+        var seenGroups = Set<UUID>()
+        var result: [AssetRecord] = []
+        result.reserveCapacity(list.count)
+
+        for asset in list {
+            if asset.isTrashed {
+                result.append(asset)
+                continue
+            }
+            guard let gid = asset.richMetadata?.versionStack?.groupID else {
+                result.append(asset)
+                continue
+            }
+            guard seenGroups.insert(gid).inserted else {
+                continue
+            }
+            if let cachedPrimary = cachedPrimaryByGroupID[gid],
+               !cachedPrimary.isTrashed,
+               (criteria?.isCompatibleWithFoldedPrimary(cachedPrimary, allowedFolderSubtreeIDs: allowedFolderSubtreeIDs) ?? true),
+               (additionalCompatibilityPredicate?(cachedPrimary) ?? true) {
+                result.append(cachedPrimary)
+            } else {
+                if localGroups == nil {
+                    var built: [UUID: [AssetRecord]] = [:]
+                    for item in list where !item.isTrashed {
+                        if let g = item.richMetadata?.versionStack?.groupID {
+                            built[g, default: []].append(item)
+                        }
+                    }
+                    localGroups = built
+                }
+                let primary = localGroups?[gid].flatMap { AssetVersionStackMetadata.resolvePrimaryAsset(in: $0) } ?? asset
+                result.append(primary)
+            }
+        }
+        return result
+    }
 }
 
 public enum FolderAssignment: Codable, Hashable, Sendable {
@@ -2158,6 +2241,7 @@ public struct AssetBatchPatch: Codable, Hashable, Sendable {
     public var folderAssignment: FolderAssignment
     public var pinnedOffline: Bool?
     public var isTrashed: Bool?
+    public var propagateToVersionStack: Bool
 
     public init(
         assetIDs: [UUID],
@@ -2171,7 +2255,8 @@ public struct AssetBatchPatch: Codable, Hashable, Sendable {
         dismissSuggestedTags: [String] = [],
         folderAssignment: FolderAssignment = .unchanged,
         pinnedOffline: Bool? = nil,
-        isTrashed: Bool? = nil
+        isTrashed: Bool? = nil,
+        propagateToVersionStack: Bool = true
     ) {
         self.assetIDs = assetIDs
         self.title = title
@@ -2185,6 +2270,7 @@ public struct AssetBatchPatch: Codable, Hashable, Sendable {
         self.folderAssignment = folderAssignment
         self.pinnedOffline = pinnedOffline
         self.isTrashed = isTrashed
+        self.propagateToVersionStack = propagateToVersionStack
     }
 
     public init(from decoder: Decoder) throws {
@@ -2201,6 +2287,7 @@ public struct AssetBatchPatch: Codable, Hashable, Sendable {
         folderAssignment = try c.decodeIfPresent(FolderAssignment.self, forKey: .folderAssignment) ?? .unchanged
         pinnedOffline = try c.decodeIfPresent(Bool.self, forKey: .pinnedOffline)
         isTrashed = try c.decodeIfPresent(Bool.self, forKey: .isTrashed)
+        propagateToVersionStack = try c.decodeIfPresent(Bool.self, forKey: .propagateToVersionStack) ?? true
     }
 }
 

@@ -386,6 +386,43 @@ final class MobileAppStore {
         return (folded, sortedGroups)
     }
 
+    private func folderSubtreeIDSet(rootID: UUID) -> Set<UUID> {
+        var byParent: [UUID: [UUID]] = [:]
+        for folder in folders {
+            if let pid = folder.parentID {
+                byParent[pid, default: []].append(folder.id)
+            }
+        }
+        var seen: Set<UUID> = [rootID]
+        var queue: [UUID] = [rootID]
+        while let current = queue.popLast() {
+            for child in byParent[current] ?? [] where seen.insert(child).inserted {
+                queue.append(child)
+            }
+        }
+        return seen
+    }
+
+    private func isCompatibleWithActiveScope(_ candidate: AssetRecord) -> Bool {
+        switch scope {
+        case .trash:
+            return candidate.isTrashed
+        case .inbox:
+            return !candidate.isTrashed && candidate.folderID == nil
+        case .folder(let rootID):
+            guard !candidate.isTrashed, let fid = candidate.folderID else { return false }
+            return folderSubtreeIDSet(rootID: rootID).contains(fid)
+        case .untagged:
+            return !candidate.isTrashed && candidate.tags.allSatisfy(\.isEmpty)
+        case .smartFolder(let smartID):
+            guard !candidate.isTrashed,
+                  let smart = smartFolders.first(where: { $0.id == smartID }) else { return false }
+            return smart.rule.matches(candidate)
+        case .allItems, .recent, .tag, .moodboardsHome, .moodboard, .pinterest:
+            return !candidate.isTrashed
+        }
+    }
+
     private func applyUnfoldedAssets(_ raw: [AssetRecord], mergeIntoStackLookup: Bool = true) {
         unfoldedAssets = raw
         let (folded, groups) = Self.foldVersionStacks(raw)
@@ -401,12 +438,14 @@ final class MobileAppStore {
                 }
             }
         }
-        // Ensure representative reflects full known stack primary when available
+        // Substitute global stack primary ONLY when compatible with active scope; otherwise preserve `item`
+        // (resolved via `AssetVersionStackMetadata.resolvePrimaryAsset(in: inListGroupMembers)`).
         let resolvedFolded: [AssetRecord] = folded.map { item in
             guard !item.isTrashed,
                   let gid = item.richMetadata?.versionStack?.groupID,
                   let fullMembers = stackMembersByGroupID[gid],
-                  let primary = AssetVersionStackMetadata.resolvePrimaryAsset(in: fullMembers) else {
+                  let primary = AssetVersionStackMetadata.resolvePrimaryAsset(in: fullMembers),
+                  isCompatibleWithActiveScope(primary) else {
                 return item
             }
             return primary
@@ -423,7 +462,9 @@ final class MobileAppStore {
             if let existing = stackMembersByGroupID[gid] {
                 var combinedByID = Dictionary(uniqueKeysWithValues: existing.map { ($0.id, $0) })
                 for m in members { combinedByID[m.id] = m }
-                stackMembersByGroupID[gid] = AssetVersionStackMetadata.sortedVersions(Array(combinedByID.values))
+                stackMembersByGroupID[gid] = AssetVersionStackMetadata.sortedVersions(
+                    Array(combinedByID.values.filter { !$0.isTrashed })
+                )
             } else {
                 stackMembersByGroupID[gid] = members
             }
@@ -1118,7 +1159,7 @@ final class MobileAppStore {
         stackMembersByGroupID = globalGroups
         let rawInbox = await fetchedInboxItems
         applyUnfoldedInboxAssets(rawInbox)
-        inboxCount = inboxAssets.count
+        inboxCount = (try? await engine.inboxCount()) ?? inboxAssets.count
         cacheStats = await fetchedStats
         publishSharedFoldersSnapshot()
         await reloadAssets()
@@ -1863,6 +1904,13 @@ final class MobileAppStore {
         do {
             let updated = try await engine.updateAssets(patch)
             let updatedByID = Dictionary(uniqueKeysWithValues: updated.map { ($0.id, $0) })
+            if patch.isTrashed != nil {
+                let affectedIDs = Set(updated.map(\.id)).union(patch.assetIDs)
+                selectedAssetIDs.subtract(affectedIDs)
+                if patch.isTrashed == true, let sel = selectedAssetID, affectedIDs.contains(sel) {
+                    selectedAssetID = nil
+                }
+            }
             for idx in assets.indices {
                 if let fresh = updatedByID[assets[idx].id] {
                     assets[idx] = fresh
