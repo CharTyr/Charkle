@@ -1238,10 +1238,65 @@ public struct QuickLookOverlayView: View {
                         NSWorkspace.shared.open(webURL)
                     }
                 }
+
+                if !asset.isTrashed {
+                    hudDivider
+
+                    hudIconButton("trash", help: "移至废纸篓 (Delete)") {
+                        trashCurrentQuickLookAsset()
+                    }
+                }
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 8)
             .charkleLiquidGlass(.darkNotch, in: Capsule(style: .continuous))
+        }
+    }
+
+    private func trashCurrentQuickLookAsset() {
+        guard !asset.isTrashed, !isDismissing else { return }
+        let id = asset.id
+        let playlist = coordinator.quickLookPlaylist
+        let remainingPlaylist = playlist.filter { $0 != id }
+        let nextGalleryFocusID = MasonryLayoutEngine.nextFocusAssetIDAfterDeleting(
+            deletedIDs: [id],
+            in: library.assets.map(\.id)
+        )
+
+        if playlist.count > 1,
+           let nextQLID = MasonryLayoutEngine.nextFocusAssetIDAfterDeleting(deletedIDs: [id], in: playlist),
+           !remainingPlaylist.isEmpty {
+            coordinator.openQuickLook(assetID: nextQLID, playlist: remainingPlaylist)
+            library.selectedAssetIDs = [nextQLID]
+            coordinator.focusedStageAssetID = nextQLID
+        } else {
+            onClose()
+        }
+
+        Task {
+            await library.trashAssets([id])
+            if coordinator.quickLookAssetID == nil,
+               library.selectedAssetIDs.isEmpty,
+               let nextFocusID = nextGalleryFocusID,
+               library.assets.contains(where: { $0.id == nextFocusID }) {
+                var transaction = Transaction(animation: nil)
+                transaction.disablesAnimations = true
+                withTransaction(transaction) {
+                    library.selectedAssetIDs = [nextFocusID]
+                    coordinator.focusedStageAssetID = nextFocusID
+                }
+            }
+            coordinator.showToast(
+                "已移至废纸篓",
+                icon: "trash",
+                actionTitle: "撤销",
+                onAction: {
+                    Task {
+                        await library.restoreAssets([id])
+                        coordinator.showToast("已放回原处", icon: "arrow.uturn.backward", tone: .success)
+                    }
+                }
+            )
         }
     }
 
@@ -1322,6 +1377,20 @@ public struct QuickLookOverlayView: View {
                 return nil
             }
             return event
+        }
+        if let textInput = event.window?.firstResponder as? any NSTextInputClient,
+           textInput.hasMarkedText() {
+            return event
+        }
+
+        if (isUnmodified || primaryModifiers == [.command]) && (event.keyCode == 51 || event.keyCode == 117) {
+            if event.isARepeat { return nil }
+            if asset.isTrashed {
+                confirmPermanentDelete = true
+            } else {
+                trashCurrentQuickLookAsset()
+            }
+            return nil
         }
 
         if isUnmodified {

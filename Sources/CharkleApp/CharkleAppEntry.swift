@@ -1113,6 +1113,58 @@ struct CharkleApp: App {
                 .keyboardShortcut("z", modifiers: [.command, .shift])
             }
 
+            CommandGroup(after: .pasteboard) {
+                Button("移至废纸篓") {
+                    if Self.isEditingTextInKeyWindow() {
+                        _ = NSApp?.sendAction(#selector(NSResponder.deleteToBeginningOfLine(_:)), to: nil, from: nil)
+                        return
+                    }
+                    let selectedSet = runtime.library.selectedAssetIDs
+                    let ordered = runtime.library.assets.compactMap { selectedSet.contains($0.id) ? $0.id : nil }
+                    let ids = ordered.count == selectedSet.count ? ordered : Array(selectedSet)
+                    guard !ids.isEmpty else { return }
+                    let nextFocusID = MasonryLayoutEngine.nextFocusAssetIDAfterDeleting(
+                        deletedIDs: Set(ids),
+                        in: runtime.library.assets.map(\.id)
+                    )
+                    Task {
+                        await runtime.library.trashAssets(ids)
+                        if runtime.library.selectedAssetIDs.isEmpty,
+                           let nextID = nextFocusID,
+                           runtime.library.assets.contains(where: { $0.id == nextID }) {
+                            var transaction = Transaction(animation: nil)
+                            transaction.disablesAnimations = true
+                            withTransaction(transaction) {
+                                runtime.library.selectedAssetIDs = [nextID]
+                                runtime.coordinator.focusedStageAssetID = nextID
+                            }
+                        }
+                        runtime.coordinator.showToast(
+                            "已移至废纸篓 (\(ids.count) 项)",
+                            icon: "trash",
+                            actionTitle: "撤销",
+                            onAction: {
+                                Task {
+                                    await runtime.library.restoreAssets(ids)
+                                    runtime.coordinator.showToast(
+                                        ids.count == 1 ? "已放回原处" : "已放回原处 (\(ids.count) 项)",
+                                        icon: "arrow.uturn.backward",
+                                        tone: .success
+                                    )
+                                }
+                            }
+                        )
+                    }
+                }
+                .keyboardShortcut(.delete, modifiers: .command)
+                .disabled(
+                    runtime.library.selectedAssetIDs.isEmpty
+                        || runtime.coordinator.isViewingMoodboard
+                        || runtime.coordinator.selectedDestination == .trash
+                        || runtime.coordinator.isModalOverlayPresented
+                )
+            }
+
             CommandMenu("灵感采集") {
                 Button("快速跳转…") {
                     guard !runtime.coordinator.isOnboardingPresented else { return }

@@ -50,6 +50,7 @@ public struct MainWindowView: View {
     @State private var inspectorDragStartWidth: CGFloat = AppCoordinatorStore.defaultInspectorWidth
     @State private var isInspectorDividerHovered: Bool = false
     @State private var isDraggingInspectorDivider: Bool = false
+    @State private var isInboxTrashHovered: Bool = false
     @FocusState private var isSubfolderFieldFocused: Bool
 
     private var activeAccent: Color {
@@ -700,20 +701,11 @@ public struct MainWindowView: View {
                         }
                     },
                     onTrashAssets: { ids in
-                        Task {
-                            await library.trashAssets(ids)
-                            coordinator.showToast(
-                                "已移至废纸篓 (\(ids.count) 项)",
-                                icon: "trash",
-                                actionTitle: "撤销",
-                                onAction: {
-                                    Task {
-                                        await library.restoreAssets(ids)
-                                        coordinator.showToast("已放回原处 (\(ids.count) 项)", icon: "arrow.uturn.backward", tone: .success)
-                                    }
-                                }
-                            )
-                        }
+                        let nextID = MasonryLayoutEngine.nextFocusAssetIDAfterDeleting(
+                            deletedIDs: Set(ids),
+                            in: library.assets.map(\.id)
+                        )
+                        trashGalleryAssetsWithUndo(ids, nextFocusSelectionID: nextID)
                     },
                     onRestoreAssets: { ids in
                         Task {
@@ -800,20 +792,11 @@ public struct MainWindowView: View {
                         triggerAIRetagging(for: ids)
                     },
                     onTrashAssets: { ids in
-                        Task {
-                            await library.trashAssets(ids)
-                            coordinator.showToast(
-                                "已移至废纸篓 (\(ids.count) 项)",
-                                icon: "trash",
-                                actionTitle: "撤销",
-                                onAction: {
-                                    Task {
-                                        await library.restoreAssets(ids)
-                                        coordinator.showToast("已放回原处 (\(ids.count) 项)", icon: "arrow.uturn.backward", tone: .success)
-                                    }
-                                }
-                            )
-                        }
+                        let nextID = MasonryLayoutEngine.nextFocusAssetIDAfterDeleting(
+                            deletedIDs: Set(ids),
+                            in: library.assets.map(\.id)
+                        )
+                        trashGalleryAssetsWithUndo(ids, nextFocusSelectionID: nextID)
                     },
                     onRestoreAssets: { ids in
                         Task {
@@ -1011,20 +994,11 @@ public struct MainWindowView: View {
                             triggerAIRetagging(for: ids)
                         },
                         onTrashAssets: { ids in
-                            Task {
-                                await library.trashAssets(ids)
-                                coordinator.showToast(
-                                    "已移至废纸篓 (\(ids.count) 项)",
-                                    icon: "trash",
-                                    actionTitle: "撤销",
-                                    onAction: {
-                                        Task {
-                                            await library.restoreAssets(ids)
-                                            coordinator.showToast("已放回原处 (\(ids.count) 项)", icon: "arrow.uturn.backward", tone: .success)
-                                        }
-                                    }
-                                )
-                            }
+                            let nextID = MasonryLayoutEngine.nextFocusAssetIDAfterDeleting(
+                                deletedIDs: Set(ids),
+                                in: library.assets.map(\.id)
+                            )
+                            trashGalleryAssetsWithUndo(ids, nextFocusSelectionID: nextID)
                         },
                         onRestoreAssets: { ids in
                             Task {
@@ -2219,7 +2193,7 @@ public struct MainWindowView: View {
 
     private var inboxTriageBar: some View {
         let targetIDs: [UUID] = if !library.selectedAssetIDs.isEmpty {
-            Array(library.selectedAssetIDs)
+            orderedTargetAssetIDs(from: library.selectedAssetIDs)
         } else if let first = library.assets.first {
             [first.id]
         } else {
@@ -2401,6 +2375,44 @@ public struct MainWindowView: View {
             .buttonStyle(CharkleMenuTriggerButtonStyle())
             .menuIndicator(.hidden)
             .fixedSize()
+
+            CharkleHairlineDivider(axis: .vertical).frame(height: 15)
+
+            Button(role: .destructive) {
+                let nextID = MasonryLayoutEngine.nextFocusAssetIDAfterDeleting(
+                    deletedIDs: Set(targetIDs),
+                    in: library.assets.map(\.id)
+                )
+                trashGalleryAssetsWithUndo(
+                    targetIDs,
+                    nextFocusSelectionID: nextID,
+                    selectNextWhenUnselected: !library.selectedAssetIDs.isEmpty
+                )
+            } label: {
+                Image(systemName: "trash")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(
+                        isInboxTrashHovered && !targetIDs.isEmpty
+                            ? CharkleTheme.destructive(for: colorScheme)
+                            : CharkleTheme.secondaryInk(for: colorScheme)
+                    )
+                    .frame(width: 26, height: 26)
+                    .background(
+                        isInboxTrashHovered && !targetIDs.isEmpty
+                            ? CharkleTheme.destructive(for: colorScheme).opacity(colorScheme == .dark ? 0.16 : 0.10)
+                            : Color.primary.opacity(0.06),
+                        in: Circle()
+                    )
+                    .contentShape(Circle())
+            }
+            .buttonStyle(CharkleTactileButtonStyle())
+            .disabled(targetIDs.isEmpty)
+            .onHover { hovering in
+                if isInboxTrashHovered != hovering {
+                    isInboxTrashHovered = hovering
+                }
+            }
+            .help("将当前选中或首项移至废纸篓 (Delete)")
         }
         .padding(.horizontal, 12)
         .padding(.vertical, barVerticalPadding)
@@ -3722,6 +3734,66 @@ public struct MainWindowView: View {
             return nil
         }
 
+        // Window-wide Delete (51), Forward Delete (117), and ⌘Delete (⌘⌫) across Quick Look and Gallery
+        if (event.keyCode == 51 || event.keyCode == 117),
+           (primaryModifiers.isEmpty || primaryModifiers == [.command]) {
+            guard !coordinator.isOnboardingPresented,
+                  !coordinator.isSettingsPresented,
+                  !coordinator.isJumpAnywherePresented,
+                  !coordinator.isMoodboardGeneratorPresented,
+                  !coordinator.isSmartFolderEditorPresented,
+                  !showInboxBatchTriageSheet,
+                  pendingPermanentDeleteIDs.isEmpty else {
+                return event
+            }
+
+            if coordinator.quickLookAssetID != nil {
+                guard !coordinator.isSmartDeduplicationPresented,
+                      !isEditingText(in: event.window),
+                      !isEditingText(in: hostWindow),
+                      !isComposingIME(in: event.window),
+                      !isComposingIME(in: hostWindow),
+                      let qlID = coordinator.quickLookAssetID,
+                      let asset = library.allAssetsByID[qlID] ?? library.assets.first(where: { $0.id == qlID }),
+                      !asset.isTrashed else {
+                    return event
+                }
+                if event.isARepeat { return nil }
+                trashQuickLookAssetWithUndo(asset)
+                return nil
+            }
+
+            guard event.window === hostWindow,
+                  isInGalleryStage,
+                  !coordinator.isModalOverlayPresented,
+                  !showInboxBatchTriageSheet,
+                  !showBatchTagPopover,
+                  !showCreateSubfolderPopover,
+                  pendingPermanentDeleteIDs.isEmpty,
+                  !isEditingText(in: hostWindow),
+                  !isComposingIME(in: hostWindow) else {
+                return event
+            }
+
+            let targetIDs = orderedTargetAssetIDs(from: library.selectedAssetIDs)
+            guard !targetIDs.isEmpty else { return event }
+            if event.isARepeat { return nil }
+
+            let targetRecords = targetIDs.compactMap { library.allAssetsByID[$0] }
+            if coordinator.selectedDestination == .trash
+                || (!targetRecords.isEmpty && targetRecords.allSatisfy(\.isTrashed)) {
+                pendingPermanentDeleteIDs = targetIDs
+                return nil
+            }
+
+            let nextAdjacentID = MasonryLayoutEngine.nextFocusAssetIDAfterDeleting(
+                deletedIDs: Set(targetIDs),
+                in: library.assets.map(\.id)
+            )
+            trashGalleryAssetsWithUndo(targetIDs, nextFocusSelectionID: nextAdjacentID)
+            return nil
+        }
+
         guard event.keyCode == 49, primaryModifiers.isEmpty else { return event }
 
         // Never let Space interact with underlying Quick Look or gallery while higher-z overlays are open.
@@ -3786,6 +3858,102 @@ public struct MainWindowView: View {
             }
         }
         return event
+    }
+
+    private func orderedTargetAssetIDs(from rawIDs: Set<UUID>) -> [UUID] {
+        guard !rawIDs.isEmpty else { return [] }
+        let ordered = library.assets.compactMap { rawIDs.contains($0.id) ? $0.id : nil }
+        if ordered.count == rawIDs.count {
+            return ordered
+        }
+        let orderedSet = Set(ordered)
+        return ordered + rawIDs.filter { !orderedSet.contains($0) }
+    }
+
+    private func trashGalleryAssetsWithUndo(
+        _ targetIDs: [UUID],
+        nextFocusSelectionID: UUID? = nil,
+        selectNextWhenUnselected: Bool = false
+    ) {
+        guard !targetIDs.isEmpty else { return }
+        let hadDeletedSelection = !library.selectedAssetIDs.isDisjoint(with: targetIDs)
+        Task {
+            await library.trashAssets(targetIDs)
+            if (hadDeletedSelection || selectNextWhenUnselected),
+               library.selectedAssetIDs.isEmpty,
+               let nextID = nextFocusSelectionID,
+               library.assets.contains(where: { $0.id == nextID }) {
+                var transaction = Transaction(animation: nil)
+                transaction.disablesAnimations = true
+                withTransaction(transaction) {
+                    library.selectedAssetIDs = [nextID]
+                    coordinator.focusedStageAssetID = nextID
+                }
+            }
+            coordinator.showToast(
+                "已移至废纸篓 (\(targetIDs.count) 项)",
+                icon: "trash",
+                actionTitle: "撤销",
+                onAction: {
+                    Task {
+                        await library.restoreAssets(targetIDs)
+                        coordinator.showToast(
+                            targetIDs.count == 1 ? "已放回原处" : "已放回原处 (\(targetIDs.count) 项)",
+                            icon: "arrow.uturn.backward",
+                            tone: .success
+                        )
+                    }
+                }
+            )
+        }
+    }
+
+    private func trashQuickLookAssetWithUndo(_ asset: AssetRecord) {
+        let id = asset.id
+        let playlist = coordinator.quickLookPlaylist
+        let remainingPlaylist = playlist.filter { $0 != id }
+        let nextGalleryFocusID = MasonryLayoutEngine.nextFocusAssetIDAfterDeleting(
+            deletedIDs: [id],
+            in: library.assets.map(\.id)
+        )
+
+        if playlist.count > 1,
+           let nextQLID = MasonryLayoutEngine.nextFocusAssetIDAfterDeleting(deletedIDs: [id], in: playlist),
+           !remainingPlaylist.isEmpty {
+            coordinator.openQuickLook(assetID: nextQLID, playlist: remainingPlaylist)
+            library.selectedAssetIDs = [nextQLID]
+            coordinator.focusedStageAssetID = nextQLID
+        } else {
+            withAnimation(CharkleMotion.accessible(CharkleMotion.exitSm, reduced: reduceMotion)) {
+                coordinator.closeQuickLook()
+            }
+        }
+
+        Task {
+            await library.trashAssets([id])
+            if coordinator.quickLookAssetID == nil,
+               library.selectedAssetIDs.isEmpty,
+               let nextFocusID = nextGalleryFocusID,
+               library.assets.contains(where: { $0.id == nextFocusID }) {
+                var transaction = Transaction(animation: nil)
+                transaction.disablesAnimations = true
+                withTransaction(transaction) {
+                    library.selectedAssetIDs = [nextFocusID]
+                    coordinator.focusedStageAssetID = nextFocusID
+                }
+            }
+            coordinator.showToast(
+                "已移至废纸篓",
+                icon: "trash",
+                actionTitle: "撤销",
+                onAction: {
+                    Task {
+                        await library.restoreAssets([id])
+                        coordinator.showToast("已放回原处", icon: "arrow.uturn.backward", tone: .success)
+                    }
+                }
+            )
+        }
     }
 
     private func triggerInboxQuickTriage(digit: Int, in window: NSWindow?) -> Bool {

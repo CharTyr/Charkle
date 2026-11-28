@@ -529,6 +529,17 @@ public struct CompactIndexGalleryView: View {
             onCopyPrimaryFile: {
                 copyPrimaryFileWithToast(for: asset, siblings: siblings)
             },
+            onTrashAsset: {
+                let targets = effectiveSelectionIDs(including: asset.id)
+                let nextID = MasonryLayoutEngine.nextFocusAssetIDAfterDeleting(
+                    deletedIDs: Set(targets),
+                    in: scopedAssets.map(\.id)
+                )
+                trashCompactAssetsWithUndo(targets, nextFocusID: nextID)
+            },
+            onPermanentlyDeleteAsset: {
+                onRequestPermanentDelete(effectiveSelectionIDs(including: asset.id))
+            },
             onPinPrimaryVersion: { verAsset in
                 onSetPrimaryVersion(verAsset.id)
             },
@@ -854,23 +865,49 @@ public struct CompactIndexGalleryView: View {
             Divider()
 
             Button(role: .destructive) {
-                Task {
-                    await library.trashAssets(targets)
-                    coordinator.showToast(
-                        "已移至废纸篓 (\(targets.count) 项)",
-                        icon: "trash",
-                        actionTitle: "撤销",
-                        onAction: {
-                            Task {
-                                await library.restoreAssets(targets)
-                                coordinator.showToast("已放回原处 (\(targets.count) 项)", icon: "arrow.uturn.backward", tone: .success)
-                            }
-                        }
-                    )
-                }
+                let nextID = MasonryLayoutEngine.nextFocusAssetIDAfterDeleting(
+                    deletedIDs: Set(targets),
+                    in: scopedAssets.map(\.id)
+                )
+                trashCompactAssetsWithUndo(targets, nextFocusID: nextID)
             } label: {
                 Label("移至废纸篓", systemImage: "trash")
             }
+        }
+    }
+
+    private func trashCompactAssetsWithUndo(_ targets: [UUID], nextFocusID: UUID?) {
+        guard !targets.isEmpty else { return }
+        let hadDeletedSelection = !library.selectedAssetIDs.isDisjoint(with: targets)
+        Task {
+            await library.trashAssets(targets)
+            if hadDeletedSelection,
+               library.selectedAssetIDs.isEmpty,
+               let nextID = nextFocusID,
+               scopedAssets.contains(where: { $0.id == nextID }) {
+                var transaction = Transaction(animation: nil)
+                transaction.disablesAnimations = true
+                withTransaction(transaction) {
+                    library.selectedAssetIDs = [nextID]
+                    lastClickedAssetID = nextID
+                    coordinator.focusedStageAssetID = nextID
+                }
+            }
+            coordinator.showToast(
+                "已移至废纸篓 (\(targets.count) 项)",
+                icon: "trash",
+                actionTitle: "撤销",
+                onAction: {
+                    Task {
+                        await library.restoreAssets(targets)
+                        coordinator.showToast(
+                            targets.count == 1 ? "已放回原处" : "已放回原处 (\(targets.count) 项)",
+                            icon: "arrow.uturn.backward",
+                            tone: .success
+                        )
+                    }
+                }
+            )
         }
     }
 
@@ -975,8 +1012,34 @@ public struct CompactIndexGalleryView: View {
             return event
         }
 
+        if let textInput = event.window?.firstResponder as? any NSTextInputClient,
+           textInput.hasMarkedText() {
+            return event
+        }
+
         let primaryModifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
         let items = scopedAssets
+
+        if (primaryModifiers.isEmpty || primaryModifiers == [.command]),
+           (event.keyCode == 51 || event.keyCode == 117) {
+            guard !library.selectedAssetIDs.isEmpty else { return event }
+            if event.isARepeat { return nil }
+            let orderedTargets = items.compactMap { library.selectedAssetIDs.contains($0.id) ? $0.id : nil }
+            let targets = orderedTargets.isEmpty ? Array(library.selectedAssetIDs) : orderedTargets
+            guard !targets.isEmpty else { return event }
+            let targetRecords = targets.compactMap { library.allAssetsByID[$0] }
+            if coordinator.selectedDestination == .trash
+                || (!targetRecords.isEmpty && targetRecords.allSatisfy(\.isTrashed)) {
+                onRequestPermanentDelete(targets)
+                return nil
+            }
+            let nextID = MasonryLayoutEngine.nextFocusAssetIDAfterDeleting(
+                deletedIDs: Set(targets),
+                in: items.map(\.id)
+            )
+            trashCompactAssetsWithUndo(targets, nextFocusID: nextID)
+            return nil
+        }
 
         if primaryModifiers == [.command], let chars = event.charactersIgnoringModifiers?.lowercased() {
             switch chars {
@@ -1102,6 +1165,8 @@ private struct CompactPrecisionItemCell: View {
     let onDoubleClickCard: () -> Void
     let onToggleVersionPopover: () -> Void
     let onCopyPrimaryFile: () -> Void
+    let onTrashAsset: () -> Void
+    let onPermanentlyDeleteAsset: () -> Void
     let onPinPrimaryVersion: (AssetRecord) -> Void
     let onOpenVersionInQuickLook: (AssetRecord) -> Void
     let onOpenDiffPair: (UUID?, UUID?) -> Void
@@ -1404,19 +1469,39 @@ private struct CompactPrecisionItemCell: View {
         }
     }
 
-    // MARK: - Quiet Hover Copy + Anchored Version Trigger Badge
+    // MARK: - Quiet Hover Copy + Trash + Anchored Version Trigger Badge
 
     @ViewBuilder
     private var interactiveActionCluster: some View {
-        HStack(alignment: .center, spacing: 6) {
-            Button(action: onCopyPrimaryFile) {
-                Image(systemName: "doc.on.doc")
-                    .font(.system(size: 11.5, weight: .medium))
+        HStack(alignment: .center, spacing: 4) {
+            if !asset.isTrashed {
+                Button(action: onCopyPrimaryFile) {
+                    Image(systemName: "doc.on.doc")
+                        .font(.system(size: 11.5, weight: .medium))
+                }
+                .buttonStyle(.charkle(.subtle, size: .icon, iconDimension: 24))
+                .help(hasStack ? "拷贝主版本原文件 (⌘C)" : "拷贝原文件 (⌘C)")
+                .opacity(isHovered ? 1 : 0)
+                .allowsHitTesting(isHovered)
+
+                Button(role: .destructive, action: onTrashAsset) {
+                    Image(systemName: "trash")
+                        .font(.system(size: 11.5, weight: .medium))
+                }
+                .buttonStyle(.charkle(.subtle, size: .icon, iconDimension: 24))
+                .help("移至废纸篓")
+                .opacity(isHovered ? 1 : 0)
+                .allowsHitTesting(isHovered)
+            } else {
+                Button(role: .destructive, action: onPermanentlyDeleteAsset) {
+                    Image(systemName: "trash.slash")
+                        .font(.system(size: 11.5, weight: .medium))
+                }
+                .buttonStyle(.charkle(.subtle, size: .icon, iconDimension: 24))
+                .help("彻底删除")
+                .opacity(isHovered ? 1 : 0)
+                .allowsHitTesting(isHovered)
             }
-            .buttonStyle(.charkle(.subtle, size: .icon, iconDimension: 24))
-            .help(hasStack ? "拷贝主版本原文件 (⌘C)" : "拷贝原文件 (⌘C)")
-            .opacity(isHovered ? 1 : 0)
-            .allowsHitTesting(isHovered)
 
             if hasStack {
                 quietVersionTriggerBadge
