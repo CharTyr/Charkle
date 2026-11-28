@@ -62,7 +62,17 @@ impl DirectAPITransport {
     }
 
     fn validate_segment(seg: &str) -> CoreResult<&str> {
-        if seg.is_empty() || seg.contains('/') || seg.contains("..") {
+        if seg.is_empty()
+            || seg.contains('/')
+            || seg.contains('\\')
+            || seg.contains("..")
+            || seg.contains('?')
+            || seg.contains('#')
+            || seg.contains('%')
+            || seg
+                .bytes()
+                .any(|b| b.is_ascii_control() || b.is_ascii_whitespace())
+        {
             return Err(CoreError::InvalidPayload(format!(
                 "Invalid Drive file ID segment: `{seg}`"
             )));
@@ -154,10 +164,13 @@ impl DirectAPITransport {
     }
 
     async fn list_query(&self, query: &str) -> CoreResult<Vec<RemoteDriveFile>> {
+        const MAX_LIST_PAGES: usize = 500;
         let fields = format!("nextPageToken,files({FILE_FIELDS})");
         let mut token: Option<String> = None;
+        let mut visited_tokens: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
         let mut out = Vec::new();
-        loop {
+        for _ in 0..MAX_LIST_PAGES {
             let mut params = vec![
                 ("q", query),
                 ("supportsAllDrives", "true"),
@@ -173,9 +186,11 @@ impl DirectAPITransport {
             for f in page.files {
                 out.push(f.into_record());
             }
-            token = page.next_page_token;
-            if token.is_none() {
-                break;
+            match page.next_page_token {
+                Some(next) if !next.is_empty() && visited_tokens.insert(next.clone()) => {
+                    token = Some(next);
+                }
+                _ => break,
             }
         }
         Ok(out)

@@ -249,23 +249,25 @@ impl EditorialLayoutSolver {
         let inner_w = (group_rect.width - padding * 2.0).max(80.0);
         let inner_h = (group_rect.height - header_height - padding * 1.6).max(60.0);
 
+        fn quantize_coord(value: f64, step: f64) -> i64 {
+            if value.is_finite() {
+                (value / step)
+                    .round()
+                    .clamp(i64::MIN as f64, i64::MAX as f64) as i64
+            } else {
+                i64::MAX
+            }
+        }
         let mut ordered: Vec<&BoardNode> = child_nodes.iter().collect();
         ordered.sort_by(|lhs, rhs| {
-            if (lhs.frame.min_y() - rhs.frame.min_y()).abs() > 24.0 {
-                return lhs
-                    .frame
-                    .min_y()
-                    .partial_cmp(&rhs.frame.min_y())
-                    .unwrap_or(std::cmp::Ordering::Equal);
-            }
-            if (lhs.frame.min_x() - rhs.frame.min_x()).abs() > 12.0 {
-                return lhs
-                    .frame
-                    .min_x()
-                    .partial_cmp(&rhs.frame.min_x())
-                    .unwrap_or(std::cmp::Ordering::Equal);
-            }
-            lhs.editorial_order.cmp(&rhs.editorial_order)
+            quantize_coord(lhs.frame.min_y(), 24.0)
+                .cmp(&quantize_coord(rhs.frame.min_y(), 24.0))
+                .then_with(|| {
+                    quantize_coord(lhs.frame.min_x(), 12.0)
+                        .cmp(&quantize_coord(rhs.frame.min_x(), 12.0))
+                })
+                .then_with(|| lhs.editorial_order.cmp(&rhs.editorial_order))
+                .then_with(|| lhs.id.cmp(&rhs.id))
         });
 
         let ratios: Vec<f64> = ordered

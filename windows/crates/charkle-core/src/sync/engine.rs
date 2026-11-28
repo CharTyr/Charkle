@@ -112,6 +112,7 @@ pub struct SyncExecutionOptions {
     pub backend_id: Option<Uuid>,
     pub is_primary_backend: bool,
     pub defer_op_pruning: bool,
+    pub defer_projection_clearing: bool,
     pub progress_prefix: Option<String>,
 }
 
@@ -121,6 +122,7 @@ impl Default for SyncExecutionOptions {
             backend_id: None,
             is_primary_backend: true,
             defer_op_pruning: false,
+            defer_projection_clearing: false,
             progress_prefix: None,
         }
     }
@@ -789,12 +791,12 @@ impl DriveSyncEngine {
                 .await?;
             report.downloaded_ops += pulled_after;
             changed_boards.extend(boards_after);
-        } else if options.defer_op_pruning {
+        } else if options.defer_op_pruning && cutoff > cursor_seq {
             if let Some(ref key) = op_cursor_key {
-                let latest_seq = self.db.max_pending_op_seq().unwrap_or(cursor_seq);
-                if latest_seq > cursor_seq {
-                    let _ = self.db.set_state(key, Some(&latest_seq));
-                }
+                // Only advance to `cutoff` (the snapshot upper bound actually evaluated this cycle),
+                // NEVER to `max_pending_op_seq()`, so concurrent local edits recorded during upload
+                // remain queued for the next sync pass instead of being silently skipped.
+                let _ = self.db.set_state(key, Some(&cutoff));
             }
         }
 
@@ -805,12 +807,23 @@ impl DriveSyncEngine {
         )
         .await;
 
-        self.write_boards(&layout, transport, &scope, &changed_boards)
-            .await?;
+        self.write_boards(
+            &layout,
+            transport,
+            &scope,
+            &changed_boards,
+            options.defer_projection_clearing,
+        )
+        .await?;
 
         if config.sync_thumbnails {
-            self.upload_dirty_thumbnails(&layout, transport, Some(&remote_thumbnails))
-                .await?;
+            self.upload_dirty_thumbnails(
+                &layout,
+                transport,
+                Some(&remote_thumbnails),
+                options.defer_projection_clearing,
+            )
+            .await?;
             let (_, straggler_count) = self
                 .download_missing_remote_thumbnails(
                     &remote_thumbnails,
@@ -835,7 +848,7 @@ impl DriveSyncEngine {
         // Cross-platform safety: vectors already propagate losslessly via `ops/*.jsonl`.
         // Do NOT overwrite macOS binary-plist `.charkle/embeddings/shard-*.bin` with JSON;
         // clear local Windows projection markers once ops have been published.
-        if config.sync_embeddings {
+        if config.sync_embeddings && !options.defer_projection_clearing {
             let dirty_emb: BTreeMap<String, String> =
                 self.db.state("projection.embeddings")?.unwrap_or_default();
             if !dirty_emb.is_empty() {
@@ -1012,128 +1025,163 @@ impl DriveSyncEngine {
             }
         }
 
-        // 2c. Mirror active folder hierarchy into secondary transport
-        self.update_progress(
-            Some(SyncPhase::Uploading {
-                completed: 0,
-                total: all_folders.len(),
-            }),
-            Some("同步目录结构…".to_string()),
-            Some(0.45),
-        )
-        .await;
-        for folder in &all_folders {
-            let _ = self
-                .ensure_secondary_folder(
-                    folder.id,
-                    &folders_by_id,
-                    &layout.root,
-                    transport,
-                    &mut remote_folders,
-                    &mut HashSet::new(),
-                )
-                .await?;
-        }
-
-        // 3. Mirror locally cached active assets without clobbering primary `drive_file_id`
-        let active_assets = self.db.fetch_assets(
-            &FilterCriteria {
-                include_trashed: false,
-                ..FilterCriteria::default()
-            },
-            None,
-        )?;
-        let mut parent_listing_cache: HashMap<String, Vec<RemoteDriveFile>> = HashMap::new();
-        let unmapped_cached: Vec<AssetRecord> = active_assets
-            .into_iter()
-            .filter(|a| {
-                !remote_assets.contains_key(&format_swift_uuid(&a.id))
-                    && self.media.cached_original(a).is_some()
-            })
-            .collect();
-        if !unmapped_cached.is_empty() {
-            let total = unmapped_cached.len();
-            for (index, asset) in unmapped_cached.into_iter().enumerate() {
-                let Some(local_path) = self.media.cached_original(&asset) else {
-                    continue;
-                };
-                let target_parent_id = match asset.folder_id {
-                    Some(fid) => {
-                        self.ensure_secondary_folder(
-                            fid,
-                            &folders_by_id,
-                            &layout.root,
-                            transport,
-                            &mut remote_folders,
-                            &mut HashSet::new(),
-                        )
-                        .await?
-                    }
-                    None => layout.inbox.clone(),
-                };
-                let existing_files = match parent_listing_cache.get(&target_parent_id) {
-                    Some(cached) => cached.clone(),
-                    None => {
-                        let listed = transport
-                            .list_files(&target_parent_id)
-                            .await
-                            .unwrap_or_default();
-                        parent_listing_cache.insert(target_parent_id.clone(), listed.clone());
-                        listed
-                    }
-                };
-
-                let safe_name = sanitize_windows_filename(&asset.file_name);
-                let asset_id_str = format_swift_uuid(&asset.id);
-                let short_id = asset_id_str[..8].to_lowercase();
-                if let Some(matched) = existing_files.iter().find(|f| {
-                    !f.is_folder()
-                        && (f.name == safe_name || f.name.to_lowercase().contains(&short_id))
-                }) {
-                    remote_assets.insert(asset_id_str, matched.id.clone());
-                    continue;
-                }
-
-                let uploaded_name = if existing_files
-                    .iter()
-                    .any(|f| f.name.eq_ignore_ascii_case(&safe_name))
-                {
-                    let stem = file_stem_or_full(&safe_name);
-                    let ext = Path::new(&safe_name)
-                        .extension()
-                        .and_then(|e| e.to_str())
-                        .unwrap_or("");
-                    if ext.is_empty() {
-                        format!("{stem} ({short_id})")
-                    } else {
-                        format!("{stem} ({short_id}).{ext}")
-                    }
-                } else {
-                    safe_name
-                };
-
-                let mime = MediaPipeline::mime_type(&uploaded_name);
-                let uploaded = transport
-                    .upload_file(&local_path, &uploaded_name, mime, &target_parent_id, None)
+        // 2c. Mirror active folder hierarchy & locally cached active assets onto this secondary
+        // backend without clobbering primary `drive_file_id` (excluding already-bound remote IDs
+        // and checkpointing every 20 uploads or on early failure).
+        let mut bound_remote_ids: HashSet<String> = remote_assets.values().cloned().collect();
+        let mirror_result: CoreResult<()> = async {
+            self.update_progress(
+                Some(SyncPhase::Uploading {
+                    completed: 0,
+                    total: all_folders.len(),
+                }),
+                Some("同步目录结构…".to_string()),
+                Some(0.45),
+            )
+            .await;
+            for folder in &all_folders {
+                let _ = self
+                    .ensure_secondary_folder(
+                        folder.id,
+                        &folders_by_id,
+                        &layout.root,
+                        transport,
+                        &mut remote_folders,
+                        &mut HashSet::new(),
+                    )
                     .await?;
-                remote_assets.insert(asset_id_str, uploaded.id.clone());
-                parent_listing_cache
-                    .entry(target_parent_id)
-                    .or_default()
-                    .push(uploaded);
-
-                let frac = 0.50 + 0.25 * ((index + 1) as f64 / total.max(1) as f64);
-                self.update_progress(
-                    Some(SyncPhase::Uploading {
-                        completed: index + 1,
-                        total,
-                    }),
-                    Some(format!("镜像素材 ({}/{total})", index + 1)),
-                    Some(frac),
-                )
-                .await;
             }
+
+            // 3. Mirror locally cached active assets without clobbering primary `drive_file_id`
+            let active_assets = self.db.fetch_assets(
+                &FilterCriteria {
+                    include_trashed: false,
+                    ..FilterCriteria::default()
+                },
+                None,
+            )?;
+            let mut parent_listing_cache: HashMap<String, Vec<RemoteDriveFile>> = HashMap::new();
+            let unmapped_cached: Vec<AssetRecord> = active_assets
+                .into_iter()
+                .filter(|a| {
+                    !remote_assets.contains_key(&format_swift_uuid(&a.id))
+                        && self.media.cached_original(a).is_some()
+                })
+                .collect();
+            if !unmapped_cached.is_empty() {
+                let total = unmapped_cached.len();
+                let mut uploads_since_checkpoint = 0usize;
+                for (index, asset) in unmapped_cached.into_iter().enumerate() {
+                    let Some(local_path) = self.media.cached_original(&asset) else {
+                        continue;
+                    };
+                    let target_parent_id = match asset.folder_id {
+                        Some(fid) => {
+                            self.ensure_secondary_folder(
+                                fid,
+                                &folders_by_id,
+                                &layout.root,
+                                transport,
+                                &mut remote_folders,
+                                &mut HashSet::new(),
+                            )
+                            .await?
+                        }
+                        None => layout.inbox.clone(),
+                    };
+                    let existing_files = match parent_listing_cache.get(&target_parent_id) {
+                        Some(cached) => cached.clone(),
+                        None => {
+                            let listed = transport
+                                .list_files(&target_parent_id)
+                                .await
+                                .unwrap_or_default();
+                            parent_listing_cache.insert(target_parent_id.clone(), listed.clone());
+                            listed
+                        }
+                    };
+
+                    let safe_name = sanitize_windows_filename(&asset.file_name);
+                    let asset_id_str = format_swift_uuid(&asset.id);
+                    let short_id = asset_id_str[..8].to_lowercase();
+                    let unclaimed_by_id = existing_files.iter().find(|f| {
+                        !f.is_folder()
+                            && !bound_remote_ids.contains(&f.id)
+                            && f.name.to_lowercase().contains(&short_id)
+                    });
+                    let unclaimed_by_name = existing_files.iter().find(|f| {
+                        !f.is_folder()
+                            && !bound_remote_ids.contains(&f.id)
+                            && f.name == safe_name
+                            && match f.size {
+                                Some(remote_size) if asset.file_size_bytes > 0 => {
+                                    remote_size == asset.file_size_bytes
+                                }
+                                _ => true,
+                            }
+                    });
+                    if let Some(matched) = unclaimed_by_id.or(unclaimed_by_name) {
+                        remote_assets.insert(asset_id_str, matched.id.clone());
+                        bound_remote_ids.insert(matched.id.clone());
+                        uploads_since_checkpoint += 1;
+                        if uploads_since_checkpoint >= 20 {
+                            uploads_since_checkpoint = 0;
+                            self.db
+                                .set_state(&remote_folders_key, Some(&remote_folders))?;
+                            self.db
+                                .set_state(&remote_assets_key, Some(&remote_assets))?;
+                        }
+                        continue;
+                    }
+
+                    let taken_names: HashSet<String> = existing_files
+                        .iter()
+                        .map(|f| f.name.to_lowercase())
+                        .collect();
+                    let uploaded_name =
+                        next_available_file_name(&safe_name, &short_id, &taken_names, 0);
+
+                    let mime = MediaPipeline::mime_type(&uploaded_name);
+                    let uploaded = transport
+                        .upload_file(&local_path, &uploaded_name, mime, &target_parent_id, None)
+                        .await?;
+                    remote_assets.insert(asset_id_str, uploaded.id.clone());
+                    bound_remote_ids.insert(uploaded.id.clone());
+                    parent_listing_cache
+                        .entry(target_parent_id)
+                        .or_default()
+                        .push(uploaded);
+                    uploads_since_checkpoint += 1;
+                    if uploads_since_checkpoint >= 20 {
+                        uploads_since_checkpoint = 0;
+                        self.db
+                            .set_state(&remote_folders_key, Some(&remote_folders))?;
+                        self.db
+                            .set_state(&remote_assets_key, Some(&remote_assets))?;
+                    }
+
+                    let frac = 0.50 + 0.25 * ((index + 1) as f64 / total.max(1) as f64);
+                    self.update_progress(
+                        Some(SyncPhase::Uploading {
+                            completed: index + 1,
+                            total,
+                        }),
+                        Some(format!("镜像素材 ({}/{total})", index + 1)),
+                        Some(frac),
+                    )
+                    .await;
+                }
+            }
+            Ok(())
         }
+        .await;
+        if mirror_result.is_err() {
+            let _ = self
+                .db
+                .set_state(&remote_folders_key, Some(&remote_folders));
+            let _ = self.db.set_state(&remote_assets_key, Some(&remote_assets));
+        }
+        mirror_result?;
 
         self.db
             .set_state(&remote_folders_key, Some(&remote_folders))?;
@@ -1204,11 +1252,22 @@ impl DriveSyncEngine {
             Some(0.88),
         )
         .await;
-        self.write_boards(&layout, transport, &scope, &changed_boards)
-            .await?;
+        self.write_boards(
+            &layout,
+            transport,
+            &scope,
+            &changed_boards,
+            options.defer_projection_clearing,
+        )
+        .await?;
         if config.sync_thumbnails {
-            self.upload_dirty_thumbnails(&layout, transport, Some(&remote_thumbnails))
-                .await?;
+            self.upload_dirty_thumbnails(
+                &layout,
+                transport,
+                Some(&remote_thumbnails),
+                options.defer_projection_clearing,
+            )
+            .await?;
             let (_, straggler_count) = self
                 .download_missing_remote_thumbnails(
                     &remote_thumbnails,
@@ -1222,7 +1281,7 @@ impl DriveSyncEngine {
                 .await?;
             report.downloaded_thumbnails += straggler_count;
         }
-        if config.sync_embeddings {
+        if config.sync_embeddings && !options.defer_projection_clearing {
             let dirty_emb: BTreeMap<String, String> =
                 self.db.state("projection.embeddings")?.unwrap_or_default();
             if !dirty_emb.is_empty() {
@@ -2081,23 +2140,56 @@ impl DriveSyncEngine {
             }
         }
 
-        // Clear stale mounted-path deletion markers once absent on mounted filesystem
-        if is_mounted {
+        // Clear stale path-based deletion markers once absent on the active remote root
+        // (covers MountedVolume, iCloud Drive, WebDAV, and LocalFolder path-addressed backends).
+        if transport.is_path_based_transport() {
+            let (prefix, folder_prefix) = if is_mounted {
+                (
+                    format!("deleted.drive.{MOUNTED_PATH_ID_PREFIX}"),
+                    format!("deleted.folder.drive.{MOUNTED_PATH_ID_PREFIX}"),
+                )
+            } else if transport.is_icloud_drive() {
+                (
+                    format!("deleted.drive.{ICLOUD_PATH_ID_PREFIX}"),
+                    format!("deleted.folder.drive.{ICLOUD_PATH_ID_PREFIX}"),
+                )
+            } else {
+                (
+                    "deleted.drive.".to_string(),
+                    "deleted.folder.drive.".to_string(),
+                )
+            };
+            let belongs_to_current_path_root = |remote_id: &str| -> bool {
+                if is_mounted {
+                    return remote_id.starts_with(MOUNTED_PATH_ID_PREFIX);
+                }
+                if transport.is_icloud_drive() {
+                    return remote_id.starts_with(ICLOUD_PATH_ID_PREFIX);
+                }
+                if !transport.accepts_remote_id(remote_id) {
+                    return false;
+                }
+                if !layout.root.is_empty() && layout.root != crate::sync::DRIVE_ROOT_ID {
+                    remote_id == layout.root || remote_id.starts_with(&format!("{}/", layout.root))
+                } else {
+                    remote_id.contains('/')
+                }
+            };
             let mut markers_to_clear: Vec<String> = Vec::new();
-            let prefix = format!("deleted.drive.{MOUNTED_PATH_ID_PREFIX}");
             for (key, _) in self.db.states_with_prefix::<bool>(&prefix)? {
                 if let Some(remote_id) = key.strip_prefix("deleted.drive.") {
-                    if !update.current.files.contains_key(remote_id)
+                    if belongs_to_current_path_root(remote_id)
+                        && !update.current.files.contains_key(remote_id)
                         && !pending_deleted_drive_ids.contains(remote_id)
                     {
                         markers_to_clear.push(key);
                     }
                 }
             }
-            let folder_prefix = format!("deleted.folder.drive.{MOUNTED_PATH_ID_PREFIX}");
             for (key, _) in self.db.states_with_prefix::<bool>(&folder_prefix)? {
                 if let Some(remote_id) = key.strip_prefix("deleted.folder.drive.") {
-                    if !update.current.files.contains_key(remote_id)
+                    if belongs_to_current_path_root(remote_id)
+                        && !update.current.files.contains_key(remote_id)
                         && !pending_deleted_folder_drive_ids.contains(remote_id)
                     {
                         markers_to_clear.push(key);
@@ -2476,7 +2568,7 @@ impl DriveSyncEngine {
                             linked.insert(file.id.clone(), saved.id);
                             if !had_existing
                                 && (saved.id == stable_uuid(&format!("asset:{}", file.id))
-                                    || file.id.starts_with(MOUNTED_PATH_ID_PREFIX))
+                                    || transport.is_path_based_transport())
                             {
                                 discovered += 1;
                                 discovered_ids.push(saved.id);
@@ -2705,7 +2797,7 @@ impl DriveSyncEngine {
             .map(|m| m.id)
             .unwrap_or_else(|| stable_uuid(&format!("asset:{}", file.id)));
         if self.db.is_tombstoned("asset", id)? {
-            if matching.is_none() && file.id.starts_with(MOUNTED_PATH_ID_PREFIX) {
+            if matching.is_none() && transport.is_path_based_transport() {
                 id = Uuid::new_v4();
             } else {
                 return Ok(RemoteIngestOutcome::Skipped);
@@ -3223,6 +3315,7 @@ impl DriveSyncEngine {
         transport: &dyn DriveTransport,
         scope: &str,
         changed_boards: &HashSet<Uuid>,
+        defer_projection_clearing: bool,
     ) -> CoreResult<()> {
         let dirty: BTreeMap<String, String> =
             self.db.state("projection.boards")?.unwrap_or_default();
@@ -3267,7 +3360,9 @@ impl DriveSyncEngine {
             }
         }
 
-        self.db.clear_projections("boards", &cleared)?;
+        if !defer_projection_clearing {
+            self.db.clear_projections("boards", &cleared)?;
+        }
         self.db.set_state(&synced_key, Some(&true))?;
         Ok(())
     }
@@ -3277,6 +3372,7 @@ impl DriveSyncEngine {
         layout: &Layout,
         transport: &dyn DriveTransport,
         prefetched: Option<&HashMap<String, RemoteDriveFile>>,
+        defer_projection_clearing: bool,
     ) -> CoreResult<()> {
         let dirty: BTreeMap<String, String> =
             self.db.state("projection.thumbnails")?.unwrap_or_default();
@@ -3319,7 +3415,9 @@ impl DriveSyncEngine {
             }
             cleared.push((id_upper.clone(), ver.clone()));
         }
-        self.db.clear_projections("thumbnails", &cleared)?;
+        if !defer_projection_clearing {
+            self.db.clear_projections("thumbnails", &cleared)?;
+        }
         Ok(())
     }
 
@@ -3461,6 +3559,12 @@ impl DriveSyncEngine {
                                 .write_thumbnail_bytes(job.uuid, ThumbnailTier::Grid520, &data)
                                 .is_ok()
                             {
+                                // Invalidate any stale higher-resolution preview so cover updates
+                                // from another device show immediately in Quick Look.
+                                let _ = fs::remove_file(
+                                    self.media
+                                        .thumbnail_path(job.uuid, ThumbnailTier::Preview1400),
+                                );
                                 stamps.insert(job.id_upper, job.stamp);
                                 stamps_dirty = true;
                                 downloaded_count += 1;

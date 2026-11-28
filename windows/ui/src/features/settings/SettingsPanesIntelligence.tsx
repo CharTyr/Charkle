@@ -119,6 +119,10 @@ const DEFAULT_TYPESAFE_CONFIG: TypeSafeExperimentalConfig = {
   enableSemanticSearch: true,
   enableInboxSmartTriage: true,
   enableCuratorVisualRerank: true,
+  enableClosedSetTagging: true,
+  autoApplyHighConfidenceTags: false,
+  highConfidenceTagThreshold: 0.82,
+  suggestedTagThreshold: 0.52,
 };
 
 function endpointFormatLabel(format: CustomAIEndpointFormat): string {
@@ -222,9 +226,10 @@ export const AISettingsPane: React.FC = () => {
   const testTypesafeConnection = useSyncAIStore((s) => s.testTypesafeConnection);
 
   const [aiDraft, setAiDraft] = useState<AIProviderConfig>(aiState?.config ?? DEFAULT_AI_CONFIG);
-  const [tsDraft, setTsDraft] = useState<TypeSafeExperimentalConfig>(
-    typesafeState?.config ?? DEFAULT_TYPESAFE_CONFIG,
-  );
+  const [tsDraft, setTsDraft] = useState<TypeSafeExperimentalConfig>({
+    ...DEFAULT_TYPESAFE_CONFIG,
+    ...(typesafeState?.config ?? {}),
+  });
 
   const [showCloudModal, setShowCloudModal] = useState(false);
   const [apiKeyInput, setApiKeyInput] = useState('');
@@ -243,7 +248,9 @@ export const AISettingsPane: React.FC = () => {
   }, [aiState, showCloudModal]);
 
   useEffect(() => {
-    if (typesafeState && !showTypeSafeModal) setTsDraft(typesafeState.config);
+    if (typesafeState && !showTypeSafeModal) {
+      setTsDraft({ ...DEFAULT_TYPESAFE_CONFIG, ...typesafeState.config });
+    }
   }, [typesafeState, showTypeSafeModal]);
 
   const closeCloudModal = () => {
@@ -255,7 +262,7 @@ export const AISettingsPane: React.FC = () => {
   const closeTypeSafeModal = () => {
     setShowTypeSafeModal(false);
     setTsKeyInput('');
-    if (typesafeState) setTsDraft(typesafeState.config);
+    if (typesafeState) setTsDraft({ ...DEFAULT_TYPESAFE_CONFIG, ...typesafeState.config });
   };
 
   const trimmedAiBaseUrl = aiDraft.baseURL.trim();
@@ -273,9 +280,17 @@ export const AISettingsPane: React.FC = () => {
   const hasTypeSafeKey = typesafeState?.hasApiKey ?? false;
   const usage = aiState?.usage;
 
-  const isLocalOllama =
-    aiDraft.provider === 'openAICompatible' &&
-    (aiDraft.baseURL.toLowerCase().includes('localhost') || aiDraft.baseURL.includes('127.0.0.1'));
+  const isLocalOllama = (() => {
+    if (aiDraft.provider !== 'openAICompatible') return false;
+    try {
+      const parsed = new URL(aiDraft.baseURL.trim());
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+      const host = parsed.hostname.toLowerCase();
+      return host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '[::1]';
+    } catch {
+      return false;
+    }
+  })();
 
   const isCloudProviderReady = (() => {
     switch (aiDraft.provider) {
@@ -361,7 +376,9 @@ export const AISettingsPane: React.FC = () => {
     tsDraft.enableSemanticSearch,
     tsDraft.enableInboxSmartTriage,
     tsDraft.enableCuratorVisualRerank,
+    tsDraft.enableClosedSetTagging,
   ].filter(Boolean).length;
+  const isPureJevTaggingReady = tsDraft.enabled && tsDraft.enableClosedSetTagging && hasTypeSafeKey;
 
   const todayTotal = (usage?.standard.todayRequests ?? 0) + (usage?.jev.todayRequests ?? 0);
   const allTotalRequests = usage?.totalRequests ?? 0;
@@ -500,12 +517,16 @@ export const AISettingsPane: React.FC = () => {
           </div>
         )}
 
-        {aiDraft.provider !== 'disabled' && (
+        {(aiDraft.provider !== 'disabled' || isPureJevTaggingReady) && (
           <>
             <SettingsCardDivider />
             <SettingsRow
               title="导入时自动分析"
-              subtitle="收藏新素材后自动补充画面描述与建议标签，让灵感词生板更懂你的参考库"
+              subtitle={
+                aiDraft.provider === 'disabled'
+                  ? '已启用 Jev 零幻觉闭集打标：收藏新素材后将自动匹配已有标签词库（无需配置普通大模型）'
+                  : '收藏新素材后自动补充画面描述与建议标签，让灵感词生板更懂你的参考库'
+              }
             >
               <SettingsSwitch
                 checked={aiDraft.autoAnalyzeOnImport}
@@ -516,20 +537,24 @@ export const AISettingsPane: React.FC = () => {
               />
             </SettingsRow>
 
-            <SettingsCardDivider />
+            {aiDraft.provider !== 'disabled' && (
+              <>
+                <SettingsCardDivider />
 
-            <SettingsRow
-              title="仅上传轻量化预览图"
-              subtitle="大幅节省网络流量，避免发送原始高清大图"
-            >
-              <SettingsSwitch
-                checked={aiDraft.sendThumbnailsToCloud}
-                ariaLabel="仅上传轻量化预览图"
-                onChange={(sendThumbnailsToCloud) =>
-                  persistAIQuiet({ ...aiDraft, sendThumbnailsToCloud })
-                }
-              />
-            </SettingsRow>
+                <SettingsRow
+                  title="仅上传轻量化预览图"
+                  subtitle="大幅节省网络流量，避免发送原始高清大图"
+                >
+                  <SettingsSwitch
+                    checked={aiDraft.sendThumbnailsToCloud}
+                    ariaLabel="仅上传轻量化预览图"
+                    onChange={(sendThumbnailsToCloud) =>
+                      persistAIQuiet({ ...aiDraft, sendThumbnailsToCloud })
+                    }
+                  />
+                </SettingsRow>
+              </>
+            )}
           </>
         )}
       </SettingsSection>
@@ -554,8 +579,8 @@ export const AISettingsPane: React.FC = () => {
               title="TypeSafe 视觉定位引擎"
               subtitle={
                 hasTypeSafeKey
-                  ? `已配置密钥 · 模型 ${tsDraft.model} · 已开启 ${enabledCapabilitiesCount}/6 项增强场景`
-                  : '尚未填写 TypeSafe API 密钥，填写后即可启用精准定位与看图精排'
+                  ? `已配置密钥，模型 ${tsDraft.model}，已开启 ${enabledCapabilitiesCount}/7 项增强场景`
+                  : '尚未填写 TypeSafe API 密钥，填写后即可启用精准定位、闭集打标与看图精排'
               }
               subtitleTone={hasTypeSafeKey ? 'positive' : 'warning'}
             >
@@ -1201,6 +1226,13 @@ export const AISettingsPane: React.FC = () => {
                 checked: tsDraft.enableCuratorVisualRerank,
                 onChange: (v: boolean) => setTsDraft({ ...tsDraft, enableCuratorVisualRerank: v }),
               },
+              {
+                key: 'enableClosedSetTagging',
+                title: '零幻觉闭集自动打标',
+                subtitle: '单次多 Noul 校验已有规范标签库，永不臆造新词；已有描述时跳过慢速大模型',
+                checked: tsDraft.enableClosedSetTagging,
+                onChange: (v: boolean) => setTsDraft({ ...tsDraft, enableClosedSetTagging: v }),
+              },
             ] as const
           ).map((item, idx) => (
             <React.Fragment key={item.key}>
@@ -1220,6 +1252,54 @@ export const AISettingsPane: React.FC = () => {
               </div>
             </React.Fragment>
           ))}
+          {tsDraft.enableClosedSetTagging && (
+            <>
+              <SettingsCardDivider />
+              <div className="px-3 py-2.5 flex flex-col gap-2.5 bg-[var(--bg-subtle)]/40">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="text-[12px] font-medium text-[var(--text-primary)]">
+                      高置信度自动写入正式标签
+                    </div>
+                    <div className="text-[11px] text-[var(--text-secondary)]">
+                      开启后达到阈值的高确信度标签将直接写入正式标签并参与同步；关闭时仅写入建议标签
+                    </div>
+                  </div>
+                  <SettingsSwitch
+                    checked={tsDraft.autoApplyHighConfidenceTags}
+                    ariaLabel="高置信度自动写入正式标签"
+                    onChange={(autoApplyHighConfidenceTags) =>
+                      setTsDraft({ ...tsDraft, autoApplyHighConfidenceTags })
+                    }
+                  />
+                </div>
+                <div className="flex flex-col gap-1">
+                  <div className="flex items-center justify-between text-[11.5px] font-medium text-[var(--text-secondary)]">
+                    <span>高置信度自动写入阈值</span>
+                    <span className="charkle-tabular text-[var(--text-primary)]">
+                      {Math.round((tsDraft.highConfidenceTagThreshold ?? 0.82) * 100)}%
+                    </span>
+                  </div>
+                  <CharkleSlider
+                    variant="standard"
+                    min={0.7}
+                    max={0.95}
+                    step={0.01}
+                    value={Math.min(0.95, Math.max(0.7, tsDraft.highConfidenceTagThreshold ?? 0.82))}
+                    valueText={`${Math.round((tsDraft.highConfidenceTagThreshold ?? 0.82) * 100)}%`}
+                    ariaLabel="高置信度自动写入阈值"
+                    onChange={(next) =>
+                      setTsDraft({
+                        ...tsDraft,
+                        highConfidenceTagThreshold: Number(next.toFixed(2)),
+                      })
+                    }
+                    className="w-full"
+                  />
+                </div>
+              </div>
+            </>
+          )}
         </div>
 
         <SettingsDisclosureGroup title="自定义服务地址（可选）">
@@ -1381,20 +1461,34 @@ export const ExternalAgentsSettingsPane: React.FC = () => {
   const selfCheckPassed = useSyncAIStore((s) => s.agentSelfCheckPassed);
   const selfCheckSummary = useSyncAIStore((s) => s.agentSelfCheckSummary);
   const saveExternalAgentConfig = useSyncAIStore((s) => s.saveExternalAgentConfig);
+  const mintExternalAgentToken = useSyncAIStore((s) => s.mintExternalAgentToken);
+  const toggleExternalAgentToken = useSyncAIStore((s) => s.toggleExternalAgentToken);
+  const revokeExternalAgentToken = useSyncAIStore((s) => s.revokeExternalAgentToken);
   const runExternalAgentSelfCheck = useSyncAIStore((s) => s.runExternalAgentSelfCheck);
   const setStatusFeedback = useSyncAIStore((s) => s.setStatusFeedback);
   const pushToast = useCoordinatorStore((s) => s.pushToast);
 
+  const [newTokenName, setNewTokenName] = useState('');
+  const [newTokenAccess, setNewTokenAccess] = useState<ExternalAgentAccessLevel>('readOnly');
+  const [mintingToken, setMintingToken] = useState(false);
+  const [revealedToken, setRevealedToken] = useState<{ name: string; plaintext: string } | null>(
+    null,
+  );
+
   const cfg = agentState?.config ?? {
     mcpEnabled: true,
-    cliEnabled: true,
+    httpMCPEnabled: true,
+    allowRemoteHTTPMCP: false,
     accessLevel: 'readOnly' as ExternalAgentAccessLevel,
+    tokens: [],
   };
 
   const helperPath = agentState?.cliBinaryPath ?? 'charkle-cli.exe';
   const libraryDir = agentState?.libraryDir ?? '';
-  const totalTools = (agentState?.readToolCount ?? 12) + (agentState?.writeToolCount ?? 8);
-  const resourceCount = agentState?.resourceCount ?? 6;
+  const totalTools = (agentState?.readToolCount ?? 4) + (agentState?.writeToolCount ?? 6);
+  const resourceCount = agentState?.resourceCount ?? 7;
+  const httpEndpoint = agentState?.httpMcpEndpointUrl ?? 'http://127.0.0.1:41937/api/v1/mcp';
+  const httpRunning = agentState?.httpMcpRunning ?? false;
   const claudeCodeCmd = libraryDir
     ? `claude mcp add charkle -- "${helperPath}" --library-dir "${libraryDir}" mcp`
     : `claude mcp add charkle -- "${helperPath}" mcp`;
@@ -1402,6 +1496,7 @@ export const ExternalAgentsSettingsPane: React.FC = () => {
     ? `codex mcp add charkle -- "${helperPath}" --library-dir "${libraryDir}" mcp`
     : `codex mcp add charkle -- "${helperPath}" mcp`;
   const mcpJson = agentState?.mcpConfigJson ?? '';
+  const httpMcpJson = agentState?.httpMcpConfigJson ?? '';
 
   const updatePolicy = (patch: Partial<typeof cfg>) => {
     void saveExternalAgentConfig({ ...cfg, ...patch });
@@ -1419,16 +1514,36 @@ export const ExternalAgentsSettingsPane: React.FC = () => {
     }
   };
 
+  const handleMintToken = async () => {
+    if (mintingToken) return;
+    setMintingToken(true);
+    try {
+      const res = await mintExternalAgentToken(newTokenName.trim() || '远程 Agent 密钥', newTokenAccess);
+      if (res) {
+        setRevealedToken({ name: res.token.name, plaintext: res.plaintext });
+        setNewTokenName('');
+      }
+    } finally {
+      setMintingToken(false);
+    }
+  };
+
+  const accessLevelLabel = (level: ExternalAgentAccessLevel): string => {
+    if (level === 'readWriteOrganize') return '全局整理与生板';
+    if (level === 'inboxAndEnrich') return '仅收件箱与打标';
+    return '仅只读';
+  };
+
   return (
     <div data-testid="settings-pane-externalAgents" className="flex flex-col gap-5">
       {/* 1. Service Switches & Safety Boundary */}
-      <SettingsSection title="服务开关与安全边界">
+      <SettingsSection title="Pure MCP v2 服务开关与安全边界">
         <SettingsRow
-          title="启用 MCP 服务"
+          title="启用本地 stdio MCP 服务"
           subtitle={
             cfg.mcpEnabled
-              ? `原生 MCP 助手已就绪 · ${totalTools} 项安全工具与 ${resourceCount} 项资源，零额外运行时依赖`
-              : '已关闭 · 所有 MCP 客户端请求将被即时拦截（不影响终端 CLI）'
+              ? `已就绪，提供 ${totalTools} 项正交工具与 ${resourceCount} 项资源，支持 Claude Code / Cursor / Codex 本机直连`
+              : '已关闭，所有本机 stdio MCP 请求将被即时拦截'
           }
           subtitleTone={cfg.mcpEnabled ? 'positive' : 'default'}
         >
@@ -1446,35 +1561,58 @@ export const ExternalAgentsSettingsPane: React.FC = () => {
         <SettingsCardDivider />
 
         <SettingsRow
-          title="启用 CLI 命令行服务"
+          title="启用 Streamable HTTP MCP 服务"
           subtitle={
-            cfg.cliEnabled
-              ? '已开放终端命令行 · 支持脚本查询、整理与情绪板导出'
-              : '已关闭 · 终端 charkle 读写命令将被即时拦截（不影响 MCP 客户端）'
+            cfg.httpMCPEnabled
+              ? `端点：${httpEndpoint}（需签发 Scoped Bearer Token 鉴权）`
+              : '已关闭，HTTP /api/v1/mcp 端点与临时下载票据将被拒绝'
           }
-          subtitleTone={cfg.cliEnabled ? 'positive' : 'default'}
+          subtitleTone={cfg.httpMCPEnabled && httpRunning ? 'positive' : 'default'}
         >
           <SettingsStatusBadge
-            text={cfg.cliEnabled ? '已开启' : '已关闭'}
-            tone={cfg.cliEnabled ? 'positive' : 'neutral'}
+            text={cfg.httpMCPEnabled ? (httpRunning ? '运行中' : '待就绪') : '已关闭'}
+            tone={cfg.httpMCPEnabled && httpRunning ? 'positive' : 'neutral'}
           />
           <SettingsSwitch
-            checked={cfg.cliEnabled}
-            ariaLabel="启用 CLI 命令行服务"
-            onChange={(cliEnabled) => updatePolicy({ cliEnabled })}
+            checked={cfg.httpMCPEnabled}
+            ariaLabel="启用 HTTP MCP 服务"
+            onChange={(httpMCPEnabled) => updatePolicy({ httpMCPEnabled })}
           />
         </SettingsRow>
 
-        {(cfg.mcpEnabled || cfg.cliEnabled) && (
+        {cfg.httpMCPEnabled && (
+          <>
+            <SettingsCardDivider />
+            <SettingsRow
+              title="允许局域网 / 远程 HTTP MCP 访问"
+              subtitle={
+                cfg.allowRemoteHTTPMCP
+                  ? '已监听 0.0.0.0 供 Tailscale / 局域网 Agent 连接；浏览器扩展与自动配对仍严格锁定 127.0.0.1 回环'
+                  : '仅监听 127.0.0.1 本机回环；需要跨设备 Agent 连接时可按需开启'
+              }
+              subtitleTone={cfg.allowRemoteHTTPMCP ? 'warning' : 'default'}
+            >
+              <SettingsSwitch
+                checked={cfg.allowRemoteHTTPMCP}
+                ariaLabel="允许远程 HTTP MCP"
+                onChange={(allowRemoteHTTPMCP) => updatePolicy({ allowRemoteHTTPMCP })}
+              />
+            </SettingsRow>
+          </>
+        )}
+
+        {(cfg.mcpEnabled || cfg.httpMCPEnabled) && (
           <>
             <SettingsCardDivider />
 
             <SettingsRow
-              title="外部访问权限级别"
+              title="本地 stdio 默认权限级别"
               subtitle={
                 cfg.accessLevel === 'readWriteOrganize'
-                  ? '允许归类、打标、创建文件夹与生成情绪板，仍永久禁止彻底删除文件'
-                  : '仅允许查询、语义检索、看联系表与导出，禁止写入素材库'
+                  ? '允许全部 10 项工具（整理、目录、情绪板、去重、回滚），仍永久禁止彻底删除文件'
+                  : cfg.accessLevel === 'inboxAndEnrich'
+                    ? '允许只读检索 + 入库 + 为收件箱素材打标/备注，禁止修改已归档资产与目录结构'
+                    : '仅允许查询、语义检索、联系表看图与情绪板读取，禁止写入素材库'
               }
             >
               <SegmentedControl<ExternalAgentAccessLevel>
@@ -1483,7 +1621,8 @@ export const ExternalAgentsSettingsPane: React.FC = () => {
                 ariaLabel="外部 Agent 权限级别"
                 options={[
                   { value: 'readOnly', label: '仅只读' },
-                  { value: 'readWriteOrganize', label: '允许整理与生板' },
+                  { value: 'inboxAndEnrich', label: '仅收件箱与打标' },
+                  { value: 'readWriteOrganize', label: '全局整理与生板' },
                 ]}
               />
             </SettingsRow>
@@ -1491,10 +1630,10 @@ export const ExternalAgentsSettingsPane: React.FC = () => {
             <SettingsCardDivider />
 
             <SettingsRow
-              title="原生助手与数据库连通自检"
+              title="MCP 服务与数据库连通自检"
               subtitle={
                 selfCheckSummary ??
-                `验证内置 charkle 助手程序、本地素材库与 ${totalTools} 项安全工具连通性`
+                `验证 stdio 助手、HTTP MCP 端点、本地素材库与 ${totalTools} 项工具连通性`
               }
               subtitleTone={
                 selfCheckPassed == null ? 'default' : selfCheckPassed ? 'positive' : 'warning'
@@ -1512,114 +1651,198 @@ export const ExternalAgentsSettingsPane: React.FC = () => {
             <InlineGuideDisclosure title="数据安全如何保障？">
               <SettingsGuideStep
                 number="1"
-                title="MCP 与 CLI 独立管控，关闭即刻生效"
-                detail="可按需只保留其中一项服务；关闭任意开关后，对应通道的新请求会立即被拦截。"
+                title="三档权限边界与可撤销操作审计"
+                detail="区分「仅只读 / 仅收件箱与打标 / 全局整理与生板」三档权限，每次批量写操作均记录 run_id，随时可通过 rollback_run 一键回滚。"
               />
               <SettingsGuideStep
                 number="2"
-                title="永不开放公网或局域网端口"
-                detail="所有调用均通过本机标准输入输出（stdio）或本地 CLI 与素材库通信，外部网络无法访问。"
+                title="Scoped Token SHA-256 哈希存储与回环隔离"
+                detail="HTTP MCP 仅在签发瞬间展示一次明文令牌，磁盘只保留 SHA-256 哈希；即使开启远程 HTTP MCP，浏览器扩展自动配对也永远只允许 127.0.0.1 回环访问。"
               />
               <SettingsGuideStep
                 number="3"
-                title="永不允许彻底删除素材或文件夹"
-                detail="即使开启「允许整理与生板」，外部 Agent 也只能将素材移入回收站，随时可恢复。"
+                title="永不允许彻底删除素材或目录"
+                detail="所有去重与清理工具仅执行软移入回收站，随时可恢复，绝不执行物理删除。"
               />
             </InlineGuideDisclosure>
           </>
         )}
       </SettingsSection>
 
-      {/* 2. MCP Client Integration */}
+      {/* 2. Scoped HTTP MCP Tokens */}
       <SettingsSection
-        title="接入常用 AI 客户端（MCP）"
-        caption={cfg.mcpEnabled ? undefined : 'MCP 服务已关闭 · 开启上方开关后生效'}
-        className={cfg.mcpEnabled ? '' : 'opacity-72'}
+        title="HTTP MCP 专属令牌（Scoped Tokens）"
+        caption={
+          cfg.httpMCPEnabled
+            ? `已签发 ${cfg.tokens.length} 个令牌（每个令牌拥有独立权限边界）`
+            : '开启上方 Streamable HTTP MCP 开关后生效'
+        }
+        className={cfg.httpMCPEnabled ? '' : 'opacity-72'}
+      >
+        <div className="flex flex-wrap items-center gap-2 px-3.5 py-3">
+          <div className="flex-1 min-w-[160px]">
+            <SettingsInput
+              value={newTokenName}
+              onChange={(e) => setNewTokenName(e.target.value)}
+              placeholder="令牌名称（例如：云端策展 Agent）"
+              aria-label="HTTP MCP 令牌名称"
+            />
+          </div>
+          <div className="w-[152px]">
+            <CustomSelect
+              value={newTokenAccess}
+              onChange={(val) => setNewTokenAccess(val as ExternalAgentAccessLevel)}
+              ariaLabel="新令牌权限级别"
+              options={[
+                { value: 'readOnly', label: '仅只读' },
+                { value: 'inboxAndEnrich', label: '仅收件箱与打标' },
+                { value: 'readWriteOrganize', label: '全局整理与生板' },
+              ]}
+            />
+          </div>
+          <SettingsButton
+            variant="accent"
+            loading={mintingToken}
+            onClick={() => void handleMintToken()}
+          >
+            签发令牌
+          </SettingsButton>
+        </div>
+
+        {revealedToken && (
+          <>
+            <SettingsCardDivider />
+            <div
+              data-testid="minted-token-banner"
+              className="px-3.5 py-3 flex flex-col gap-2 bg-[var(--accent-subtle)]"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[12px] font-semibold text-[var(--text-primary)]">
+                  新令牌「{revealedToken.name}」仅显示此一次，请立即复制保存：
+                </span>
+                <div className="flex items-center gap-1.5">
+                  <SettingsButton
+                    variant="accent"
+                    onClick={() => void copyText(revealedToken.plaintext, '已复制新签发的 MCP 令牌')}
+                  >
+                    <Copy16Regular className="w-3.5 h-3.5 shrink-0" />
+                    复制明文
+                  </SettingsButton>
+                  <SettingsButton variant="secondary" onClick={() => setRevealedToken(null)}>
+                    我已保存
+                  </SettingsButton>
+                </div>
+              </div>
+              <SettingsCodeSnippet text={revealedToken.plaintext} testId="minted-token-plaintext" />
+            </div>
+          </>
+        )}
+
+        {cfg.tokens.length > 0 && (
+          <>
+            <SettingsCardDivider />
+            <div className="flex flex-col divide-y divide-[var(--border-subtle)]">
+              {cfg.tokens.map((tok) => (
+                <div
+                  key={tok.id}
+                  data-testid={`mcp-token-row-${tok.id}`}
+                  className="px-3.5 py-2.5 flex items-center justify-between gap-3"
+                >
+                  <div className="min-w-0 flex flex-col gap-0.5">
+                    <div className="flex items-center gap-2">
+                      <span className="text-[12.5px] font-medium text-[var(--text-primary)] truncate">
+                        {tok.name}
+                      </span>
+                      <SettingsStatusBadge
+                        text={accessLevelLabel(tok.accessLevel)}
+                        tone={tok.isEnabled ? 'positive' : 'neutral'}
+                      />
+                    </div>
+                    <span className="charkle-mono text-[11px] text-[var(--text-tertiary)]">
+                      {tok.tokenPrefix}…
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <SettingsSwitch
+                      checked={tok.isEnabled}
+                      ariaLabel={`切换令牌 ${tok.name}`}
+                      onChange={(enabled) => void toggleExternalAgentToken(tok.id, enabled)}
+                    />
+                    <SettingsButton
+                      variant="secondary"
+                      onClick={() => void revokeExternalAgentToken(tok.id)}
+                    >
+                      吊销
+                    </SettingsButton>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+      </SettingsSection>
+
+      {/* 3. MCP Client Integration (stdio + Streamable HTTP) */}
+      <SettingsSection
+        title="接入常用 AI 客户端（stdio / HTTP MCP）"
+        caption={
+          cfg.mcpEnabled || cfg.httpMCPEnabled
+            ? undefined
+            : '开启上方任一 MCP 服务开关后生效'
+        }
+        className={cfg.mcpEnabled || cfg.httpMCPEnabled ? '' : 'opacity-72'}
       >
         <SettingsRow
-          title="Claude Code"
+          title="Claude Code / Codex CLI（本机 stdio）"
           subtitle="在终端执行一行命令即可将 Charkle 注册为原生 MCP 工具"
         >
           <SettingsButton
             variant="accent"
             onClick={() => void copyText(claudeCodeCmd, '已复制 Claude Code 接入命令')}
           >
-            一键复制命令
+            复制 Claude 命令
           </SettingsButton>
         </SettingsRow>
 
-        <InlineGuideDisclosure title="查看 Claude Code / Codex CLI 接入命令">
+        <InlineGuideDisclosure title="查看 Claude Code / Codex CLI 接入命令与 stdio JSON">
           <SettingsCodeSnippet text={`${claudeCodeCmd}\n${codexCmd}`} />
-          <SettingsGuideStep
-            number="1"
-            title="在终端粘贴运行对应命令，完成后重启对话"
-            detail="输入「看看我的 Charkle 素材库概览」即可验证连通。"
-          />
+          <SettingsCodeSnippet text={mcpJson} testId="mcp-config-json-snippet" />
+          <div className="flex justify-end">
+            <SettingsButton
+              variant="standard"
+              onClick={() => void copyText(mcpJson, '已复制 stdio MCP JSON 配置')}
+            >
+              <Copy16Regular className="w-3.5 h-3.5 shrink-0" />
+              复制 stdio JSON
+            </SettingsButton>
+          </div>
         </InlineGuideDisclosure>
 
         <SettingsCardDivider />
 
         <SettingsRow
-          title="Cursor / Antigravity / 其他 MCP 客户端"
-          subtitle="复制标准 MCP JSON 配置粘贴至对应客户端的配置文件"
+          title="Streamable HTTP MCP 客户端"
+          subtitle={<span className="charkle-mono text-[11px] break-all">{httpEndpoint}</span>}
         >
           <SettingsButton
             variant="standard"
-            onClick={() => void copyText(mcpJson, '已复制 MCP JSON 配置')}
+            onClick={() => void copyText(httpMcpJson, '已复制 Streamable HTTP MCP JSON 配置')}
           >
             <Copy16Regular className="w-3.5 h-3.5 shrink-0" />
-            复制 JSON 配置
+            复制 HTTP JSON
           </SettingsButton>
         </SettingsRow>
 
-        <InlineGuideDisclosure title="查看 MCP JSON 配置片段" defaultExpanded>
-          <SettingsCodeSnippet text={mcpJson} testId="mcp-config-json-snippet" />
-        </InlineGuideDisclosure>
-      </SettingsSection>
-
-      {/* 3. Terminal CLI */}
-      <SettingsSection
-        title="终端命令行（charkle CLI）"
-        caption={cfg.cliEnabled ? undefined : 'CLI 服务已关闭 · 开启上方开关后生效'}
-        className={cfg.cliEnabled ? '' : 'opacity-72'}
-      >
-        <SettingsRow
-          title="本机命令行程序路径"
-          subtitle={<span className="charkle-mono text-[11px] break-all">{helperPath}</span>}
-        >
-          <SettingsButton
-            variant="standard"
-            onClick={() => void copyText(helperPath, '已复制 charkle 可执行文件路径')}
-          >
-            <Copy16Regular className="w-3.5 h-3.5 shrink-0" />
-            复制路径
-          </SettingsButton>
-        </SettingsRow>
-
-        <InlineGuideDisclosure title="常用命令行示例（交互终端自动排版，管道自动输出单行紧凑 JSON）">
-          <SettingsCodeSnippet
-            text={[
-              'charkle-cli.exe doctor',
-              'charkle-cli.exe overview',
-              'charkle-cli.exe search --folder 插画 --tone cool --diversify --out sheet.jpg',
-              'charkle-cli.exe semantic "夏日海边蓝天女孩" --fast --diversify --limit 12',
-              'charkle-cli.exe semantic --queries "人物动态,夏日海边晴空,极简白底" --out brief.jpg',
-              'charkle-cli.exe similar <asset-id> --unlike-ids <avoid-id> --limit 8',
-              'charkle-cli.exe asset <id1> <id2> <id3>',
-              'charkle-cli.exe inbox --suggest',
-              'charkle-cli.exe patch-board <board-id> --note "配色已定稿"',
-              'charkle-cli.exe export-board <board-id> --output board.png',
-              'charkle-cli.exe completions powershell',
-            ].join('\n')}
-          />
+        <InlineGuideDisclosure title="查看 Streamable HTTP MCP JSON 配置片段" defaultExpanded>
+          <SettingsCodeSnippet text={httpMcpJson} testId="http-mcp-config-json-snippet" />
         </InlineGuideDisclosure>
       </SettingsSection>
 
       {/* 4. Usage Guide & Copyable Prompts */}
       <SettingsSection title="使用指南">
         <SettingsRow
-          title={`已开放的外部 Agent 能力（${totalTools} 项安全工具 · ${resourceCount} 项资源）`}
-          subtitle="分页多维检索 / 语义与以图找图 / 联系表看图 / 读取 EXIF 与 AI 生图 Prompt / 情绪板色板与非重叠补丁 / 实时热刷新窗口"
+          title={`Pure MCP v2 能力矩阵（${totalTools} 项正交工具 / ${resourceCount} 项资源）`}
+          subtitle="多维与语义检索 / 会话去重与联系表看图 / 批量异构整理与 dry_run / 相似去重 / 情绪板读写 / 审计回滚"
         />
 
         <InlineGuideDisclosure title="不知道怎么跟 AI 开口？查看 3 条推荐对话示例">

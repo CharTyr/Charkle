@@ -96,14 +96,14 @@ impl CloudAIUsageBucket {
         day_key: &str,
     ) {
         self.rollover_if_needed(day_key);
-        self.today_requests += 1;
-        self.today_input_tokens += input_tokens;
-        self.today_output_tokens += output_tokens;
-        self.today_total_tokens += total_tokens;
-        self.total_requests += 1;
-        self.total_input_tokens += input_tokens;
-        self.total_output_tokens += output_tokens;
-        self.total_tokens += total_tokens;
+        self.today_requests = self.today_requests.saturating_add(1);
+        self.today_input_tokens = self.today_input_tokens.saturating_add(input_tokens);
+        self.today_output_tokens = self.today_output_tokens.saturating_add(output_tokens);
+        self.today_total_tokens = self.today_total_tokens.saturating_add(total_tokens);
+        self.total_requests = self.total_requests.saturating_add(1);
+        self.total_input_tokens = self.total_input_tokens.saturating_add(input_tokens);
+        self.total_output_tokens = self.total_output_tokens.saturating_add(output_tokens);
+        self.total_tokens = self.total_tokens.saturating_add(total_tokens);
         self.last_provider_label = Some(provider_label.to_string());
         let trimmed = model.trim();
         if !trimmed.is_empty() {
@@ -186,14 +186,38 @@ impl CloudAIUsageSummary {
     }
 
     pub fn synchronize_aggregates(&mut self) {
-        self.today_requests = self.standard.today_requests + self.jev.today_requests;
-        self.today_input_tokens = self.standard.today_input_tokens + self.jev.today_input_tokens;
-        self.today_output_tokens = self.standard.today_output_tokens + self.jev.today_output_tokens;
-        self.today_total_tokens = self.standard.today_total_tokens + self.jev.today_total_tokens;
-        self.total_requests = self.standard.total_requests + self.jev.total_requests;
-        self.total_input_tokens = self.standard.total_input_tokens + self.jev.total_input_tokens;
-        self.total_output_tokens = self.standard.total_output_tokens + self.jev.total_output_tokens;
-        self.total_tokens = self.standard.total_tokens + self.jev.total_tokens;
+        self.today_requests = self
+            .standard
+            .today_requests
+            .saturating_add(self.jev.today_requests);
+        self.today_input_tokens = self
+            .standard
+            .today_input_tokens
+            .saturating_add(self.jev.today_input_tokens);
+        self.today_output_tokens = self
+            .standard
+            .today_output_tokens
+            .saturating_add(self.jev.today_output_tokens);
+        self.today_total_tokens = self
+            .standard
+            .today_total_tokens
+            .saturating_add(self.jev.today_total_tokens);
+        self.total_requests = self
+            .standard
+            .total_requests
+            .saturating_add(self.jev.total_requests);
+        self.total_input_tokens = self
+            .standard
+            .total_input_tokens
+            .saturating_add(self.jev.total_input_tokens);
+        self.total_output_tokens = self
+            .standard
+            .total_output_tokens
+            .saturating_add(self.jev.total_output_tokens);
+        self.total_tokens = self
+            .standard
+            .total_tokens
+            .saturating_add(self.jev.total_tokens);
 
         let latest = match (self.standard.last_used_at, self.jev.last_used_at) {
             (Some(a), Some(b)) if b > a => Some(&self.jev),
@@ -282,8 +306,8 @@ impl CloudAIUsageStore {
         }
         guard.synchronize_aggregates();
         let snap = guard.clone();
-        drop(guard);
         self.persist(&snap);
+        drop(guard);
         snap
     }
 
@@ -302,8 +326,8 @@ impl CloudAIUsageStore {
             }
         }
         let snap = guard.clone();
-        drop(guard);
         self.persist(&snap);
+        drop(guard);
         snap
     }
 
@@ -311,14 +335,8 @@ impl CloudAIUsageStore {
         let Some(path) = &self.path else {
             return;
         };
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
         if let Ok(bytes) = serde_json::to_vec_pretty(summary) {
-            let tmp = path.with_extension("json.tmp");
-            if std::fs::write(&tmp, &bytes).is_ok() {
-                let _ = std::fs::rename(&tmp, path);
-            }
+            let _ = crate::net_safety::write_bytes_atomic(path, &bytes);
         }
     }
 }

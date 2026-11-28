@@ -484,7 +484,7 @@ impl MediaArtwork {
             image::imageops::overlay(&mut img, &overlay.to_rgba8(), 0, 0);
         }
         if let Some(av) = avatar {
-            composite_circular_avatar(&mut img, av, 36, 636, 40);
+            composite_circular_avatar(&mut img, av, 56, 656, 20);
         }
 
         DynamicImage::ImageRgba8(img)

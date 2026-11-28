@@ -50,10 +50,8 @@ export const Titlebar: React.FC = () => {
   const setThemeMode = useCoordinatorStore((s) => s.setThemeMode);
   const sidebarOpen = useCoordinatorStore((s) => s.sidebarOpen);
   const sidebarCollapsed = useCoordinatorStore((s) => s.sidebarCollapsed);
-  const sidebarWidth = useCoordinatorStore((s) => s.sidebarWidth);
   const setSidebarOpen = useCoordinatorStore((s) => s.setSidebarOpen);
   const inspectorOpen = useCoordinatorStore((s) => s.inspectorOpen);
-  const inspectorWidth = useCoordinatorStore((s) => s.inspectorWidth);
   const toggleInspector = useCoordinatorStore((s) => s.toggleInspector);
   const isMaximized = useCoordinatorStore((s) => s.windowMaximized);
   const setIsMaximized = useCoordinatorStore((s) => s.setWindowMaximized);
@@ -61,7 +59,8 @@ export const Titlebar: React.FC = () => {
 
   const folders = useLibraryStore((s) => s.folders);
   const boards = useMoodboardStore((s) => s.boards);
-  const activeBoard = useMoodboardStore((s) => s.activeBoard);
+  const activeBoardId = useMoodboardStore((s) => s.activeBoard?.id ?? null);
+  const activeBoardTitle = useMoodboardStore((s) => s.activeBoard?.title ?? null);
 
   const headerRef = useRef<HTMLElement | null>(null);
   const maxBtnRef = useRef<HTMLButtonElement | null>(null);
@@ -76,9 +75,9 @@ export const Titlebar: React.FC = () => {
 
   const activeMoodboardTitle = useMemo(() => {
     if (destination.type !== 'moodboard') return null;
-    if (activeBoard?.id === destination.id) return activeBoard.title;
+    if (activeBoardId === destination.id && activeBoardTitle) return activeBoardTitle;
     return boards.find((b) => b.id === destination.id)?.title ?? '情绪板';
-  }, [destination, activeBoard, boards]);
+  }, [destination, activeBoardId, activeBoardTitle, boards]);
 
   useEffect(() => {
     let disposed = false;
@@ -178,25 +177,35 @@ export const Titlebar: React.FC = () => {
       if (headerEl) observer.observe(headerEl);
       if (maxEl) observer.observe(maxEl);
     }
+    let resizeTimer: number | null = null;
     const handleResize = () => {
       reportMaximizeRect();
-      void getTransport()
-        .windowIsMaximized()
-        .then((val) => setIsMaximized(val))
-        .catch(() => {});
+      if (resizeTimer !== null) {
+        window.clearTimeout(resizeTimer);
+      }
+      resizeTimer = window.setTimeout(() => {
+        resizeTimer = null;
+        void getTransport()
+          .windowIsMaximized()
+          .then((val) => setIsMaximized(val))
+          .catch(() => {});
+      }, 120);
     };
     window.addEventListener('resize', handleResize);
     return () => {
+      if (resizeTimer !== null) {
+        window.clearTimeout(resizeTimer);
+      }
       observer?.disconnect();
       window.removeEventListener('resize', handleResize);
       void getTransport().setMaximizeButtonRect(null);
     };
-  }, [reportMaximizeRect]);
+  }, [reportMaximizeRect, setIsMaximized]);
 
   useEffect(() => {
     const raf = requestAnimationFrame(reportMaximizeRect);
     return () => cancelAnimationFrame(raf);
-  }, [sidebarOpen, sidebarCollapsed, sidebarWidth, inspectorOpen, inspectorWidth, reportMaximizeRect]);
+  }, [sidebarOpen, sidebarCollapsed, inspectorOpen, reportMaximizeRect]);
 
   const handleToggleMaximize = async () => {
     try {

@@ -10,6 +10,8 @@ export interface ErrorBoundaryProps {
   children: React.ReactNode;
   /** Compact presentation for small utility windows (drop shelf, capture overlay). */
   compact?: boolean;
+  /** Whether to occupy full viewport (`w-screen h-screen`) or fill parent container (`w-full h-full`). */
+  fullScreen?: boolean;
   /** Optional custom heading shown in the recovery card. */
   title?: string;
 }
@@ -55,7 +57,7 @@ export class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoun
       return this.props.children;
     }
 
-    const { compact = false, title = '界面遇到意外中断' } = this.props;
+    const { compact = false, fullScreen = true, title = '界面遇到意外中断' } = this.props;
     const { error, showDetails } = this.state;
 
     if (compact) {
@@ -83,7 +85,10 @@ export class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoun
     return (
       <div
         role="alert"
-        className="w-screen h-screen flex items-center justify-center p-6 bg-[var(--bg-gallery)] text-[var(--text-primary)] select-none"
+        className={[
+          fullScreen ? 'w-screen h-screen' : 'w-full h-full',
+          'flex items-center justify-center p-6 bg-[var(--bg-gallery)] text-[var(--text-primary)] select-none',
+        ].join(' ')}
       >
         <div className="w-full max-w-[420px] rounded-[var(--win-radius-dialog)] bg-[var(--bg-elevated)] border border-[var(--win-stroke-flyout)] shadow-[var(--shadow-modal)] p-6 flex flex-col gap-4">
           <div className="flex items-start gap-3">

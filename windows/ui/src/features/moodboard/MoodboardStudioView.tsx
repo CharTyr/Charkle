@@ -57,6 +57,7 @@ import {
   CharkleSlider,
   Popover,
   SegmentedControl,
+  isSystemMotionReduced,
   useResolvedIsDark,
 } from '../../design-system';
 import {
@@ -196,6 +197,12 @@ const RESIZE_CORNERS: ReadonlyArray<{
   { id: 'bottomLeading', signX: -1, signY: 1, cursor: 'nesw-resize' },
   { id: 'bottomTrailing', signX: 1, signY: 1, cursor: 'nwse-resize' },
 ];
+
+function escapeCssAttrValue(value: string): string {
+  return typeof CSS !== 'undefined' && typeof CSS.escape === 'function'
+    ? CSS.escape(value)
+    : value.replace(/["\\]/g, '\\$&');
+}
 
 function isRectInsideGroup(child: BoardRect, group: BoardRect): boolean {
   const cx = child.x + child.width * 0.5;
@@ -356,11 +363,27 @@ const BoardAssetMedia: React.FC<BoardAssetMediaProps> = ({
       : '';
   const [imgFailed, setImgFailed] = useState(false);
   const [videoFailed, setVideoFailed] = useState(false);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
 
   useEffect(() => {
     setImgFailed(false);
     setVideoFailed(false);
   }, [assetId, thumbUrl, videoUrl]);
+
+  useEffect(() => {
+    const v = videoRef.current;
+    return () => {
+      if (v) {
+        v.pause();
+        v.removeAttribute('src');
+        try {
+          v.load();
+        } catch {
+          // Ignore in jsdom
+        }
+      }
+    };
+  }, [videoUrl, videoFailed]);
 
   if (isMissing) {
     return (
@@ -419,6 +442,7 @@ const BoardAssetMedia: React.FC<BoardAssetMediaProps> = ({
   if (asset?.mediaKind === 'video' && !videoFailed && videoUrl) {
     return (
       <video
+        ref={videoRef}
         src={videoUrl}
         poster={withCacheBust(transport.thumbnailUrl(assetId, 'preview1400'), asset.updatedAt)}
         muted
@@ -528,6 +552,21 @@ export const MoodboardStudioView: React.FC = () => {
   const [selectedConnectorId, setSelectedConnectorId] = useState<string | null>(null);
   const [editingNoteId, setEditingNoteId] = useState<string | null>(null);
   const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
+  const [groupTitleDraft, setGroupTitleDraft] = useState<{ nodeId: string; title: string } | null>(
+    null,
+  );
+  const groupTitleDraftRef = useRef<{ nodeId: string; title: string } | null>(null);
+  const [noteDraft, setNoteDraft] = useState<{
+    nodeId: string;
+    title: string;
+    text: string;
+  } | null>(null);
+  const noteDraftRef = useRef<{ nodeId: string; title: string; text: string } | null>(null);
+  const [cropDraft, setCropDraft] = useState<{
+    nodeId: string;
+    crop: NormalizedCropRect | null;
+  } | null>(null);
+  const cropDraftRef = useRef<{ nodeId: string; crop: NormalizedCropRect | null } | null>(null);
   const [editingConnector, setEditingConnector] = useState<{
     id: string;
     x: number;
@@ -735,9 +774,7 @@ export const MoodboardStudioView: React.FC = () => {
 
   const triggerSmoothCameraUpdate = useCallback(
     (updater: (prev: CameraState) => CameraState, persist = true) => {
-      const reduced =
-        typeof window !== 'undefined' &&
-        window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+      const reduced = isSystemMotionReduced();
       if (!reduced) {
         setCameraAnimated(true);
         if (cameraAnimTimerRef.current !== null) {
@@ -819,12 +856,121 @@ export const MoodboardStudioView: React.FC = () => {
     setExportDark(isDark);
   }, [isDark]);
 
+  const commitGroupTitleDraft = useCallback(() => {
+    const pending = groupTitleDraftRef.current;
+    if (!pending) return;
+    groupTitleDraftRef.current = null;
+    setGroupTitleDraft(null);
+    const existing = safeNodesRef.current.find((n) => n.id === pending.nodeId);
+    if (!existing || !('groupFrame' in existing.kind)) return;
+    if (existing.kind.groupFrame.title === pending.title) return;
+    mutateActiveBoard((doc) => ({
+      ...doc,
+      nodes: doc.nodes.map((n) =>
+        n.id === pending.nodeId && 'groupFrame' in n.kind
+          ? { ...n, kind: { groupFrame: { ...n.kind.groupFrame, title: pending.title } } }
+          : n,
+      ),
+    }));
+  }, [mutateActiveBoard]);
+
+  const commitNoteDraft = useCallback(() => {
+    const pending = noteDraftRef.current;
+    if (!pending) return;
+    noteDraftRef.current = null;
+    setNoteDraft(null);
+    const existing = safeNodesRef.current.find((n) => n.id === pending.nodeId);
+    if (!existing || !('note' in existing.kind)) return;
+    const nextTitle = pending.title || null;
+    if (
+      (existing.kind.note.title ?? null) === nextTitle &&
+      existing.kind.note.text === pending.text
+    ) {
+      return;
+    }
+    mutateActiveBoard((doc) => ({
+      ...doc,
+      nodes: doc.nodes.map((n) =>
+        n.id === pending.nodeId && 'note' in n.kind
+          ? { ...n, kind: { note: { ...n.kind.note, title: nextTitle, text: pending.text } } }
+          : n,
+      ),
+    }));
+  }, [mutateActiveBoard]);
+
+  const commitCropDraft = useCallback(() => {
+    const pending = cropDraftRef.current;
+    if (!pending) return;
+    cropDraftRef.current = null;
+    setCropDraft(null);
+    const existing = safeNodesRef.current.find((n) => n.id === pending.nodeId);
+    if (!existing || !('assetRef' in existing.kind)) return;
+    const cur = existing.kind.assetRef.crop ?? null;
+    const nxt = pending.crop;
+    const unchanged =
+      cur === nxt ||
+      (cur !== null &&
+        nxt !== null &&
+        Math.abs(cur.x - nxt.x) < 1e-4 &&
+        Math.abs(cur.y - nxt.y) < 1e-4 &&
+        Math.abs(cur.width - nxt.width) < 1e-4 &&
+        Math.abs(cur.height - nxt.height) < 1e-4);
+    if (unchanged) return;
+    mutateActiveBoard((doc) => ({
+      ...doc,
+      nodes: doc.nodes.map((n) =>
+        n.id === pending.nodeId && 'assetRef' in n.kind
+          ? { ...n, kind: { assetRef: { ...n.kind.assetRef, crop: nxt } } }
+          : n,
+      ),
+    }));
+  }, [mutateActiveBoard]);
+
+  useEffect(() => {
+    if (!editingGroupId) {
+      commitGroupTitleDraft();
+      return;
+    }
+    if (groupTitleDraftRef.current && groupTitleDraftRef.current.nodeId !== editingGroupId) {
+      commitGroupTitleDraft();
+    }
+    const target = safeNodesRef.current.find((n) => n.id === editingGroupId);
+    if (target && 'groupFrame' in target.kind) {
+      const seed = { nodeId: editingGroupId, title: target.kind.groupFrame.title };
+      groupTitleDraftRef.current = seed;
+      setGroupTitleDraft(seed);
+    }
+  }, [editingGroupId, commitGroupTitleDraft]);
+
+  useEffect(() => {
+    if (!editingNoteId) {
+      commitNoteDraft();
+      return;
+    }
+    if (noteDraftRef.current && noteDraftRef.current.nodeId !== editingNoteId) {
+      commitNoteDraft();
+    }
+    const target = safeNodesRef.current.find((n) => n.id === editingNoteId);
+    if (target && 'note' in target.kind) {
+      const seed = {
+        nodeId: editingNoteId,
+        title: target.kind.note.title ?? '',
+        text: target.kind.note.text,
+      };
+      noteDraftRef.current = seed;
+      setNoteDraft(seed);
+    }
+  }, [editingNoteId, commitNoteDraft]);
+
   // Clean up timers, active gesture refs, and flush pending debounced saves on unmount
   useEffect(() => {
     return () => {
       if (cameraAnimTimerRef.current !== null) {
         window.clearTimeout(cameraAnimTimerRef.current);
       }
+      commitGroupTitleDraft();
+      commitNoteDraft();
+      commitCropDraft();
       liveDragRef.current = null;
       liveResizeRef.current = null;
       liveRotateRef.current = null;
@@ -835,7 +981,7 @@ export const MoodboardStudioView: React.FC = () => {
       liveEraserRef.current = null;
       void useMoodboardStore.getState().flushPendingSaves();
     };
-  }, []);
+  }, [commitCropDraft, commitGroupTitleDraft, commitNoteDraft]);
 
   // Measure canvas stage viewport via ResizeObserver
   useEffect(() => {
@@ -982,9 +1128,27 @@ export const MoodboardStudioView: React.FC = () => {
   }, [activeBoard?.id, applyZoomAtScreenPoint, persistViewportQuietly]);
 
   // Selection & Transform helpers matching macOS MoodboardCanvasView
+  const selectedNodeIdSet = useMemo(() => new Set(selectedNodeIds), [selectedNodeIds]);
+
+  const groupEnclosedCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    const groups = safeNodes.filter((n) => 'groupFrame' in n.kind);
+    if (groups.length === 0) return counts;
+    for (const g of groups) counts.set(g.id, 0);
+    for (const other of safeNodes) {
+      if ('groupFrame' in other.kind) continue;
+      for (const g of groups) {
+        if (isRectInsideGroup(other.frame, g.frame)) {
+          counts.set(g.id, (counts.get(g.id) ?? 0) + 1);
+        }
+      }
+    }
+    return counts;
+  }, [safeNodes]);
+
   const selectedUnlockedNodes = useMemo(
-    () => safeNodes.filter((n) => selectedNodeIds.includes(n.id) && !n.isLocked),
-    [safeNodes, selectedNodeIds],
+    () => safeNodes.filter((n) => selectedNodeIdSet.has(n.id) && !n.isLocked),
+    [safeNodes, selectedNodeIdSet],
   );
 
   const selectedSingleNode = useMemo<BoardNode | null>(() => {
@@ -993,8 +1157,9 @@ export const MoodboardStudioView: React.FC = () => {
   }, [safeNodes, selectedNodeIds]);
 
   useEffect(() => {
+    commitCropDraft();
     setCropOpen(false);
-  }, [selectedSingleNode?.id]);
+  }, [selectedSingleNode?.id, commitCropDraft]);
 
   const rotateNodes = useCallback(
     (ids: string[], delta: number) => {
@@ -1225,17 +1390,19 @@ export const MoodboardStudioView: React.FC = () => {
 
   const openQuickLookForSelectedNode = useCallback((): boolean => {
     const first = safeNodesRef.current.find(
-      (n) => selectedNodeIds.includes(n.id) && 'assetRef' in n.kind,
+      (n) => selectedNodeIdSet.has(n.id) && 'assetRef' in n.kind,
     );
     if (!first || !('assetRef' in first.kind)) return false;
-    const nodeEl = document.querySelector(`[data-board-node-id="${first.id}"]`) as HTMLElement | null;
+    const nodeEl = document.querySelector(
+      `[data-board-node-id="${escapeCssAttrValue(first.id)}"]`,
+    ) as HTMLElement | null;
     const rect = nodeEl?.getBoundingClientRect();
     openBoardAsset(
       first.kind.assetRef.assetID,
       rect ? { left: rect.left, top: rect.top, width: rect.width, height: rect.height } : null,
     );
     return true;
-  }, [openBoardAsset, selectedNodeIds]);
+  }, [openBoardAsset, selectedNodeIdSet]);
 
   // Complete macOS keyboard shortcut parity (V/H/C/P/E, R/Shift+R, Shift+H/V, Ctrl+A/C/X/V,
   // Space tap Quick Look vs Space+drag pan, Delete/Backspace, Escape, Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y)
@@ -1299,7 +1466,7 @@ export const MoodboardStudioView: React.FC = () => {
           const assetIds = Array.from(
             new Set(
               safeNodesRef.current
-                .filter((n) => selectedNodeIds.includes(n.id) && 'assetRef' in n.kind)
+                .filter((n) => selectedNodeIdSet.has(n.id) && 'assetRef' in n.kind)
                 .map((n) => ('assetRef' in n.kind ? n.kind.assetRef.assetID : ''))
                 .filter(Boolean),
             ),
@@ -1383,7 +1550,7 @@ export const MoodboardStudioView: React.FC = () => {
 
       // Transform shortcuts when unlocked nodes are selected
       const unlockedIds = safeNodesRef.current
-        .filter((n) => selectedNodeIds.includes(n.id) && !n.isLocked)
+        .filter((n) => selectedNodeIdSet.has(n.id) && !n.isLocked)
         .map((n) => n.id);
       if (unlockedIds.length > 0) {
         if (lower === 'r' && noMod) {
@@ -1456,6 +1623,7 @@ export const MoodboardStudioView: React.FC = () => {
     removeBoardNodesWithFeedback,
     removeConnector,
     selectedNodeIds,
+    selectedNodeIdSet,
     selectedConnectorId,
     pendingConnector,
     contextMenu,
@@ -1947,9 +2115,21 @@ export const MoodboardStudioView: React.FC = () => {
       }
     };
 
-    const onPointerMove = (e: PointerEvent) => handleMove(e.clientX, e.clientY, e.shiftKey);
-    const onMouseMove = (e: MouseEvent) => handleMove(e.clientX, e.clientY, e.shiftKey);
-    const onUp = () => commitAndClearGesture();
+    let sawPointerMove = false;
+    let gestureCommitted = false;
+    const onPointerMove = (e: PointerEvent) => {
+      sawPointerMove = true;
+      handleMove(e.clientX, e.clientY, e.shiftKey);
+    };
+    const onMouseMove = (e: MouseEvent) => {
+      if (sawPointerMove) return;
+      handleMove(e.clientX, e.clientY, e.shiftKey);
+    };
+    const onUp = () => {
+      if (gestureCommitted) return;
+      gestureCommitted = true;
+      commitAndClearGesture();
+    };
 
     window.addEventListener('pointermove', onPointerMove);
     window.addEventListener('pointerup', onUp);
@@ -2168,6 +2348,7 @@ export const MoodboardStudioView: React.FC = () => {
             const reader = new FileReader();
             reader.onload = () => resolve(String(reader.result ?? ''));
             reader.onerror = () => reject(reader.error ?? new Error('读取文件失败'));
+            reader.onabort = () => reject(new Error('文件读取已取消'));
             reader.readAsDataURL(file);
           });
           const base64 = dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl;
@@ -2715,7 +2896,7 @@ export const MoodboardStudioView: React.FC = () => {
             {orderedRenderNodes.map((node) => {
               const rect = effectiveFramesMap.get(node.id) ?? node.frame;
               const rot = effectiveRotation(node);
-              const selected = selectedNodeIds.includes(node.id);
+              const selected = selectedNodeIdSet.has(node.id);
               const isSwapTarget = swappingNodeId === node.id;
               const edIdx = editorialOrderIndexMap.get(node.id) ?? 0;
 
@@ -2744,14 +2925,7 @@ export const MoodboardStudioView: React.FC = () => {
                       : '色卡条';
 
               const enclosedCount =
-                'groupFrame' in node.kind
-                  ? safeNodes.filter(
-                      (other) =>
-                        other.id !== node.id &&
-                        !('groupFrame' in other.kind) &&
-                        isRectInsideGroup(other.frame, node.frame),
-                    ).length
-                  : 0;
+                'groupFrame' in node.kind ? (groupEnclosedCounts.get(node.id) ?? 0) : 0;
 
               const handleNodeMouseDown = (e: React.MouseEvent) => {
                 if (!allowNodeHitTesting && tool !== 'connector') return;
@@ -2942,33 +3116,30 @@ export const MoodboardStudioView: React.FC = () => {
                             <input
                               type="text"
                               autoFocus
-                              value={gData.title}
+                              value={
+                                groupTitleDraft?.nodeId === node.id
+                                  ? groupTitleDraft.title
+                                  : gData.title
+                              }
                               placeholder="分组名称"
                               onMouseDown={(e) => e.stopPropagation()}
-                              onBlur={() =>
-                                setEditingGroupId((cur) => (cur === node.id ? null : cur))
-                              }
+                              onBlur={() => {
+                                commitGroupTitleDraft();
+                                setEditingGroupId((cur) => (cur === node.id ? null : cur));
+                              }}
                               onKeyDown={(e) => {
                                 if ((e.key === 'Enter' && !e.nativeEvent.isComposing) || e.key === 'Escape') {
                                   e.preventDefault();
                                   e.stopPropagation();
+                                  commitGroupTitleDraft();
                                   e.currentTarget.blur();
                                   setEditingGroupId(null);
                                 }
                               }}
                               onChange={(e) => {
-                                const val = e.target.value;
-                                mutateActiveBoard((doc) => ({
-                                  ...doc,
-                                  nodes: doc.nodes.map((n) =>
-                                    n.id === node.id && 'groupFrame' in n.kind
-                                      ? {
-                                          ...n,
-                                          kind: { groupFrame: { ...n.kind.groupFrame, title: val } },
-                                        }
-                                      : n,
-                                  ),
-                                }));
+                                const next = { nodeId: node.id, title: e.target.value };
+                                groupTitleDraftRef.current = next;
+                                setGroupTitleDraft(next);
                               }}
                               style={{ color: theme.accent }}
                               className="bg-transparent text-[12px] font-semibold outline-none flex-1 min-w-0"
@@ -3047,7 +3218,8 @@ export const MoodboardStudioView: React.FC = () => {
                     const refKind = node.kind.assetRef;
                     const asset = assetsById.get(refKind.assetID);
                     const isMissingAsset = libraryBootstrapped && !asset;
-                    const crop = refKind.crop;
+                    const crop =
+                      cropDraft?.nodeId === node.id ? cropDraft.crop : refKind.crop;
                     const hasCrop = Boolean(
                       !isMissingAsset &&
                         crop &&
@@ -3244,11 +3416,26 @@ export const MoodboardStudioView: React.FC = () => {
                     const noteData = node.kind.note;
                     const st = getNoteStylePalette(noteData.style);
                     const isEditingNote = editingNoteId === node.id;
+                    const activeNoteTitle =
+                      isEditingNote && noteDraft?.nodeId === node.id
+                        ? noteDraft.title
+                        : (noteData.title ?? '');
+                    const activeNoteText =
+                      isEditingNote && noteDraft?.nodeId === node.id
+                        ? noteDraft.text
+                        : noteData.text;
                     const handleNoteFieldBlur = (
                       e: React.FocusEvent<HTMLInputElement | HTMLTextAreaElement>,
                     ) => {
                       const nextTarget = e.relatedTarget as HTMLElement | null;
-                      if (nextTarget?.closest(`[data-board-node-id="${node.id}"]`)) return;
+                      if (
+                        nextTarget?.closest(
+                          `[data-board-node-id="${escapeCssAttrValue(node.id)}"]`,
+                        )
+                      ) {
+                        return;
+                      }
+                      commitNoteDraft();
                       setEditingNoteId((cur) => (cur === node.id ? null : cur));
                     };
                     const handleNoteFieldKeyDown = (
@@ -3257,6 +3444,7 @@ export const MoodboardStudioView: React.FC = () => {
                       if (e.key === 'Escape') {
                         e.preventDefault();
                         e.stopPropagation();
+                        commitNoteDraft();
                         e.currentTarget.blur();
                         setEditingNoteId(null);
                       }
@@ -3275,21 +3463,19 @@ export const MoodboardStudioView: React.FC = () => {
                           {isEditingNote ? (
                             <input
                               type="text"
-                              value={noteData.title ?? ''}
+                              value={activeNoteTitle}
                               placeholder="标题 / 氛围词"
                               onMouseDown={(e) => e.stopPropagation()}
                               onBlur={handleNoteFieldBlur}
                               onKeyDown={handleNoteFieldKeyDown}
                               onChange={(e) => {
-                                const val = e.target.value;
-                                mutateActiveBoard((doc) => ({
-                                  ...doc,
-                                  nodes: doc.nodes.map((n) =>
-                                    n.id === node.id && 'note' in n.kind
-                                      ? { ...n, kind: { note: { ...n.kind.note, title: val || null } } }
-                                      : n,
-                                  ),
-                                }));
+                                const next = {
+                                  nodeId: node.id,
+                                  title: e.target.value,
+                                  text: activeNoteText,
+                                };
+                                noteDraftRef.current = next;
+                                setNoteDraft(next);
                               }}
                               style={{ fontSize: Math.max(13, noteData.fontSize) }}
                               className="bg-transparent font-semibold outline-none flex-1 min-w-0"
@@ -3345,20 +3531,18 @@ export const MoodboardStudioView: React.FC = () => {
                         {isEditingNote ? (
                           <textarea
                             autoFocus
-                            value={noteData.text}
+                            value={activeNoteText}
                             onMouseDown={(e) => e.stopPropagation()}
                             onBlur={handleNoteFieldBlur}
                             onKeyDown={handleNoteFieldKeyDown}
                             onChange={(e) => {
-                              const val = e.target.value;
-                              mutateActiveBoard((doc) => ({
-                                ...doc,
-                                nodes: doc.nodes.map((n) =>
-                                  n.id === node.id && 'note' in n.kind
-                                    ? { ...n, kind: { note: { ...n.kind.note, text: val } } }
-                                    : n,
-                                ),
-                              }));
+                              const next = {
+                                nodeId: node.id,
+                                title: activeNoteTitle,
+                                text: e.target.value,
+                              };
+                              noteDraftRef.current = next;
+                              setNoteDraft(next);
                             }}
                             style={{ fontSize: Math.max(11, noteData.fontSize - 1) }}
                             className="flex-1 bg-transparent resize-none outline-none leading-relaxed opacity-90"
@@ -3570,7 +3754,7 @@ export const MoodboardStudioView: React.FC = () => {
                 const screenW = Math.max(24, worldRect.width * camera.zoom);
                 const screenH = Math.max(24, worldRect.height * camera.zoom);
                 const rot = effectiveRotation(node);
-                const isSelected = selectedNodeIds.includes(node.id);
+                const isSelected = selectedNodeIdSet.has(node.id);
                 const isGroup = 'groupFrame' in node.kind;
                 const isResizingThis = liveResize?.nodeId === node.id;
                 const isRotatingThis = liveRotate?.nodeId === node.id;
@@ -4215,7 +4399,7 @@ export const MoodboardStudioView: React.FC = () => {
                 {/* Floating Selected Transform Pill (stacked cleanly above Tool Dock) */}
                 {showTransformPill && (() => {
                   const selectedNodesList = safeNodes.filter((n) =>
-                    selectedNodeIds.includes(n.id),
+                    selectedNodeIdSet.has(n.id),
                   );
                   const allSelectedIds = selectedNodesList.map((n) => n.id);
                   if (allSelectedIds.length === 0) return null;
@@ -5098,35 +5282,53 @@ export const MoodboardStudioView: React.FC = () => {
       {selectedSingleNode && 'assetRef' in selectedSingleNode.kind && (
         <Popover
           open={cropOpen}
-          onOpenChange={setCropOpen}
+          onOpenChange={(open) => {
+            if (!open) commitCropDraft();
+            setCropOpen(open);
+          }}
           anchorEl={cropBtnRef.current}
           placement="top-center"
           className="w-[248px] p-3"
         >
           {(() => {
-            const crop: NormalizedCropRect = selectedSingleNode.kind.assetRef.crop ?? {
+            const activeCropValue =
+              cropDraft?.nodeId === selectedSingleNode.id
+                ? cropDraft.crop
+                : selectedSingleNode.kind.assetRef.crop;
+            const crop: NormalizedCropRect = activeCropValue ?? {
               x: 0,
               y: 0,
               width: 1,
               height: 1,
             };
-            const updateCrop = (next: NormalizedCropRect | null) => {
+            const previewCrop = (next: NormalizedCropRect) => {
+              const draft = { nodeId: selectedSingleNode.id, crop: next };
+              cropDraftRef.current = draft;
+              setCropDraft(draft);
+            };
+            const resetCropImmediately = () => {
+              cropDraftRef.current = null;
+              setCropDraft(null);
               mutateActiveBoard((doc) => ({
                 ...doc,
                 nodes: doc.nodes.map((n) =>
                   n.id === selectedSingleNode.id && 'assetRef' in n.kind
-                    ? { ...n, kind: { assetRef: { ...n.kind.assetRef, crop: next } } }
+                    ? { ...n, kind: { assetRef: { ...n.kind.assetRef, crop: null } } }
                     : n,
                 ),
               }));
             };
             return (
-              <div className="flex flex-col gap-2 text-[11.5px]">
+              <div
+                onPointerUp={commitCropDraft}
+                onKeyUp={commitCropDraft}
+                className="flex flex-col gap-2 text-[11.5px]"
+              >
                 <div className="flex items-center justify-between font-semibold text-[var(--text-primary)]">
                   <span>非破坏性局部裁切</span>
                   <button
                     type="button"
-                    onClick={() => updateCrop(null)}
+                    onClick={resetCropImmediately}
                     className="text-[var(--accent)] hover:underline cursor-pointer"
                   >
                     重置原图
@@ -5140,7 +5342,7 @@ export const MoodboardStudioView: React.FC = () => {
                     step={0.05}
                     value={crop.width}
                     onChange={(w) => {
-                      updateCrop({
+                      previewCrop({
                         x: Math.min(1 - w, crop.x),
                         y: Math.min(1 - w, crop.y),
                         width: w,
@@ -5162,7 +5364,7 @@ export const MoodboardStudioView: React.FC = () => {
                     step={0.02}
                     value={crop.x}
                     disabled={1 - crop.width <= 0.001}
-                    onChange={(x) => updateCrop({ ...crop, x })}
+                    onChange={(x) => previewCrop({ ...crop, x })}
                     ariaLabel="水平偏移"
                     valueText={`${Math.round(crop.x * 100)}%`}
                     variant="standard"
@@ -5178,7 +5380,7 @@ export const MoodboardStudioView: React.FC = () => {
                     step={0.02}
                     value={crop.y}
                     disabled={1 - crop.height <= 0.001}
-                    onChange={(y) => updateCrop({ ...crop, y })}
+                    onChange={(y) => previewCrop({ ...crop, y })}
                     ariaLabel="垂直偏移"
                     valueText={`${Math.round(crop.y * 100)}%`}
                     variant="standard"

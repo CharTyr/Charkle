@@ -451,6 +451,14 @@ pub struct TypeSafeExperimentalConfig {
     pub enable_inbox_smart_triage: bool,
     #[serde(default = "default_true")]
     pub enable_curator_visual_rerank: bool,
+    #[serde(default = "default_true")]
+    pub enable_closed_set_tagging: bool,
+    #[serde(default)]
+    pub auto_apply_high_confidence_tags: bool,
+    #[serde(default = "default_high_conf_tag_threshold")]
+    pub high_confidence_tag_threshold: f64,
+    #[serde(default = "default_suggested_tag_threshold")]
+    pub suggested_tag_threshold: f64,
 }
 
 fn default_typesafe_base_url() -> String {
@@ -467,6 +475,31 @@ fn default_low_conf_padding() -> f64 {
 }
 fn default_min_presence() -> f64 {
     0.45
+}
+fn default_high_conf_tag_threshold() -> f64 {
+    0.82
+}
+fn default_suggested_tag_threshold() -> f64 {
+    0.52
+}
+
+impl TypeSafeExperimentalConfig {
+    /// Clamps user-supplied probability thresholds into safe bounds while preserving all other fields.
+    pub fn sanitized(mut self) -> Self {
+        let high = if self.high_confidence_tag_threshold.is_finite() {
+            self.high_confidence_tag_threshold.clamp(0.60, 0.98)
+        } else {
+            default_high_conf_tag_threshold()
+        };
+        let suggested = if self.suggested_tag_threshold.is_finite() {
+            self.suggested_tag_threshold.clamp(0.30, high)
+        } else {
+            default_suggested_tag_threshold().min(high)
+        };
+        self.high_confidence_tag_threshold = high;
+        self.suggested_tag_threshold = suggested;
+        self
+    }
 }
 
 impl Default for TypeSafeExperimentalConfig {
@@ -485,7 +518,51 @@ impl Default for TypeSafeExperimentalConfig {
             enable_semantic_search: true,
             enable_inbox_smart_triage: true,
             enable_curator_visual_rerank: true,
+            enable_closed_set_tagging: true,
+            auto_apply_high_confidence_tags: false,
+            high_confidence_tag_threshold: default_high_conf_tag_threshold(),
+            suggested_tag_threshold: default_suggested_tag_threshold(),
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClosedSetTagOption {
+    pub name: String,
+    #[serde(default)]
+    pub aliases: Vec<String>,
+    #[serde(default)]
+    pub context_hints: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClosedSetTagMatch {
+    pub tag: String,
+    pub probability: f64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClosedSetTaggingResult {
+    #[serde(default)]
+    pub confirmed_tags: Vec<ClosedSetTagMatch>,
+    #[serde(default)]
+    pub suggested_tags: Vec<ClosedSetTagMatch>,
+    #[serde(default)]
+    pub evaluated_tag_count: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+}
+
+impl ClosedSetTaggingResult {
+    pub fn all_matched_tag_names(&self) -> Vec<String> {
+        self.confirmed_tags
+            .iter()
+            .chain(self.suggested_tags.iter())
+            .map(|m| m.tag.clone())
+            .collect()
     }
 }
 

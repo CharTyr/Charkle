@@ -30,12 +30,14 @@ import {
   Button,
   ModalShell,
   Popover,
+  copyTextToClipboard,
   formatDuration,
   getGitHubLanguageColor,
   isLightHex,
 } from '../../design-system';
 import {
   getEffectiveSocialAttachments,
+  moveAssetsToFolderWithUndo,
   useCoordinatorStore,
   useLibraryStore,
   useMoodboardStore,
@@ -56,6 +58,9 @@ export interface AssetCardProps {
   orderedIds: string[];
   width: number;
   height: number;
+  x?: number;
+  y?: number;
+  zIndex?: number;
   style?: React.CSSProperties;
   onHoverChange?: (assetId: string, hovering: boolean) => void;
   cardRefCallback?: (assetId: string, el: HTMLDivElement | null) => void;
@@ -109,6 +114,487 @@ function fallbackWaveformPeaks(seedStr: string): number[] {
   return out;
 }
 
+const HoverVideoPreview: React.FC<{
+  src: string;
+  ready: boolean;
+  onReady: () => void;
+  onError: () => void;
+}> = ({ src, ready, onReady, onError }) => {
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  useEffect(() => {
+    return () => {
+      const v = videoRef.current;
+      if (v) {
+        v.pause();
+        v.removeAttribute('src');
+        v.load();
+      }
+    };
+  }, []);
+
+  return (
+    <video
+      ref={videoRef}
+      src={src}
+      muted
+      loop
+      autoPlay
+      playsInline
+      onLoadedData={onReady}
+      onCanPlay={onReady}
+      onError={onError}
+      className={[
+        'absolute inset-0 w-full h-full object-cover transition-opacity duration-150',
+        ready ? 'opacity-100' : 'opacity-0',
+      ].join(' ')}
+    />
+  );
+};
+
+interface AssetCardContextMenuProps {
+  asset: AssetRecord;
+  menuState: { x: number; y: number; targetIds: string[] };
+  isPlainWebBookmark: boolean;
+  primaryHex: string | null;
+  onClose: () => void;
+  onOpenQuickLook: () => void;
+  onRequestPermDelete: (ids: string[]) => void;
+}
+
+const AssetCardContextMenu: React.FC<AssetCardContextMenuProps> = ({
+  asset,
+  menuState,
+  isPlainWebBookmark,
+  primaryHex,
+  onClose,
+  onOpenQuickLook,
+  onRequestPermDelete,
+}) => {
+  const [moveSubOpen, setMoveSubOpen] = useState(false);
+  const [boardSubOpen, setBoardSubOpen] = useState(false);
+
+  const destination = useCoordinatorStore((s) => s.destination);
+  const setSelection = useCoordinatorStore((s) => s.setSelection);
+  const clearSelection = useCoordinatorStore((s) => s.clearSelection);
+  const activeMoodboardId = useCoordinatorStore((s) => s.activeMoodboardId);
+  const setMoodboardGeneratorOpen = useCoordinatorStore((s) => s.setMoodboardGeneratorOpen);
+  const pushToast = useCoordinatorStore((s) => s.pushToast);
+
+  const folders = useLibraryStore((s) => s.folders);
+  const updateAssets = useLibraryStore((s) => s.updateAssets);
+  const boards = useMoodboardStore((s) => s.boards);
+  const addAssetsToBoard = useMoodboardStore((s) => s.addAssetsToBoard);
+
+  const transport = getTransport();
+  const menuTargetIds = menuState.targetIds;
+  const menuCountSuffix = menuTargetIds.length > 1 ? ` (${menuTargetIds.length} 项)` : '';
+
+  const pruneSelectionIds = (removedIds: readonly string[]) => {
+    const removedSet = new Set(removedIds);
+    const remaining = useCoordinatorStore
+      .getState()
+      .selectedAssetIds.filter((id) => !removedSet.has(id));
+    if (remaining.length === 0) {
+      clearSelection();
+    } else {
+      setSelection(remaining, remaining[0]);
+    }
+  };
+
+  return (
+    <Popover
+      open
+      onOpenChange={(open) => {
+        if (!open) {
+          setMoveSubOpen(false);
+          setBoardSubOpen(false);
+          onClose();
+        }
+      }}
+      anchorPoint={{ x: menuState.x, y: menuState.y }}
+      className="w-[244px] p-1"
+    >
+      <div className="flex flex-col gap-0.5 text-[13px] leading-[18px]">
+        <button
+          type="button"
+          onClick={() => {
+            onClose();
+            onOpenQuickLook();
+          }}
+          className="w-full min-h-[32px] px-2.5 py-1.5 flex items-center gap-2.5 text-left rounded-[var(--win-radius-control)] text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)] active:bg-[var(--win-subtle-active)] transition-colors duration-[83ms] ease-[var(--win-ease-out)] cursor-pointer"
+        >
+          <span className="w-4 h-4 inline-flex items-center justify-center shrink-0 text-[var(--text-secondary)]">
+            {isPlainWebBookmark && asset.sourceURL ? (
+              <Open16Regular className="w-4 h-4" />
+            ) : (
+              <Eye16Regular className="w-4 h-4" />
+            )}
+          </span>
+          <span className="flex-1 min-w-0 truncate">
+            {isPlainWebBookmark && asset.sourceURL ? '在默认浏览器中打开' : '快速预览'}
+          </span>
+          <kbd className="ml-auto pl-3 text-[11px] leading-[14px] text-[var(--text-tertiary)] charkle-mono shrink-0">
+            Space
+          </kbd>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => {
+            onClose();
+            void transport.revealInExplorer(asset.id);
+          }}
+          className="w-full min-h-[32px] px-2.5 py-1.5 flex items-center gap-2.5 text-left rounded-[var(--win-radius-control)] text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)] active:bg-[var(--win-subtle-active)] transition-colors duration-[83ms] ease-[var(--win-ease-out)] cursor-pointer"
+        >
+          <span className="w-4 h-4 inline-flex items-center justify-center shrink-0 text-[var(--text-secondary)]">
+            <FolderOpen16Regular className="w-4 h-4" />
+          </span>
+          <span className="flex-1 min-w-0 truncate">在资源管理器中显示</span>
+        </button>
+
+        {asset.sourceURL && !isPlainWebBookmark && (
+          <button
+            type="button"
+            onClick={() => {
+              onClose();
+              if (asset.sourceURL) void transport.openExternalUrl(asset.sourceURL);
+            }}
+            className="w-full min-h-[32px] px-2.5 py-1.5 flex items-center gap-2.5 text-left rounded-[var(--win-radius-control)] text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)] active:bg-[var(--win-subtle-active)] transition-colors duration-[83ms] ease-[var(--win-ease-out)] cursor-pointer"
+          >
+            <span className="w-4 h-4 inline-flex items-center justify-center shrink-0 text-[var(--text-secondary)]">
+              <Open16Regular className="w-4 h-4" />
+            </span>
+            <span className="flex-1 min-w-0 truncate">打开来源网页</span>
+          </button>
+        )}
+
+        {asset.isTrashed || destination.type === 'trash' ? (
+          <>
+            <div className="my-1 mx-2 h-px bg-[var(--win-stroke-divider)]" />
+            <button
+              type="button"
+              onClick={() => {
+                const ids = [...menuTargetIds];
+                onClose();
+                pruneSelectionIds(ids);
+                void updateAssets({ assetIDs: ids, isTrashed: false }, destination).then(() =>
+                  pushToast({
+                    message: `已将 ${ids.length} 项放回原处`,
+                    tone: 'success',
+                  }),
+                );
+              }}
+              className="w-full min-h-[32px] px-2.5 py-1.5 flex items-center gap-2.5 text-left rounded-[var(--win-radius-control)] text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)] active:bg-[var(--win-subtle-active)] transition-colors duration-[83ms] ease-[var(--win-ease-out)] cursor-pointer"
+            >
+              <span className="w-4 h-4 inline-flex items-center justify-center shrink-0 text-[var(--text-secondary)]">
+                <ArrowUndo16Regular className="w-4 h-4" />
+              </span>
+              <span className="flex-1 min-w-0 truncate">放回原处{menuCountSuffix}</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                const ids = [...menuTargetIds];
+                onClose();
+                onRequestPermDelete(ids);
+              }}
+              className="w-full min-h-[32px] px-2.5 py-1.5 flex items-center gap-2.5 text-left rounded-[var(--win-radius-control)] text-[var(--danger)] hover:bg-[var(--danger-soft)] transition-colors duration-[83ms] ease-[var(--win-ease-out)] cursor-pointer"
+            >
+              <span className="w-4 h-4 inline-flex items-center justify-center shrink-0 text-[var(--danger)]">
+                <Delete16Regular className="w-4 h-4" />
+              </span>
+              <span className="flex-1 min-w-0 truncate">彻底删除…{menuCountSuffix}</span>
+            </button>
+          </>
+        ) : (
+          <>
+            <div className="my-1 mx-2 h-px bg-[var(--win-stroke-divider)]" />
+            <button
+              type="button"
+              onClick={() => {
+                const ids = [...menuTargetIds];
+                onClose();
+                void transport
+                  .copyAssetsToClipboard(ids)
+                  .then((n) =>
+                    pushToast({ message: `已拷贝 ${n} 项素材到剪贴板`, tone: 'success' }),
+                  )
+                  .catch((err) =>
+                    pushToast({
+                      message: err instanceof Error ? err.message : '拷贝素材失败',
+                      tone: 'error',
+                    }),
+                  );
+              }}
+              className="w-full min-h-[32px] px-2.5 py-1.5 flex items-center gap-2.5 text-left rounded-[var(--win-radius-control)] text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)] active:bg-[var(--win-subtle-active)] transition-colors duration-[83ms] ease-[var(--win-ease-out)] cursor-pointer"
+            >
+              <span className="w-4 h-4 inline-flex items-center justify-center shrink-0 text-[var(--text-secondary)]">
+                <Copy16Regular className="w-4 h-4" />
+              </span>
+              <span className="flex-1 min-w-0 truncate">拷贝{menuCountSuffix}</span>
+              <kbd className="ml-auto pl-3 text-[11px] leading-[14px] text-[var(--text-tertiary)] charkle-mono shrink-0">
+                Ctrl+C
+              </kbd>
+            </button>
+
+            <div className="my-1 mx-2 h-px bg-[var(--win-stroke-divider)]" />
+
+            {/* Moodboard action */}
+            {boards.length > 0 ? (
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (boards.length === 1) {
+                      const ids = [...menuTargetIds];
+                      onClose();
+                      void addAssetsToBoard(boards[0].id, ids);
+                    } else {
+                      setBoardSubOpen((v) => !v);
+                    }
+                  }}
+                  className="w-full min-h-[32px] px-2.5 py-1.5 flex items-center gap-2.5 text-left rounded-[var(--win-radius-control)] text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)] active:bg-[var(--win-subtle-active)] transition-colors duration-[83ms] ease-[var(--win-ease-out)] cursor-pointer"
+                >
+                  <span className="w-4 h-4 inline-flex items-center justify-center shrink-0 text-[var(--text-secondary)]">
+                    <Board16Regular className="w-4 h-4" />
+                  </span>
+                  <span className="flex-1 min-w-0 truncate">加入情绪板{menuCountSuffix}</span>
+                  {boards.length > 1 && (
+                    <ChevronRight16Regular className="w-3.5 h-3.5 text-[var(--text-tertiary)] shrink-0" />
+                  )}
+                </button>
+                {boardSubOpen && boards.length > 1 && (
+                  <div className="mt-1 pl-2 border-t border-[var(--win-stroke-divider)] pt-1 flex flex-col gap-0.5 max-h-[160px] overflow-y-auto charkle-scroll">
+                    {boards.map((board) => (
+                      <button
+                        key={board.id}
+                        type="button"
+                        onClick={() => {
+                          const ids = [...menuTargetIds];
+                          onClose();
+                          setBoardSubOpen(false);
+                          void addAssetsToBoard(board.id, ids);
+                        }}
+                        className="w-full min-h-[30px] flex items-center justify-between gap-2 px-2 py-1 text-left text-[12.5px] rounded-[var(--win-radius-control)] text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)] cursor-pointer"
+                      >
+                        <span className="truncate">{board.title}</span>
+                        {board.id === activeMoodboardId && (
+                          <span className="text-[10.5px] text-[var(--accent)] shrink-0">活跃</span>
+                        )}
+                      </button>
+                    ))}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onClose();
+                        setBoardSubOpen(false);
+                        setMoodboardGeneratorOpen(true);
+                      }}
+                      className="w-full min-h-[30px] flex items-center gap-1.5 px-2 py-1 text-left text-[12.5px] rounded-[var(--win-radius-control)] text-[var(--accent)] hover:bg-[var(--accent-soft)] cursor-pointer"
+                    >
+                      <Sparkle16Regular className="w-3.5 h-3.5 shrink-0" />
+                      <span>快速生成新情绪板…</span>
+                    </button>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={() => {
+                  onClose();
+                  setMoodboardGeneratorOpen(true);
+                }}
+                className="w-full min-h-[32px] px-2.5 py-1.5 flex items-center gap-2.5 text-left rounded-[var(--win-radius-control)] text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)] active:bg-[var(--win-subtle-active)] transition-colors duration-[83ms] ease-[var(--win-ease-out)] cursor-pointer"
+              >
+                <span className="w-4 h-4 inline-flex items-center justify-center shrink-0 text-[var(--accent)]">
+                  <Sparkle16Regular className="w-4 h-4" />
+                </span>
+                <span className="flex-1 min-w-0 truncate">快速生成情绪板…</span>
+              </button>
+            )}
+
+            {/* Hierarchical folder move submenu */}
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => setMoveSubOpen((v) => !v)}
+                className="w-full min-h-[32px] px-2.5 py-1.5 flex items-center gap-2.5 text-left rounded-[var(--win-radius-control)] text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)] active:bg-[var(--win-subtle-active)] transition-colors duration-[83ms] ease-[var(--win-ease-out)] cursor-pointer"
+              >
+                <span className="w-4 h-4 inline-flex items-center justify-center shrink-0 text-[var(--text-secondary)]">
+                  <FolderArrowRight16Regular className="w-4 h-4" />
+                </span>
+                <span className="flex-1 min-w-0 truncate">移动到文件夹{menuCountSuffix}</span>
+                <ChevronRight16Regular className="w-3.5 h-3.5 text-[var(--text-tertiary)] shrink-0" />
+              </button>
+              {moveSubOpen && (
+                <div className="mt-1 pl-1 border-t border-[var(--win-stroke-divider)] pt-1">
+                  <FolderMoveMenu
+                    folders={folders}
+                    currentFolderId={
+                      menuTargetIds.length === 1 ? (asset.folderID ?? null) : undefined
+                    }
+                    onSelectFolder={(folderId) => {
+                      const ids = [...menuTargetIds];
+                      onClose();
+                      setMoveSubOpen(false);
+                      const folderName = folderId
+                        ? folders.find((f) => f.id === folderId)?.name ?? '文件夹'
+                        : '收件箱';
+                      void moveAssetsToFolderWithUndo(ids, folderId, folderName, destination);
+                    }}
+                  />
+                </div>
+              )}
+            </div>
+
+            <button
+              type="button"
+              onClick={() => {
+                const ids = [...menuTargetIds];
+                onClose();
+                const nextPinned = !asset.pinnedOffline;
+                void updateAssets(
+                  { assetIDs: ids, pinnedOffline: nextPinned },
+                  destination,
+                ).then(() =>
+                  pushToast({
+                    message: nextPinned
+                      ? ids.length > 1
+                        ? `已将 ${ids.length} 项设为始终保留在本地`
+                        : '已设为始终保留在本地'
+                      : ids.length > 1
+                        ? `已取消 ${ids.length} 项的始终保留`
+                        : '已取消始终保留，将按需管理空间',
+                    tone: 'info',
+                  }),
+                );
+              }}
+              className="w-full min-h-[32px] px-2.5 py-1.5 flex items-center gap-2.5 text-left rounded-[var(--win-radius-control)] text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)] active:bg-[var(--win-subtle-active)] transition-colors duration-[83ms] ease-[var(--win-ease-out)] cursor-pointer"
+            >
+              <span className="w-4 h-4 inline-flex items-center justify-center shrink-0 text-[var(--text-secondary)]">
+                {asset.pinnedOffline ? (
+                  <Cloud16Regular className="w-4 h-4" />
+                ) : (
+                  <ArrowDownload16Regular className="w-4 h-4" />
+                )}
+              </span>
+              <span className="flex-1 min-w-0 truncate">
+                {asset.pinnedOffline
+                  ? `取消始终保留在本地${menuCountSuffix}`
+                  : `始终保留在本地${menuCountSuffix}`}
+              </span>
+            </button>
+
+            {primaryHex && (
+              <button
+                type="button"
+                onClick={() => {
+                  const hexUpper = primaryHex.toUpperCase();
+                  onClose();
+                  void copyTextToClipboard(hexUpper)
+                    .then(() => {
+                      pushToast({
+                        message: `已复制色值 ${hexUpper}`,
+                        tone: 'info',
+                      });
+                    })
+                    .catch(() => {
+                      pushToast({
+                        message: '复制色值失败',
+                        tone: 'error',
+                      });
+                    });
+                }}
+                className="w-full min-h-[32px] px-2.5 py-1.5 flex items-center gap-2.5 text-left rounded-[var(--win-radius-control)] text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)] active:bg-[var(--win-subtle-active)] transition-colors duration-[83ms] ease-[var(--win-ease-out)] cursor-pointer"
+              >
+                <span className="w-4 h-4 inline-flex items-center justify-center shrink-0 text-[var(--text-secondary)]">
+                  <Color16Regular className="w-4 h-4" />
+                </span>
+                <span className="flex-1 min-w-0 truncate">
+                  复制主色 {primaryHex.toUpperCase()}
+                </span>
+              </button>
+            )}
+
+            <div className="my-1 mx-2 h-px bg-[var(--win-stroke-divider)]" />
+
+            <button
+              type="button"
+              onClick={() => {
+                const ids = [...menuTargetIds];
+                onClose();
+                pruneSelectionIds(ids);
+                void updateAssets({ assetIDs: ids, isTrashed: true }, destination, {
+                  undoMessage: `已移至回收站 (${ids.length} 项)`,
+                  undoPatch: { assetIDs: ids, isTrashed: false },
+                });
+              }}
+              className="w-full min-h-[32px] px-2.5 py-1.5 flex items-center gap-2.5 text-left rounded-[var(--win-radius-control)] text-[var(--danger)] hover:bg-[var(--danger-soft)] transition-colors duration-[83ms] ease-[var(--win-ease-out)] cursor-pointer"
+            >
+              <span className="w-4 h-4 inline-flex items-center justify-center shrink-0 text-[var(--danger)]">
+                <Delete16Regular className="w-4 h-4" />
+              </span>
+              <span className="flex-1 min-w-0 truncate">移至回收站{menuCountSuffix}</span>
+            </button>
+          </>
+        )}
+      </div>
+    </Popover>
+  );
+};
+
+const AssetCardPermDeleteModal: React.FC<{
+  ids: string[];
+  onClose: () => void;
+}> = ({ ids, onClose }) => {
+  const destination = useCoordinatorStore((s) => s.destination);
+  const setSelection = useCoordinatorStore((s) => s.setSelection);
+  const clearSelection = useCoordinatorStore((s) => s.clearSelection);
+  const permanentlyDeleteAssets = useLibraryStore((s) => s.permanentlyDeleteAssets);
+
+  return (
+    <ModalShell
+      open
+      onClose={onClose}
+      title={`彻底删除 ${ids.length} 项素材？`}
+      width="sm"
+      footer={
+        <>
+          <Button variant="standard" onClick={onClose}>
+            取消
+          </Button>
+          <Button
+            variant="danger"
+            onClick={async () => {
+              const targetIds = [...ids];
+              onClose();
+              if (targetIds.length > 0) {
+                const removedSet = new Set(targetIds);
+                const remaining = useCoordinatorStore
+                  .getState()
+                  .selectedAssetIds.filter((id) => !removedSet.has(id));
+                if (remaining.length === 0) {
+                  clearSelection();
+                } else {
+                  setSelection(remaining, remaining[0]);
+                }
+                await permanentlyDeleteAssets(targetIds, destination);
+              }
+            }}
+          >
+            彻底删除
+          </Button>
+        </>
+      }
+    >
+      <p className="text-[13px] text-[var(--text-secondary)] leading-relaxed charkle-prose">
+        彻底删除后将无法从回收站恢复。
+      </p>
+    </ModalShell>
+  );
+};
+
 /**
  * Borderless gallery-first AssetCard matching macOS `VirtualizedMasonryView.swift` & `HoverMediaPreview.swift`:
  * - Pure artwork first; zero permanent chrome below cards
@@ -124,6 +610,9 @@ export const AssetCard: React.FC<AssetCardProps> = React.memo(({
   orderedIds,
   width,
   height,
+  x,
+  y,
+  zIndex,
   style,
   onHoverChange,
   cardRefCallback,
@@ -142,28 +631,15 @@ export const AssetCard: React.FC<AssetCardProps> = React.memo(({
     y: number;
     targetIds: string[];
   } | null>(null);
-  const [moveSubOpen, setMoveSubOpen] = useState(false);
-  const [boardSubOpen, setBoardSubOpen] = useState(false);
   const [permDeleteIds, setPermDeleteIds] = useState<string[] | null>(null);
 
-  const destination = useCoordinatorStore((s) => s.destination);
   const selectAsset = useCoordinatorStore((s) => s.selectAsset);
-  const setSelection = useCoordinatorStore((s) => s.setSelection);
-  const clearSelection = useCoordinatorStore((s) => s.clearSelection);
   const openQuickLook = useCoordinatorStore((s) => s.openQuickLook);
-  const activeMoodboardId = useCoordinatorStore((s) => s.activeMoodboardId);
-  const setMoodboardGeneratorOpen = useCoordinatorStore((s) => s.setMoodboardGeneratorOpen);
   const pushToast = useCoordinatorStore((s) => s.pushToast);
 
-  const folders = useLibraryStore((s) => s.folders);
   const mediaRevision = useLibraryStore((s) => s.mediaRevision);
   const cardThumbRevision = useLibraryStore((s) => s.thumbnailRevisions[asset.id] ?? 0);
   const effectiveThumbRev = mediaRevision + cardThumbRevision;
-  const updateAssets = useLibraryStore((s) => s.updateAssets);
-  const permanentlyDeleteAssets = useLibraryStore((s) => s.permanentlyDeleteAssets);
-
-  const boards = useMoodboardStore((s) => s.boards);
-  const addAssetsToBoard = useMoodboardStore((s) => s.addAssetsToBoard);
 
   const isBeingDragged = useDndStore(
     (s) => s.pointerDrag?.kind === 'assets' && s.pointerDrag.assetIds.includes(asset.id),
@@ -246,20 +722,6 @@ export const AssetCard: React.FC<AssetCardProps> = React.memo(({
   const resolveTargetIds = () => {
     const latestSel = useCoordinatorStore.getState().selectedAssetIds;
     return selected && latestSel.length > 1 ? latestSel : [asset.id];
-  };
-  const menuTargetIds = menuState?.targetIds ?? [asset.id];
-  const menuCountSuffix = menuTargetIds.length > 1 ? ` (${menuTargetIds.length} 项)` : '';
-
-  const pruneSelectionIds = (removedIds: readonly string[]) => {
-    const removedSet = new Set(removedIds);
-    const remaining = useCoordinatorStore
-      .getState()
-      .selectedAssetIds.filter((id) => !removedSet.has(id));
-    if (remaining.length === 0) {
-      clearSelection();
-    } else {
-      setSelection(remaining, remaining[0]);
-    }
   };
 
   const primaryHex = asset.dominantColors[0]?.hex ?? null;
@@ -545,8 +1007,6 @@ export const AssetCard: React.FC<AssetCardProps> = React.memo(({
             }
             snapshotIds = [asset.id];
           }
-          setMoveSubOpen(false);
-          setBoardSubOpen(false);
           setMenuState({ x: e.clientX, y: e.clientY, targetIds: snapshotIds });
         }}
         onKeyDown={(e) => {
@@ -558,6 +1018,15 @@ export const AssetCard: React.FC<AssetCardProps> = React.memo(({
         style={{
           width,
           height,
+          ...(x !== undefined && y !== undefined
+            ? {
+                position: 'absolute' as const,
+                transform: `translate3d(${x}px, ${y}px, 0)`,
+                top: 0,
+                left: 0,
+                zIndex: zIndex ?? 1,
+              }
+            : null),
           ...style,
         }}
         className={[
@@ -853,19 +1322,11 @@ export const AssetCard: React.FC<AssetCardProps> = React.memo(({
             {/* Strictly cached-only muted hover live preview (140ms dwell debounce + zero black-frame flash) */}
             {canHoverLivePreview && cachedOriginalUrl && asset.mediaKind === 'video' && (
               <>
-                <video
+                <HoverVideoPreview
                   src={cachedOriginalUrl}
-                  muted
-                  loop
-                  autoPlay
-                  playsInline
-                  onLoadedData={() => setHoverMediaReady(true)}
-                  onCanPlay={() => setHoverMediaReady(true)}
+                  ready={hoverMediaReady}
+                  onReady={() => setHoverMediaReady(true)}
                   onError={() => setHoverPreviewFailed(true)}
-                  className={[
-                    'absolute inset-0 w-full h-full object-cover transition-opacity duration-150',
-                    hoverMediaReady ? 'opacity-100' : 'opacity-0',
-                  ].join(' ')}
                 />
                 {hoverMediaReady && width >= 92 && height >= 64 && (
                   <span
@@ -973,385 +1434,23 @@ export const AssetCard: React.FC<AssetCardProps> = React.memo(({
         )}
       </div>
 
-      {/* Right-click Fluent 2 Acrylic context menu */}
-      <Popover
-        open={menuState !== null}
-        onOpenChange={(open) => {
-          if (!open) {
-            setMenuState(null);
-            setMoveSubOpen(false);
-            setBoardSubOpen(false);
-          }
-        }}
-        anchorPoint={menuState ? { x: menuState.x, y: menuState.y } : null}
-        className="w-[244px] p-1"
-      >
-        <div className="flex flex-col gap-0.5 text-[13px] leading-[18px]">
-          <button
-            type="button"
-            onClick={() => {
-              setMenuState(null);
-              handleOpenQuickLook();
-            }}
-            className="w-full min-h-[32px] px-2.5 py-1.5 flex items-center gap-2.5 text-left rounded-[var(--win-radius-control)] text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)] active:bg-[var(--win-subtle-active)] transition-colors duration-[83ms] ease-[var(--win-ease-out)] cursor-pointer"
-          >
-            <span className="w-4 h-4 inline-flex items-center justify-center shrink-0 text-[var(--text-secondary)]">
-              {isPlainWebBookmark && asset.sourceURL ? (
-                <Open16Regular className="w-4 h-4" />
-              ) : (
-                <Eye16Regular className="w-4 h-4" />
-              )}
-            </span>
-            <span className="flex-1 min-w-0 truncate">
-              {isPlainWebBookmark && asset.sourceURL ? '在默认浏览器中打开' : '快速预览'}
-            </span>
-            <kbd className="ml-auto pl-3 text-[11px] leading-[14px] text-[var(--text-tertiary)] charkle-mono shrink-0">
-              Space
-            </kbd>
-          </button>
+      {/* Lazily mounted Fluent 2 Acrylic context menu (zero idle store subscriptions) */}
+      {menuState && (
+        <AssetCardContextMenu
+          asset={asset}
+          menuState={menuState}
+          isPlainWebBookmark={isPlainWebBookmark}
+          primaryHex={primaryHex}
+          onClose={() => setMenuState(null)}
+          onOpenQuickLook={handleOpenQuickLook}
+          onRequestPermDelete={(ids) => setPermDeleteIds(ids)}
+        />
+      )}
 
-          <button
-            type="button"
-            onClick={() => {
-              setMenuState(null);
-              void transport.revealInExplorer(asset.id);
-            }}
-            className="w-full min-h-[32px] px-2.5 py-1.5 flex items-center gap-2.5 text-left rounded-[var(--win-radius-control)] text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)] active:bg-[var(--win-subtle-active)] transition-colors duration-[83ms] ease-[var(--win-ease-out)] cursor-pointer"
-          >
-            <span className="w-4 h-4 inline-flex items-center justify-center shrink-0 text-[var(--text-secondary)]">
-              <FolderOpen16Regular className="w-4 h-4" />
-            </span>
-            <span className="flex-1 min-w-0 truncate">在资源管理器中显示</span>
-          </button>
-
-          {asset.sourceURL && !isPlainWebBookmark && (
-            <button
-              type="button"
-              onClick={() => {
-                setMenuState(null);
-                if (asset.sourceURL) void transport.openExternalUrl(asset.sourceURL);
-              }}
-              className="w-full min-h-[32px] px-2.5 py-1.5 flex items-center gap-2.5 text-left rounded-[var(--win-radius-control)] text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)] active:bg-[var(--win-subtle-active)] transition-colors duration-[83ms] ease-[var(--win-ease-out)] cursor-pointer"
-            >
-              <span className="w-4 h-4 inline-flex items-center justify-center shrink-0 text-[var(--text-secondary)]">
-                <Open16Regular className="w-4 h-4" />
-              </span>
-              <span className="flex-1 min-w-0 truncate">打开来源网页</span>
-            </button>
-          )}
-
-          {asset.isTrashed || destination.type === 'trash' ? (
-            <>
-              <div className="my-1 mx-2 h-px bg-[var(--win-stroke-divider)]" />
-              <button
-                type="button"
-                onClick={() => {
-                  const ids = [...menuTargetIds];
-                  setMenuState(null);
-                  pruneSelectionIds(ids);
-                  void updateAssets({ assetIDs: ids, isTrashed: false }, destination).then(() =>
-                    pushToast({
-                      message: `已将 ${ids.length} 项放回原处`,
-                      tone: 'success',
-                    }),
-                  );
-                }}
-                className="w-full min-h-[32px] px-2.5 py-1.5 flex items-center gap-2.5 text-left rounded-[var(--win-radius-control)] text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)] active:bg-[var(--win-subtle-active)] transition-colors duration-[83ms] ease-[var(--win-ease-out)] cursor-pointer"
-              >
-                <span className="w-4 h-4 inline-flex items-center justify-center shrink-0 text-[var(--text-secondary)]">
-                  <ArrowUndo16Regular className="w-4 h-4" />
-                </span>
-                <span className="flex-1 min-w-0 truncate">放回原处{menuCountSuffix}</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  const ids = [...menuTargetIds];
-                  setMenuState(null);
-                  setPermDeleteIds(ids);
-                }}
-                className="w-full min-h-[32px] px-2.5 py-1.5 flex items-center gap-2.5 text-left rounded-[var(--win-radius-control)] text-[var(--danger)] hover:bg-[var(--danger-soft)] transition-colors duration-[83ms] ease-[var(--win-ease-out)] cursor-pointer"
-              >
-                <span className="w-4 h-4 inline-flex items-center justify-center shrink-0 text-[var(--danger)]">
-                  <Delete16Regular className="w-4 h-4" />
-                </span>
-                <span className="flex-1 min-w-0 truncate">彻底删除…{menuCountSuffix}</span>
-              </button>
-            </>
-          ) : (
-            <>
-              <div className="my-1 mx-2 h-px bg-[var(--win-stroke-divider)]" />
-              <button
-                type="button"
-                onClick={() => {
-                  const ids = [...menuTargetIds];
-                  setMenuState(null);
-                  void transport
-                    .copyAssetsToClipboard(ids)
-                    .then((n) =>
-                      pushToast({ message: `已拷贝 ${n} 项素材到剪贴板`, tone: 'success' }),
-                    )
-                    .catch((err) =>
-                      pushToast({
-                        message: err instanceof Error ? err.message : '拷贝素材失败',
-                        tone: 'error',
-                      }),
-                    );
-                }}
-                className="w-full min-h-[32px] px-2.5 py-1.5 flex items-center gap-2.5 text-left rounded-[var(--win-radius-control)] text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)] active:bg-[var(--win-subtle-active)] transition-colors duration-[83ms] ease-[var(--win-ease-out)] cursor-pointer"
-              >
-                <span className="w-4 h-4 inline-flex items-center justify-center shrink-0 text-[var(--text-secondary)]">
-                  <Copy16Regular className="w-4 h-4" />
-                </span>
-                <span className="flex-1 min-w-0 truncate">拷贝{menuCountSuffix}</span>
-                <kbd className="ml-auto pl-3 text-[11px] leading-[14px] text-[var(--text-tertiary)] charkle-mono shrink-0">
-                  Ctrl+C
-                </kbd>
-              </button>
-
-              <div className="my-1 mx-2 h-px bg-[var(--win-stroke-divider)]" />
-
-              {/* Moodboard action */}
-              {boards.length > 0 ? (
-                <div className="relative">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (boards.length === 1) {
-                        const ids = [...menuTargetIds];
-                        setMenuState(null);
-                        void addAssetsToBoard(boards[0].id, ids);
-                      } else {
-                        setBoardSubOpen((v) => !v);
-                      }
-                    }}
-                    className="w-full min-h-[32px] px-2.5 py-1.5 flex items-center gap-2.5 text-left rounded-[var(--win-radius-control)] text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)] active:bg-[var(--win-subtle-active)] transition-colors duration-[83ms] ease-[var(--win-ease-out)] cursor-pointer"
-                  >
-                    <span className="w-4 h-4 inline-flex items-center justify-center shrink-0 text-[var(--text-secondary)]">
-                      <Board16Regular className="w-4 h-4" />
-                    </span>
-                    <span className="flex-1 min-w-0 truncate">加入情绪板{menuCountSuffix}</span>
-                    {boards.length > 1 && (
-                      <ChevronRight16Regular className="w-3.5 h-3.5 text-[var(--text-tertiary)] shrink-0" />
-                    )}
-                  </button>
-                  {boardSubOpen && boards.length > 1 && (
-                    <div className="mt-1 pl-2 border-t border-[var(--win-stroke-divider)] pt-1 flex flex-col gap-0.5 max-h-[160px] overflow-y-auto charkle-scroll">
-                      {boards.map((board) => (
-                        <button
-                          key={board.id}
-                          type="button"
-                          onClick={() => {
-                            const ids = [...menuTargetIds];
-                            setMenuState(null);
-                            setBoardSubOpen(false);
-                            void addAssetsToBoard(board.id, ids);
-                          }}
-                          className="w-full min-h-[30px] flex items-center justify-between gap-2 px-2 py-1 text-left text-[12.5px] rounded-[var(--win-radius-control)] text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)] cursor-pointer"
-                        >
-                          <span className="truncate">{board.title}</span>
-                          {board.id === activeMoodboardId && (
-                            <span className="text-[10.5px] text-[var(--accent)] shrink-0">活跃</span>
-                          )}
-                        </button>
-                      ))}
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setMenuState(null);
-                          setBoardSubOpen(false);
-                          setMoodboardGeneratorOpen(true);
-                        }}
-                        className="w-full min-h-[30px] flex items-center gap-1.5 px-2 py-1 text-left text-[12.5px] rounded-[var(--win-radius-control)] text-[var(--accent)] hover:bg-[var(--accent-soft)] cursor-pointer"
-                      >
-                        <Sparkle16Regular className="w-3.5 h-3.5 shrink-0" />
-                        <span>快速生成新情绪板…</span>
-                      </button>
-                    </div>
-                  )}
-                </div>
-              ) : (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setMenuState(null);
-                    setMoodboardGeneratorOpen(true);
-                  }}
-                  className="w-full min-h-[32px] px-2.5 py-1.5 flex items-center gap-2.5 text-left rounded-[var(--win-radius-control)] text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)] active:bg-[var(--win-subtle-active)] transition-colors duration-[83ms] ease-[var(--win-ease-out)] cursor-pointer"
-                >
-                  <span className="w-4 h-4 inline-flex items-center justify-center shrink-0 text-[var(--accent)]">
-                    <Sparkle16Regular className="w-4 h-4" />
-                  </span>
-                  <span className="flex-1 min-w-0 truncate">快速生成情绪板…</span>
-                </button>
-              )}
-
-              {/* Hierarchical folder move submenu */}
-              <div className="relative">
-                <button
-                  type="button"
-                  onClick={() => setMoveSubOpen((v) => !v)}
-                  className="w-full min-h-[32px] px-2.5 py-1.5 flex items-center gap-2.5 text-left rounded-[var(--win-radius-control)] text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)] active:bg-[var(--win-subtle-active)] transition-colors duration-[83ms] ease-[var(--win-ease-out)] cursor-pointer"
-                >
-                  <span className="w-4 h-4 inline-flex items-center justify-center shrink-0 text-[var(--text-secondary)]">
-                    <FolderArrowRight16Regular className="w-4 h-4" />
-                  </span>
-                  <span className="flex-1 min-w-0 truncate">移动到文件夹{menuCountSuffix}</span>
-                  <ChevronRight16Regular className="w-3.5 h-3.5 text-[var(--text-tertiary)] shrink-0" />
-                </button>
-                {moveSubOpen && (
-                  <div className="mt-1 pl-1 border-t border-[var(--win-stroke-divider)] pt-1">
-                    <FolderMoveMenu
-                      folders={folders}
-                      currentFolderId={
-                        menuTargetIds.length === 1 ? (asset.folderID ?? null) : undefined
-                      }
-                      onSelectFolder={(folderId) => {
-                        const ids = [...menuTargetIds];
-                        setMenuState(null);
-                        setMoveSubOpen(false);
-                        const folderName = folderId
-                          ? folders.find((f) => f.id === folderId)?.name ?? '文件夹'
-                          : '收件箱';
-                        void updateAssets(
-                          {
-                            assetIDs: ids,
-                            folderAssignment: folderId ? { folder: folderId } : 'inbox',
-                          },
-                          destination,
-                          {
-                            undoMessage: `已移动 ${ids.length} 项至「${folderName}」`,
-                            undoPatch: {
-                              assetIDs: ids,
-                              folderAssignment: asset.folderID
-                                ? { folder: asset.folderID }
-                                : 'inbox',
-                            },
-                          },
-                        );
-                      }}
-                    />
-                  </div>
-                )}
-              </div>
-
-              <button
-                type="button"
-                onClick={() => {
-                  const ids = [...menuTargetIds];
-                  setMenuState(null);
-                  const nextPinned = !asset.pinnedOffline;
-                  void updateAssets(
-                    { assetIDs: ids, pinnedOffline: nextPinned },
-                    destination,
-                  ).then(() =>
-                    pushToast({
-                      message: nextPinned
-                        ? ids.length > 1
-                          ? `已将 ${ids.length} 项设为始终保留在本地`
-                          : '已设为始终保留在本地'
-                        : ids.length > 1
-                          ? `已取消 ${ids.length} 项的始终保留`
-                          : '已取消始终保留，将按需管理空间',
-                      tone: 'info',
-                    }),
-                  );
-                }}
-                className="w-full min-h-[32px] px-2.5 py-1.5 flex items-center gap-2.5 text-left rounded-[var(--win-radius-control)] text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)] active:bg-[var(--win-subtle-active)] transition-colors duration-[83ms] ease-[var(--win-ease-out)] cursor-pointer"
-              >
-                <span className="w-4 h-4 inline-flex items-center justify-center shrink-0 text-[var(--text-secondary)]">
-                  {asset.pinnedOffline ? (
-                    <Cloud16Regular className="w-4 h-4" />
-                  ) : (
-                    <ArrowDownload16Regular className="w-4 h-4" />
-                  )}
-                </span>
-                <span className="flex-1 min-w-0 truncate">
-                  {asset.pinnedOffline
-                    ? `取消始终保留在本地${menuCountSuffix}`
-                    : `始终保留在本地${menuCountSuffix}`}
-                </span>
-              </button>
-
-              {primaryHex && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    const hexUpper = primaryHex.toUpperCase();
-                    setMenuState(null);
-                    void navigator.clipboard?.writeText(hexUpper);
-                    pushToast({
-                      message: `已复制色值 ${hexUpper}`,
-                      tone: 'info',
-                    });
-                  }}
-                  className="w-full min-h-[32px] px-2.5 py-1.5 flex items-center gap-2.5 text-left rounded-[var(--win-radius-control)] text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)] active:bg-[var(--win-subtle-active)] transition-colors duration-[83ms] ease-[var(--win-ease-out)] cursor-pointer"
-                >
-                  <span className="w-4 h-4 inline-flex items-center justify-center shrink-0 text-[var(--text-secondary)]">
-                    <Color16Regular className="w-4 h-4" />
-                  </span>
-                  <span className="flex-1 min-w-0 truncate">
-                    复制主色 {primaryHex.toUpperCase()}
-                  </span>
-                </button>
-              )}
-
-              <div className="my-1 mx-2 h-px bg-[var(--win-stroke-divider)]" />
-
-              <button
-                type="button"
-                onClick={() => {
-                  const ids = [...menuTargetIds];
-                  setMenuState(null);
-                  pruneSelectionIds(ids);
-                  void updateAssets({ assetIDs: ids, isTrashed: true }, destination, {
-                    undoMessage: `已移至回收站 (${ids.length} 项)`,
-                    undoPatch: { assetIDs: ids, isTrashed: false },
-                  });
-                }}
-                className="w-full min-h-[32px] px-2.5 py-1.5 flex items-center gap-2.5 text-left rounded-[var(--win-radius-control)] text-[var(--danger)] hover:bg-[var(--danger-soft)] transition-colors duration-[83ms] ease-[var(--win-ease-out)] cursor-pointer"
-              >
-                <span className="w-4 h-4 inline-flex items-center justify-center shrink-0 text-[var(--danger)]">
-                  <Delete16Regular className="w-4 h-4" />
-                </span>
-                <span className="flex-1 min-w-0 truncate">移至回收站{menuCountSuffix}</span>
-              </button>
-            </>
-          )}
-        </div>
-      </Popover>
-
-      {/* Irreversible Permanent Delete Confirmation Modal (DESIGN.md §7.3) */}
-      <ModalShell
-        open={permDeleteIds !== null}
-        onClose={() => setPermDeleteIds(null)}
-        title={`彻底删除 ${permDeleteIds?.length ?? 0} 项素材？`}
-        width="sm"
-        footer={
-          <>
-            <Button variant="standard" onClick={() => setPermDeleteIds(null)}>
-              取消
-            </Button>
-            <Button
-              variant="danger"
-              onClick={async () => {
-                const ids = permDeleteIds ?? [];
-                setPermDeleteIds(null);
-                if (ids.length > 0) {
-                  pruneSelectionIds(ids);
-                  await permanentlyDeleteAssets(ids, destination);
-                }
-              }}
-            >
-              彻底删除
-            </Button>
-          </>
-        }
-      >
-        <p className="text-[13px] text-[var(--text-secondary)] leading-relaxed charkle-prose">
-          彻底删除后将无法从回收站恢复。
-        </p>
-      </ModalShell>
+      {/* Lazily mounted Permanent Delete Confirmation Modal */}
+      {permDeleteIds && (
+        <AssetCardPermDeleteModal ids={permDeleteIds} onClose={() => setPermDeleteIds(null)} />
+      )}
     </>
   );
 });

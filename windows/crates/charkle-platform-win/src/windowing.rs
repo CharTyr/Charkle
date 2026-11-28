@@ -258,6 +258,12 @@ fn window_glass_surfaces() -> &'static Mutex<HashMap<isize, bool>> {
     MAP.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+#[cfg(target_os = "windows")]
+fn window_last_surfaces() -> &'static Mutex<HashMap<isize, WindowSurfaceState>> {
+    static MAP: OnceLock<Mutex<HashMap<isize, WindowSurfaceState>>> = OnceLock::new();
+    MAP.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 /// Updates the tracked physical client rect of the custom titlebar's Maximize button
 /// so Win32 `WM_NCHITTEST` returns `HTMAXBUTTON` for native Windows 11 Snap Layouts.
 pub fn update_maximize_button_rect(hwnd: isize, rect: Option<ClientRect>) {
@@ -421,6 +427,8 @@ mod win32_impl {
     }
 
     pub fn query_windows_version() -> WindowsVersion {
+        // SAFETY: `ntdll.dll` is permanently loaded in every Windows process and `RtlGetVersion`
+        // accepts a valid initialized `RtlOsVersionInfoW` struct pointer.
         unsafe {
             let Ok(ntdll) = GetModuleHandleW(w!("ntdll.dll")) else {
                 return WindowsVersion {
@@ -463,6 +471,7 @@ mod win32_impl {
     }
 
     pub fn is_transparency_enabled() -> bool {
+        // SAFETY: `RegGetValueW` writes a single `u32` into stack-owned `value` bounded by `size`.
         unsafe {
             let mut value: u32 = 1;
             let mut size = size_of::<u32>() as u32;
@@ -484,6 +493,7 @@ mod win32_impl {
     }
 
     pub fn are_animations_enabled() -> bool {
+        // SAFETY: `SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION)` writes a `BOOL` into `enabled`.
         unsafe {
             let mut enabled = BOOL::from(true);
             let ok = SystemParametersInfoW(
@@ -501,6 +511,7 @@ mod win32_impl {
     }
 
     fn read_dwm_dword(value_name: PCWSTR) -> Option<u32> {
+        // SAFETY: `value_name` is a static NUL-terminated UTF-16 string; `value` is a stack `u32`.
         unsafe {
             let mut value: u32 = 0;
             let mut size = size_of::<u32>() as u32;
@@ -542,6 +553,7 @@ mod win32_impl {
                 modes.insert(hwnd_raw, is_dark);
             }
             let hwnd = HWND(hwnd_raw as *mut c_void);
+            // SAFETY: `hwnd` belongs to our process window; all DWM attribute pointers reference live stack values.
             unsafe {
                 // Force DWM non-client rendering enabled + suppress uxtheme caption/icon/sysmenu
                 // chrome BEFORE any SWP_FRAMECHANGED so uxtheme never paints the legacy Aero Basic
@@ -643,7 +655,7 @@ mod win32_impl {
             }
         }
 
-        WindowSurfaceState {
+        let state = WindowSurfaceState {
             build_number: ver.build,
             backdrop,
             is_dark,
@@ -651,7 +663,13 @@ mod win32_impl {
             animations_enabled,
             snap_layouts_supported: ver.build >= 22000,
             system_accent_hex,
+        };
+        if hwnd_raw != 0 {
+            if let Ok(mut last_map) = window_last_surfaces().lock() {
+                last_map.insert(hwnd_raw, state.clone());
+            }
         }
+        state
     }
 
     pub fn install_snap_layout_subclass(hwnd_raw: isize) -> bool {
@@ -659,6 +677,7 @@ mod win32_impl {
             return false;
         }
         let hwnd = HWND(hwnd_raw as *mut c_void);
+        // SAFETY: `hwnd` is a live window owned by our process; `snap_subclass_proc` removes itself on `WM_NCDESTROY`.
         unsafe { SetWindowSubclass(hwnd, Some(snap_subclass_proc), SNAP_SUBCLASS_ID, 0).as_bool() }
     }
 
@@ -669,6 +688,7 @@ mod win32_impl {
             return false;
         }
         let hwnd = HWND(hwnd_raw as *mut c_void);
+        // SAFETY: Validates `hwnd` via `IsWindow` before posting standard `WM_NCLBUTTONDOWN`.
         unsafe {
             if !IsWindow(hwnd).as_bool() || IsZoomed(hwnd).as_bool() {
                 return false;
@@ -854,10 +874,28 @@ mod win32_impl {
                         return Some(LRESULT(0));
                     }
                     m if should_refresh_surface_on_message(m) => {
-                        // Let the windowing layer process the OS notification first, then re-sync DWM
-                        // Mica Alt + immersive dark mode and broadcast the fresh surface state (theme,
-                        // transparency, animation, and system accent color) to registered listeners.
+                        // Let the windowing layer process the OS notification first. For generic
+                        // `WM_SETTINGCHANGE` broadcasts (e.g. unrelated env/locale updates), skip
+                        // expensive DWM re-application & event broadcast when tracked visual OS
+                        // settings are unchanged.
                         let res = DefSubclassProc(hwnd, msg, wparam, lparam);
+                        if m == 0x001A {
+                            let cur_transparency = is_transparency_enabled();
+                            let cur_animations = are_animations_enabled();
+                            let cur_accent = read_system_accent_hex();
+                            let unchanged = window_last_surfaces()
+                                .lock()
+                                .ok()
+                                .and_then(|map| map.get(&hwnd_key).cloned())
+                                .is_some_and(|prev| {
+                                    prev.transparency_enabled == cur_transparency
+                                        && prev.animations_enabled == cur_animations
+                                        && prev.system_accent_hex == cur_accent
+                                });
+                            if unchanged {
+                                return Some(res);
+                            }
+                        }
                         let is_dark = window_dark_modes()
                             .lock()
                             .ok()
@@ -882,6 +920,9 @@ mod win32_impl {
                         }
                         if let Ok(mut glass_map) = window_glass_surfaces().lock() {
                             glass_map.remove(&hwnd_key);
+                        }
+                        if let Ok(mut last_map) = window_last_surfaces().lock() {
+                            last_map.remove(&hwnd_key);
                         }
                         let _ = RemoveWindowSubclass(hwnd, Some(snap_subclass_proc), uid_subclass);
                     }

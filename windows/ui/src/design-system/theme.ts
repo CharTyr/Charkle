@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useSyncExternalStore } from 'react';
 import type { CSSProperties } from 'react';
 import type { AccentSource, AssetRecord, PhotoExifMetadata } from '../types/domain';
 
@@ -344,34 +344,60 @@ export function applyThemeToDocument(mode: ThemeMode): 'light' | 'dark' {
   return effective;
 }
 
-export function useResolvedIsDark(mode?: ThemeMode): boolean {
-  const [domDark, setDomDark] = useState<boolean>(() => {
-    if (mode === 'dark') return true;
-    if (mode === 'light') return false;
-    if (typeof document !== 'undefined' && document.documentElement.dataset.theme) {
-      return document.documentElement.dataset.theme === 'dark';
-    }
-    return resolveSystemDark();
-  });
-
-  useEffect(() => {
-    if (mode === 'dark') {
-      setDomDark(true);
-      return;
-    }
-    if (mode === 'light') {
-      setDomDark(false);
-      return;
-    }
-    if (typeof document === 'undefined' || typeof MutationObserver === 'undefined') return;
+function readDomResolvedIsDark(): boolean {
+  if (typeof document !== 'undefined') {
     const root = document.documentElement;
-    const sync = () => setDomDark(root.dataset.theme === 'dark');
-    sync();
-    const obs = new MutationObserver(sync);
-    obs.observe(root, { attributes: true, attributeFilter: ['data-theme', 'class'] });
-    return () => obs.disconnect();
-  }, [mode]);
+    if (root.dataset.theme === 'dark') return true;
+    if (root.dataset.theme === 'light') return false;
+    if (root.classList.contains('dark')) return true;
+  }
+  return resolveSystemDark();
+}
 
+const themeListeners = new Set<() => void>();
+let sharedThemeObserver: MutationObserver | null = null;
+let sharedColorSchemeMedia: MediaQueryList | null = null;
+
+function notifyThemeListeners() {
+  for (const listener of themeListeners) {
+    listener();
+  }
+}
+
+function subscribeThemeChanges(listener: () => void): () => void {
+  themeListeners.add(listener);
+  if (themeListeners.size === 1) {
+    if (typeof document !== 'undefined' && typeof MutationObserver !== 'undefined') {
+      sharedThemeObserver = new MutationObserver(notifyThemeListeners);
+      sharedThemeObserver.observe(document.documentElement, {
+        attributes: true,
+        attributeFilter: ['data-theme', 'class'],
+      });
+    }
+    if (typeof window !== 'undefined' && typeof window.matchMedia === 'function') {
+      sharedColorSchemeMedia = window.matchMedia('(prefers-color-scheme: dark)');
+      sharedColorSchemeMedia.addEventListener?.('change', notifyThemeListeners);
+    }
+  }
+  return () => {
+    themeListeners.delete(listener);
+    if (themeListeners.size === 0) {
+      sharedThemeObserver?.disconnect();
+      sharedThemeObserver = null;
+      sharedColorSchemeMedia?.removeEventListener?.('change', notifyThemeListeners);
+      sharedColorSchemeMedia = null;
+    }
+  };
+}
+
+export function useResolvedIsDark(mode?: ThemeMode): boolean {
+  const domDark = useSyncExternalStore(
+    subscribeThemeChanges,
+    readDomResolvedIsDark,
+    () => false,
+  );
+  if (mode === 'dark') return true;
+  if (mode === 'light') return false;
   return domDark;
 }
 

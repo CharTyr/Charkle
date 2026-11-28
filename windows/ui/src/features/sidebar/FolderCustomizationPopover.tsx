@@ -131,17 +131,27 @@ export const FolderCustomizationPopover: React.FC<FolderCustomizationPopoverProp
   );
   const [customEmojiInput, setCustomEmojiInput] = useState('');
 
+  const prevOpenRef = React.useRef(false);
+
   useEffect(() => {
-    if (open) {
+    if (open && !prevOpenRef.current) {
       setShowEmojiMode(Boolean(customSymbol?.startsWith('emoji:')));
       setCustomEmojiInput('');
     }
+    prevOpenRef.current = open;
   }, [open, customSymbol]);
 
   const applyCustomEmoji = () => {
     const trimmed = customEmojiInput.trim();
     if (!trimmed) return;
-    const first = Array.from(trimmed)[0];
+    let first = '';
+    if (typeof Intl !== 'undefined' && typeof Intl.Segmenter === 'function') {
+      const seg = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+      const iter = seg.segment(trimmed)[Symbol.iterator]().next();
+      first = iter.value?.segment ?? '';
+    } else {
+      first = Array.from(trimmed)[0] ?? '';
+    }
     if (!first) return;
     setCustomEmojiInput('');
     onApply(colorHex, `emoji:${first}`);

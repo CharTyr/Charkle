@@ -223,6 +223,43 @@ impl ICloudDriveTransport {
         }
     }
 
+    fn ensure_within_base(&self, candidate: &Path) -> CoreResult<()> {
+        let base_canon =
+            fs::canonicalize(&self.base_directory).unwrap_or_else(|_| self.base_directory.clone());
+        let mut probe = candidate.to_path_buf();
+        while !probe.exists() {
+            let Some(parent) = probe.parent() else {
+                break;
+            };
+            probe = parent.to_path_buf();
+        }
+        if probe.exists() {
+            let probe_canon = fs::canonicalize(&probe).unwrap_or(probe);
+            if !probe_canon.starts_with(&base_canon) {
+                return Err(CoreError::InvalidOperation(
+                    "Rejected iCloud Drive path escaping sync root via symlink.".to_string(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn locate_non_root(&self, id: &str) -> CoreResult<PathBuf> {
+        if id == DRIVE_ROOT_ID || Self::strip_prefix(id).is_some_and(str::is_empty) {
+            return Err(CoreError::InvalidOperation(
+                "Refusing to modify or delete iCloud Drive sync root directory.".to_string(),
+            ));
+        }
+        let path = self.locate(id)?;
+        if path == self.base_directory {
+            return Err(CoreError::InvalidOperation(
+                "Refusing to modify or delete iCloud Drive sync root directory.".to_string(),
+            ));
+        }
+        self.ensure_within_base(&path)?;
+        Ok(path)
+    }
+
     fn locate(&self, id: &str) -> CoreResult<PathBuf> {
         if id == DRIVE_ROOT_ID {
             return Ok(self.base_directory.clone());
@@ -539,7 +576,7 @@ impl DriveTransport for ICloudDriveTransport {
         let target = parent_path.join(&disk_name);
 
         if let Some(eid) = existing_file_id {
-            let existing = self.locate(eid)?;
+            let existing = self.locate_non_root(eid)?;
             if existing != target {
                 return Err(CoreError::InvalidPayload(
                     "iCloud Drive 目标文件路径已变化。".to_string(),
@@ -548,6 +585,7 @@ impl DriveTransport for ICloudDriveTransport {
         } else if target.exists() {
             return Err(CoreError::AlreadyExists(name.to_string()));
         }
+        self.ensure_within_base(&target)?;
 
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent)?;
@@ -587,7 +625,7 @@ impl DriveTransport for ICloudDriveTransport {
         new_name: Option<&str>,
     ) -> CoreResult<RemoteDriveFile> {
         self.verify_base_directory()?;
-        let src = self.locate(file_id)?;
+        let src = self.locate_non_root(file_id)?;
         if !src.exists() {
             return Err(CoreError::NotFound(file_id.to_string()));
         }
@@ -604,12 +642,16 @@ impl DriveTransport for ICloudDriveTransport {
             None => current_name,
         };
         let dst_parent = self.locate(to_parent_id)?;
+        self.ensure_within_base(&dst_parent)?;
         fs::create_dir_all(&dst_parent)?;
         let dst = dst_parent.join(&disk_name);
+        self.ensure_within_base(&dst)?;
         if src != dst {
             if dst.exists() {
                 if dst.is_dir() {
-                    fs::remove_dir_all(&dst)?;
+                    return Err(CoreError::AlreadyExists(format!(
+                        "目标目录已存在，已拒绝覆盖：{disk_name}"
+                    )));
                 } else {
                     fs::remove_file(&dst)?;
                 }
@@ -621,7 +663,7 @@ impl DriveTransport for ICloudDriveTransport {
 
     async fn trash_file(&self, file_id: &str) -> CoreResult<()> {
         self.verify_base_directory()?;
-        let path = self.locate(file_id)?;
+        let path = self.locate_non_root(file_id)?;
         if path.exists() {
             if path.is_dir() {
                 fs::remove_dir_all(&path)?;

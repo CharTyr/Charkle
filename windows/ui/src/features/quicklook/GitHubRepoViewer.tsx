@@ -1,22 +1,16 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import DOMPurify from 'dompurify';
-import { marked } from 'marked';
 import { ArrowSync16Regular, Open16Regular } from '@fluentui/react-icons';
-import { getTransport } from '../../api/transport';
-import { Button, getGitHubLanguageColor } from '../../design-system';
+import {
+  Button,
+  getGitHubLanguageColor,
+  openSafeExternalUrl,
+  sanitizeMarkdownHtml,
+} from '../../design-system';
 import { useCoordinatorStore, useLibraryStore } from '../../stores';
 import type { AssetRecord } from '../../types/domain';
 
 export interface GitHubRepoViewerProps {
   asset: AssetRecord;
-}
-
-function isBlockedProtocol(href: string): boolean {
-  const trimmed = href.trim();
-  const schemeMatch = trimmed.match(/^([a-z][a-z0-9+.-]*):/i);
-  if (!schemeMatch) return false;
-  const scheme = schemeMatch[1].toLowerCase();
-  return scheme !== 'http' && scheme !== 'https' && scheme !== 'mailto';
 }
 
 export const GitHubRepoViewer: React.FC<GitHubRepoViewerProps> = ({ asset }) => {
@@ -36,12 +30,11 @@ export const GitHubRepoViewer: React.FC<GitHubRepoViewerProps> = ({ asset }) => 
   const readmeHtml = useMemo(() => {
     const md = repo?.readmeMarkdown;
     if (!md) return '';
-    const raw = marked.parse(md, { async: false, gfm: true }) as string;
-    return DOMPurify.sanitize(raw, {
-      FORBID_TAGS: ['script', 'style', 'iframe', 'object', 'embed', 'form'],
-      FORBID_ATTR: ['onerror', 'onload', 'onclick', 'onmouseover'],
-    });
-  }, [repo?.readmeMarkdown]);
+    const baseLinkUrl = repo
+      ? `https://github.com/${encodeURIComponent(repo.owner)}/${encodeURIComponent(repo.repo)}/blob/${encodeURIComponent(repo.defaultBranch || 'main')}/`
+      : undefined;
+    return sanitizeMarkdownHtml(md, { allowImages: true, baseLinkUrl });
+  }, [repo?.readmeMarkdown, repo?.owner, repo?.repo, repo?.defaultBranch]);
 
   if (!repo) return null;
 
@@ -52,27 +45,20 @@ export const GitHubRepoViewer: React.FC<GitHubRepoViewerProps> = ({ asset }) => 
     `https://opengraph.githubassets.com/1/${repo.owner}/${repo.repo}`;
 
   const openSafeExternal = (url: string) => {
-    if (isBlockedProtocol(url)) return;
-    void getTransport()
-      .openExternalUrl(url)
-      .catch(() => {
-        pushToast({ message: '无法在默认浏览器中打开链接', tone: 'error' });
-      });
+    void openSafeExternalUrl(url, {
+      allowMailto: true,
+      onError: () => pushToast({ message: '无法在默认浏览器中打开链接', tone: 'error' }),
+    });
   };
 
-  const handleArticleClick = (e: React.MouseEvent<HTMLElement>) => {
+  const handleArticleLinkEvent = (e: React.MouseEvent<HTMLElement>) => {
     const anchor = (e.target as HTMLElement).closest('a[href]') as HTMLAnchorElement | null;
     if (!anchor) return;
     const href = anchor.getAttribute('href')?.trim();
     if (!href) return;
     e.preventDefault();
-    if (href.startsWith('#') || isBlockedProtocol(href)) return;
-    const resolved = /^https?:\/\//i.test(href)
-      ? href
-      : /^mailto:/i.test(href)
-        ? href
-        : `https://github.com/${repo.owner}/${repo.repo}/blob/${repo.defaultBranch || 'main'}/${href.replace(/^\/+/, '')}`;
-    openSafeExternal(resolved);
+    if (href.startsWith('#')) return;
+    openSafeExternal(href);
   };
 
   return (
@@ -126,7 +112,7 @@ export const GitHubRepoViewer: React.FC<GitHubRepoViewerProps> = ({ asset }) => 
             }}
             className="h-7 w-7 shrink-0"
           >
-            <ArrowSync16Regular className={`w-3.5 h-3.5 ${refreshing ? 'animate-spin' : ''}`} />
+            <ArrowSync16Regular className={`w-3.5 h-3.5 ${refreshing ? 'animate-spin motion-reduce:animate-none' : ''}`} />
           </Button>
 
           <Button
@@ -239,7 +225,8 @@ export const GitHubRepoViewer: React.FC<GitHubRepoViewerProps> = ({ asset }) => 
 
           {readmeHtml ? (
             <article
-              onClick={handleArticleClick}
+              onClick={handleArticleLinkEvent}
+              onAuxClick={handleArticleLinkEvent}
               className="text-[13.5px] leading-[1.7] text-[var(--text-primary)] select-text space-y-3 [&_h1]:text-[21px] [&_h1]:font-bold [&_h1]:pb-1.5 [&_h1]:border-b [&_h1]:border-[var(--border-hairline)] [&_h2]:text-[17px] [&_h2]:font-bold [&_h2]:pb-1 [&_h2]:border-b [&_h2]:border-[var(--border-hairline)] [&_h3]:text-[15px] [&_h3]:font-semibold [&_ul]:list-disc [&_ul]:pl-5 [&_ol]:list-decimal [&_ol]:pl-5 [&_blockquote]:border-l-[3px] [&_blockquote]:border-[var(--accent)]/60 [&_blockquote]:pl-3 [&_blockquote]:text-[var(--text-secondary)] [&_code]:px-1.5 [&_code]:py-0.5 [&_code]:rounded [&_code]:bg-[var(--bg-subtle)] [&_code]:text-[12px] [&_pre]:p-3 [&_pre]:rounded-[10px] [&_pre]:bg-[var(--bg-subtle)] [&_pre]:overflow-x-auto [&_pre_code]:bg-transparent [&_pre_code]:p-0 [&_table]:w-full [&_table]:border-collapse [&_th]:text-left [&_th]:px-2.5 [&_th]:py-1.5 [&_th]:bg-[var(--bg-subtle)] [&_th]:border [&_th]:border-[var(--border-hairline)] [&_td]:px-2.5 [&_td]:py-1.5 [&_td]:border [&_td]:border-[var(--border-hairline)] [&_img]:max-w-full [&_img]:rounded-[10px] [&_a]:text-[var(--accent)] [&_a]:underline"
               dangerouslySetInnerHTML={{ __html: readmeHtml }}
             />

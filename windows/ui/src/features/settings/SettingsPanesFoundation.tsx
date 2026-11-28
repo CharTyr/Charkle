@@ -161,10 +161,8 @@ export const GoogleOAuthSetupModal: React.FC<{
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
-    if (open) {
-      setClientId('');
-      setClientSecret('');
-    }
+    setClientId('');
+    setClientSecret('');
   }, [open]);
 
   const busy = saving || signingInGoogle;
@@ -315,6 +313,8 @@ export const WebDAVEditorModal: React.FC<{
       setRemotePath(initialConfig.webDAVRemotePath || '/Charkle');
       setPassword('');
       setInlineMsg(null);
+    } else if (!open) {
+      setPassword('');
     }
     wasOpenRef.current = open;
   }, [open, initialConfig]);
@@ -495,6 +495,8 @@ export const BackendProfileEditorModal: React.FC<{
       } else {
         setHasSavedPwd(false);
       }
+    } else if (!open) {
+      setWebdavPassword('');
     }
     wasOpenRef.current = open;
   }, [open, initialProfile]);
@@ -834,6 +836,8 @@ export const StorageLocationWizardModal: React.FC<{
       });
       setAction('migrate');
       setWebdavPassword('');
+    } else if (!open) {
+      setWebdavPassword('');
     }
     wasOpenRef.current = open;
   }, [open, syncConfig, initialMode]);
@@ -877,7 +881,7 @@ export const StorageLocationWizardModal: React.FC<{
       rootFolderName: draft.rootFolderName.trim() || 'Charkle',
       backends: [],
     };
-    const pwd = webdavPassword.trim() || undefined;
+    const pwd = webdavPassword.length > 0 ? webdavPassword : undefined;
     if (action === 'migrate') {
       const report = await runStorageMigration(baseTarget, pwd);
       if (report) {
@@ -1749,6 +1753,8 @@ export const SyncSettingsPane: React.FC = () => {
   const hasAnyWebDAVBackend = resolvedBackendsList.some((b) => b.mode === 'webDAV');
   const primaryICloudBackend =
     resolvedBackendsList.find((b) => b.mode === 'iCloudDrive') ?? null;
+  const primaryWebDAVBackend =
+    resolvedBackendsList.find((b) => b.mode === 'webDAV') ?? null;
 
   const statusByBackendId = new Map<string, SyncBackendStatus>(
     (syncStatus?.backendStatuses ?? []).map((st) => [st.backendID, st]),
@@ -1907,10 +1913,24 @@ export const SyncSettingsPane: React.FC = () => {
   // State B: Active Cloud Sync / Multi-Backend (Google Drive / iCloud Drive / gdirectMount / WebDAV)
   const sharedID = resolveSharedFolderID(draft.sharedFolderURLOrID);
   const trimmedShared = draft.sharedFolderURLOrID.trim();
-  const isWebDAVConnected = syncStatus?.account?.source === 'WebDAV';
-  let webdavHost = draft.webDAVServerURL.trim();
+  const effectiveWebdavUrl = (
+    primaryWebDAVBackend?.webDAVServerURL || draft.webDAVServerURL
+  ).trim();
+  const effectiveWebdavUser = (
+    primaryWebDAVBackend?.webDAVUsername || draft.webDAVUsername
+  ).trim();
+  const effectiveWebdavPath = (
+    primaryWebDAVBackend?.webDAVRemotePath || draft.webDAVRemotePath || '/Charkle'
+  ).trim();
+  const webdavBackendStatus = primaryWebDAVBackend
+    ? statusByBackendId.get(primaryWebDAVBackend.id)
+    : undefined;
+  const isWebDAVConnected =
+    syncStatus?.account?.source === 'WebDAV' ||
+    Boolean(webdavBackendStatus?.lastSyncedAt && !webdavBackendStatus.lastError);
+  let webdavHost = effectiveWebdavUrl;
   try {
-    webdavHost = new URL(draft.webDAVServerURL).host || webdavHost;
+    webdavHost = new URL(effectiveWebdavUrl).host || webdavHost;
   } catch {
     // keep raw url
   }
@@ -2496,20 +2516,35 @@ export const SyncSettingsPane: React.FC = () => {
             title={webdavHost || '尚未配置 WebDAV 服务器'}
             subtitle={
               webdavHost
-                ? `账号：${draft.webDAVUsername || '未填写'} · 路径：${draft.webDAVRemotePath || '/Charkle'}`
+                ? `账号：${effectiveWebdavUser || '未填写'} · 路径：${effectiveWebdavPath || '/Charkle'}`
                 : '支持坚果云、Nextcloud、群晖 NAS、Alist 等标准 WebDAV 服务'
             }
             subtitleTone={isWebDAVConnected ? 'positive' : 'default'}
           >
             <SettingsButton
               variant="standard"
-              loading={testingWebdav}
-              disabled={!draft.webDAVServerURL.trim() || isBusy}
-              onClick={() => void testWebdavConnection(draft, null)}
+              loading={testingWebdav || testingBackend}
+              disabled={!effectiveWebdavUrl || isBusy}
+              onClick={() => {
+                if (primaryWebDAVBackend && draft.mode !== 'webDAV') {
+                  void testBackendConnection(primaryWebDAVBackend, null);
+                } else {
+                  void testWebdavConnection(draft, null);
+                }
+              }}
             >
               测试连接
             </SettingsButton>
-            <SettingsButton variant="standard" onClick={() => setShowWebDAVModal(true)}>
+            <SettingsButton
+              variant="standard"
+              onClick={() => {
+                if (primaryWebDAVBackend && draft.mode !== 'webDAV') {
+                  setEditingBackend({ profile: primaryWebDAVBackend, isNew: false });
+                } else {
+                  setShowWebDAVModal(true);
+                }
+              }}
+            >
               编辑配置…
             </SettingsButton>
           </SettingsRow>

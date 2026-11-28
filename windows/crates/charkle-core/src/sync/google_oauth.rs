@@ -310,12 +310,14 @@ impl GoogleOAuthClient {
 
         open_browser(auth_url).await;
 
-        let (code, returned_state) =
-            tokio::time::timeout(Duration::from_secs(180), wait_for_loopback_code(listener))
-                .await
-                .map_err(|_| {
-                    CoreError::AuthenticationRequired("Google 登录超时，请重试。".to_string())
-                })??;
+        let (code, returned_state) = tokio::time::timeout(
+            Duration::from_secs(180),
+            wait_for_loopback_code_with_state(listener, Some(&state)),
+        )
+        .await
+        .map_err(|_| {
+            CoreError::AuthenticationRequired("Google 登录超时，请重试。".to_string())
+        })??;
 
         if returned_state.as_deref() != Some(state.as_str()) {
             return Err(CoreError::AuthenticationRequired(
@@ -407,11 +409,25 @@ struct TokenResponse {
     expires_in: Option<i64>,
 }
 
+#[allow(dead_code)]
 async fn wait_for_loopback_code(listener: TcpListener) -> CoreResult<(String, Option<String>)> {
+    wait_for_loopback_code_with_state(listener, None).await
+}
+
+async fn wait_for_loopback_code_with_state(
+    listener: TcpListener,
+    expected_state: Option<&str>,
+) -> CoreResult<(String, Option<String>)> {
     loop {
         let (mut stream, _) = listener.accept().await?;
         let mut buf = vec![0u8; 8192];
-        let n = stream.read(&mut buf).await.unwrap_or(0);
+        let n = match tokio::time::timeout(Duration::from_secs(5), stream.read(&mut buf)).await {
+            Ok(Ok(n)) => n,
+            _ => {
+                let _ = stream.shutdown().await;
+                continue;
+            }
+        };
         if n == 0 {
             continue;
         }
@@ -440,6 +456,18 @@ async fn wait_for_loopback_code(listener: TcpListener) -> CoreResult<(String, Op
                 "state" => state = Some(v.into_owned()),
                 "error" => error = Some(v.into_owned()),
                 _ => {}
+            }
+        }
+
+        if let Some(exp) = expected_state {
+            if state.as_deref() != Some(exp) {
+                let _ = stream
+                    .write_all(
+                        b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    )
+                    .await;
+                let _ = stream.shutdown().await;
+                continue;
             }
         }
 

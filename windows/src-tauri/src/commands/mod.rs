@@ -13,7 +13,7 @@ pub mod updater;
 pub mod window;
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, AtomicU8};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use charkle_core::bridge::LocalExtensionBridgeServer;
@@ -48,6 +48,7 @@ pub struct AppState {
     pub shelf_pinned: Arc<AtomicBool>,
     pub shelf_drag_hovering: Arc<AtomicBool>,
     pub shelf_busy: Arc<AtomicBool>,
+    pub shelf_busy_count: Arc<AtomicUsize>,
     pub shelf_hold_until_ms: Arc<AtomicU64>,
     pub shelf_hwnd: Arc<AtomicIsize>,
     pub shelf_anim_gen: Arc<AtomicU64>,
@@ -57,6 +58,32 @@ pub struct AppState {
     pub _clipboard_listener: Option<ClipboardListenerHandle>,
     pub _top_edge_monitor: Option<TopEdgeDragMonitorHandle>,
     pub _wake_listener: Option<LibraryWakeHandle>,
+}
+
+/// Refcounted RAII guard for `AppState::shelf_busy` so concurrent shelf ingests/drags or
+/// cancelled futures can neither prematurely clear busy state nor leave it stuck `true`.
+pub struct ShelfBusyGuard {
+    count: Arc<AtomicUsize>,
+    flag: Arc<AtomicBool>,
+}
+
+impl ShelfBusyGuard {
+    pub fn acquire(state: &AppState) -> Self {
+        state.shelf_busy_count.fetch_add(1, Ordering::SeqCst);
+        state.shelf_busy.store(true, Ordering::SeqCst);
+        Self {
+            count: Arc::clone(&state.shelf_busy_count),
+            flag: Arc::clone(&state.shelf_busy),
+        }
+    }
+}
+
+impl Drop for ShelfBusyGuard {
+    fn drop(&mut self) {
+        if self.count.fetch_sub(1, Ordering::SeqCst) == 1 {
+            self.flag.store(false, Ordering::SeqCst);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]

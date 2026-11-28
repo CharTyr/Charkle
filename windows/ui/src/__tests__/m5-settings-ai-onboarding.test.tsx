@@ -157,28 +157,57 @@ describe('Charkle Windows M5 9-Pane Settings Overlay, Hybrid AI, TypeSafe Jev, E
     fireEvent.change(screen.getByLabelText('TypeSafe API 密钥'), {
       target: { value: 'ts-mock-key' },
     });
+    expect(screen.getByLabelText('零幻觉闭集自动打标')).toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText('高置信度自动写入正式标签'));
     fireEvent.click(screen.getByRole('button', { name: '保存配置' }));
     await waitFor(() => {
       expect(useSyncAIStore.getState().typesafeState?.config.enabled).toBe(true);
+      expect(useSyncAIStore.getState().typesafeState?.config.enableClosedSetTagging).toBe(true);
+      expect(useSyncAIStore.getState().typesafeState?.config.autoApplyHighConfidenceTags).toBe(
+        true,
+      );
       expect(useSyncAIStore.getState().typesafeState?.hasApiKey).toBe(true);
     });
 
-    // Pane 7: External Agent independent MCP / CLI toggles + access policy + MCP JSON
+    // Pane 7: Pure MCP v2 stdio + Streamable HTTP toggles, 3-tier access & Scoped Tokens
     fireEvent.click(screen.getByRole('tab', { name: '外部 Agent' }));
     await waitFor(() => {
       expect(screen.getByTestId('settings-pane-externalAgents')).toBeInTheDocument();
     });
-    expect(screen.getByTestId('mcp-config-json-snippet').textContent).toContain('charkle-cli.exe');
+    expect(screen.getByTestId('http-mcp-config-json-snippet').textContent).toContain('/api/v1/mcp');
 
     fireEvent.click(screen.getByLabelText('启用 MCP 服务'));
     await waitFor(() => {
       expect(useSyncAIStore.getState().agentState?.config.mcpEnabled).toBe(false);
-      expect(useSyncAIStore.getState().agentState?.config.cliEnabled).toBe(true);
+      expect(useSyncAIStore.getState().agentState?.config.httpMCPEnabled).toBe(true);
     });
 
-    fireEvent.click(screen.getByRole('radio', { name: '允许整理与生板' }));
+    fireEvent.click(screen.getByRole('radio', { name: '仅收件箱与打标' }));
+    await waitFor(() => {
+      expect(useSyncAIStore.getState().agentState?.config.accessLevel).toBe('inboxAndEnrich');
+    });
+
+    fireEvent.click(screen.getByRole('radio', { name: '全局整理与生板' }));
     await waitFor(() => {
       expect(useSyncAIStore.getState().agentState?.config.accessLevel).toBe('readWriteOrganize');
+    });
+
+    // Mint, toggle, and revoke a Scoped HTTP MCP token
+    fireEvent.change(screen.getByLabelText('HTTP MCP 令牌名称'), {
+      target: { value: 'Remote Curator' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: '签发令牌' }));
+    await waitFor(() => {
+      expect(screen.getByTestId('minted-token-plaintext').textContent).toMatch(/^ck_mcp_/);
+      expect(useSyncAIStore.getState().agentState?.config.tokens).toHaveLength(1);
+    });
+    fireEvent.click(screen.getByLabelText('切换令牌 Remote Curator'));
+    await waitFor(() => {
+      expect(useSyncAIStore.getState().agentState?.config.tokens[0]?.isEnabled).toBe(false);
+    });
+    fireEvent.click(screen.getByRole('button', { name: '吊销' }));
+    await waitFor(() => {
+      expect(useSyncAIStore.getState().agentState?.config.tokens).toHaveLength(0);
     });
 
     // Pane 8: Extensions (Figma Plugin bundle)
@@ -202,5 +231,43 @@ describe('Charkle Windows M5 9-Pane Settings Overlay, Hybrid AI, TypeSafe Jev, E
     await waitFor(() => {
       expect(screen.queryByTestId('onboarding-studio')).not.toBeInTheDocument();
     });
+  });
+
+  it('unlocks pure-Jev closed-set tagging with VLM disabled, concurrency=6, and auto-apply formal tags', async () => {
+    const { resolveEnrichEngineStatus, useLibraryStore } = await import('../stores');
+
+    await useSyncAIStore.getState().refreshSettingsData();
+    await useLibraryStore.getState().bootstrap({ type: 'allItems' });
+
+    // VLM remains disabled; enable Jev closed-set tagging + API key + autoApply
+    const baseTs = useSyncAIStore.getState().typesafeState!.config;
+    await useSyncAIStore.getState().saveTypesafeConfig(
+      {
+        ...baseTs,
+        enabled: true,
+        enableClosedSetTagging: true,
+        autoApplyHighConfidenceTags: true,
+        highConfidenceTagThreshold: 0.85,
+      },
+      { apiKey: 'ts-pure-jev-key' },
+    );
+
+    const status = resolveEnrichEngineStatus(
+      useSyncAIStore.getState().aiState,
+      useSyncAIStore.getState().typesafeState,
+    );
+    expect(status.canEnrich).toBe(true);
+    expect(status.jevReady).toBe(true);
+    expect(status.vlmReady).toBe(false);
+    expect(status.concurrency).toBe(6);
+    expect(status.label).toBe('Jev 闭集打标');
+
+    const target = useLibraryStore.getState().assets[0];
+    expect(target).toBeDefined();
+    const enriched = await useLibraryStore
+      .getState()
+      .enrichAssets([target.id], { type: 'allItems' });
+    expect(enriched).toHaveLength(1);
+    expect(enriched[0].tags.length).toBeGreaterThanOrEqual(target.tags.length);
   });
 });

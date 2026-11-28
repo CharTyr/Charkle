@@ -725,10 +725,13 @@ impl XiaohongshuPostResolver {
     }
 
     async fn resolve_short_link(url: &Url) -> Option<Url> {
+        if !crate::net_safety::is_safe_public_url(url, false) {
+            return None;
+        }
         let client = Client::builder()
             .timeout(Duration::from_secs(10))
             .user_agent(XHS_BROWSER_UA)
-            .redirect(reqwest::redirect::Policy::limited(8))
+            .redirect(crate::net_safety::public_redirect_policy(8, false))
             .build()
             .ok()?;
         let resp = client
@@ -738,17 +741,20 @@ impl XiaohongshuPostResolver {
             .await
             .ok()?;
         let final_url = resp.url().clone();
-        WebBookmarkResolver::is_web_url(&final_url).then_some(final_url)
+        crate::net_safety::is_safe_public_url(&final_url, false).then_some(final_url)
     }
 
     async fn fetch_html(url: &Url) -> Option<(String, Url)> {
+        if !crate::net_safety::is_safe_public_url(url, false) {
+            return None;
+        }
         let client = Client::builder()
             .timeout(Duration::from_secs(12))
             .user_agent(XHS_BROWSER_UA)
-            .redirect(reqwest::redirect::Policy::limited(8))
+            .redirect(crate::net_safety::public_redirect_policy(8, false))
             .build()
             .ok()?;
-        let resp = client
+        let mut resp = client
             .get(url.clone())
             .header(
                 "Accept",
@@ -759,16 +765,27 @@ impl XiaohongshuPostResolver {
             .send()
             .await
             .ok()?;
-        if !resp.status().is_success() {
+        if !resp.status().is_success() || !crate::net_safety::is_safe_public_url(resp.url(), false)
+        {
             return None;
         }
         let final_url = resp.url().clone();
-        let bytes = resp.bytes().await.ok()?;
-        if bytes.is_empty() {
+        let mut collected = Vec::new();
+        while let Some(chunk) = resp.chunk().await.ok()? {
+            let remaining = MAX_XHS_HTML_BYTES.saturating_sub(collected.len());
+            if remaining == 0 {
+                break;
+            }
+            let take = chunk.len().min(remaining);
+            collected.extend_from_slice(&chunk[..take]);
+            if collected.len() >= MAX_XHS_HTML_BYTES {
+                break;
+            }
+        }
+        if collected.is_empty() {
             return None;
         }
-        let capped = &bytes[..bytes.len().min(MAX_XHS_HTML_BYTES)];
-        let html = String::from_utf8_lossy(capped).into_owned();
+        let html = String::from_utf8_lossy(&collected).into_owned();
         Some((html, final_url))
     }
 }
@@ -850,14 +867,26 @@ pub async fn fetch_or_cache_xhs_media(
         }
     }
 
+    let xhs_redirect = reqwest::redirect::Policy::custom(|attempt| {
+        if attempt.previous().len() >= 5 {
+            return attempt.error("Too many redirects");
+        }
+        if attempt.url().scheme() != "https"
+            || !crate::net_safety::is_safe_public_url(attempt.url(), true)
+            || !XiaohongshuURLParser::is_xiaohongshu_media_host(attempt.url().host_str())
+        {
+            return attempt.error("Redirected host outside Xiaohongshu CDN allowlist");
+        }
+        attempt.follow()
+    });
     let client = Client::builder()
         .timeout(Duration::from_secs(10))
         .user_agent(XHS_BROWSER_UA)
-        .redirect(reqwest::redirect::Policy::limited(5))
+        .redirect(xhs_redirect)
         .build()
         .map_err(|e| XhsProxyError::Upstream(e.to_string()))?;
 
-    let resp = client
+    let mut resp = client
         .get(url.clone())
         .header("Referer", XIAOHONGSHU_REFERER)
         .header(
@@ -897,28 +926,52 @@ pub async fn fetch_or_cache_xhs_media(
         .map(|s| s.split(';').next().unwrap_or(s).trim().to_string())
         .filter(|s| !s.is_empty());
 
-    let bytes = resp
-        .bytes()
+    let vec_bytes = crate::net_safety::read_bounded_bytes(&mut resp, MAX_XHS_PROXY_BYTES)
         .await
-        .map_err(|e| XhsProxyError::Upstream(e.to_string()))?;
-    if bytes.is_empty() {
+        .map_err(|e| {
+            if e.contains("exceed") {
+                XhsProxyError::TooLarge
+            } else {
+                XhsProxyError::Upstream(e)
+            }
+        })?;
+    if vec_bytes.is_empty() {
         return Err(XhsProxyError::Upstream("Empty upstream body".to_string()));
     }
-    if bytes.len() > MAX_XHS_PROXY_BYTES {
-        return Err(XhsProxyError::TooLarge);
+
+    if let Some(ref ct) = header_ct {
+        let lower = ct.to_ascii_lowercase();
+        if lower.contains("html") || lower.contains("json") || lower.contains("svg") {
+            return Err(XhsProxyError::Upstream(format!(
+                "Upstream returned non-media content type ({ct})"
+            )));
+        }
     }
 
-    let content_type =
-        header_ct.unwrap_or_else(|| sniff_media_content_type(&bytes, url.as_str()).to_string());
-    let vec_bytes = bytes.to_vec();
+    let content_type = header_ct
+        .filter(|ct| {
+            let l = ct.to_ascii_lowercase();
+            l.starts_with("image/") || l.starts_with("video/")
+        })
+        .unwrap_or_else(|| sniff_media_content_type(&vec_bytes, url.as_str()).to_string());
 
-    // Persist cache atomically (best-effort; never fail request on disk cache write error).
+    // Persist cache atomically with unique temp paths so concurrent fetches never collide.
     if tokio::fs::create_dir_all(cache_dir).await.is_ok() {
-        let tmp_bin: PathBuf = cache_dir.join(format!("{hash}.bin.tmp"));
-        if tokio::fs::write(&tmp_bin, &vec_bytes).await.is_ok() {
-            let _ = tokio::fs::rename(&tmp_bin, &bin_path).await;
+        let nonce = uuid::Uuid::new_v4().simple();
+        let tmp_bin: PathBuf = cache_dir.join(format!("{hash}.{nonce}.bin.tmp"));
+        if tokio::fs::write(&tmp_bin, &vec_bytes).await.is_ok()
+            && tokio::fs::rename(&tmp_bin, &bin_path).await.is_err()
+        {
+            let _ = tokio::fs::remove_file(&tmp_bin).await;
         }
-        let _ = tokio::fs::write(&ct_path, content_type.as_bytes()).await;
+        let tmp_ct: PathBuf = cache_dir.join(format!("{hash}.{nonce}.ct.tmp"));
+        if tokio::fs::write(&tmp_ct, content_type.as_bytes())
+            .await
+            .is_ok()
+            && tokio::fs::rename(&tmp_ct, &ct_path).await.is_err()
+        {
+            let _ = tokio::fs::remove_file(&tmp_ct).await;
+        }
     }
 
     Ok(XhsProxyResponse {

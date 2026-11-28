@@ -213,4 +213,24 @@ describe('Charkle Windows M2 Gallery, Navigation, Inspector & Quick Look', () =>
       expect(within(docViewer).getByText(/90–95% 中性画布/)).toBeInTheDocument();
     });
   });
+
+  it('clears stale searchQuery on destination switch unless preserveSearch is true', () => {
+    useCoordinatorStore.setState({ destination: { type: 'allItems' } });
+    useLibraryStore.setState((s) => ({
+      criteria: { ...s.criteria, searchQuery: 'sunset architecture' },
+    }));
+
+    // Switching to another destination clears stale searchQuery synchronously
+    useCoordinatorStore.getState().setDestination({ type: 'inbox' });
+    expect(useLibraryStore.getState().criteria.searchQuery).toBe('');
+
+    // Explicit preserveSearch keeps query intact (e.g. searching while on Moodboards)
+    useLibraryStore.setState((s) => ({
+      criteria: { ...s.criteria, searchQuery: 'editorial' },
+    }));
+    useCoordinatorStore
+      .getState()
+      .setDestination({ type: 'allItems' }, { preserveSearch: true });
+    expect(useLibraryStore.getState().criteria.searchQuery).toBe('editorial');
+  });
 });

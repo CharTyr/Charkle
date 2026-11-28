@@ -41,6 +41,7 @@ import {
   getRecentFrequentSidebarTags,
   getSmartFolderMatchCount,
   getTopTenSidebarTags,
+  moveAssetsToFolderWithUndo,
   useCoordinatorStore,
   useLibraryStore,
   useMoodboardStore,
@@ -54,6 +55,7 @@ import {
   type SyncStatus,
 } from '../../types/domain';
 import { useDndStore } from '../dnd/dndStore';
+import { registerPointerDragHandlers } from '../dnd/PointerDragContext';
 import { runMaterialPackageImport } from '../import/materialPackageImport';
 import { FolderTree } from './FolderTree';
 import { SmartFolderEditorModal } from './SmartFolderEditorModal';
@@ -253,7 +255,6 @@ export const SidebarView: React.FC = () => {
   const deleteFolder = useLibraryStore((s) => s.deleteFolder);
   const saveSmartFolder = useLibraryStore((s) => s.saveSmartFolder);
   const deleteSmartFolder = useLibraryStore((s) => s.deleteSmartFolder);
-  const updateAssets = useLibraryStore((s) => s.updateAssets);
 
   const boards = useMoodboardStore((s) => s.boards);
   const openBoard = useMoodboardStore((s) => s.openBoard);
@@ -314,13 +315,30 @@ export const SidebarView: React.FC = () => {
     setSearchDraft(criteria.searchQuery);
   }, [criteria.searchQuery]);
 
+  // Register folder asset drop handler at SidebarView level so it stays active even when
+  // the sidebar is collapsed to the 64px icon rail (where FolderTree is not mounted).
+  useEffect(() => {
+    return registerPointerDragHandlers({
+      onDropAssetsToFolder: (folderId, assetIds) => {
+        const lib = useLibraryStore.getState();
+        const targetName = lib.folders.find((f) => f.id === folderId)?.name ?? '文件夹';
+        void moveAssetsToFolderWithUndo(
+          assetIds,
+          folderId,
+          targetName,
+          useCoordinatorStore.getState().destination,
+        );
+      },
+    });
+  }, []);
+
   // 120ms debounced unified instant + hybrid search (single search bar, zero mode switching)
   useEffect(() => {
     if (searchDraft === criteria.searchQuery) return;
     const timer = window.setTimeout(() => {
       const trimmed = searchDraft.trim();
       if (isMoodboardView && trimmed.length > 0) {
-        setDestination({ type: 'allItems' });
+        setDestination({ type: 'allItems' }, { preserveSearch: true });
       }
       void setCriteria({ searchQuery: searchDraft }, effectiveSearchDestination);
     }, 120);
@@ -603,7 +621,7 @@ export const SidebarView: React.FC = () => {
       <div className="flex flex-col gap-3 text-[12px]">
         <div className="flex items-center gap-2.5">
           {syncBusy ? (
-            <ArrowSync16Regular className="w-4 h-4 animate-spin text-[var(--accent)] shrink-0" />
+            <ArrowSync16Regular className="w-4 h-4 animate-spin motion-reduce:animate-none text-[var(--accent)] shrink-0" />
           ) : (
             <span className={`h-2 w-2 rounded-full shrink-0 ${syncDotClass}`} />
           )}
@@ -997,7 +1015,7 @@ export const SidebarView: React.FC = () => {
                 className={railBtnClass(syncPopoverOpen)}
               >
                 {syncBusy ? (
-                  <ArrowSync16Regular className="w-4 h-4 animate-spin text-[var(--accent)]" />
+                  <ArrowSync16Regular className="w-4 h-4 animate-spin motion-reduce:animate-none text-[var(--accent)]" />
                 ) : (
                   <CloudSync16Regular className="w-[18px] h-[18px]" />
                 )}
@@ -1498,14 +1516,7 @@ export const SidebarView: React.FC = () => {
               }}
               onDropAssets={async (folderId, assetIds) => {
                 const targetName = folders.find((f) => f.id === folderId)?.name ?? '文件夹';
-                await updateAssets(
-                  { assetIDs: assetIds, folderAssignment: { folder: folderId } },
-                  destination,
-                  {
-                    undoMessage: `已移动 ${assetIds.length} 项到「${targetName}」`,
-                    undoPatch: { assetIDs: assetIds, folderAssignment: 'inbox' },
-                  },
-                );
+                await moveAssetsToFolderWithUndo(assetIds, folderId, targetName, destination);
               }}
             />
           </section>
@@ -1628,7 +1639,7 @@ export const SidebarView: React.FC = () => {
           >
             <span className="w-4 h-4 inline-flex items-center justify-center shrink-0">
               {syncBusy ? (
-                <ArrowSync16Regular className="w-3.5 h-3.5 animate-spin text-[var(--accent)]" />
+                <ArrowSync16Regular className="w-3.5 h-3.5 animate-spin motion-reduce:animate-none text-[var(--accent)]" />
               ) : (
                 <span className={`w-2 h-2 rounded-full ${syncDotClass}`} />
               )}

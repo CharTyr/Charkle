@@ -88,7 +88,7 @@ impl Drop for OwnedDC {
 /// STA COM worker-backed `ShellThumbnailProvider` safe to share across Tokio async tasks.
 #[derive(Debug, Clone)]
 pub struct WinShellThumbnailProvider {
-    tx: mpsc::UnboundedSender<ThumbJob>,
+    tx: mpsc::Sender<ThumbJob>,
 }
 
 impl Default for WinShellThumbnailProvider {
@@ -99,7 +99,8 @@ impl Default for WinShellThumbnailProvider {
 
 impl WinShellThumbnailProvider {
     pub fn new() -> Self {
-        let (tx, mut rx) = mpsc::unbounded_channel::<ThumbJob>();
+        const MAX_PENDING_THUMB_JOBS: usize = 128;
+        let (tx, mut rx) = mpsc::channel::<ThumbJob>(MAX_PENDING_THUMB_JOBS);
 
         let _ = std::thread::Builder::new()
             .name("charkle-shell-thumb-sta".to_string())
@@ -114,7 +115,13 @@ impl WinShellThumbnailProvider {
                 };
 
                 while let Some(job) = rx.blocking_recv() {
-                    let result = generate_thumbnail_on_sta(&job.file_path, job.max_side);
+                    if job.reply.is_closed() {
+                        continue;
+                    }
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        generate_thumbnail_on_sta(&job.file_path, job.max_side)
+                    }))
+                    .unwrap_or_else(|_| Err("Shell thumbnail STA worker panicked".to_string()));
                     let _ = job.reply.send(result);
                 }
             });
@@ -138,6 +145,7 @@ impl ShellThumbnailProvider for WinShellThumbnailProvider {
         };
         self.tx
             .send(job)
+            .await
             .map_err(|_| "Shell thumbnail STA worker is shut down".to_string())?;
         reply_rx
             .await
@@ -201,12 +209,16 @@ fn generate_thumbnail_on_sta(file_path: &Path, max_side: u32) -> Result<Option<V
             Some((&mut bm as *mut BITMAP).cast()),
         )
     };
-    if got == 0 || bm.bmWidth <= 0 || bm.bmHeight <= 0 {
+    if got == 0 || bm.bmWidth <= 0 || bm.bmHeight <= 0 || bm.bmWidth > 8192 || bm.bmHeight > 8192 {
         return Ok(None);
     }
 
     let width = bm.bmWidth as u32;
     let height = bm.bmHeight as u32;
+    let bgra_len = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|px| px.checked_mul(4))
+        .ok_or_else(|| "Shell thumbnail dimensions overflow".to_string())?;
 
     // SAFETY: Compatible memory DC is immediately guarded by `OwnedDC`.
     let hdc = OwnedDC(unsafe { CreateCompatibleDC(HDC::default()) });
@@ -227,7 +239,7 @@ fn generate_thumbnail_on_sta(file_path: &Path, max_side: u32) -> Result<Option<V
         ..Default::default()
     };
 
-    let mut bgra = vec![0u8; (width as usize) * (height as usize) * 4];
+    let mut bgra = vec![0u8; bgra_len];
     // SAFETY: `bgra` has exact size `width * height * 4` matching 32-bit top-down `bmi`.
     let scanlines = unsafe {
         GetDIBits(

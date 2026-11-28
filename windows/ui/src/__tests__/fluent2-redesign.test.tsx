@@ -493,6 +493,18 @@ describe('Fluent 2 Desktop Redesign Architecture & Regressions', () => {
         expect(content, `Unexpected retired lens reference in ${filePath}`).not.toContain(
           retiredModuleName,
         );
+        if (filePath.endsWith('.tsx')) {
+          expect(content, `Forbidden native <select> in ${filePath}; use CustomSelect`).not.toMatch(
+            /<select\b/,
+          );
+          expect(content, `Forbidden transition-all in ${filePath}`).not.toMatch(
+            /\btransition-all\b/,
+          );
+          expect(
+            content,
+            `Forbidden raw Tailwind backdrop-blur-* in ${filePath}; use .win-acrylic / .win-acrylic-dark`,
+          ).not.toMatch(/\bbackdrop-blur-/);
+        }
       }
     }
   });

@@ -502,7 +502,48 @@ export class RingGalleryWebGLEngine {
 
   private readonly onContextLost = (e: Event): void => {
     e.preventDefault();
+    if (this.rafId) {
+      cancelAnimationFrame(this.rafId);
+      this.rafId = 0;
+    }
+    this.texturePool?.purgeAll();
+    this.texturePool = null;
+    this.fallbackTex = null;
+    this.vao = null;
+    this.program = null;
+    this.uniforms = null;
   };
+
+  private readonly onContextRestored = (): void => {
+    if (this.disposed || !this.gl) return;
+    if (!this.initPipeline(this.gl)) return;
+    this.texturePool = this.createTexturePool(this.gl);
+    this.prefetchAroundCurrentOffset();
+    this.requestFrame();
+  };
+
+  private createTexturePool(gl: WebGL2RenderingContext): RingWebGLTexturePool {
+    return new RingWebGLTexturePool(gl, (assetId, aspect) => {
+      const asset = this.assets.find((a) => a.id === assetId);
+      if (asset && (asset.pixelWidth <= 0 || asset.pixelHeight <= 0)) {
+        const prev = this.decodedAspects.get(assetId);
+        if (prev === undefined || Math.abs(prev - aspect) > 0.01) {
+          this.decodedAspects.set(assetId, aspect);
+          const prevFrontVirtual = this.cardTrack.isEmpty
+            ? 0
+            : this.cardTrack.nearestVirtualIndex(this.offset);
+          const rebuilt = RingCardTrack.build(this.assets, this.params, this.decodedAspects);
+          if (!rebuilt.equals(this.cardTrack)) {
+            this.cardTrack = rebuilt;
+            if (!this.isDragging && !this.offsetAnim && !this.cardTrack.isEmpty) {
+              this.offset = this.cardTrack.centerArcForVirtualIndex(prevFrontVirtual);
+            }
+          }
+        }
+      }
+      this.requestFrame();
+    });
+  }
 
   constructor(private readonly canvas: HTMLCanvasElement) {
     let gl: WebGL2RenderingContext | null = null;
@@ -524,26 +565,8 @@ export class RingGalleryWebGLEngine {
       this.gl = gl;
       this.isWebGL2 = true;
       canvas.addEventListener('webglcontextlost', this.onContextLost, false);
-      this.texturePool = new RingWebGLTexturePool(gl, (assetId, aspect) => {
-        const asset = this.assets.find((a) => a.id === assetId);
-        if (asset && (asset.pixelWidth <= 0 || asset.pixelHeight <= 0)) {
-          const prev = this.decodedAspects.get(assetId);
-          if (prev === undefined || Math.abs(prev - aspect) > 0.01) {
-            this.decodedAspects.set(assetId, aspect);
-            const prevFrontVirtual = this.cardTrack.isEmpty
-              ? 0
-              : this.cardTrack.nearestVirtualIndex(this.offset);
-            const rebuilt = RingCardTrack.build(this.assets, this.params, this.decodedAspects);
-            if (!rebuilt.equals(this.cardTrack)) {
-              this.cardTrack = rebuilt;
-              if (!this.isDragging && !this.offsetAnim && !this.cardTrack.isEmpty) {
-                this.offset = this.cardTrack.centerArcForVirtualIndex(prevFrontVirtual);
-              }
-            }
-          }
-        }
-        this.requestFrame();
-      });
+      canvas.addEventListener('webglcontextrestored', this.onContextRestored, false);
+      this.texturePool = this.createTexturePool(gl);
     } else {
       this.isWebGL2 = false;
     }
@@ -624,6 +647,7 @@ export class RingGalleryWebGLEngine {
   dispose(): void {
     this.disposed = true;
     this.canvas.removeEventListener('webglcontextlost', this.onContextLost, false);
+    this.canvas.removeEventListener('webglcontextrestored', this.onContextRestored, false);
     if (this.rafId) {
       cancelAnimationFrame(this.rafId);
       this.rafId = 0;

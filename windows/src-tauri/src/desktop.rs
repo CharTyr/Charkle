@@ -70,10 +70,30 @@ fn write_json_atomic(path: &Path, json: &str) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let tmp = path.with_extension("json.tmp");
-    if std::fs::write(&tmp, json).is_ok() && std::fs::rename(&tmp, path).is_err() {
-        let _ = std::fs::remove_file(path);
-        let _ = std::fs::rename(&tmp, path);
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("config.json");
+    let tmp = path.with_file_name(format!("{file_name}.{}.tmp", Uuid::new_v4().simple()));
+    if std::fs::write(&tmp, json).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        return;
+    }
+    if std::fs::rename(&tmp, path).is_err() {
+        // On Windows, `std::fs::rename` fails if the target exists; use a backup swap so a
+        // crash mid-write does not leave the config missing.
+        let backup = path.with_file_name(format!("{file_name}.{}.bak", Uuid::new_v4().simple()));
+        let moved_orig = std::fs::rename(path, &backup).is_ok();
+        if std::fs::rename(&tmp, path).is_ok() {
+            if moved_orig {
+                let _ = std::fs::remove_file(&backup);
+            }
+        } else {
+            if moved_orig {
+                let _ = std::fs::rename(&backup, path);
+            }
+            let _ = std::fs::remove_file(&tmp);
+        }
     }
 }
 
@@ -504,10 +524,16 @@ pub fn show_or_focus_main_window_with_event(
         return;
     }
 
-    // Build WebviewWindow off the Win32 main thread so WebView2 creation never deadlocks,
-    // then apply Win11 Mica Alt chrome + focus on the main thread.
+    // Build WebviewWindow off the Win32 main thread under a single-flight lock so rapid wake
+    // triggers (tray + shelf + deep-link) never race to build two `"main"` windows simultaneously.
+    static MAIN_WINDOW_RECREATE_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
     let handle = app.clone();
     tauri::async_runtime::spawn(async move {
+        let _recreate_guard = MAIN_WINDOW_RECREATE_LOCK
+            .get_or_init(|| tokio::sync::Mutex::new(()))
+            .lock()
+            .await;
+
         if let Some(existing) = handle.get_webview_window("main") {
             let ui_handle = handle.clone();
             let _ = handle.run_on_main_thread(move || {
@@ -558,6 +584,7 @@ pub fn show_or_focus_main_window_with_event(
                 let ui_handle = handle.clone();
                 let _ = handle.run_on_main_thread(move || {
                     configure_main_window(&ui_handle, &main_win);
+                    crate::commands::window::attach_surface_change_emitter(&main_win);
                     let _ = main_win.show();
                     let _ = main_win.set_focus();
                     let st = ui_handle.state::<AppState>();
@@ -634,7 +661,7 @@ fn spawn_shelf_single_input_ingest(
     let state = drop_app.state::<AppState>();
     state.shelf_anim_gen.fetch_add(1, Ordering::SeqCst);
     state.shelf_expanded.store(true, Ordering::SeqCst);
-    state.shelf_busy.store(true, Ordering::SeqCst);
+    let busy_guard = crate::commands::ShelfBusyGuard::acquire(&state);
     let _ = drop_app.emit_to(
         "shelf",
         "shelf:drop-status",
@@ -652,7 +679,7 @@ fn spawn_shelf_single_input_ingest(
             .engine
             .ingest(vec![input], target_folder_id, target_board_id)
             .await;
-        state.shelf_busy.store(false, Ordering::SeqCst);
+        drop(busy_guard);
         state
             .shelf_hold_until_ms
             .store(now_epoch_ms().saturating_add(2600), Ordering::SeqCst);
@@ -713,7 +740,7 @@ fn ingest_shelf_dropped_files(
     tracing::info!(count = raw_count, source, "Drop Shelf DragDrop Drop");
     state.shelf_anim_gen.fetch_add(1, Ordering::SeqCst);
     state.shelf_expanded.store(true, Ordering::SeqCst);
-    state.shelf_busy.store(true, Ordering::SeqCst);
+    let busy_guard = crate::commands::ShelfBusyGuard::acquire(&state);
 
     let _ = drop_app.emit_to(
         "shelf",
@@ -733,7 +760,7 @@ fn ingest_shelf_dropped_files(
             .engine
             .ingest_local_paths(paths, target_folder_id, target_board_id)
             .await;
-        state.shelf_busy.store(false, Ordering::SeqCst);
+        drop(busy_guard);
         state
             .shelf_hold_until_ms
             .store(now_epoch_ms().saturating_add(2600), Ordering::SeqCst);

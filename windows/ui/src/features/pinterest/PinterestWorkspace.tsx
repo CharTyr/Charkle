@@ -22,7 +22,7 @@ import {
   ZoomOut16Regular,
 } from '@fluentui/react-icons';
 import { isTauriRuntime } from '../../api/transport';
-import { Button, Tooltip } from '../../design-system';
+import { Button, CustomSelect, Tooltip, type SelectOption } from '../../design-system';
 import { useLibraryStore } from '../../stores/libraryStore';
 import { usePinterestStore } from '../../stores/pinterestStore';
 import {
@@ -192,7 +192,7 @@ export const PinterestWorkspace: React.FC = () => {
               onClick={() => void handleAuthChangedEvent(true)}
               className="w-full justify-center"
             >
-              <ArrowSync16Regular className={`w-3.5 h-3.5 ${checking ? 'animate-spin' : ''}`} />
+              <ArrowSync16Regular className={`w-3.5 h-3.5 ${checking ? 'animate-spin motion-reduce:animate-none' : ''}`} />
               <span>已完成登录，立即刷新</span>
             </Button>
           </div>
@@ -224,7 +224,7 @@ export const PinterestWorkspace: React.FC = () => {
           onPointerDown={stopCanvasPropagation}
           className="pointer-events-none absolute inset-0 flex items-center justify-center"
         >
-          <div className="px-4 py-2.5 rounded-full bg-[var(--bg-elevated)]/92 border border-[var(--win-stroke-card)] shadow-lg backdrop-blur-md text-[13px] text-[var(--text-secondary)]">
+          <div className="win-acrylic px-4 py-2.5 rounded-full text-[13px] text-[var(--text-secondary)]">
             正在铺展 Pinterest 无限灵感空间…
           </div>
         </div>
@@ -235,7 +235,7 @@ export const PinterestWorkspace: React.FC = () => {
           onPointerDown={stopCanvasPropagation}
           className="absolute inset-0 flex items-center justify-center pointer-events-none"
         >
-          <div className="pointer-events-auto max-w-[380px] p-5 rounded-[14px] bg-[var(--bg-elevated)]/95 border border-[var(--win-stroke-card)] shadow-lg backdrop-blur-md text-center flex flex-col items-center gap-3">
+          <div className="win-acrylic pointer-events-auto max-w-[380px] p-5 rounded-[14px] text-center flex flex-col items-center gap-3">
             <div className="text-[13.5px] font-medium text-[var(--text-primary)]">
               {feedError || '当前灵感流暂无可展示内容'}
             </div>
@@ -267,7 +267,7 @@ export const PinterestWorkspace: React.FC = () => {
         className="absolute top-3 left-3 right-3 z-20 flex flex-wrap items-center justify-between gap-2 pointer-events-none"
       >
         {/* Left cluster: Feed/Board switcher + Search bar */}
-        <div className="pointer-events-auto flex items-center gap-1.5 p-1 rounded-[12px] bg-[var(--bg-elevated)]/88 border border-[var(--win-stroke-card)] shadow-[0_8px_28px_rgba(0,0,0,0.14)] backdrop-blur-xl max-w-full">
+        <div className="win-acrylic pointer-events-auto flex items-center gap-1.5 p-1 rounded-[12px] max-w-full">
           {/* Feed / Boards Menu */}
           <div className="relative">
             <button
@@ -392,7 +392,7 @@ export const PinterestWorkspace: React.FC = () => {
         </div>
 
         {/* Right cluster: Batch Board Import + Zoom Controls + Account Menu */}
-        <div className="pointer-events-auto flex items-center gap-1.5 p-1 rounded-[12px] bg-[var(--bg-elevated)]/88 border border-[var(--win-stroke-card)] shadow-[0_8px_28px_rgba(0,0,0,0.14)] backdrop-blur-xl">
+        <div className="win-acrylic pointer-events-auto flex items-center gap-1.5 p-1 rounded-[12px]">
           <Button
             variant="subtle"
             size="xs"
@@ -529,7 +529,7 @@ export const PinterestWorkspace: React.FC = () => {
         onMouseDown={stopCanvasPropagation}
         onWheel={stopCanvasPropagation}
         onClick={stopCanvasPropagation}
-        className="absolute bottom-4 left-4 z-20 p-1 rounded-full bg-[var(--bg-elevated)]/90 border border-[var(--win-stroke-card)] shadow-[0_8px_28px_rgba(0,0,0,0.18)] backdrop-blur-xl flex items-center gap-1"
+        className="win-acrylic absolute bottom-4 left-4 z-20 p-1 rounded-full flex items-center gap-1"
       >
         <Tooltip content="浏览模式（点击卡片查看高清详情与类似素材）" side="top">
           <button
@@ -580,7 +580,7 @@ export const PinterestWorkspace: React.FC = () => {
         >
           {!isTrayExpanded ? (
             /* Collapsed Tray Capsule */
-            <div className="flex items-center gap-2.5 pl-2.5 pr-2 py-1.5 rounded-full bg-[var(--bg-elevated)]/92 border border-[var(--win-stroke-card)] shadow-[0_12px_36px_rgba(0,0,0,0.22)] backdrop-blur-xl">
+            <div className="win-acrylic flex items-center gap-2.5 pl-2.5 pr-2 py-1.5 rounded-full">
               <button
                 type="button"
                 data-testid="pinterest-tray-expand-btn"
@@ -638,7 +638,7 @@ export const PinterestWorkspace: React.FC = () => {
             /* Expanded Horizontal Aspect-Preserving Waterfall Drawer */
             <div
               data-testid="pinterest-tray-drawer"
-              className="w-[min(840px,calc(100vw-120px))] rounded-[16px] bg-[var(--bg-elevated)]/96 border border-[var(--win-stroke-card)] shadow-[0_20px_54px_rgba(0,0,0,0.3)] backdrop-blur-xl overflow-hidden flex flex-col"
+              className="win-acrylic w-[min(840px,calc(100vw-120px))] rounded-[16px] overflow-hidden flex flex-col"
             >
               {/* Drawer Header */}
               <div className="px-4 py-2.5 border-b border-[var(--win-stroke-divider)] flex items-center justify-between gap-2">
@@ -706,7 +706,7 @@ export const PinterestWorkspace: React.FC = () => {
                         backgroundColor: pin.dominantColorHex || 'var(--bg-subtle)',
                       }}
                       className={[
-                        'group relative shrink-0 rounded-[10px] overflow-hidden shadow-sm transition-all',
+                        'group relative shrink-0 rounded-[10px] overflow-hidden shadow-sm transition-[opacity,box-shadow]',
                         selected
                           ? 'ring-2 ring-[var(--accent)]'
                           : 'ring-1 ring-black/10 dark:ring-white/10 opacity-85 hover:opacity-100',
@@ -769,21 +769,24 @@ export const PinterestWorkspace: React.FC = () => {
 
               {/* Drawer Footer: Target Folder + Extra Tags + Batch Import */}
               <div className="px-4 py-2.5 border-t border-[var(--win-stroke-divider)] bg-[var(--bg-subtle)]/40 flex flex-wrap items-center gap-2">
-                <select
-                  aria-label="目标文件夹"
+                <CustomSelect<string>
+                  ariaLabel="目标文件夹"
+                  size="sm"
                   value={trayTargetFolderId}
                   disabled={isImportingTray}
-                  onChange={(e) => setTrayTargetFolderId(e.target.value)}
-                  className="h-8 px-2.5 rounded-[var(--win-radius-control)] bg-[var(--win-control-fill)] border border-[var(--win-stroke-control)] text-[12px] text-[var(--text-primary)] outline-none min-w-[140px]"
-                >
-                  <option value="">放入收件箱</option>
-                  {flatFolders.map((node) => (
-                    <option key={node.folder.id} value={node.folder.id}>
-                      {'　'.repeat(node.depth)}
-                      {node.folder.name}
-                    </option>
-                  ))}
-                </select>
+                  onChange={(val) => setTrayTargetFolderId(val)}
+                  options={[
+                    { value: '', label: '放入收件箱' } as SelectOption<string>,
+                    ...flatFolders.map(
+                      (node): SelectOption<string> => ({
+                        value: node.folder.id,
+                        label: node.folder.name,
+                        depth: node.depth,
+                      }),
+                    ),
+                  ]}
+                  className="min-w-[140px] text-[12px]"
+                />
 
                 <input
                   type="text"

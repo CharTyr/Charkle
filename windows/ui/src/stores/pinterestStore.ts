@@ -80,7 +80,18 @@ function errorMessage(err: unknown, fallback: string): string {
 
 const spatialLayout = new PinterestSpatialLayout(224, 16);
 const prefetchedUrls = new Set<string>();
+const MAX_DETAIL_CACHE_ENTRIES = 120;
 const detailCache = new Map<string, PinterestPinDetailResult>();
+
+function putDetailCache(pinId: string, result: PinterestPinDetailResult): void {
+  detailCache.delete(pinId);
+  while (detailCache.size >= MAX_DETAIL_CACHE_ENTRIES) {
+    const oldestKey = detailCache.keys().next().value;
+    if (oldestKey === undefined) break;
+    detailCache.delete(oldestKey);
+  }
+  detailCache.set(pinId, result);
+}
 
 function warmImageUrl(rawUrl: string | undefined): void {
   if (!rawUrl || typeof Image === 'undefined') return;
@@ -220,6 +231,7 @@ for (const p of initialTray) {
 }
 
 let activeFeedEpoch = 0;
+let activeBoardsEpoch = 0;
 
 function makeIdRecord(ids: Iterable<string>): Record<string, true> {
   const out: Record<string, true> = {};
@@ -357,6 +369,7 @@ export const usePinterestStore = create<PinterestStoreState>((set, get) => ({
       // Ignore sign-out bridge cleanup failures
     }
     activeFeedEpoch += 1;
+    activeBoardsEpoch += 1;
     spatialLayout.reset();
     detailCache.clear();
     set((s) => ({
@@ -393,11 +406,14 @@ export const usePinterestStore = create<PinterestStoreState>((set, get) => ({
   async refreshBoards() {
     const username = get().account?.username?.trim();
     if (!username) return;
+    const epoch = ++activeBoardsEpoch;
     set({ isLoadingBoards: true });
     try {
       const boards = await getTransport().pinterestFetchBoards(username);
+      if (epoch !== activeBoardsEpoch || get().sessionState !== 'signedIn') return;
       set({ boards, isLoadingBoards: false });
     } catch (err) {
+      if (epoch !== activeBoardsEpoch || get().sessionState !== 'signedIn') return;
       set({ isLoadingBoards: false });
       if (isAuthError(err)) {
         set({ needsReauth: true });
@@ -545,14 +561,19 @@ export const usePinterestStore = create<PinterestStoreState>((set, get) => ({
     const state = get();
     if (state.collectedPinIds[pin.id]) return;
     const nextPins = [pin, ...state.collectedPins].slice(0, MAX_TRAY_ITEMS);
+    const nextIds = makeIdRecord(nextPins.map((p) => p.id));
+    const nextSelected: Record<string, true> = {};
+    for (const id of Object.keys(state.traySelectedPinIds)) {
+      if (nextIds[id]) {
+        nextSelected[id] = true;
+      }
+    }
+    nextSelected[pin.id] = true;
     persistTray(nextPins);
     set({
       collectedPins: nextPins,
-      collectedPinIds: makeIdRecord(nextPins.map((p) => p.id)),
-      traySelectedPinIds: {
-        ...state.traySelectedPinIds,
-        [pin.id]: true,
-      },
+      collectedPinIds: nextIds,
+      traySelectedPinIds: nextSelected,
     });
   },
 
@@ -647,9 +668,10 @@ export const usePinterestStore = create<PinterestStoreState>((set, get) => ({
         true,
       );
       const importedSet = new Set(Object.keys(get().importedPinIds));
+      const failedSet = new Set(report.failedPinIDs);
       const processedIds = new Set<string>();
       for (const pin of targetPins) {
-        if (!report.failedPinIDs.includes(pin.id)) {
+        if (!failedSet.has(pin.id)) {
           importedSet.add(pin.id);
           processedIds.add(pin.id);
         }
@@ -754,6 +776,7 @@ export const usePinterestStore = create<PinterestStoreState>((set, get) => ({
 
     const cached = detailCache.get(pin.id);
     if (cached) {
+      putDetailCache(pin.id, cached);
       set({
         detailStack: nextStack,
         activeDetailPin: cached.pin,
@@ -778,7 +801,7 @@ export const usePinterestStore = create<PinterestStoreState>((set, get) => ({
 
     try {
       const result = await getTransport().pinterestFetchPinDetail(pin);
-      detailCache.set(pin.id, result);
+      putDetailCache(pin.id, result);
       if (get().activeDetailPin?.id !== pin.id) return;
       set({
         activeDetailPin: result.pin,
@@ -853,6 +876,7 @@ export const usePinterestStore = create<PinterestStoreState>((set, get) => ({
         isLoadingMoreSimilar: false,
       });
     } catch {
+      if (get().activeDetailPin?.id !== pin.id) return;
       set({ isLoadingMoreSimilar: false });
     }
   },

@@ -1476,6 +1476,10 @@ export interface TypeSafeExperimentalConfig {
   enableSemanticSearch: boolean;
   enableInboxSmartTriage: boolean;
   enableCuratorVisualRerank: boolean;
+  enableClosedSetTagging: boolean;
+  autoApplyHighConfidenceTags: boolean;
+  highConfidenceTagThreshold: number;
+  suggestedTagThreshold: number;
 }
 
 export interface TypeSafeModelInfo {
@@ -1506,13 +1510,28 @@ export interface InboxTriageRecommendation {
   source: 'typeSafeJev' | 'appleVisionSaliency';
 }
 
-export type ExternalAgentAccessLevel = 'readOnly' | 'readWriteOrganize';
+export type ExternalAgentAccessLevel =
+  | 'readOnly'
+  | 'inboxAndEnrich'
+  | 'readWriteOrganize';
+
+export interface ExternalAgentToken {
+  id: string;
+  name: string;
+  tokenPrefix: string;
+  tokenHash: string;
+  accessLevel: ExternalAgentAccessLevel;
+  isEnabled: boolean;
+  createdAt: string;
+}
 
 export interface ExternalAgentConfig {
   enabled?: boolean;
   mcpEnabled: boolean;
-  cliEnabled: boolean;
+  httpMCPEnabled: boolean;
+  allowRemoteHTTPMCP: boolean;
   accessLevel: ExternalAgentAccessLevel;
+  tokens: ExternalAgentToken[];
 }
 
 export interface ExternalAgentStateDto {
@@ -1520,9 +1539,18 @@ export interface ExternalAgentStateDto {
   cliBinaryPath: string;
   libraryDir: string;
   mcpConfigJson: string;
+  httpMcpEndpointUrl: string;
+  httpMcpRunning: boolean;
+  httpMcpConfigJson: string;
   readToolCount: number;
   writeToolCount: number;
   resourceCount: number;
+}
+
+export interface MintExternalAgentTokenDto {
+  state: ExternalAgentStateDto;
+  token: ExternalAgentToken;
+  plaintext: string;
 }
 
 export interface StorageMigrationReport {

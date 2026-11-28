@@ -34,7 +34,6 @@ import {
 } from '../../stores';
 import {
   buildFolderTree,
-  flattenFolderTree,
   type FolderRecord,
   type FolderTreeNode,
 } from '../../types/domain';
@@ -701,17 +700,30 @@ export const FolderTree: React.FC<FolderTreeProps> = ({
   onMoveFolder,
   onUpdateAppearance,
   onDeleteFolder,
-  onDropAssets,
+  onDropAssets: _onDropAssets,
 }) => {
   const pushToast = useCoordinatorStore((s) => s.pushToast);
   const allAssets = useLibraryStore((s) => s.allAssets);
 
   const tree = useMemo(() => buildFolderTree(folders), [folders]);
-  const flatVisibleIds = useMemo(() => flattenFolderTree(tree).map((n) => n.folder.id), [tree]);
 
   const [expandedIds, setExpandedIds] = useState<Set<string>>(
     () => new Set(folders.filter((f) => !f.parentID).map((f) => f.id)),
   );
+  // Only include visible (not hidden beneath a collapsed ancestor) rows for Shift+click range selection
+  const flatVisibleIds = useMemo(() => {
+    const out: string[] = [];
+    const visit = (nodes: FolderTreeNode[]) => {
+      for (const n of nodes) {
+        out.push(n.folder.id);
+        if (n.children.length > 0 && expandedIds.has(n.folder.id)) {
+          visit(n.children);
+        }
+      }
+    };
+    visit(tree);
+    return out;
+  }, [tree, expandedIds]);
   const [selectedFolderIds, setSelectedFolderIds] = useState<Set<string>>(new Set());
   const [lastClickedId, setLastClickedId] = useState<string | null>(null);
   const [pendingDeleteWithContents, setPendingDeleteWithContents] = useState<FolderRecord[]>([]);
@@ -784,19 +796,15 @@ export const FolderTree: React.FC<FolderTreeProps> = ({
     onSelectFolder(folder.id);
   };
 
-  // Register PointerDrag folder reorder/nesting & asset drop handlers
+  // Register PointerDrag folder reorder/nesting handler (asset-to-folder drop is hosted in
+  // SidebarView so drops also work on the collapsed 64px folder rail when FolderTree unmounts).
   const foldersRef = useRef(folders);
   foldersRef.current = folders;
   const moveFolderRef = useRef(onMoveFolder);
   moveFolderRef.current = onMoveFolder;
-  const dropAssetsRef = useRef(onDropAssets);
-  dropAssetsRef.current = onDropAssets;
 
   useEffect(() => {
     return registerPointerDragHandlers({
-      onDropAssetsToFolder: (folderId, assetIds) => {
-        void dropAssetsRef.current(folderId, assetIds);
-      },
       onMoveFolder: (draggedId, targetId, zone) => {
         const all = foldersRef.current;
         if (zone === 'root' || !targetId) {

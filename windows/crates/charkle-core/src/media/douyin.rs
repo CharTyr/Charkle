@@ -10,7 +10,7 @@ use scraper::{Html, Selector};
 use serde_json::Value;
 use url::Url;
 
-use crate::media::resolvers::{ResolvedSocialPost, SocialPostResolver, WebBookmarkResolver};
+use crate::media::resolvers::ResolvedSocialPost;
 use crate::media::xiaohongshu::XiaohongshuPostResolver;
 use crate::models::core::{
     SocialMediaAttachment, SocialMediaAttachmentKind, SocialPlatform, SocialPostMetadata,
@@ -314,7 +314,7 @@ fn matches_domain_suffix(host: Option<&str>, suffixes: &[&str]) -> bool {
     let Some(raw) = host else {
         return false;
     };
-    let h = raw.trim().to_ascii_lowercase();
+    let h = raw.trim().trim_end_matches('.').to_ascii_lowercase();
     if h.is_empty() {
         return false;
     }
@@ -373,15 +373,15 @@ impl DouyinPostResolver {
             .map(|aweme_id| Self::build_minimal_bookmark(&working_ref, aweme_id))
     }
 
-    /// Follows redirects on `v.douyin.com/<code>` (capped at 6 hops, SSRF-guarded).
+    /// Follows redirects on `v.douyin.com/<code>` (capped at 6 hops, every hop SSRF-guarded).
     pub async fn resolve_short_link(url: &Url) -> Option<Url> {
-        if !SocialPostResolver::is_safe_public_media_url(url) {
+        if !crate::net_safety::is_safe_public_url(url, false) {
             return None;
         }
         let client = Client::builder()
             .timeout(Duration::from_secs(12))
             .user_agent(DOUYIN_BROWSER_UA)
-            .redirect(reqwest::redirect::Policy::limited(6))
+            .redirect(crate::net_safety::public_redirect_policy(6, false))
             .build()
             .ok()?;
 
@@ -393,24 +393,24 @@ impl DouyinPostResolver {
             .ok()?;
 
         let final_url = resp.url().clone();
-        if !SocialPostResolver::is_safe_public_media_url(&final_url) {
+        if !crate::net_safety::is_safe_public_url(&final_url, false) {
             return None;
         }
         Some(final_url)
     }
 
     async fn fetch_html(url: &Url) -> Option<(String, Url)> {
-        if !SocialPostResolver::is_safe_public_media_url(url) {
+        if !crate::net_safety::is_safe_public_url(url, false) {
             return None;
         }
         let client = Client::builder()
             .timeout(Duration::from_secs(12))
             .user_agent(DOUYIN_BROWSER_UA)
-            .redirect(reqwest::redirect::Policy::limited(5))
+            .redirect(crate::net_safety::public_redirect_policy(5, false))
             .build()
             .ok()?;
 
-        let resp = client
+        let mut resp = client
             .get(url.clone())
             .header(
                 "Accept",
@@ -426,11 +426,13 @@ impl DouyinPostResolver {
             return None;
         }
         let final_url = resp.url().clone();
-        if !SocialPostResolver::is_safe_public_media_url(&final_url) {
+        if !crate::net_safety::is_safe_public_url(&final_url, false) {
             return None;
         }
-        let bytes = resp.bytes().await.ok()?;
-        if bytes.is_empty() || bytes.len() > MAX_DOUYIN_HTML_BYTES {
+        let bytes = crate::net_safety::read_bounded_bytes(&mut resp, MAX_DOUYIN_HTML_BYTES)
+            .await
+            .ok()?;
+        if bytes.is_empty() {
             return None;
         }
         let html = String::from_utf8_lossy(&bytes).into_owned();
@@ -785,7 +787,7 @@ fn upgraded_https_url(raw: &str) -> Option<String> {
         trimmed.to_string()
     };
     let parsed = Url::parse(&normalized).ok()?;
-    if !WebBookmarkResolver::is_web_url(&parsed) {
+    if !crate::net_safety::is_safe_public_url(&parsed, true) {
         return None;
     }
     Some(parsed.to_string())
@@ -933,7 +935,25 @@ fn hex_nibble(b: u8) -> Option<u8> {
     }
 }
 
+const MAX_DOUYIN_JSON_DEPTH: usize = 64;
+const MAX_DOUYIN_JSON_NODES: usize = 16_384;
+
 fn locate_aweme_object<'a>(root: &'a Value, target_id: Option<&str>) -> Option<&'a Value> {
+    let mut budget = MAX_DOUYIN_JSON_NODES;
+    locate_aweme_object_bounded(root, target_id, 0, &mut budget)
+}
+
+fn locate_aweme_object_bounded<'a>(
+    root: &'a Value,
+    target_id: Option<&str>,
+    depth: usize,
+    budget: &mut usize,
+) -> Option<&'a Value> {
+    if depth >= MAX_DOUYIN_JSON_DEPTH || *budget == 0 {
+        return None;
+    }
+    *budget -= 1;
+
     match root {
         Value::Object(map) => {
             if let Some(id_val) = map.get("aweme_id").or_else(|| map.get("awemeId")) {
@@ -949,13 +969,16 @@ fn locate_aweme_object<'a>(root: &'a Value, target_id: Option<&str>) -> Option<&
             }
             for key in ["aweme_detail", "awemeDetail", "detail", "itemInfo"] {
                 if let Some(child) = map.get(key) {
-                    if let Some(found) = locate_aweme_object(child, target_id) {
+                    if let Some(found) =
+                        locate_aweme_object_bounded(child, target_id, depth + 1, budget)
+                    {
                         return Some(found);
                     }
                 }
             }
             for val in map.values() {
-                if let Some(found) = locate_aweme_object(val, target_id) {
+                if let Some(found) = locate_aweme_object_bounded(val, target_id, depth + 1, budget)
+                {
                     return Some(found);
                 }
             }
@@ -963,7 +986,8 @@ fn locate_aweme_object<'a>(root: &'a Value, target_id: Option<&str>) -> Option<&
         }
         Value::Array(arr) => {
             for item in arr {
-                if let Some(found) = locate_aweme_object(item, target_id) {
+                if let Some(found) = locate_aweme_object_bounded(item, target_id, depth + 1, budget)
+                {
                     return Some(found);
                 }
             }
@@ -1068,4 +1092,67 @@ fn clean_douyin_page_title(raw: &str) -> String {
 fn is_blocked_title(title: &str) -> bool {
     let trimmed = title.trim();
     trimmed.is_empty() || BLOCKED_TITLES.iter().any(|b| trimmed.contains(b))
+}
+
+#[cfg(test)]
+mod security_tests {
+    use super::*;
+
+    #[test]
+    fn upgraded_https_url_rejects_ssrf_and_non_https_targets() {
+        for bad in [
+            "http://127.0.0.1/cover.jpg",
+            "https://[::1]/cover.jpg",
+            "https://[::ffff:127.0.0.1]/cover.jpg",
+            "https://169.254.169.254/latest/meta-data/",
+            "http://192.168.1.5/cover.jpg",
+            "https://localhost/cover.jpg",
+            "https://user:pass@p3-pc.douyinpic.com/img/a.jpg",
+            "javascript:alert(1)",
+            "file:///C:/Windows/win.ini",
+        ] {
+            assert!(
+                upgraded_https_url(bad).is_none(),
+                "must reject unsafe url: {bad}"
+            );
+        }
+
+        assert_eq!(
+            upgraded_https_url("http://p3-pc.douyinpic.com/img/cover.webp").as_deref(),
+            Some("https://p3-pc.douyinpic.com/img/cover.webp")
+        );
+        assert_eq!(
+            upgraded_https_url("//p3-pc.douyinpic.com/img/cover.webp").as_deref(),
+            Some("https://p3-pc.douyinpic.com/img/cover.webp")
+        );
+    }
+
+    #[test]
+    fn parse_meta_fallback_strips_unsafe_loopback_cover_urls() {
+        let html = r#"
+            <html><head>
+                <meta property="og:title" content="测试作品 - 抖音" />
+                <meta property="og:description" content="安全封面测试" />
+                <meta property="og:image" content="http://127.0.0.1:8080/internal-probe.png" />
+            </head><body></body></html>
+        "#;
+        let url = Url::parse("https://www.douyin.com/video/7345678901234567890").unwrap();
+        let reference = DouyinURLParser::parse(&url).unwrap();
+        let parsed = DouyinPostResolver::parse_meta_fallback(html, &reference)
+            .expect("should keep safe text metadata");
+        assert!(parsed.metadata.attachments.is_empty());
+        assert!(parsed.primary_thumbnail_url.is_none());
+    }
+
+    #[test]
+    fn locate_aweme_object_respects_depth_bound() {
+        let mut node = serde_json::json!({
+            "aweme_id": "7345678901234567890",
+            "desc": "too deep"
+        });
+        for _ in 0..80 {
+            node = serde_json::json!({ "nested": node });
+        }
+        assert!(locate_aweme_object(&node, Some("7345678901234567890")).is_none());
+    }
 }

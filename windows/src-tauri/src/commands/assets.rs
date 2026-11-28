@@ -45,6 +45,7 @@ pub async fn ingest_files(
         .engine
         .ingest_local_paths(path_bufs, folder, board)
         .await?;
+    super::settings::spawn_auto_analyze_if_enabled(&state, &report.assets);
     Ok(report.assets)
 }
 
@@ -59,15 +60,16 @@ pub async fn ingest_url(
 ) -> IpcResult<Vec<AssetRecord>> {
     let folder = parse_optional_uuid(target_folder_id)?;
     let board = parse_optional_uuid(target_board_id)?;
-    state
+    let assets = state
         .engine
         .ingest(
             vec![CaptureInput::WebUrl { url, title, notes }],
             folder,
             board,
         )
-        .await
-        .map_err(Into::into)
+        .await?;
+    super::settings::spawn_auto_analyze_if_enabled(&state, &assets);
+    Ok(assets)
 }
 
 #[tauri::command]
@@ -136,7 +138,7 @@ pub async fn ingest_image_base64(
         code: "INVALID_BASE64",
         message: format!("Invalid base64 image payload: {e}"),
     })?;
-    state
+    let assets = state
         .engine
         .ingest(
             vec![CaptureInput::ImageData {
@@ -147,8 +149,9 @@ pub async fn ingest_image_base64(
             folder,
             board,
         )
-        .await
-        .map_err(Into::into)
+        .await?;
+    super::settings::spawn_auto_analyze_if_enabled(&state, &assets);
+    Ok(assets)
 }
 
 #[tauri::command]

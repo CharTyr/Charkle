@@ -10,8 +10,9 @@ import {
   Sparkle16Regular,
   ZoomIn16Regular,
 } from '@fluentui/react-icons';
-import { getTransport, isTauriRuntime } from '../../api/transport';
-import { Button } from '../../design-system';
+import { isTauriRuntime } from '../../api/transport';
+import { Button, openSafeExternalUrl } from '../../design-system';
+import { useCoordinatorStore } from '../../stores/coordinatorStore';
 import { usePinterestStore } from '../../stores/pinterestStore';
 import { resolveSocialMediaUrl, type PinterestPin } from '../../types/domain';
 import { pinAspectRatio, pinDisplayImageUrl, pinDisplayTitle } from './spatialLayout';
@@ -116,7 +117,7 @@ export const PinterestPinDetailModal: React.FC = () => {
       onPointerDown={(e) => e.stopPropagation()}
       onWheel={(e) => e.stopPropagation()}
       onClick={closePinDetail}
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/52 backdrop-blur-[6px] p-5"
+      className="win-smoke-scrim fixed inset-0 z-50 flex items-center justify-center p-5"
     >
       <div
         onClick={(e) => e.stopPropagation()}
@@ -172,7 +173,7 @@ export const PinterestPinDetailModal: React.FC = () => {
                   className="w-full h-full object-cover block"
                 />
               )}
-              <span className="pointer-events-none absolute bottom-2 right-2 inline-flex items-center gap-1 px-2 py-1 rounded-full bg-black/60 text-white text-[11px] opacity-0 group-hover:opacity-100 transition-opacity backdrop-blur-sm">
+              <span className="win-acrylic-dark pointer-events-none absolute bottom-2 right-2 inline-flex items-center gap-1 px-2 py-1 rounded-full text-[11px] opacity-0 group-hover:opacity-100 transition-opacity">
                 <ZoomIn16Regular className="w-3.5 h-3.5" />
                 <span>查看大图</span>
               </span>
@@ -258,7 +259,14 @@ export const PinterestPinDetailModal: React.FC = () => {
                 <Button
                   variant="subtle"
                   size="sm"
-                  onClick={() => void getTransport().openExternalUrl(pin.pinPageURL)}
+                  onClick={() =>
+                    void openSafeExternalUrl(pin.pinPageURL, {
+                      onError: () =>
+                        useCoordinatorStore
+                          .getState()
+                          .pushToast({ message: '无法在默认浏览器中打开 Pinterest 页面', tone: 'error' }),
+                    })
+                  }
                 >
                   <Open16Regular className="w-3.5 h-3.5" />
                   <span>在 Pinterest 打开</span>

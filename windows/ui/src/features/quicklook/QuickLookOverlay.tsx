@@ -41,6 +41,7 @@ import {
   WIN_TRANSITION_NORMAL,
   computeAmbientTintStyle,
   isLongStripImage,
+  isSystemMotionReduced,
   m,
   useResolvedIsDark,
 } from '../../design-system';
@@ -106,14 +107,23 @@ function formatQuickLookBookmarkDomain(
   return '网页';
 }
 
-function isMotionReducedNow(): boolean {
-  if (typeof document !== 'undefined' && document.documentElement.dataset.animations === 'disabled') {
-    return true;
-  }
-  if (typeof window !== 'undefined' && typeof window.matchMedia === 'function') {
-    return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-  }
+function isMediaOrSliderControl(target: EventTarget | null): boolean {
+  const el = target as HTMLElement | null;
+  if (!el) return false;
+  if (el.tagName === 'VIDEO' || el.tagName === 'AUDIO') return true;
+  if (el.tagName === 'INPUT' && (el as HTMLInputElement).type === 'range') return true;
+  if (el.getAttribute('role') === 'slider' || Boolean(el.closest('[role="slider"]'))) return true;
   return false;
+}
+
+function isMediaPlaybackElement(target: EventTarget | null): boolean {
+  const el = target as HTMLElement | null;
+  if (!el) return false;
+  return el.tagName === 'VIDEO' || el.tagName === 'AUDIO';
+}
+
+function isMotionReducedNow(): boolean {
+  return isSystemMotionReduced();
 }
 
 function isValidRect(rect: QuickLookOriginRect | null | undefined): rect is QuickLookOriginRect {
@@ -351,6 +361,8 @@ export const QuickLookOverlay: React.FC = () => {
   const freezeAnimRef = useRef<(() => void) | null>(null);
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const lastActiveAssetRef = useRef<AssetRecord | null>(null);
+  const previousFocusRef = useRef<HTMLElement | null>(null);
+  const wasQuickLookOpenRef = useRef<boolean>(false);
 
   const activeIndex = useMemo(() => {
     if (!quickLookAssetId) return -1;
@@ -392,10 +404,30 @@ export const QuickLookOverlay: React.FC = () => {
     }
   }, [quickLookAssetId, bootstrapped, asset, closeQuickLook]);
 
-  // Resign stale underlying text/button focus immediately upon entering Quick Look
+  // Save underlying focus on open, resign it for Quick Look, and restore cleanly on close
   useEffect(() => {
-    if (!quickLookAssetId) return;
-    (document.activeElement as HTMLElement | null)?.blur?.();
+    const isOpen = Boolean(quickLookAssetId);
+    const wasOpen = wasQuickLookOpenRef.current;
+    wasQuickLookOpenRef.current = isOpen;
+
+    if (isOpen && !wasOpen) {
+      const activeEl = document.activeElement as HTMLElement | null;
+      previousFocusRef.current =
+        activeEl && activeEl !== document.body && activeEl !== document.documentElement
+          ? activeEl
+          : null;
+      activeEl?.blur?.();
+    } else if (!isOpen && wasOpen) {
+      const prev = previousFocusRef.current;
+      previousFocusRef.current = null;
+      if (prev && prev.isConnected) {
+        try {
+          prev.focus({ preventScroll: true });
+        } catch {
+          prev.focus?.();
+        }
+      }
+    }
   }, [quickLookAssetId]);
 
   useEffect(() => {
@@ -484,6 +516,10 @@ export const QuickLookOverlay: React.FC = () => {
         return;
       }
 
+      if (e.code === 'Space' && !hasPrimaryModifiers && isMediaPlaybackElement(e.target)) {
+        return;
+      }
+
       if (
         (e.key === 'Escape' && !hasPrimaryModifiers) ||
         (e.code === 'Space' && !hasPrimaryModifiers)
@@ -502,6 +538,7 @@ export const QuickLookOverlay: React.FC = () => {
       }
 
       if (!hasPrimaryModifiers && e.key === 'ArrowLeft') {
+        if (isMediaOrSliderControl(e.target)) return;
         if (assets.length > 1 && activeIndex >= 0) {
           e.preventDefault();
           e.stopPropagation();
@@ -512,6 +549,7 @@ export const QuickLookOverlay: React.FC = () => {
       }
 
       if (!hasPrimaryModifiers && e.key === 'ArrowRight') {
+        if (isMediaOrSliderControl(e.target)) return;
         if (assets.length > 1 && activeIndex >= 0) {
           e.preventDefault();
           e.stopPropagation();
@@ -643,7 +681,12 @@ export const QuickLookOverlay: React.FC = () => {
       const closingAsset = lastActiveAssetRef.current;
       if (closingAsset) {
         const liveCardRect = queryVisibleCardRect(closingAsset.id);
-        const exitDelta = computeConnectedFlipDelta(liveCardRect, closingAsset, inspectorOpen);
+        const exitDelta = computeConnectedFlipDelta(
+          liveCardRect,
+          closingAsset,
+          inspectorOpen,
+          effectiveInspectorWidth,
+        );
         if (exitDelta) {
           return {
             x: exitDelta.x,

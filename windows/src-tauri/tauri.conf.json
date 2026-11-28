@@ -29,7 +29,7 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self' http://tauri.localhost https://tauri.localhost charkle-media: http://charkle-media.localhost; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: charkle-media: http://charkle-media.localhost https:; media-src 'self' blob: charkle-media: http://charkle-media.localhost https:; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost charkle-media: http://charkle-media.localhost blob: data:; worker-src 'self' blob:; frame-src https://www.youtube.com https://www.youtube-nocookie.com https://player.bilibili.com https://player.vimeo.com https://www.dailymotion.com; object-src 'none'; base-uri 'self'; form-action 'none'"
     }
   },
   "plugins": {

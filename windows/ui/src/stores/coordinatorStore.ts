@@ -265,6 +265,7 @@ export interface CoordinatorState {
   dedupOpen: boolean;
   dedupInitialScope: DeduplicationScanScope;
   activeMoodboardId: string | null;
+  destinationClearSearchNonce: number;
   toasts: ToastItem[];
 
   setThemeMode: (mode: ThemeMode) => Promise<void>;
@@ -296,7 +297,10 @@ export interface CoordinatorState {
   toggleVisualFilterBar: () => void;
   setLayoutMode: (mode: GalleryLayoutMode) => void;
   setCardScale: (scale: number) => void;
-  setDestination: (dest: SidebarDestination, opts?: { preserveSelection?: boolean }) => void;
+  setDestination: (
+    dest: SidebarDestination,
+    opts?: { preserveSelection?: boolean; preserveSearch?: boolean },
+  ) => void;
   selectAsset: (
     id: string,
     orderedIds: string[],
@@ -369,6 +373,7 @@ export const useCoordinatorStore = create<CoordinatorState>((set, get) => ({
   dedupOpen: false,
   dedupInitialScope: { type: 'allActive' },
   activeMoodboardId: null,
+  destinationClearSearchNonce: 0,
   toasts: [],
 
   async setThemeMode(mode) {
@@ -609,12 +614,24 @@ export const useCoordinatorStore = create<CoordinatorState>((set, get) => ({
   },
 
   setDestination(dest, opts) {
-    set((s) => ({
-      destination: dest,
-      selectedAssetIds: opts?.preserveSelection ? s.selectedAssetIds : [],
-      lastSelectedAssetId: opts?.preserveSelection ? s.lastSelectedAssetId : null,
-      activeMoodboardId: dest.type === 'moodboard' ? dest.id : s.activeMoodboardId,
-    }));
+    set((s) => {
+      const sameDest =
+        s.destination.type === dest.type &&
+        (('id' in s.destination ? s.destination.id : undefined) ===
+          ('id' in dest ? dest.id : undefined)) &&
+        (('name' in s.destination ? s.destination.name : undefined) ===
+          ('name' in dest ? dest.name : undefined));
+      const shouldClearSearch = !sameDest && !opts?.preserveSearch;
+      return {
+        destination: dest,
+        selectedAssetIds: opts?.preserveSelection ? s.selectedAssetIds : [],
+        lastSelectedAssetId: opts?.preserveSelection ? s.lastSelectedAssetId : null,
+        activeMoodboardId: dest.type === 'moodboard' ? dest.id : s.activeMoodboardId,
+        destinationClearSearchNonce: shouldClearSearch
+          ? s.destinationClearSearchNonce + 1
+          : s.destinationClearSearchNonce,
+      };
+    });
   },
 
   selectAsset(id, orderedIds, opts) {

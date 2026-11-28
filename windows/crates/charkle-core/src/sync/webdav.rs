@@ -94,6 +94,9 @@ impl WebDAVTransport {
 
         let client = Client::builder()
             .timeout(Duration::from_secs(60))
+            .redirect(crate::net_safety::same_origin_no_downgrade_redirect_policy(
+                5,
+            ))
             .build()
             .unwrap_or_else(|_| Client::new());
 
@@ -115,20 +118,52 @@ impl WebDAVTransport {
     }
 
     fn is_local_or_lan_host(host: &str) -> bool {
-        if matches!(host, "localhost" | "127.0.0.1" | "::1" | "[::1]") || host.ends_with(".local") {
+        let trimmed = host.trim().trim_end_matches('.').to_ascii_lowercase();
+        if trimmed == "localhost" || trimmed.ends_with(".local") {
             return true;
         }
-        if host.starts_with("192.168.") || host.starts_with("10.") {
-            return true;
-        }
-        if host.starts_with("172.") {
-            let mut parts = host.split('.');
-            let _ = parts.next();
-            if let Some(second) = parts.next().and_then(|s| s.parse::<u8>().ok()) {
-                return (16..=31).contains(&second);
-            }
+        let unbracketed = trimmed
+            .strip_prefix('[')
+            .and_then(|s| s.strip_suffix(']'))
+            .unwrap_or(&trimmed);
+        if let Ok(ip) = unbracketed.parse::<std::net::IpAddr>() {
+            return match ip {
+                std::net::IpAddr::V4(v4) => {
+                    v4.is_loopback() || v4.is_private() || v4.is_link_local()
+                }
+                std::net::IpAddr::V6(v6) => {
+                    let segs = v6.segments();
+                    v6.is_loopback() || (segs[0] & 0xfe00) == 0xfc00 || (segs[0] & 0xffc0) == 0xfe80
+                }
+            };
         }
         false
+    }
+
+    fn validate_relative_path(rel_path: &str) -> CoreResult<()> {
+        if rel_path.contains('\\')
+            || rel_path.contains('\0')
+            || rel_path.contains('?')
+            || rel_path.contains('#')
+        {
+            return Err(CoreError::InvalidPayload(
+                "WebDAV 相对路径包含非法字符。".to_string(),
+            ));
+        }
+        for seg in rel_path.split('/').filter(|s| !s.is_empty()) {
+            let lower = seg.to_ascii_lowercase();
+            if seg == "."
+                || seg == ".."
+                || lower.contains("%2e")
+                || lower.contains("%2f")
+                || lower.contains("%5c")
+            {
+                return Err(CoreError::InvalidPayload(format!(
+                    "WebDAV 相对路径包含非法穿越段：{seg}"
+                )));
+            }
+        }
+        Ok(())
     }
 
     fn join_relative(parent: &str, name: &str) -> String {
@@ -140,6 +175,7 @@ impl WebDAVTransport {
     }
 
     fn build_url(&self, rel_path: &str, is_dir: bool) -> CoreResult<Url> {
+        Self::validate_relative_path(rel_path)?;
         let mut url = self.base_url.clone();
         {
             let mut segs = url.path_segments_mut().map_err(|_| {
@@ -306,6 +342,9 @@ impl WebDAVTransport {
             let Ok(resolved) = base_url.join(&entry.href) else {
                 continue;
             };
+            if resolved.origin() != base_url.origin() {
+                continue;
+            }
             let decoded_path = percent_decode_path(resolved.path());
             let item_path = normalize_slash_path(&decoded_path);
             let rel = if base_path == "/" {
@@ -318,11 +357,14 @@ impl WebDAVTransport {
                 continue;
             };
 
-            if rel.is_empty() || rel == self_rel {
+            if rel.is_empty() || rel == self_rel || Self::validate_relative_path(&rel).is_err() {
                 continue;
             }
             let name = rel.rsplit('/').next().unwrap_or(&rel).to_string();
-            if name == ".DS_Store" || name.starts_with(".charkle-write-") {
+            if name == ".DS_Store"
+                || name.starts_with(".charkle-write-")
+                || validate_drive_name(&name).is_err()
+            {
                 continue;
             }
 
@@ -370,7 +412,11 @@ impl DriveTransport for WebDAVTransport {
     }
 
     fn accepts_remote_id(&self, id: &str) -> bool {
-        !id.is_empty() && !id.starts_with("mounted-") && !id.starts_with("icloud-path:")
+        !id.is_empty()
+            && id != DRIVE_ROOT_ID
+            && !id.starts_with("mounted-")
+            && !id.starts_with("icloud-path:")
+            && Self::validate_relative_path(id).is_ok()
     }
 
     async fn account_info(&self) -> CoreResult<DriveAccountInfo> {
@@ -615,8 +661,14 @@ impl DriveTransport for WebDAVTransport {
     }
 
     async fn trash_file(&self, file_id: &str) -> CoreResult<()> {
+        let trimmed = file_id.trim().trim_matches('/');
+        if trimmed.is_empty() || trimmed == DRIVE_ROOT_ID {
+            return Err(CoreError::InvalidOperation(
+                "Refusing to delete WebDAV sync root.".to_string(),
+            ));
+        }
         let resp = self
-            .request(Method::DELETE, self.build_url(file_id, false)?)
+            .request(Method::DELETE, self.build_url(trimmed, false)?)
             .send()
             .await?;
         let status = resp.status();

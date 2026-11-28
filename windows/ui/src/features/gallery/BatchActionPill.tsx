@@ -16,9 +16,12 @@ import {
 import { getTransport } from '../../api/transport';
 import { Button, ModalShell, Popover, Tooltip } from '../../design-system';
 import {
+  moveAssetsToFolderWithUndo,
+  resolveEnrichEngineStatus,
   useCoordinatorStore,
   useLibraryStore,
   useMoodboardStore,
+  useSyncAIStore,
 } from '../../stores';
 import { extractableLinkAttachments } from '../../types/domain';
 import { FolderMoveMenu } from '../sidebar/FolderMoveMenu';
@@ -47,9 +50,16 @@ export const BatchActionPill: React.FC = () => {
   const folders = useLibraryStore((s) => s.folders);
   const tagCounts = useLibraryStore((s) => s.tagCounts);
   const updateAssets = useLibraryStore((s) => s.updateAssets);
+  const enrichAssets = useLibraryStore((s) => s.enrichAssets);
+  const enrichingAssetIds = useLibraryStore((s) => s.enrichingAssetIds);
+  const enrichProgress = useLibraryStore((s) => s.enrichProgress);
+  const enrichEngineLabel = useLibraryStore((s) => s.enrichEngineLabel);
   const permanentlyDeleteAssets = useLibraryStore((s) => s.permanentlyDeleteAssets);
   const batchExtractLinkMedia = useLibraryStore((s) => s.batchExtractLinkMedia);
   const exportAssetsToPureRef = useLibraryStore((s) => s.exportAssetsToPureRef);
+
+  const aiState = useSyncAIStore((s) => s.aiState);
+  const typesafeState = useSyncAIStore((s) => s.typesafeState);
 
   const boards = useMoodboardStore((s) => s.boards);
   const addAssetsToBoard = useMoodboardStore((s) => s.addAssetsToBoard);
@@ -78,6 +88,11 @@ export const BatchActionPill: React.FC = () => {
     () => selectedAssets.filter((a) => extractableLinkAttachments(a).length > 0),
     [selectedAssets],
   );
+  const enrichStatus = useMemo(
+    () => resolveEnrichEngineStatus(aiState, typesafeState, selectedAssets),
+    [aiState, typesafeState, selectedAssets],
+  );
+  const isEnrichingBatch = enrichingAssetIds.length > 0;
 
   const showPill = selectedAssetIds.length >= 2 && !isModalOverlayActive;
   if (!showPill && permDeleteIds === null) return null;
@@ -206,6 +221,27 @@ export const BatchActionPill: React.FC = () => {
                   <Sparkle16Regular className="w-3.5 h-3.5" />
                   <span>生成情绪板</span>
                 </Button>
+
+                {enrichStatus.canEnrich && (
+                  <Button
+                    variant="subtle"
+                    size="xs"
+                    loading={isEnrichingBatch}
+                    data-testid="batch-ai-tag"
+                    title={
+                      enrichStatus.label ? `当前引擎：${enrichStatus.label}` : '批量 AI 自动打标'
+                    }
+                    onClick={() => void enrichAssets([...selectedAssetIds], destination)}
+                    className="text-[var(--accent)] font-semibold"
+                  >
+                    <Tag16Regular className="w-3.5 h-3.5" />
+                    <span>
+                      {isEnrichingBatch
+                        ? `${enrichEngineLabel ?? 'AI 打标'} ${enrichProgress?.completed ?? 0}/${enrichProgress?.total ?? selectedAssetIds.length}`
+                        : 'AI 打标'}
+                    </span>
+                  </Button>
+                )}
 
                 {extractableLinkAssets.length > 0 && (
                   <Button
@@ -366,17 +402,7 @@ export const BatchActionPill: React.FC = () => {
             const destName = folderId
               ? folders.find((f) => f.id === folderId)?.name ?? '文件夹'
               : '收件箱';
-            void updateAssets(
-              {
-                assetIDs: ids,
-                folderAssignment: folderId ? { folder: folderId } : 'inbox',
-              },
-              destination,
-              {
-                undoMessage: `已移动 ${ids.length} 项至「${destName}」`,
-                undoPatch: { assetIDs: ids, folderAssignment: 'inbox' },
-              },
-            );
+            void moveAssetsToFolderWithUndo(ids, folderId, destName, destination);
           }}
         />
       </Popover>

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowSync16Regular,
   CheckmarkCircle16Filled,
@@ -7,7 +7,7 @@ import {
   LockClosed12Regular,
 } from '@fluentui/react-icons';
 import { isTauriRuntime } from '../../api/transport';
-import { Button } from '../../design-system';
+import { Button, CustomSelect, type SelectOption } from '../../design-system';
 import { useLibraryStore } from '../../stores/libraryStore';
 import { usePinterestStore } from '../../stores/pinterestStore';
 import {
@@ -47,17 +47,46 @@ export const PinterestBoardImportModal: React.FC = () => {
   const [existingFolderId, setExistingFolderId] = useState<string>('');
   const [skipDuplicates, setSkipDuplicates] = useState(true);
   const [extraTagsText, setExtraTagsText] = useState('');
+  const seededOnOpenRef = useRef(false);
 
   const isTauri = isTauriRuntime();
 
+  const existingFolderOptions = useMemo<SelectOption<string>[]>(
+    () =>
+      flatFolders.map((node) => ({
+        value: node.folder.id,
+        label: node.folder.name,
+        depth: node.depth,
+      })),
+    [flatFolders],
+  );
+
+  // Seed default all-selected state once per modal open (never re-select after user clicks "取消全选")
   useEffect(() => {
-    if (!open) return;
-    if (boards.length > 0 && Object.keys(selectedIds).length === 0) {
+    if (!open) {
+      seededOnOpenRef.current = false;
+      return;
+    }
+    if (!seededOnOpenRef.current && boards.length > 0) {
+      seededOnOpenRef.current = true;
       const next: Record<string, true> = {};
       for (const b of boards) next[b.id] = true;
       setSelectedIds(next);
     }
-  }, [open, boards, selectedIds]);
+  }, [open, boards]);
+
+  useEffect(() => {
+    if (!open) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !isImportingBoards) {
+        e.preventDefault();
+        e.stopPropagation();
+        closeModal();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown, true);
+    return () => window.removeEventListener('keydown', handleKeyDown, true);
+  }, [open, isImportingBoards, closeModal]);
 
   useEffect(() => {
     if (!existingFolderId && flatFolders.length > 0) {
@@ -128,7 +157,7 @@ export const PinterestBoardImportModal: React.FC = () => {
       onClick={() => {
         if (!isImportingBoards) closeModal();
       }}
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/52 backdrop-blur-[6px] p-5"
+      className="win-smoke-scrim fixed inset-0 z-50 flex items-center justify-center p-5"
     >
       <div
         onClick={(e) => e.stopPropagation()}
@@ -171,7 +200,7 @@ export const PinterestBoardImportModal: React.FC = () => {
                 onClick={() => void refreshBoards()}
               >
                 <ArrowSync16Regular
-                  className={`w-3.5 h-3.5 ${isLoadingBoards ? 'animate-spin' : ''}`}
+                  className={`w-3.5 h-3.5 ${isLoadingBoards ? 'animate-spin motion-reduce:animate-none' : ''}`}
                 />
                 <span>刷新画板</span>
               </Button>
@@ -293,23 +322,16 @@ export const PinterestBoardImportModal: React.FC = () => {
             </div>
 
             {destMode === 'existingFolder' && (
-              <select
+              <CustomSelect
+                ariaLabel="选择已有目标文件夹"
                 value={existingFolderId}
-                disabled={isImportingBoards || flatFolders.length === 0}
-                onChange={(e) => setExistingFolderId(e.target.value)}
-                className="h-8 px-2.5 rounded-[var(--win-radius-control)] bg-[var(--win-control-fill)] border border-[var(--win-stroke-control)] text-[12.5px] text-[var(--text-primary)] outline-none"
-              >
-                {flatFolders.length === 0 ? (
-                  <option value="">暂无已有文件夹</option>
-                ) : (
-                  flatFolders.map((node) => (
-                    <option key={node.folder.id} value={node.folder.id}>
-                      {'　'.repeat(node.depth)}
-                      {node.folder.name}
-                    </option>
-                  ))
-                )}
-              </select>
+                options={existingFolderOptions}
+                disabled={isImportingBoards || existingFolderOptions.length === 0}
+                placeholder="暂无已有文件夹"
+                onChange={(val) => setExistingFolderId(val)}
+                size="sm"
+                className="w-full"
+              />
             )}
           </div>
 
@@ -353,8 +375,8 @@ export const PinterestBoardImportModal: React.FC = () => {
               </div>
               <div className="h-1.5 rounded-full bg-black/10 dark:bg-white/10 overflow-hidden">
                 <div
-                  className="h-full rounded-full bg-[var(--accent)] transition-all duration-150"
-                  style={{ width: `${Math.max(4, Math.round(progressRatio * 100))}%` }}
+                  className="h-full w-full origin-left rounded-full bg-[var(--accent)] transition-transform duration-150 motion-reduce:transition-none"
+                  style={{ transform: `scaleX(${Math.max(0.04, Math.min(1, progressRatio))})` }}
                 />
               </div>
               <div className="flex items-center gap-4 text-[11.5px] text-[var(--text-secondary)] charkle-tabular">

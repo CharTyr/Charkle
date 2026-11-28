@@ -16,7 +16,7 @@ pub mod web_snapshot;
 use std::backtrace::Backtrace;
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, AtomicU8};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, AtomicU8, AtomicUsize};
 use std::sync::{Arc, Mutex};
 
 use charkle_core::bridge::LocalExtensionBridgeServer;
@@ -224,6 +224,7 @@ pub fn run() {
             let shelf_pinned = Arc::new(AtomicBool::new(false));
             let shelf_drag_hovering = Arc::new(AtomicBool::new(false));
             let shelf_busy = Arc::new(AtomicBool::new(false));
+            let shelf_busy_count = Arc::new(AtomicUsize::new(0));
             let shelf_hold_until_ms = Arc::new(AtomicU64::new(0));
             let shelf_hwnd = Arc::new(AtomicIsize::new(0));
             let shelf_anim_gen = Arc::new(AtomicU64::new(0));
@@ -331,11 +332,8 @@ pub fn run() {
 
             let bridge_for_boot = Arc::clone(&extension_bridge);
             tauri::async_runtime::spawn(async move {
-                let status = bridge_for_boot.status().await;
-                if status.enabled {
-                    if let Err(err) = bridge_for_boot.start().await {
-                        tracing::warn!(%err, "Failed to start local browser extension bridge");
-                    }
+                if let Err(err) = bridge_for_boot.sync_mcp_network_binding().await {
+                    tracing::warn!(%err, "Failed to start local extension / HTTP MCP bridge");
                 }
             });
 
@@ -378,6 +376,7 @@ pub fn run() {
                 shelf_pinned,
                 shelf_drag_hovering,
                 shelf_busy,
+                shelf_busy_count,
                 shelf_hold_until_ms,
                 shelf_hwnd,
                 shelf_anim_gen,
@@ -553,9 +552,13 @@ pub fn run() {
             commands::settings::get_typesafe_state,
             commands::settings::save_typesafe_config,
             commands::settings::test_typesafe_connection,
+            commands::settings::enrich_assets,
             commands::settings::run_inbox_smart_triage,
             commands::settings::get_external_agent_state,
             commands::settings::save_external_agent_config,
+            commands::settings::mint_external_agent_token,
+            commands::settings::toggle_external_agent_token,
+            commands::settings::revoke_external_agent_token,
             commands::settings::run_external_agent_self_check,
             commands::settings::rebuild_local_visual_index,
             commands::settings::save_webdav_password,

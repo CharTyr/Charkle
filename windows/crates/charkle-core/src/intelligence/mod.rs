@@ -32,7 +32,7 @@ pub use usage_tracker::{
     CloudAIUsageBucket, CloudAIUsageCategory, CloudAIUsageStore, CloudAIUsageSummary,
 };
 pub use visual_grounding::{
-    offline_saliency_box, FolderClassificationResult, FolderOptionInput, TypeSafeImagePreparer,
-    VisualGroundingEngine,
+    canonicalize_suggested_tags, offline_saliency_box, ClosedSetTagFunnel,
+    FolderClassificationResult, FolderOptionInput, TypeSafeImagePreparer, VisualGroundingEngine,
 };
 pub use visual_query::{ParsedVisualHints, VisualQueryIntelligence, VisualTone};

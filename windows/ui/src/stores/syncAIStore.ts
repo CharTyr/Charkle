@@ -10,9 +10,11 @@ import {
   type CacheStats,
   type CloudAIUsageCategory,
   type DriveSyncConfig,
+  type ExternalAgentAccessLevel,
   type ExternalAgentConfig,
   type ExternalAgentSelfCheckDto,
   type ExternalAgentStateDto,
+  type MintExternalAgentTokenDto,
   type GDirectInstallProgress,
   type GDirectInstallResult,
   type ICloudDriveAvailability,
@@ -30,7 +32,9 @@ import {
 import { useCoordinatorStore } from './coordinatorStore';
 
 function accessLevelTitle(level: ExternalAgentConfig['accessLevel']): string {
-  return level === 'readWriteOrganize' ? '允许整理与生板' : '仅只读';
+  if (level === 'readWriteOrganize') return '全局整理与生板';
+  if (level === 'inboxAndEnrich') return '仅收件箱与打标';
+  return '仅只读';
 }
 
 export interface SyncAIState {
@@ -127,6 +131,12 @@ export interface SyncAIState {
     config: ExternalAgentConfig,
     opts?: { quiet?: boolean },
   ) => Promise<void>;
+  mintExternalAgentToken: (
+    name: string,
+    accessLevel: ExternalAgentAccessLevel,
+  ) => Promise<MintExternalAgentTokenDto | null>;
+  toggleExternalAgentToken: (tokenId: string, enabled: boolean) => Promise<void>;
+  revokeExternalAgentToken: (tokenId: string) => Promise<void>;
   runExternalAgentSelfCheck: () => Promise<ExternalAgentSelfCheckDto>;
   rebuildLocalVisualIndex: (assetIds?: string[]) => Promise<number>;
   setGDirectInstallProgress: (progress: GDirectInstallProgress | null) => void;
@@ -860,13 +870,13 @@ export const useSyncAIStore = create<SyncAIState>((set, get) => ({
       const agentState = await getTransport().saveExternalAgentConfig(config);
       const levelLabel = accessLevelTitle(config.accessLevel);
       const statusMessage =
-        config.mcpEnabled && config.cliEnabled
-          ? `MCP 与 CLI 服务均已开启 · 权限：${levelLabel}`
+        config.mcpEnabled && config.httpMCPEnabled
+          ? `本地 stdio 与 HTTP MCP 均已开启，默认权限：${levelLabel}`
           : config.mcpEnabled
-            ? `已开启 MCP 服务（CLI 已关闭）· 权限：${levelLabel}`
-            : config.cliEnabled
-              ? `已开启 CLI 命令行服务（MCP 已关闭）· 权限：${levelLabel}`
-              : '已关闭 MCP 与 CLI 外部接入服务';
+            ? `已开启本地 stdio MCP（HTTP MCP 已关闭），权限：${levelLabel}`
+            : config.httpMCPEnabled
+              ? `已开启 Streamable HTTP MCP（stdio 已关闭）`
+              : '已关闭 MCP 外部接入服务';
 
       set({
         agentState,
@@ -878,6 +888,43 @@ export const useSyncAIStore = create<SyncAIState>((set, get) => ({
           tone: 'info',
         });
       }
+    } catch (err) {
+      set({ errorMessage: err instanceof Error ? err.message : String(err) });
+    }
+  },
+
+  async mintExternalAgentToken(name, accessLevel) {
+    set({ errorMessage: null });
+    try {
+      const minted = await getTransport().mintExternalAgentToken(name, accessLevel);
+      const msg = `已签发令牌「${minted.token.name}」（${accessLevelTitle(accessLevel)}），请立即复制保存`;
+      set({ agentState: minted.state, statusMessage: msg });
+      useCoordinatorStore.getState().pushToast({ message: msg, tone: 'success' });
+      return minted;
+    } catch (err) {
+      set({ errorMessage: err instanceof Error ? err.message : String(err) });
+      return null;
+    }
+  },
+
+  async toggleExternalAgentToken(tokenId, enabled) {
+    set({ errorMessage: null });
+    try {
+      const agentState = await getTransport().toggleExternalAgentToken(tokenId, enabled);
+      const msg = enabled ? '已重新启用该 HTTP MCP 令牌' : '已停用该 HTTP MCP 令牌';
+      set({ agentState, statusMessage: msg });
+    } catch (err) {
+      set({ errorMessage: err instanceof Error ? err.message : String(err) });
+    }
+  },
+
+  async revokeExternalAgentToken(tokenId) {
+    set({ errorMessage: null });
+    try {
+      const agentState = await getTransport().revokeExternalAgentToken(tokenId);
+      const msg = '已永久吊销该 HTTP MCP 令牌';
+      set({ agentState, statusMessage: msg });
+      useCoordinatorStore.getState().pushToast({ message: msg, tone: 'info' });
     } catch (err) {
       set({ errorMessage: err instanceof Error ? err.message : String(err) });
     }

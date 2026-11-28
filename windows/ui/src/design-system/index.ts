@@ -8,6 +8,7 @@ export * from './Menu';
 export * from './ModalShell';
 export * from './MotionPrimitives';
 export * from './Popover';
+export * from './security';
 export * from './SegmentedControl';
 export * from './Skeleton';
 export * from './Slider';

@@ -34,6 +34,40 @@ use crate::desktop::CaptureFrameStore;
 /// Maximum single Range response chunk size (4 MiB) so 4K video/GIF scrubbing never spikes RAM.
 const MAX_RANGE_CHUNK_BYTES: u64 = 4 * 1024 * 1024;
 
+const DEFAULT_TAURI_CORS_ORIGIN: &str = "http://tauri.localhost";
+const ALLOWED_CORS_ORIGINS: &[&str] = &[
+    "http://tauri.localhost",
+    "https://tauri.localhost",
+    "tauri://localhost",
+    "http://localhost:1420",
+    "http://127.0.0.1:1420",
+];
+
+/// Resolves an explicit allowlisted `Access-Control-Allow-Origin` for Tauri WebView requests.
+/// Returns `Err(())` only when an explicit untrusted cross-origin `Origin` header is supplied.
+fn resolve_cors_origin(request: &Request<Vec<u8>>) -> Result<&'static str, ()> {
+    let Some(raw) = request
+        .headers()
+        .get(header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+    else {
+        return Ok(DEFAULT_TAURI_CORS_ORIGIN);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(DEFAULT_TAURI_CORS_ORIGIN);
+    }
+    ALLOWED_CORS_ORIGINS
+        .iter()
+        .copied()
+        .find(|allowed| allowed.eq_ignore_ascii_case(trimmed))
+        .ok_or(())
+}
+
+fn cors_origin_or_default(request: &Request<Vec<u8>>) -> &'static str {
+    resolve_cors_origin(request).unwrap_or(DEFAULT_TAURI_CORS_ORIGIN)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ByteRangeResult {
     Full,
@@ -117,10 +151,15 @@ pub fn is_video_stream_proxy_route(request: &Request<Vec<u8>>) -> bool {
 /// with site-required `Referer` and `User-Agent` headers (zero local disk download, CORS-enabled
 /// so HTML5 `<video>` + `<canvas>` frame-to-cover extraction works seamlessly).
 pub async fn handle_video_stream_proxy_request(request: &Request<Vec<u8>>) -> Response<Vec<u8>> {
+    let cors_origin = match resolve_cors_origin(request) {
+        Ok(origin) => origin,
+        Err(()) => return error_response(StatusCode::FORBIDDEN, "Origin not allowed"),
+    };
     if request.method() == "OPTIONS" {
         return Response::builder()
             .status(StatusCode::NO_CONTENT)
-            .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+            .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, cors_origin)
+            .header(header::VARY, "Origin")
             .header(header::ACCESS_CONTROL_ALLOW_METHODS, "GET, HEAD, OPTIONS")
             .header(header::ACCESS_CONTROL_ALLOW_HEADERS, "Range, If-None-Match")
             .header(
@@ -176,7 +215,8 @@ pub async fn handle_video_stream_proxy_request(request: &Request<Vec<u8>>) -> Re
                 .status(status)
                 .header(header::CONTENT_TYPE, res.content_type)
                 .header(header::CACHE_CONTROL, "no-store")
-                .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+                .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, cors_origin)
+                .header(header::VARY, "Origin")
                 .header(
                     header::ACCESS_CONTROL_EXPOSE_HEADERS,
                     "Content-Range, Content-Length, Accept-Ranges, Content-Type",
@@ -214,10 +254,15 @@ pub async fn handle_social_proxy_request(
     data_dir: &Path,
     request: &Request<Vec<u8>>,
 ) -> Response<Vec<u8>> {
+    let cors_origin = match resolve_cors_origin(request) {
+        Ok(origin) => origin,
+        Err(()) => return error_response(StatusCode::FORBIDDEN, "Origin not allowed"),
+    };
     if request.method() == "OPTIONS" {
         return Response::builder()
             .status(StatusCode::NO_CONTENT)
-            .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+            .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, cors_origin)
+            .header(header::VARY, "Origin")
             .header(header::ACCESS_CONTROL_ALLOW_METHODS, "GET, HEAD, OPTIONS")
             .header(header::ACCESS_CONTROL_ALLOW_HEADERS, "Range, If-None-Match")
             .body(Vec::new())
@@ -253,7 +298,8 @@ pub async fn handle_social_proxy_request(
                 .header(header::CONTENT_TYPE, res.content_type)
                 .header(header::CONTENT_LENGTH, total_len.to_string())
                 .header(header::CACHE_CONTROL, "public, max-age=86400")
-                .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+                .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, cors_origin)
+                .header(header::VARY, "Origin")
                 .body(body)
                 .unwrap_or_else(|_| Response::new(Vec::new()))
         }
@@ -272,10 +318,15 @@ pub async fn handle_xhs_proxy_request(
     data_dir: &Path,
     request: &Request<Vec<u8>>,
 ) -> Response<Vec<u8>> {
+    let cors_origin = match resolve_cors_origin(request) {
+        Ok(origin) => origin,
+        Err(()) => return error_response(StatusCode::FORBIDDEN, "Origin not allowed"),
+    };
     if request.method() == "OPTIONS" {
         return Response::builder()
             .status(StatusCode::NO_CONTENT)
-            .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+            .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, cors_origin)
+            .header(header::VARY, "Origin")
             .header(header::ACCESS_CONTROL_ALLOW_METHODS, "GET, HEAD, OPTIONS")
             .header(header::ACCESS_CONTROL_ALLOW_HEADERS, "Range, If-None-Match")
             .body(Vec::new())
@@ -309,7 +360,8 @@ pub async fn handle_xhs_proxy_request(
                 .header(header::CONTENT_TYPE, res.content_type)
                 .header(header::CONTENT_LENGTH, total_len.to_string())
                 .header(header::CACHE_CONTROL, "public, max-age=86400")
-                .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+                .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, cors_origin)
+                .header(header::VARY, "Origin")
                 .body(body)
                 .unwrap_or_else(|_| Response::new(Vec::new()))
         }
@@ -351,30 +403,69 @@ pub async fn handle_on_demand_original_request(
     asset_id: Uuid,
     request: &Request<Vec<u8>>,
 ) -> Response<Vec<u8>> {
-    let Ok(Some(asset)) = engine.fetch_asset(asset_id) else {
+    let cors_origin = match resolve_cors_origin(request) {
+        Ok(origin) => origin,
+        Err(()) => return error_response(StatusCode::FORBIDDEN, "Origin not allowed"),
+    };
+    let is_head = request.method() == "HEAD";
+    let if_none_match = request
+        .headers()
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let range_header = request
+        .headers()
+        .get(header::RANGE)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+
+    let engine_lookup = Arc::clone(engine);
+    let lookup_res = tokio::task::spawn_blocking(move || {
+        let asset = engine_lookup.fetch_asset(asset_id).ok().flatten()?;
+        let mime = if !asset.mime_type.is_empty() && asset.mime_type != "application/octet-stream" {
+            asset.mime_type.clone()
+        } else {
+            MediaPipeline::mime_type(&asset.file_name).to_string()
+        };
+        let cached = engine_lookup.cached_original_path(&asset);
+        Some((mime, cached, asset.drive_file_id.is_some()))
+    })
+    .await
+    .ok()
+    .flatten();
+
+    let Some((mime, cached, has_remote)) = lookup_res else {
         return error_response(StatusCode::NOT_FOUND, "Asset not found");
     };
-    let mime = if !asset.mime_type.is_empty() && asset.mime_type != "application/octet-stream" {
-        asset.mime_type.clone()
+
+    let target_path = if let Some(cached_path) = cached {
+        cached_path
     } else {
-        MediaPipeline::mime_type(&asset.file_name).to_string()
+        if !has_remote {
+            return error_response(StatusCode::NOT_FOUND, "Media file not cached locally");
+        }
+        match engine.original_path_or_download(asset_id).await {
+            Ok(path) => path,
+            Err(err) => {
+                tracing::warn!(%asset_id, %err, "On-demand cloud original download failed");
+                return error_response(StatusCode::NOT_FOUND, "Media file not cached locally");
+            }
+        }
     };
 
-    if let Some(cached) = engine.cached_original_path(&asset) {
-        return serve_file_with_range(request, &cached, &mime, "public, max-age=300");
-    }
-
-    if asset.drive_file_id.is_none() {
-        return error_response(StatusCode::NOT_FOUND, "Media file not cached locally");
-    }
-
-    match engine.original_path_or_download(asset_id).await {
-        Ok(path) => serve_file_with_range(request, &path, &mime, "public, max-age=300"),
-        Err(err) => {
-            tracing::warn!(%asset_id, %err, "On-demand cloud original download failed");
-            error_response(StatusCode::NOT_FOUND, "Media file not cached locally")
-        }
-    }
+    tokio::task::spawn_blocking(move || {
+        serve_file_with_range_parts(
+            is_head,
+            if_none_match.as_deref(),
+            range_header.as_deref(),
+            cors_origin,
+            &target_path,
+            &mime,
+            "public, max-age=300",
+        )
+    })
+    .await
+    .unwrap_or_else(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Media read aborted"))
 }
 
 /// Handles a `charkle-media://` request synchronously from disk or ephemeral capture frame
@@ -384,10 +475,15 @@ pub fn handle_media_request(
     capture_frames: Option<&Arc<CaptureFrameStore>>,
     request: &Request<Vec<u8>>,
 ) -> Response<Vec<u8>> {
+    let cors_origin = match resolve_cors_origin(request) {
+        Ok(origin) => origin,
+        Err(()) => return error_response(StatusCode::FORBIDDEN, "Origin not allowed"),
+    };
     if request.method() == "OPTIONS" {
         return Response::builder()
             .status(StatusCode::NO_CONTENT)
-            .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+            .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, cors_origin)
+            .header(header::VARY, "Origin")
             .header(header::ACCESS_CONTROL_ALLOW_METHODS, "GET, HEAD, OPTIONS")
             .header(header::ACCESS_CONTROL_ALLOW_HEADERS, "Range, If-None-Match")
             .body(Vec::new())
@@ -415,7 +511,8 @@ pub fn handle_media_request(
             .header(header::CONTENT_TYPE, "image/png")
             .header(header::CONTENT_LENGTH, frame.png_bytes.len().to_string())
             .header(header::CACHE_CONTROL, "no-store")
-            .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+            .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, cors_origin)
+            .header(header::VARY, "Origin")
             .body(body)
             .unwrap_or_else(|_| Response::new(Vec::new()));
     }
@@ -468,6 +565,35 @@ fn serve_file_with_range(
     mime_type: &str,
     cache_control: &str,
 ) -> Response<Vec<u8>> {
+    let cors_origin = cors_origin_or_default(request);
+    let if_none_match = request
+        .headers()
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok());
+    let range_header = request
+        .headers()
+        .get(header::RANGE)
+        .and_then(|v| v.to_str().ok());
+    serve_file_with_range_parts(
+        request.method() == "HEAD",
+        if_none_match,
+        range_header,
+        cors_origin,
+        file_path,
+        mime_type,
+        cache_control,
+    )
+}
+
+fn serve_file_with_range_parts(
+    is_head: bool,
+    if_none_match: Option<&str>,
+    range_header: Option<&str>,
+    cors_origin: &'static str,
+    file_path: &Path,
+    mime_type: &str,
+    cache_control: &str,
+) -> Response<Vec<u8>> {
     let Ok(meta) = std::fs::metadata(file_path) else {
         return error_response(StatusCode::NOT_FOUND, "File missing on disk");
     };
@@ -480,26 +606,18 @@ fn serve_file_with_range(
         .unwrap_or(0);
     let etag = format!("\"{total_len:x}-{mtime_secs:x}\"");
 
-    if let Some(if_none_match) = request
-        .headers()
-        .get(header::IF_NONE_MATCH)
-        .and_then(|v| v.to_str().ok())
-    {
+    if let Some(if_none_match) = if_none_match {
         if if_none_match.trim() == etag {
             return Response::builder()
                 .status(StatusCode::NOT_MODIFIED)
                 .header(header::ETAG, &etag)
                 .header(header::CACHE_CONTROL, cache_control)
-                .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+                .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, cors_origin)
+                .header(header::VARY, "Origin")
                 .body(Vec::new())
                 .unwrap_or_else(|_| Response::new(Vec::new()));
         }
     }
-
-    let range_header = request
-        .headers()
-        .get(header::RANGE)
-        .and_then(|v| v.to_str().ok());
 
     let range = match range_header {
         Some(h) => parse_byte_range(h, total_len),
@@ -511,13 +629,14 @@ fn serve_file_with_range(
             .status(StatusCode::RANGE_NOT_SATISFIABLE)
             .header(header::CONTENT_RANGE, format!("bytes */{total_len}"))
             .header(header::ACCEPT_RANGES, "bytes")
-            .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+            .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, cors_origin)
+            .header(header::VARY, "Origin")
             .body(Vec::new())
             .unwrap_or_else(|_| Response::new(Vec::new())),
         ByteRangeResult::Partial { start, end } => {
             let chunk_len = end - start + 1;
             let mut body = Vec::new();
-            if request.method() != "HEAD" {
+            if !is_head {
                 let Ok(mut file) = File::open(file_path) else {
                     return error_response(
                         StatusCode::INTERNAL_SERVER_ERROR,
@@ -543,12 +662,13 @@ fn serve_file_with_range(
                 .header(header::ACCEPT_RANGES, "bytes")
                 .header(header::ETAG, &etag)
                 .header(header::CACHE_CONTROL, cache_control)
-                .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+                .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, cors_origin)
+                .header(header::VARY, "Origin")
                 .body(body)
                 .unwrap_or_else(|_| Response::new(Vec::new()))
         }
         ByteRangeResult::Full => {
-            let body = if request.method() == "HEAD" {
+            let body = if is_head {
                 Vec::new()
             } else {
                 match std::fs::read(file_path) {
@@ -568,7 +688,8 @@ fn serve_file_with_range(
                 .header(header::ACCEPT_RANGES, "bytes")
                 .header(header::ETAG, &etag)
                 .header(header::CACHE_CONTROL, cache_control)
-                .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+                .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, cors_origin)
+                .header(header::VARY, "Origin")
                 .body(body)
                 .unwrap_or_else(|_| Response::new(Vec::new()))
         }
@@ -579,7 +700,11 @@ fn error_response(status: StatusCode, msg: &str) -> Response<Vec<u8>> {
     Response::builder()
         .status(status)
         .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
-        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+        .header(
+            header::ACCESS_CONTROL_ALLOW_ORIGIN,
+            DEFAULT_TAURI_CORS_ORIGIN,
+        )
+        .header(header::VARY, "Origin")
         .body(msg.as_bytes().to_vec())
         .unwrap_or_else(|_| Response::new(Vec::new()))
 }
@@ -768,8 +893,18 @@ mod tests {
                 .headers()
                 .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
                 .unwrap(),
-            "*"
+            "http://tauri.localhost"
         );
+        // Untrusted cross-origin requests are rejected
+        let evil_req = Request::builder()
+            .uri(format!(
+                "http://charkle-media.localhost/proxy-xhs?url={encoded}"
+            ))
+            .header(header::ORIGIN, "https://evil.example")
+            .body(Vec::new())
+            .unwrap();
+        let evil_res = handle_xhs_proxy_request(tmp.path(), &evil_req).await;
+        assert_eq!(evil_res.status(), StatusCode::FORBIDDEN);
         assert_eq!(
             ok_res.headers().get(header::CACHE_CONTROL).unwrap(),
             "public, max-age=86400"

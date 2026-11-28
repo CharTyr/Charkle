@@ -447,7 +447,10 @@ fn extract_zip_safely(zip_path: &Path, dst_root: &Path) -> CoreResult<()> {
         rel_paths.push(rel);
     }
 
+    const MAX_ENTRY_DECOMPRESSED_BYTES: u64 = 256 * 1024 * 1024;
+    const MAX_TOTAL_DECOMPRESSED_BYTES: u64 = 2 * 1024 * 1024 * 1024;
     let canon_root = fs::canonicalize(dst_root).unwrap_or_else(|_| dst_root.to_path_buf());
+    let mut total_extracted_bytes: u64 = 0;
 
     for (i, rel) in rel_paths.into_iter().enumerate() {
         let mut entry = archive
@@ -478,8 +481,24 @@ fn extract_zip_safely(zip_path: &Path, dst_root: &Path) -> CoreResult<()> {
                 )));
             }
         }
+        let remaining = MAX_TOTAL_DECOMPRESSED_BYTES.saturating_sub(total_extracted_bytes);
+        let entry_cap = MAX_ENTRY_DECOMPRESSED_BYTES.min(remaining);
+        if entry.size() > entry_cap {
+            return Err(CoreError::InvalidOperation(
+                "素材包解压体积超出安全限制，已拒绝导入。".to_string(),
+            ));
+        }
         let mut out = File::create(&target)?;
-        std::io::copy(&mut entry, &mut out)?;
+        let mut limited = std::io::Read::take(&mut entry, entry_cap.saturating_add(1));
+        let copied = std::io::copy(&mut limited, &mut out)?;
+        if copied > entry_cap {
+            drop(out);
+            let _ = fs::remove_file(&target);
+            return Err(CoreError::InvalidOperation(
+                "素材包解压体积超出安全限制，已中止导入。".to_string(),
+            ));
+        }
+        total_extracted_bytes = total_extracted_bytes.saturating_add(copied);
     }
 
     Ok(())
@@ -1043,7 +1062,7 @@ fn unwrap_single_top_level_dir(dir: &Path) -> PathBuf {
             .extension()
             .and_then(|e| e.to_str())
             .is_some_and(|e| e.eq_ignore_ascii_case("info"));
-        if only.is_dir() && !is_info {
+        if fs::symlink_metadata(only).is_ok_and(|m| m.file_type().is_dir()) && !is_info {
             return only.clone();
         }
     }

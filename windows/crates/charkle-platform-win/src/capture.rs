@@ -91,29 +91,37 @@ pub fn enumerate_monitors() -> Vec<MonitorCaptureInfo> {
         _rc: *mut RECT,
         data: LPARAM,
     ) -> BOOL {
-        let list = unsafe { &mut *(data.0 as *mut Vec<MonitorCaptureInfo>) };
-        let mut info = MONITORINFO {
-            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
-            ..Default::default()
-        };
-        if unsafe { GetMonitorInfoW(hmon, &mut info) }.as_bool() {
-            let mut dpi_x: u32 = 96;
-            let mut dpi_y: u32 = 96;
-            let _ = unsafe { GetDpiForMonitor(hmon, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) };
-            let r = info.rcMonitor;
-            list.push(MonitorCaptureInfo {
-                index: list.len(),
-                left: r.left,
-                top: r.top,
-                width: (r.right - r.left).max(1),
-                height: (r.bottom - r.top).max(1),
-                dpi_x,
-                dpi_y,
-                scale_factor: (dpi_x as f64 / 96.0).clamp(1.0, 4.0),
-                is_primary: (info.dwFlags & MONITORINFOF_PRIMARY) != 0,
-            });
-        }
-        BOOL(1)
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if data.0 == 0 {
+                return BOOL(0);
+            }
+            // SAFETY: `data` points to the stack-owned `Vec<MonitorCaptureInfo>` in `enumerate_monitors`.
+            let list = unsafe { &mut *(data.0 as *mut Vec<MonitorCaptureInfo>) };
+            let mut info = MONITORINFO {
+                cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                ..Default::default()
+            };
+            if unsafe { GetMonitorInfoW(hmon, &mut info) }.as_bool() {
+                let mut dpi_x: u32 = 96;
+                let mut dpi_y: u32 = 96;
+                let _ =
+                    unsafe { GetDpiForMonitor(hmon, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) };
+                let r = info.rcMonitor;
+                list.push(MonitorCaptureInfo {
+                    index: list.len(),
+                    left: r.left,
+                    top: r.top,
+                    width: (r.right - r.left).max(1),
+                    height: (r.bottom - r.top).max(1),
+                    dpi_x,
+                    dpi_y,
+                    scale_factor: (dpi_x as f64 / 96.0).clamp(1.0, 4.0),
+                    is_primary: (info.dwFlags & MONITORINFOF_PRIMARY) != 0,
+                });
+            }
+            BOOL(1)
+        }))
+        .unwrap_or(BOOL(0))
     }
 
     let mut monitors: Vec<MonitorCaptureInfo> = Vec::new();
@@ -238,25 +246,33 @@ pub fn configure_capture_window_physical(hwnd_raw: isize, bounds: VirtualDesktop
         uid_subclass: usize,
         _ref_data: usize,
     ) -> LRESULT {
-        match msg {
-            WM_NCCALCSIZE => return LRESULT(0),
-            WM_NCACTIVATE => {
-                // Keep overlay activation intact so Escape cancels immediately, while preventing
-                // DefWindowProcW from painting any classic non-client caption/frame strip.
-                return DefSubclassProc(
-                    hwnd,
-                    msg,
-                    wparam,
-                    LPARAM(crate::windowing::nc_activate_no_repaint_lparam()),
-                );
-            }
-            m if crate::windowing::should_suppress_nc_paint_message(m) => {
-                return LRESULT(0);
-            }
-            WM_NCDESTROY => {
-                let _ = RemoveWindowSubclass(hwnd, Some(capture_subclass_proc), uid_subclass);
-            }
-            _ => {}
+        let handled =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Option<LRESULT> {
+                match msg {
+                    WM_NCCALCSIZE => return Some(LRESULT(0)),
+                    WM_NCACTIVATE => {
+                        // Keep overlay activation intact so Escape cancels immediately, while preventing
+                        // DefWindowProcW from painting any classic non-client caption/frame strip.
+                        return Some(DefSubclassProc(
+                            hwnd,
+                            msg,
+                            wparam,
+                            LPARAM(crate::windowing::nc_activate_no_repaint_lparam()),
+                        ));
+                    }
+                    m if crate::windowing::should_suppress_nc_paint_message(m) => {
+                        return Some(LRESULT(0));
+                    }
+                    WM_NCDESTROY => {
+                        let _ =
+                            RemoveWindowSubclass(hwnd, Some(capture_subclass_proc), uid_subclass);
+                    }
+                    _ => {}
+                }
+                None
+            }));
+        if let Ok(Some(res)) = handled {
+            return res;
         }
         DefSubclassProc(hwnd, msg, wparam, lparam)
     }
@@ -509,24 +525,41 @@ fn try_capture_dxgi_primary(
         context.CopyResource(&staging, &tex);
         let _ = duplication.ReleaseFrame();
 
+        struct MappedTextureGuard<'a> {
+            context: &'a ID3D11DeviceContext,
+            staging: &'a ID3D11Texture2D,
+        }
+        impl Drop for MappedTextureGuard<'_> {
+            fn drop(&mut self) {
+                // SAFETY: Pairs with the successful `Map(&staging, 0, ...)` above.
+                unsafe {
+                    self.context.Unmap(self.staging, 0);
+                }
+            }
+        }
+
         let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
         context
             .Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
             .ok()?;
+        let _map_guard = MappedTextureGuard {
+            context: &context,
+            staging: &staging,
+        };
 
         let w = bounds.width as usize;
         let h = bounds.height as usize;
         let pitch = mapped.RowPitch as usize;
         let src_ptr = mapped.pData as *const u8;
-        let row_bytes = w.checked_mul(4);
-        if src_ptr.is_null() || row_bytes.is_none_or(|rb| pitch < rb) {
-            context.Unmap(&staging, 0);
+        let row_bytes = w.checked_mul(4)?;
+        let total_bytes = row_bytes.checked_mul(h)?;
+        if src_ptr.is_null() || pitch < row_bytes {
             return None;
         }
-        let mut rgba = vec![0u8; w * h * 4];
+        let mut rgba = vec![0u8; total_bytes];
         for row in 0..h {
-            let src_row = std::slice::from_raw_parts(src_ptr.add(row * pitch), w * 4);
-            let dst_row = &mut rgba[row * w * 4..(row + 1) * w * 4];
+            let src_row = std::slice::from_raw_parts(src_ptr.add(row * pitch), row_bytes);
+            let dst_row = &mut rgba[row * row_bytes..(row + 1) * row_bytes];
             for (s, d) in src_row.chunks_exact(4).zip(dst_row.chunks_exact_mut(4)) {
                 d[0] = s[2];
                 d[1] = s[1];
@@ -534,7 +567,6 @@ fn try_capture_dxgi_primary(
                 d[3] = 255;
             }
         }
-        context.Unmap(&staging, 0);
         Some(rgba)
     }
 }

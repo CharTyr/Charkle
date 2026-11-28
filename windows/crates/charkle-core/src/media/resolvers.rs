@@ -49,6 +49,7 @@ fn http_client(timeout_secs: u64) -> Client {
     Client::builder()
         .timeout(Duration::from_secs(timeout_secs))
         .user_agent(USER_AGENT)
+        .redirect(crate::net_safety::public_redirect_policy(8, false))
         .build()
         .unwrap_or_else(|_| Client::new())
 }
@@ -57,7 +58,7 @@ fn browser_http_client(timeout_secs: u64) -> Client {
     Client::builder()
         .timeout(Duration::from_secs(timeout_secs))
         .user_agent(BROWSER_USER_AGENT)
-        .redirect(reqwest::redirect::Policy::limited(8))
+        .redirect(crate::net_safety::public_redirect_policy(8, false))
         .build()
         .unwrap_or_else(|_| http_client(timeout_secs))
 }
@@ -982,10 +983,10 @@ impl WebBookmarkResolver {
         max_svg_side: u32,
     ) -> Option<DynamicImage> {
         let img_url = Url::parse(raw_url).ok()?;
-        if !Self::is_web_url(&img_url) {
+        if !SocialPostResolver::is_safe_public_media_url(&img_url) {
             return None;
         }
-        let img_resp = client
+        let mut img_resp = client
             .get(img_url)
             .header(
                 "Accept",
@@ -995,7 +996,9 @@ impl WebBookmarkResolver {
             .send()
             .await
             .ok()?;
-        if !img_resp.status().is_success() {
+        if !SocialPostResolver::is_safe_public_media_url(img_resp.url())
+            || !img_resp.status().is_success()
+        {
             return None;
         }
         let content_type = img_resp
@@ -1003,8 +1006,10 @@ impl WebBookmarkResolver {
             .get(reqwest::header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
             .map(String::from);
-        let img_bytes = img_resp.bytes().await.ok()?;
-        if img_bytes.is_empty() || img_bytes.len() > max_bytes {
+        let img_bytes = crate::net_safety::read_bounded_bytes(&mut img_resp, max_bytes)
+            .await
+            .ok()?;
+        if img_bytes.is_empty() {
             return None;
         }
         decode_web_image_bytes(&img_bytes, content_type.as_deref(), max_svg_side)
@@ -1876,23 +1881,30 @@ impl GitHubRepoResolver {
             candidates.push(standard);
         }
         for url in candidates {
-            let Ok(resp) = client
-                .get(&url)
+            let Ok(parsed_url) = Url::parse(&url) else {
+                continue;
+            };
+            if !SocialPostResolver::is_safe_public_media_url(&parsed_url) {
+                continue;
+            }
+            let Ok(mut resp) = client
+                .get(parsed_url)
                 .header("Accept", "image/png,image/webp,image/jpeg,image/*")
                 .send()
                 .await
             else {
                 continue;
             };
-            if !resp.status().is_success() {
+            if !SocialPostResolver::is_safe_public_media_url(resp.url())
+                || !resp.status().is_success()
+            {
                 continue;
             }
-            let Ok(bytes) = resp.bytes().await else {
+            let Ok(bytes) =
+                crate::net_safety::read_bounded_bytes(&mut resp, MAX_OG_IMAGE_BYTES).await
+            else {
                 continue;
             };
-            if bytes.len() > MAX_OG_IMAGE_BYTES {
-                continue;
-            }
             if let Ok(img) = image::load_from_memory(&bytes) {
                 if img.width() >= 200 && img.height() >= 100 {
                     return Some(img);
@@ -2877,40 +2889,9 @@ impl SocialPostResolver {
     }
 
     /// Returns `true` if `url` is a public `http`/`https` destination (blocks loopback / RFC1918 /
-    /// link-local SSRF targets).
+    /// link-local / CGNAT / multicast / IPv4-mapped IPv6 / userinfo SSRF targets).
     pub fn is_safe_public_media_url(url: &Url) -> bool {
-        if !WebBookmarkResolver::is_web_url(url) {
-            return false;
-        }
-        let Some(host) = url.host_str() else {
-            return false;
-        };
-        let lower = host.to_ascii_lowercase();
-        if lower == "localhost"
-            || lower.ends_with(".localhost")
-            || lower.ends_with(".local")
-            || lower == "0.0.0.0"
-        {
-            return false;
-        }
-        if let Ok(ip) = lower.trim_matches(['[', ']']).parse::<std::net::IpAddr>() {
-            return match ip {
-                std::net::IpAddr::V4(v4) => {
-                    !v4.is_private()
-                        && !v4.is_loopback()
-                        && !v4.is_link_local()
-                        && !v4.is_unspecified()
-                        && !v4.is_broadcast()
-                }
-                std::net::IpAddr::V6(v6) => {
-                    !v6.is_loopback()
-                        && !v6.is_unspecified()
-                        && (v6.segments()[0] & 0xfe00) != 0xfc00
-                        && (v6.segments()[0] & 0xffc0) != 0xfe80
-                }
-            };
-        }
-        true
+        crate::net_safety::is_safe_public_url(url, false)
     }
 
     pub async fn download_media_bytes_with_referer(
@@ -2950,7 +2931,7 @@ impl SocialPostResolver {
                     req = req.header("Referer", ref_hdr);
                 }
                 match req.send().await {
-                    Ok(resp) => {
+                    Ok(mut resp) => {
                         if !Self::is_safe_public_media_url(resp.url())
                             || !resp.status().is_success()
                         {
@@ -2961,10 +2942,9 @@ impl SocialPostResolver {
                             .get(reqwest::header::CONTENT_TYPE)
                             .and_then(|v| v.to_str().ok())
                             .map(String::from);
-                        match resp.bytes().await {
+                        match crate::net_safety::read_bounded_bytes(&mut resp, max_bytes).await {
                             Ok(bytes) => {
                                 if !bytes.is_empty()
-                                    && bytes.len() <= max_bytes
                                     && is_acceptable_media_response(mime.as_deref(), &bytes, kind)
                                 {
                                     let ext = resolve_media_extension(
@@ -2973,7 +2953,7 @@ impl SocialPostResolver {
                                         &bytes,
                                         kind,
                                     );
-                                    return Some((bytes.to_vec(), ext));
+                                    return Some((bytes, ext));
                                 }
                                 break;
                             }
@@ -3019,7 +2999,7 @@ impl SocialPostResolver {
             let Ok(url) = Url::parse(&cand) else {
                 continue;
             };
-            if !WebBookmarkResolver::is_web_url(&url) {
+            if !Self::is_safe_public_media_url(&url) {
                 continue;
             }
             let is_xhs = XiaohongshuURLParser::is_xiaohongshu_media_host(url.host_str());
@@ -3031,12 +3011,16 @@ impl SocialPostResolver {
                     req = req.header("Referer", XIAOHONGSHU_REFERER);
                 }
                 match req.send().await {
-                    Ok(resp) => {
-                        if !resp.status().is_success() {
+                    Ok(mut resp) => {
+                        if !Self::is_safe_public_media_url(resp.url())
+                            || !resp.status().is_success()
+                        {
                             break;
                         }
-                        if let Ok(bytes) = resp.bytes().await {
-                            if !bytes.is_empty() && bytes.len() <= 4 * 1024 * 1024 {
+                        if let Ok(bytes) =
+                            crate::net_safety::read_bounded_bytes(&mut resp, 4 * 1024 * 1024).await
+                        {
+                            if !bytes.is_empty() {
                                 if let Ok(img) = image::load_from_memory(&bytes) {
                                     return Some(img);
                                 }
@@ -4016,10 +4000,22 @@ pub async fn fetch_or_cache_social_media(
         }
     }
 
+    let social_redirect = reqwest::redirect::Policy::custom(|attempt| {
+        if attempt.previous().len() >= 5 {
+            return attempt.error("Too many redirects");
+        }
+        if attempt.url().scheme() != "https"
+            || !crate::net_safety::is_safe_public_url(attempt.url(), true)
+            || !XPostURLParser::is_allowed_social_proxy_host(attempt.url().host_str())
+        {
+            return attempt.error("Redirected host outside social CDN allowlist");
+        }
+        attempt.follow()
+    });
     let client = Client::builder()
         .timeout(Duration::from_secs(12))
         .user_agent(BROWSER_USER_AGENT)
-        .redirect(reqwest::redirect::Policy::limited(5))
+        .redirect(social_redirect)
         .build()
         .map_err(|e| XhsProxyError::Upstream(e.to_string()))?;
 
@@ -4045,7 +4041,7 @@ pub async fn fetch_or_cache_social_media(
                 req = req.header("Referer", ref_hdr);
             }
             match req.send().await {
-                Ok(resp) => {
+                Ok(mut resp) => {
                     if resp.url().scheme() != "https"
                         || !XPostURLParser::is_allowed_social_proxy_host(resp.url().host_str())
                     {
@@ -4071,19 +4067,18 @@ pub async fn fetch_or_cache_social_media(
                         .and_then(|v| v.to_str().ok())
                         .map(|s| s.split(';').next().unwrap_or(s).trim().to_string())
                         .filter(|s| !s.is_empty());
-                    match resp.bytes().await {
-                        Ok(bytes) => {
-                            if bytes.is_empty() {
+                    match crate::net_safety::read_bounded_bytes(&mut resp, MAX_XHS_PROXY_BYTES)
+                        .await
+                    {
+                        Ok(vec_bytes) => {
+                            if vec_bytes.is_empty() {
                                 last_err =
                                     XhsProxyError::Upstream("Empty upstream body".to_string());
                                 break;
                             }
-                            if bytes.len() > MAX_XHS_PROXY_BYTES {
-                                return Err(XhsProxyError::TooLarge);
-                            }
                             if !is_acceptable_media_response(
                                 header_ct.as_deref(),
-                                &bytes,
+                                &vec_bytes,
                                 SocialMediaAttachmentKind::Photo,
                             ) {
                                 last_err = XhsProxyError::Upstream(
@@ -4097,24 +4092,36 @@ pub async fn fetch_or_cache_social_media(
                                     l.starts_with("image/") || l.starts_with("video/")
                                 })
                                 .unwrap_or_else(|| {
-                                    sniff_social_media_content_type(&bytes, cand_url.as_str())
+                                    sniff_social_media_content_type(&vec_bytes, cand_url.as_str())
                                         .to_string()
                                 });
-                            let vec_bytes = bytes.to_vec();
                             if tokio::fs::create_dir_all(cache_dir).await.is_ok() {
-                                let tmp_bin = cache_dir.join(format!("{hash}.bin.tmp"));
-                                if tokio::fs::write(&tmp_bin, &vec_bytes).await.is_ok() {
-                                    let _ = tokio::fs::rename(&tmp_bin, &bin_path).await;
+                                let nonce = uuid::Uuid::new_v4().simple();
+                                let tmp_bin = cache_dir.join(format!("{hash}.{nonce}.bin.tmp"));
+                                if tokio::fs::write(&tmp_bin, &vec_bytes).await.is_ok()
+                                    && tokio::fs::rename(&tmp_bin, &bin_path).await.is_err()
+                                {
+                                    let _ = tokio::fs::remove_file(&tmp_bin).await;
                                 }
-                                let _ = tokio::fs::write(&ct_path, content_type.as_bytes()).await;
+                                let tmp_ct = cache_dir.join(format!("{hash}.{nonce}.ct.tmp"));
+                                if tokio::fs::write(&tmp_ct, content_type.as_bytes())
+                                    .await
+                                    .is_ok()
+                                    && tokio::fs::rename(&tmp_ct, &ct_path).await.is_err()
+                                {
+                                    let _ = tokio::fs::remove_file(&tmp_ct).await;
+                                }
                             }
                             return Ok(XhsProxyResponse {
                                 bytes: vec_bytes,
                                 content_type,
                             });
                         }
+                        Err(err) if err.contains("exceed") => {
+                            return Err(XhsProxyError::TooLarge);
+                        }
                         Err(err) => {
-                            last_err = XhsProxyError::Upstream(err.to_string());
+                            last_err = XhsProxyError::Upstream(err);
                             if attempt == 0 {
                                 tokio::time::sleep(Duration::from_millis(160)).await;
                             }

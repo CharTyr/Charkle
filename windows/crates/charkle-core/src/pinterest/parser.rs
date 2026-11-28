@@ -13,11 +13,49 @@ use super::models::{
 pub struct PinterestJSONParser;
 
 impl PinterestJSONParser {
+    /// Validates whether a host belongs to an official Pinterest web domain (not e.g. `pinterest.evil.com`).
+    fn is_pinterest_host(host: &str) -> bool {
+        let lower = host.trim().trim_end_matches('.').to_ascii_lowercase();
+        const ALLOWED_ROOTS: &[&str] = &[
+            "pinterest.com",
+            "pinterest.co.uk",
+            "pinterest.jp",
+            "pinterest.co.jp",
+            "pinterest.de",
+            "pinterest.fr",
+            "pinterest.es",
+            "pinterest.it",
+            "pinterest.ca",
+            "pinterest.com.au",
+            "pinterest.com.mx",
+            "pinterest.com.br",
+            "pinterest.co.kr",
+            "pinterest.co.in",
+            "pinterest.ch",
+            "pinterest.at",
+            "pinterest.cl",
+            "pinterest.dk",
+            "pinterest.ie",
+            "pinterest.nl",
+            "pinterest.nz",
+            "pinterest.ph",
+            "pinterest.pt",
+            "pinterest.ru",
+            "pinterest.se",
+        ];
+        ALLOWED_ROOTS
+            .iter()
+            .any(|root| lower == *root || lower.ends_with(&format!(".{root}")))
+    }
+
     /// Extracts a numeric Pinterest Pin ID from any `https://*.pinterest.*/pin/<id>/...` URL.
     pub fn extract_pin_id(raw_url: &str) -> Option<String> {
         let parsed = Url::parse(raw_url.trim()).ok()?;
-        let host = parsed.host_str()?.to_ascii_lowercase();
-        if !host.contains("pinterest.") {
+        if !matches!(parsed.scheme(), "http" | "https") {
+            return None;
+        }
+        let host = parsed.host_str()?;
+        if !Self::is_pinterest_host(host) {
             return None;
         }
         let segments: Vec<&str> = parsed.path_segments()?.filter(|s| !s.is_empty()).collect();
@@ -302,11 +340,10 @@ impl PinterestJSONParser {
             {
                 preview_url = Some(spec);
             } else if let Some(sig) = Self::clean_string(dict.get("image_signature")) {
-                if sig.len() >= 12 {
-                    let chars: Vec<char> = sig.chars().collect();
-                    let p1: String = chars[0..2].iter().collect();
-                    let p2: String = chars[2..4].iter().collect();
-                    let p3: String = chars[4..6].iter().collect();
+                if sig.len() >= 12 && sig.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    let p1 = &sig[0..2];
+                    let p2 = &sig[2..4];
+                    let p3 = &sig[4..6];
                     original_url = Some(format!(
                         "https://i.pinimg.com/originals/{p1}/{p2}/{p3}/{sig}.jpg"
                     ));

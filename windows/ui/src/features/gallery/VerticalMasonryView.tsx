@@ -91,6 +91,7 @@ export const VerticalMasonryView: React.FC<VerticalMasonryViewProps> = ({
   const prevColumnCountRef = useRef<number>(0);
   const prevLayoutRef = useRef<Map<string, PlacedAssetFrame>>(new Map());
   const prevScrollTopRef = useRef<number>(0);
+  const committedScrollTopRef = useRef<number>(0);
   const pendingFlipRef = useRef<{
     prevLayout: Map<string, PlacedAssetFrame>;
     oldScrollY: number;
@@ -286,6 +287,7 @@ export const VerticalMasonryView: React.FC<VerticalMasonryViewProps> = ({
       });
     }
     prevScrollTopRef.current = 0;
+    committedScrollTopRef.current = 0;
     setScrollTop(0);
   }, [destinationKey]);
 
@@ -298,6 +300,7 @@ export const VerticalMasonryView: React.FC<VerticalMasonryViewProps> = ({
       programmaticScrollRef.current = true;
       if (el) el.scrollTop = maxScroll;
       prevScrollTopRef.current = maxScroll;
+      committedScrollTopRef.current = maxScroll;
       setScrollTop(maxScroll);
       requestAnimationFrame(() => {
         programmaticScrollRef.current = false;
@@ -392,6 +395,7 @@ export const VerticalMasonryView: React.FC<VerticalMasonryViewProps> = ({
             scrollMutated = true;
             programmaticScrollRef.current = true;
             el.scrollTop = nextScrollY;
+            committedScrollTopRef.current = nextScrollY;
             setScrollTop(nextScrollY);
             prevScrollTopRef.current = nextScrollY;
             requestAnimationFrame(() => {
@@ -463,6 +467,7 @@ export const VerticalMasonryView: React.FC<VerticalMasonryViewProps> = ({
     } else {
       el.scrollTop = targetTop;
     }
+    committedScrollTopRef.current = targetTop;
     setScrollTop(targetTop);
     prevScrollTopRef.current = targetTop;
     requestAnimationFrame(() => {
@@ -590,7 +595,18 @@ export const VerticalMasonryView: React.FC<VerticalMasonryViewProps> = ({
           if (!programmaticScrollRef.current) {
             sessionZoomAnchorRef.current = null;
           }
-          setScrollTop(nextTop);
+          const maxScroll = Math.max(
+            0,
+            (layoutRef.current?.totalHeight ?? 0) - (e.currentTarget.clientHeight || viewport.height),
+          );
+          if (
+            Math.abs(nextTop - committedScrollTopRef.current) >= 96 ||
+            nextTop <= 1 ||
+            nextTop >= maxScroll - 1
+          ) {
+            committedScrollTopRef.current = nextTop;
+            setScrollTop(nextTop);
+          }
         }}
         onMouseDown={handlePointerDown}
         onContextMenu={(e) => {
@@ -617,15 +633,11 @@ export const VerticalMasonryView: React.FC<VerticalMasonryViewProps> = ({
                 orderedIds={orderedIds}
                 width={item.width}
                 height={item.height}
+                x={Math.round(item.x)}
+                y={Math.round(item.y)}
+                zIndex={isAnchor ? 20 : 1}
                 onHoverChange={handleHoverChange}
                 cardRefCallback={handleCardRef}
-                style={{
-                  position: 'absolute',
-                  transform: `translate3d(${Math.round(item.x)}px, ${Math.round(item.y)}px, 0)`,
-                  top: 0,
-                  left: 0,
-                  zIndex: isAnchor ? 20 : 1,
-                }}
               />
             );
           })}

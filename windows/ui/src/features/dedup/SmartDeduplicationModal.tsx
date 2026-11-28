@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
   ArrowSync16Regular,
@@ -14,7 +14,14 @@ import {
   Warning16Regular,
 } from '@fluentui/react-icons';
 import { getTransport } from '../../api/transport';
-import { Button, ModalShell, SegmentedControl, formatBytes } from '../../design-system';
+import {
+  Button,
+  CustomSelect,
+  ModalShell,
+  SegmentedControl,
+  formatBytes,
+  type SelectOption,
+} from '../../design-system';
 import { useCoordinatorStore, useLibraryStore, useMoodboardStore } from '../../stores';
 import {
   buildFolderTree,
@@ -126,13 +133,16 @@ export const SmartDeduplicationModal: React.FC = () => {
   const [disposal, setDisposal] = useState<DuplicateDisposalMode>('moveToTrash');
   const [resolving, setResolving] = useState(false);
   const [confirmPermanentOpen, setConfirmPermanentOpen] = useState(false);
+  const scanSeqRef = useRef(0);
 
   const runScan = useCallback(
     async (nextScope: DeduplicationScanScope, nextSensitivity: DeduplicationSensitivity) => {
+      const seq = ++scanSeqRef.current;
       setScanning(true);
       setScanError(null);
       try {
         const result = await getTransport().scanDuplicates(nextScope, nextSensitivity, null);
+        if (seq !== scanSeqRef.current) return;
         setReport(result);
         const nextIncluded: Record<string, boolean> = {};
         for (const g of result.groups) {
@@ -142,10 +152,13 @@ export const SmartDeduplicationModal: React.FC = () => {
         setKeeperOverrides({});
         setSelectedGroupId(result.groups[0]?.id ?? null);
       } catch (err) {
+        if (seq !== scanSeqRef.current) return;
         setScanError(err instanceof Error ? err.message : String(err));
         setReport(null);
       } finally {
-        setScanning(false);
+        if (seq === scanSeqRef.current) {
+          setScanning(false);
+        }
       }
     },
     [],
@@ -342,13 +355,13 @@ export const SmartDeduplicationModal: React.FC = () => {
           <div className="px-5 py-3 border-b border-[var(--win-stroke-divider)] flex flex-col gap-2.5 shrink-0 bg-[var(--bg-subtle)]/40">
             <div className="flex flex-wrap items-center justify-between gap-2.5">
               <div className="flex flex-wrap items-center gap-2.5">
-                <label className="inline-flex items-center gap-1.5 text-[12px] text-[var(--text-secondary)]">
+                <div className="inline-flex items-center gap-1.5 text-[12px] text-[var(--text-secondary)]">
                   <span>作用域</span>
-                  <select
-                    aria-label="去重扫描作用域"
+                  <CustomSelect<string>
+                    ariaLabel="去重扫描作用域"
+                    size="sm"
                     value={scopeSelectValue}
-                    onChange={(e) => {
-                      const val = e.target.value;
+                    onChange={(val) => {
                       const nextScope: DeduplicationScanScope =
                         val === 'allActive'
                           ? { type: 'allActive' }
@@ -362,18 +375,20 @@ export const SmartDeduplicationModal: React.FC = () => {
                       setScope(nextScope);
                       void runScan(nextScope, sensitivity);
                     }}
-                    className="win-input-elevation h-[30px] px-2.5 rounded-[var(--win-radius-control)] text-[12px] text-[var(--text-primary)] bg-[var(--win-control-fill)] outline-none max-w-[220px]"
-                  >
-                    <option value="allActive">全库活跃素材</option>
-                    <option value="inbox">收件箱</option>
-                    {flatFolders.map(({ folder, depth }) => (
-                      <option key={folder.id} value={`folder:${folder.id}`}>
-                        {'　'.repeat(Math.min(depth, 4))}
-                        {folder.name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
+                    options={[
+                      { value: 'allActive', label: '全库活跃素材' } as SelectOption<string>,
+                      { value: 'inbox', label: '收件箱' } as SelectOption<string>,
+                      ...flatFolders.map(
+                        ({ folder, depth }): SelectOption<string> => ({
+                          value: `folder:${folder.id}`,
+                          label: folder.name,
+                          depth: Math.min(depth, 4),
+                        }),
+                      ),
+                    ]}
+                    className="h-[30px] max-w-[220px] text-[12px]"
+                  />
+                </div>
 
                 <div className="flex items-center gap-1.5">
                   <span className="text-[12px] text-[var(--text-secondary)]">严格度</span>
@@ -452,7 +467,7 @@ export const SmartDeduplicationModal: React.FC = () => {
           <div className="flex-1 min-h-0 flex overflow-hidden">
             {scanning ? (
               <div className="flex-1 flex flex-col items-center justify-center gap-2 text-[var(--text-secondary)]">
-                <ArrowSync16Regular className="w-6 h-6 animate-spin text-[var(--accent)]" />
+                <ArrowSync16Regular className="w-6 h-6 animate-spin motion-reduce:animate-none text-[var(--accent)]" />
                 <div className="text-[13px] font-medium text-[var(--text-primary)]">
                   正在计算视觉、波形与文档规范化指纹…
                 </div>

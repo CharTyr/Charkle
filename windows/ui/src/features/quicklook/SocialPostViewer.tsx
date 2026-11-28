@@ -490,7 +490,7 @@ export const SocialPostViewer: React.FC<SocialPostViewerProps> = ({ asset }) => 
                               className="inline-flex items-center gap-1 text-[var(--accent)] font-medium hover:underline disabled:opacity-50 cursor-pointer"
                             >
                               <ArrowSync16Regular
-                                className={`w-3.5 h-3.5 ${retrying ? 'animate-spin' : ''}`}
+                                className={`w-3.5 h-3.5 ${retrying ? 'animate-spin motion-reduce:animate-none' : ''}`}
                               />
                               <span>重试获取</span>
                             </button>
@@ -579,7 +579,7 @@ export const SocialPostViewer: React.FC<SocialPostViewerProps> = ({ asset }) => 
                           className="inline-flex items-center gap-1 text-[var(--accent)] font-medium hover:underline disabled:opacity-50 cursor-pointer"
                         >
                           <ArrowSync16Regular
-                            className={`w-3.5 h-3.5 ${retrying ? 'animate-spin' : ''}`}
+                            className={`w-3.5 h-3.5 ${retrying ? 'animate-spin motion-reduce:animate-none' : ''}`}
                           />
                           <span>重试获取</span>
                         </button>
@@ -646,7 +646,7 @@ export const SocialPostViewer: React.FC<SocialPostViewerProps> = ({ asset }) => 
               onClick={() => void handleRefreshPost()}
               className="charkle-pressable inline-flex items-center gap-1.5 px-3 py-1.5 rounded-[var(--win-radius-control)] bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-[var(--accent-text)] text-[12px] font-medium disabled:opacity-50 cursor-pointer"
             >
-              <ArrowSync16Regular className={`w-3.5 h-3.5 ${retrying ? 'animate-spin' : ''}`} />
+              <ArrowSync16Regular className={`w-3.5 h-3.5 ${retrying ? 'animate-spin motion-reduce:animate-none' : ''}`} />
               <span>重试获取</span>
             </button>
           </div>
@@ -698,7 +698,7 @@ export const SocialPostViewer: React.FC<SocialPostViewerProps> = ({ asset }) => 
             onClick={() => void handleRefreshPost()}
             className="inline-flex items-center gap-1 text-[12px] font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] disabled:opacity-50 cursor-pointer"
           >
-            <ArrowSync16Regular className={`w-3.5 h-3.5 ${retrying ? 'animate-spin' : ''}`} />
+            <ArrowSync16Regular className={`w-3.5 h-3.5 ${retrying ? 'animate-spin motion-reduce:animate-none' : ''}`} />
             <span>{retrying ? '解析中…' : '刷新解析'}</span>
           </button>
 

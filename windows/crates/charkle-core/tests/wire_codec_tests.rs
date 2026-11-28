@@ -1,7 +1,7 @@
 //! Golden macOS `/.charkle/` wire-format round-trip and SwiftWireCodec parity tests.
 
 use charkle_core::models::agent::{
-    ExternalAgentAccessLevel, ExternalAgentChannel, ExternalAgentConfig,
+    ExternalAgentAccessLevel, ExternalAgentConfig, ExternalAgentToken, ExternalAgentTransport,
 };
 use charkle_core::models::core::{AssetRecord, LabColor};
 use charkle_core::models::media::EmbeddingPrecision;
@@ -223,21 +223,37 @@ fn ops_shard_filename_and_sync_fields_diff_match_swift() {
 
 #[test]
 fn external_agent_policy_and_drive_shared_folder_parser_compatibility() {
-    // Legacy JSON with only `enabled` must map both MCP and CLI cleanly to ReadOnly
+    // Legacy JSON with only `enabled` must map both stdio & HTTP MCP cleanly to ReadOnly
     let legacy = r#"{"enabled":true}"#;
     let cfg: ExternalAgentConfig = serde_json::from_str(legacy).expect("decode legacy config");
     assert!(cfg.enabled());
-    assert!(cfg.allows_read(ExternalAgentChannel::Mcp));
-    assert!(cfg.allows_read(ExternalAgentChannel::Cli));
-    assert!(!cfg.allows_write(ExternalAgentChannel::Mcp));
+    assert!(cfg.is_enabled_for(ExternalAgentTransport::Stdio));
+    assert!(cfg.is_enabled_for(ExternalAgentTransport::Http));
+    assert!(!cfg.allow_remote_http_mcp);
+    assert!(!cfg.access_level.allows_inbox_and_enrich_writes());
     assert_eq!(cfg.access_level, ExternalAgentAccessLevel::ReadOnly);
 
+    // Legacy `cliEnabled` key is ignored gracefully while 3-tier access + httpMCPEnabled decode cleanly
     let rw: ExternalAgentConfig = serde_json::from_str(
-        r#"{"mcpEnabled":true,"cliEnabled":false,"accessLevel":"readWriteOrganize"}"#,
+        r#"{"mcpEnabled":true,"cliEnabled":false,"httpMCPEnabled":false,"accessLevel":"readWriteOrganize"}"#,
     )
     .expect("decode rw config");
-    assert!(rw.allows_write(ExternalAgentChannel::Mcp));
-    assert!(!rw.allows_read(ExternalAgentChannel::Cli));
+    assert!(rw.is_enabled_for(ExternalAgentTransport::Stdio));
+    assert!(!rw.is_enabled_for(ExternalAgentTransport::Http));
+    assert!(rw.access_level.allows_global_organize_writes());
+
+    let inbox_tier: ExternalAgentConfig = serde_json::from_str(
+        r#"{"mcpEnabled":true,"httpMCPEnabled":true,"accessLevel":"inboxAndEnrich"}"#,
+    )
+    .expect("decode inboxAndEnrich config");
+    assert!(inbox_tier.access_level.allows_inbox_and_enrich_writes());
+    assert!(!inbox_tier.access_level.allows_global_organize_writes());
+
+    let (tok, plain) =
+        ExternalAgentToken::mint("Test HTTP Agent", ExternalAgentAccessLevel::ReadOnly);
+    assert!(plain.starts_with("ck_mcp_"));
+    assert!(tok.matches(&plain));
+    assert!(!tok.matches("ck_mcp_wrong"));
 
     assert_eq!(
         DriveSyncConfig::extract_google_drive_folder_id(

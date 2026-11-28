@@ -56,9 +56,11 @@ import {
   getFolderDisplayPath,
   isInspectorCardOrderCustomized,
   isPlainWebBookmark,
+  resolveEnrichEngineStatus,
   useCoordinatorStore,
   useLibraryStore,
   useMoodboardStore,
+  useSyncAIStore,
   type InspectorCardId,
   type InspectorTab,
 } from '../../stores';
@@ -340,12 +342,15 @@ export interface InspectorViewProps {
   /** When hosted inside Quick Look, pin directly to the active previewed asset. */
   pinnedAsset?: AssetRecord | null;
   isQuickLookHosted?: boolean;
+  /** False when hosted in a hidden drawer slot so background IPC/hydration pauses cleanly. */
+  active?: boolean;
   onRequestCloseQuickLook?: () => void;
 }
 
 export const InspectorView: React.FC<InspectorViewProps> = ({
   pinnedAsset = null,
   isQuickLookHosted = false,
+  active = true,
   onRequestCloseQuickLook,
 }) => {
   const destination = useCoordinatorStore((s) => s.destination);
@@ -374,11 +379,18 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
   const cutAssets = useLibraryStore((s) => s.cutAssets);
   const setCriteria = useLibraryStore((s) => s.setCriteria);
   const refreshRichAsset = useLibraryStore((s) => s.refreshRichAsset);
+  const enrichAssets = useLibraryStore((s) => s.enrichAssets);
+  const enrichingAssetIds = useLibraryStore((s) => s.enrichingAssetIds);
+  const enrichProgress = useLibraryStore((s) => s.enrichProgress);
+  const enrichEngineLabel = useLibraryStore((s) => s.enrichEngineLabel);
   const markAssetOpened = useLibraryStore((s) => s.markAssetOpened);
   const hydrateImageMetadata = useLibraryStore((s) => s.hydrateImageMetadata);
   const patchSingleAssetInMemory = useLibraryStore((s) => s.patchSingleAssetInMemory);
   const extractSocialAttachment = useLibraryStore((s) => s.extractSocialAttachment);
   const extractAllSocialAttachments = useLibraryStore((s) => s.extractAllSocialAttachments);
+
+  const aiState = useSyncAIStore((s) => s.aiState);
+  const typesafeState = useSyncAIStore((s) => s.typesafeState);
 
   const boards = useMoodboardStore((s) => s.boards);
   const createBoard = useMoodboardStore((s) => s.createBoard);
@@ -438,14 +450,26 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
     }
   }, [selectedAssets.length]);
 
-  // Flush pending debounced notes deterministically on asset switch AND unmount
-  // so rapid Asset A -> Asset B switches NEVER drop Asset A's notes or leak into Asset B.
+  // Flush pending title & debounced notes deterministically on asset switch AND unmount
+  // so rapid Asset A -> Asset B switches NEVER drop Asset A's edits or leak into Asset B.
+  const titleInputRef = useRef<HTMLInputElement | null>(null);
+  const pendingTitleRef = useRef<{ assetId: string; value: string; original: string } | null>(null);
   const notesTimerRef = useRef<number | null>(null);
   const pendingNotesRef = useRef<{ assetId: string; value: string } | null>(null);
   const lastSavedNotesRef = useRef<{ assetId: string | null; value: string }>({
     assetId: asset?.id ?? null,
     value: asset?.notes ?? '',
   });
+
+  const flushPendingTitle = useCallback(() => {
+    const pending = pendingTitleRef.current;
+    if (!pending) return;
+    pendingTitleRef.current = null;
+    const trimmed = pending.value.trim();
+    if (!trimmed || trimmed === pending.original) return;
+    const liveDest = useCoordinatorStore.getState().destination;
+    void updateAssets({ assetIDs: [pending.assetId], title: trimmed }, liveDest).catch(() => {});
+  }, [updateAssets]);
 
   const flushPendingNotes = useCallback(() => {
     if (notesTimerRef.current !== null) {
@@ -461,6 +485,15 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
     );
   }, [updateAssets]);
 
+  // Synchronize external title / notes updates (e.g., Undo, sync, enrichment) when input is clean & unfocused
+  useEffect(() => {
+    if (!asset) return;
+    const isFocused = typeof document !== 'undefined' && document.activeElement === titleInputRef.current;
+    if (!isFocused && (!pendingTitleRef.current || pendingTitleRef.current.assetId !== asset.id)) {
+      setTitleDraft(asset.title);
+    }
+  }, [asset?.id, asset?.title]);
+
   useEffect(() => {
     // Sync lastSaved snapshot for current asset once any prior pending flush finishes
     if (!pendingNotesRef.current || pendingNotesRef.current.assetId !== (asset?.id ?? null)) {
@@ -468,14 +501,22 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
         assetId: asset?.id ?? null,
         value: asset?.notes ?? '',
       };
+      const isEditingNotes =
+        typeof document !== 'undefined' &&
+        document.activeElement instanceof HTMLTextAreaElement &&
+        document.activeElement.getAttribute('aria-label') === '素材备注';
+      if (asset && !isEditingNotes) {
+        setNotesDraft(asset.notes);
+      }
     }
   }, [asset?.id, asset?.notes]);
 
   useEffect(() => {
     return () => {
+      flushPendingTitle();
       flushPendingNotes();
     };
-  }, [asset?.id, flushPendingNotes]);
+  }, [asset?.id, flushPendingTitle, flushPendingNotes]);
 
   // Menus & confirmations
   const [boardMenuOpen, setBoardMenuOpen] = useState(false);
@@ -499,8 +540,9 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
   const folderBtnRef = useRef<HTMLButtonElement | null>(null);
   const batchFolderBtnRef = useRef<HTMLButtonElement | null>(null);
 
-  // Self-contained live pointer-capture drag-to-reorder (zero PointerDragContext unmount bugs!)
+  // Self-contained live pointer-capture drag-to-reorder (attaches window listeners ONLY during active drag)
   const [activeCardDrag, setActiveCardDrag] = useState<ActiveCardDragState | null>(null);
+  const [cardDragListening, setCardDragListening] = useState(false);
   const dragSessionRef = useRef<{
     cardId: InspectorCardId;
     title: string;
@@ -519,9 +561,11 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
     const exif = asset.richMetadata?.photoExif;
     const aiGen = asset.richMetadata?.aiGeneration;
     const socialPost = asset.richMetadata?.socialPost;
-    const hasSocialMedia =
+    const webPage = !socialPost ? asset.richMetadata?.webPage : null;
+    const hasSocialOrWebMedia =
       getEffectiveSocialAttachments(socialPost).length > 0 ||
-      isZeroDownloadVideoBookmark(socialPost);
+      isZeroDownloadVideoBookmark(socialPost) ||
+      Boolean(webPage && ((webPage.attachments?.length ?? 0) > 0 || webPage.summary?.trim()));
     return inspectorCardOrder.filter((section) => {
       switch (section) {
         case 'previewIdentity':
@@ -537,7 +581,7 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
         case 'githubRepo':
           return Boolean(asset.richMetadata?.githubRepo);
         case 'socialMediaExtract':
-          return hasSocialMedia;
+          return hasSocialOrWebMedia;
       }
     });
   }, [asset, inspectorCardOrder]);
@@ -555,6 +599,7 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
     }
     dragSessionRef.current = null;
     setActiveCardDrag(null);
+    setCardDragListening(false);
   }, []);
 
   useEffect(() => {
@@ -572,6 +617,7 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
   }, [pendingDeleteIds.length]);
 
   useEffect(() => {
+    if (!cardDragListening) return;
     const handlePointerMove = (e: PointerEvent) => {
       const sess = dragSessionRef.current;
       if (!sess || e.pointerId !== sess.pointerId) return;
@@ -654,7 +700,7 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
       window.removeEventListener('pointercancel', handlePointerUp, true);
       window.removeEventListener('keydown', handleKeyDown, true);
     };
-  }, [finishCardDrag, moveInspectorCard]);
+  }, [cardDragListening, finishCardDrag, moveInspectorCard]);
 
   const handleStartHeaderDrag = useCallback(
     (
@@ -685,6 +731,7 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
         lastSwappedTarget: null,
         lastSwapAt: 0,
       };
+      setCardDragListening(true);
     },
     [],
   );
@@ -703,11 +750,17 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
   const [loadingSimilar, setLoadingSimilar] = useState(false);
   const hydratedIdsRef = useRef<Set<string>>(new Set());
 
+  const hasExifOrAiMeta = Boolean(
+    asset?.richMetadata?.photoExif || asset?.richMetadata?.aiGeneration,
+  );
+
   useEffect(() => {
     let cancelled = false;
-    if (!asset) {
-      setSimilar([]);
-      setLoadingSimilar(false);
+    if (!active || !asset) {
+      if (!asset) {
+        setSimilar([]);
+        setLoadingSimilar(false);
+      }
       return;
     }
 
@@ -732,8 +785,7 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
       (asset.mediaKind === 'image' ||
         asset.mediaKind === 'animatedImage' ||
         asset.mediaKind === 'designFile') &&
-      !asset.richMetadata?.photoExif &&
-      !asset.richMetadata?.aiGeneration &&
+      !hasExifOrAiMeta &&
       !hydratedIdsRef.current.has(asset.id)
     ) {
       hydratedIdsRef.current.add(asset.id);
@@ -743,14 +795,7 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [
-    asset?.id,
-    asset?.updatedAt,
-    asset?.mediaKind,
-    asset?.richMetadata?.photoExif,
-    asset?.richMetadata?.aiGeneration,
-    hydrateImageMetadata,
-  ]);
+  }, [active, asset?.id, asset?.mediaKind, hasExifOrAiMeta, hydrateImageMetadata]);
 
   const showSimilarSkeleton = useDelayedFlag(loadingSimilar && similar.length === 0, 300, 500);
 
@@ -777,6 +822,7 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
   };
 
   const commitTitle = (targetAsset: AssetRecord) => {
+    pendingTitleRef.current = null;
     const trimmed = titleDraft.trim();
     if (!trimmed) {
       setTitleDraft(targetAsset.title);
@@ -969,11 +1015,19 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
 
             <div className="flex flex-col gap-2">
               <input
+                ref={titleInputRef}
                 type="text"
                 value={titleDraft}
                 aria-label="素材标题"
                 placeholder="素材标题"
-                onChange={(e) => setTitleDraft(e.target.value)}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  setTitleDraft(val);
+                  pendingTitleRef.current =
+                    val.trim() && val.trim() !== targetAsset.title
+                      ? { assetId: targetAsset.id, value: val, original: targetAsset.title }
+                      : null;
+                }}
                 onBlur={() => commitTitle(targetAsset)}
                 onKeyDown={(e) => {
                   if (e.nativeEvent.isComposing || e.keyCode === 229) return;
@@ -1159,7 +1213,7 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
                   >
                     <ArrowSync16Regular
                       className={`w-3 h-3 text-[var(--text-secondary)] shrink-0 ${
-                        refreshingRichAssetId === targetAsset.id ? 'animate-spin' : ''
+                        refreshingRichAssetId === targetAsset.id ? 'animate-spin motion-reduce:animate-none' : ''
                       }`}
                     />
                     <span>刷新缩略图</span>
@@ -1338,7 +1392,48 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
             )}
 
             <div className="flex flex-col gap-[7px]">
-              <span className="text-[10.5px] font-medium text-[var(--text-secondary)]">标签</span>
+              {(() => {
+                const enrichStatus = resolveEnrichEngineStatus(aiState, typesafeState, [
+                  targetAsset,
+                ]);
+                const isEnrichingThis = enrichingAssetIds.includes(targetAsset.id);
+                const hasExistingTagging =
+                  targetAsset.suggestedTags.length > 0 || Boolean(targetAsset.aiDescription);
+                return (
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[10.5px] font-medium text-[var(--text-secondary)]">
+                      标签
+                    </span>
+                    {enrichStatus.canEnrich && (
+                      <button
+                        type="button"
+                        data-testid="inspector-ai-tag-btn"
+                        disabled={enrichingAssetIds.length > 0}
+                        title={
+                          enrichStatus.label
+                            ? `当前引擎：${enrichStatus.label}`
+                            : '运行 AI 自动打标'
+                        }
+                        onClick={() => void enrichAssets([targetAsset.id], destination)}
+                        className="charkle-pressable inline-flex items-center gap-1 text-[10.5px] font-medium text-[var(--accent)] hover:underline disabled:opacity-50 cursor-pointer"
+                      >
+                        <Sparkle16Regular className="w-3 h-3" />
+                        <span>
+                          {isEnrichingThis
+                            ? `${enrichEngineLabel ?? 'AI 打标'}中${
+                                enrichProgress && enrichProgress.total > 1
+                                  ? ` (${enrichProgress.completed}/${enrichProgress.total})`
+                                  : '…'
+                              }`
+                            : hasExistingTagging
+                              ? '重新打标'
+                              : 'AI 打标'}
+                        </span>
+                      </button>
+                    )}
+                  </div>
+                );
+              })()}
 
               {targetAsset.tags.length > 0 && (
                 <div className="flex flex-wrap gap-1.5">
@@ -1878,7 +1973,7 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
               >
                 <ArrowSync16Regular
                   className={`w-3 h-3 ${
-                    refreshingRichAssetId === targetAsset.id ? 'animate-spin' : ''
+                    refreshingRichAssetId === targetAsset.id ? 'animate-spin motion-reduce:animate-none' : ''
                   }`}
                 />
                 <span>刷新</span>

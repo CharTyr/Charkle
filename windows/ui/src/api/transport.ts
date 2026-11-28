@@ -39,9 +39,11 @@ import {
   type DuplicateDisposalMode,
   type EditorialLayoutResult,
   type ExtensionBridgeStateDto,
+  type ExternalAgentAccessLevel,
   type ExternalAgentConfig,
   type ExternalAgentSelfCheckDto,
   type ExternalAgentStateDto,
+  type ExternalAgentToken,
   type FigmaBridgeExportReport,
   type FilterCriteria,
   type FolderRecord,
@@ -53,6 +55,7 @@ import {
   type InboxTriageRecommendation,
   type MaterialPackageImportResult,
   type MediaKind,
+  type MintExternalAgentTokenDto,
   type MoodboardAgentStep,
   type MoodboardCurationRequest,
   type MoodboardDocument,
@@ -362,9 +365,16 @@ export interface CharkleTransport {
     opts?: { apiKey?: string | null; clearApiKey?: boolean },
   ): Promise<TypeSafeStateDto>;
   testTypesafeConnection(): Promise<TypeSafeTestResultDto>;
+  enrichAssets(assetIds: string[]): Promise<AssetRecord[]>;
   runInboxSmartTriage(assetIds?: string[], maxCount?: number): Promise<InboxTriageRecommendation[]>;
   getExternalAgentState(): Promise<ExternalAgentStateDto>;
   saveExternalAgentConfig(config: ExternalAgentConfig): Promise<ExternalAgentStateDto>;
+  mintExternalAgentToken(
+    name: string,
+    accessLevel: ExternalAgentAccessLevel,
+  ): Promise<MintExternalAgentTokenDto>;
+  toggleExternalAgentToken(tokenId: string, enabled: boolean): Promise<ExternalAgentStateDto>;
+  revokeExternalAgentToken(tokenId: string): Promise<ExternalAgentStateDto>;
   runExternalAgentSelfCheck(): Promise<ExternalAgentSelfCheckDto>;
   rebuildLocalVisualIndex(): Promise<RebuildIndexResultDto>;
   saveWebdavPassword(password: string): Promise<void>;
@@ -1086,6 +1096,10 @@ export class TauriTransport implements CharkleTransport {
     return invoke('test_typesafe_connection');
   }
 
+  enrichAssets(assetIds: string[]): Promise<AssetRecord[]> {
+    return invoke('enrich_assets', { assetIds });
+  }
+
   runInboxSmartTriage(
     assetIds?: string[],
     maxCount = 24,
@@ -1102,6 +1116,21 @@ export class TauriTransport implements CharkleTransport {
 
   saveExternalAgentConfig(config: ExternalAgentConfig): Promise<ExternalAgentStateDto> {
     return invoke('save_external_agent_config', { config });
+  }
+
+  mintExternalAgentToken(
+    name: string,
+    accessLevel: ExternalAgentAccessLevel,
+  ): Promise<MintExternalAgentTokenDto> {
+    return invoke('mint_external_agent_token', { name, accessLevel });
+  }
+
+  toggleExternalAgentToken(tokenId: string, enabled: boolean): Promise<ExternalAgentStateDto> {
+    return invoke('toggle_external_agent_token', { tokenId, enabled });
+  }
+
+  revokeExternalAgentToken(tokenId: string): Promise<ExternalAgentStateDto> {
+    return invoke('revoke_external_agent_token', { tokenId });
   }
 
   runExternalAgentSelfCheck(): Promise<ExternalAgentSelfCheckDto> {
@@ -3074,14 +3103,20 @@ export class InMemoryMockTransport implements CharkleTransport {
       enableSemanticSearch: true,
       enableInboxSmartTriage: true,
       enableCuratorVisualRerank: true,
+      enableClosedSetTagging: true,
+      autoApplyHighConfidenceTags: false,
+      highConfidenceTagThreshold: 0.82,
+      suggestedTagThreshold: 0.52,
     },
     hasApiKey: false,
   };
 
   private mockAgentConfig: ExternalAgentConfig = {
     mcpEnabled: true,
-    cliEnabled: true,
+    httpMCPEnabled: true,
+    allowRemoteHTTPMCP: false,
     accessLevel: 'readOnly',
+    tokens: [],
   };
 
   async getAiProviderState(): Promise<AIProviderStateDto> {
@@ -3188,6 +3223,57 @@ export class InMemoryMockTransport implements CharkleTransport {
     };
   }
 
+  async enrichAssets(assetIds: string[]): Promise<AssetRecord[]> {
+    const ts = this.mockTypesafeState;
+    const ai = this.mockAiState;
+    const canJev = Boolean(ts.config.enabled && ts.config.enableClosedSetTagging && ts.hasApiKey);
+    const canVlm =
+      ai.config.provider !== 'disabled' &&
+      (ai.config.provider === 'chatGPTSubscription'
+        ? ai.chatgptSession.sharingEnabled
+        : ai.hasApiKey);
+    if (!canJev && !canVlm) return [];
+
+    // Canonical pool from existing assets for zero-hallucination mock behavior
+    const vocabCounts = new Map<string, number>();
+    for (const a of this.assets) {
+      if (a.isTrashed) continue;
+      for (const t of a.tags) {
+        const clean = t.trim();
+        if (clean) vocabCounts.set(clean, (vocabCounts.get(clean) ?? 0) + 1);
+      }
+    }
+    const topCanonical = [...vocabCounts.entries()]
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .map(([name]) => name);
+
+    const updated: AssetRecord[] = [];
+    for (const id of assetIds) {
+      const idx = this.assets.findIndex((a) => a.id === id);
+      if (idx < 0 || this.assets[idx].isTrashed) continue;
+      const cur = { ...this.assets[idx] };
+      const existingLower = new Set(cur.tags.map((t) => t.toLowerCase()));
+      const candidates = topCanonical.filter((t) => !existingLower.has(t.toLowerCase())).slice(0, 2);
+
+      if (canVlm && (!canJev || !cur.aiDescription?.trim())) {
+        cur.aiDescription = cur.aiDescription?.trim() || `AI 画面摘要：${cur.title}`;
+      }
+      if (canJev && candidates.length > 0) {
+        if (ts.config.autoApplyHighConfidenceTags) {
+          cur.tags = [...new Set([...cur.tags, candidates[0]])].sort();
+          cur.suggestedTags = candidates.slice(1);
+        } else {
+          cur.suggestedTags = candidates;
+        }
+      } else if (canVlm) {
+        cur.suggestedTags = candidates.length > 0 ? candidates : ['视觉参考'];
+      }
+      this.assets[idx] = cur;
+      updated.push(structuredClone(cur));
+    }
+    return updated;
+  }
+
   async runInboxSmartTriage(
     assetIds?: string[],
     maxCount = 24,
@@ -3232,8 +3318,12 @@ export class InMemoryMockTransport implements CharkleTransport {
   async getExternalAgentState(): Promise<ExternalAgentStateDto> {
     const cliBinaryPath = 'C:\\Program Files\\Charkle\\charkle-cli.exe';
     const libraryDir = '%LOCALAPPDATA%\\Charkle';
+    const httpMcpEndpointUrl = 'http://127.0.0.1:41937/api/v1/mcp';
     return {
-      config: { ...this.mockAgentConfig },
+      config: {
+        ...this.mockAgentConfig,
+        tokens: this.mockAgentConfig.tokens.map((t) => ({ ...t })),
+      },
       cliBinaryPath,
       libraryDir,
       mcpConfigJson: JSON.stringify(
@@ -3248,14 +3338,78 @@ export class InMemoryMockTransport implements CharkleTransport {
         null,
         2,
       ),
-      readToolCount: 12,
-      writeToolCount: 8,
-      resourceCount: 6,
+      httpMcpEndpointUrl,
+      httpMcpRunning: this.mockAgentConfig.httpMCPEnabled,
+      httpMcpConfigJson: JSON.stringify(
+        {
+          mcpServers: {
+            'charkle-http': {
+              type: 'http',
+              url: httpMcpEndpointUrl,
+              headers: {
+                Authorization: 'Bearer <YOUR_SCOPED_MCP_TOKEN>',
+              },
+            },
+          },
+        },
+        null,
+        2,
+      ),
+      readToolCount: 4,
+      writeToolCount: 6,
+      resourceCount: 7,
     };
   }
 
   async saveExternalAgentConfig(config: ExternalAgentConfig): Promise<ExternalAgentStateDto> {
-    this.mockAgentConfig = { ...config };
+    this.mockAgentConfig = {
+      ...config,
+      tokens: (config.tokens ?? this.mockAgentConfig.tokens).map((t) => ({ ...t })),
+    };
+    return this.getExternalAgentState();
+  }
+
+  async mintExternalAgentToken(
+    name: string,
+    accessLevel: ExternalAgentAccessLevel,
+  ): Promise<MintExternalAgentTokenDto> {
+    const rawHex = crypto.randomUUID().replace(/-/g, '') + '0123456789abcdef';
+    const plaintext = `ck_mcp_${rawHex.slice(0, 48)}`;
+    const token: ExternalAgentToken = {
+      id: crypto.randomUUID().toUpperCase(),
+      name: name.trim() || '远程 Agent 密钥',
+      tokenPrefix: plaintext.slice(0, 15),
+      tokenHash: `mock_sha256_${rawHex.slice(0, 32)}`,
+      accessLevel,
+      isEnabled: true,
+      createdAt: new Date().toISOString(),
+    };
+    this.mockAgentConfig = {
+      ...this.mockAgentConfig,
+      tokens: [...this.mockAgentConfig.tokens, token],
+    };
+    const state = await this.getExternalAgentState();
+    return { state, token, plaintext };
+  }
+
+  async toggleExternalAgentToken(
+    tokenId: string,
+    enabled: boolean,
+  ): Promise<ExternalAgentStateDto> {
+    this.mockAgentConfig = {
+      ...this.mockAgentConfig,
+      tokens: this.mockAgentConfig.tokens.map((t) =>
+        t.id === tokenId ? { ...t, isEnabled: enabled } : t,
+      ),
+    };
+    return this.getExternalAgentState();
+  }
+
+  async revokeExternalAgentToken(tokenId: string): Promise<ExternalAgentStateDto> {
+    this.mockAgentConfig = {
+      ...this.mockAgentConfig,
+      tokens: this.mockAgentConfig.tokens.filter((t) => t.id !== tokenId),
+    };
     return this.getExternalAgentState();
   }
 

@@ -216,47 +216,51 @@ impl ChatGPTSignInClient {
             .expires_at
             .is_some_and(|exp| Utc::now() + chrono::Duration::seconds(60) >= exp);
         if needs_refresh {
-            if let Some(refresh) = conn.refresh_token.as_deref().filter(|s| !s.is_empty()) {
-                let discovery = self.fetch_discovery().await?;
-                let token_json = self
-                    .post_token_form(
-                        &discovery.token_endpoint,
-                        &[
-                            ("grant_type", "refresh_token"),
-                            ("client_id", conn.client_id.as_str()),
-                            ("refresh_token", refresh),
-                            ("resource", CHATGPT_RESOURCE),
-                        ],
+            let Some(refresh) = conn.refresh_token.as_deref().filter(|s| !s.is_empty()) else {
+                return Err(CoreError::AuthenticationRequired(
+                    "ChatGPT 访问令牌已过期且缺少刷新令牌，请重新登录。".to_string(),
+                ));
+            };
+            let discovery = self.fetch_discovery().await?;
+            let token_json = self
+                .post_token_form(
+                    &discovery.token_endpoint,
+                    &[
+                        ("grant_type", "refresh_token"),
+                        ("client_id", conn.client_id.as_str()),
+                        ("refresh_token", refresh),
+                        ("resource", CHATGPT_RESOURCE),
+                    ],
+                )
+                .await?;
+            let new_access = token_json
+                .get("access_token")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| {
+                    CoreError::InvalidOperation(
+                        "刷新 ChatGPT 访问令牌失败，请重新登录。".to_string(),
                     )
-                    .await?;
-                let new_access = token_json
-                    .get("access_token")
-                    .and_then(Value::as_str)
-                    .filter(|s| !s.is_empty())
-                    .ok_or_else(|| {
-                        CoreError::InvalidOperation(
-                            "刷新 ChatGPT 访问令牌失败，请重新登录。".to_string(),
-                        )
-                    })?
-                    .to_string();
-                let new_refresh = token_json
-                    .get("refresh_token")
-                    .and_then(Value::as_str)
-                    .filter(|s| !s.is_empty())
-                    .map(String::from)
-                    .or_else(|| conn.refresh_token.clone());
-                let expires_in = token_json
-                    .get("expires_in")
-                    .and_then(Value::as_i64)
-                    .unwrap_or(3600);
-                let mut updated = conn.clone();
-                updated.access_token = Some(new_access.clone());
-                updated.refresh_token = new_refresh;
-                updated.expires_at = Some(Utc::now() + chrono::Duration::seconds(expires_in));
-                updated.saved_at = Utc::now();
-                self.persist_connection(&updated).await?;
-                return Ok(new_access);
-            }
+                })?
+                .to_string();
+            let new_refresh = token_json
+                .get("refresh_token")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .or_else(|| conn.refresh_token.clone());
+            let expires_in = token_json
+                .get("expires_in")
+                .and_then(Value::as_i64)
+                .unwrap_or(3600)
+                .max(60);
+            let mut updated = conn.clone();
+            updated.access_token = Some(new_access.clone());
+            updated.refresh_token = new_refresh;
+            updated.expires_at = Some(Utc::now() + chrono::Duration::seconds(expires_in));
+            updated.saved_at = Utc::now();
+            self.persist_connection(&updated).await?;
+            return Ok(new_access);
         }
 
         conn.access_token.filter(|t| !t.is_empty()).ok_or_else(|| {
@@ -331,7 +335,11 @@ impl ChatGPTSignInClient {
         let saved_client_id = existing.as_ref().map(|c| c.client_id.clone());
         let (code, returned_state, issued_client_id) = tokio::time::timeout(
             Duration::from_secs(300),
-            wait_for_chatgpt_callback(listener, saved_client_id.clone()),
+            wait_for_chatgpt_callback_with_state(
+                listener,
+                saved_client_id.clone(),
+                Some(&pkce.state),
+            ),
         )
         .await
         .map_err(|_| {
@@ -353,22 +361,13 @@ impl ChatGPTSignInClient {
                 )
             })?;
 
-        // Persist issued client_id before redeeming one-time code so retries reuse the registration.
-        let mut reg = existing.clone().unwrap_or(StoredChatGPTConnection {
-            client_id: effective_client_id.clone(),
-            status: ChatGPTConnectionStatus::Disconnected,
-            scopes: Vec::new(),
-            saved_at: Utc::now(),
-            subject: None,
-            name: None,
-            email: None,
-            access_token: None,
-            refresh_token: None,
-            expires_at: None,
-        });
-        reg.client_id = effective_client_id.clone();
-        reg.saved_at = Utc::now();
-        self.persist_connection(&reg).await?;
+        // Persist updated client_id only when refreshing an existing connection (never clobber
+        // an active session with `Disconnected` before account-switch token exchange succeeds).
+        if let Some(mut reg) = existing.clone() {
+            reg.client_id = effective_client_id.clone();
+            reg.saved_at = Utc::now();
+            self.persist_connection(&reg).await?;
+        }
 
         let token_json = self
             .post_token_form(
@@ -436,7 +435,8 @@ impl ChatGPTSignInClient {
         let expires_in = token_json
             .get("expires_in")
             .and_then(Value::as_i64)
-            .unwrap_or(3600);
+            .unwrap_or(3600)
+            .max(60);
 
         let connected = StoredChatGPTConnection {
             client_id: effective_client_id,
@@ -549,31 +549,41 @@ fn parse_and_validate_id_token(
     let claims: Value = serde_json::from_slice(&payload_bytes)
         .map_err(|_| CoreError::AuthenticationRequired("ChatGPT 身份令牌内容无效。".to_string()))?;
 
-    if let Some(iss) = claims.get("iss").and_then(Value::as_str) {
-        if iss.trim_end_matches('/') != CHATGPT_ISSUER {
-            return Err(CoreError::AuthenticationRequired(
-                "ChatGPT 身份令牌签发方不匹配。".to_string(),
-            ));
-        }
+    let iss = claims.get("iss").and_then(Value::as_str).ok_or_else(|| {
+        CoreError::AuthenticationRequired("ChatGPT 身份令牌缺少签发方。".to_string())
+    })?;
+    if iss.trim_end_matches('/') != CHATGPT_ISSUER {
+        return Err(CoreError::AuthenticationRequired(
+            "ChatGPT 身份令牌签发方不匹配。".to_string(),
+        ));
     }
-    if let Some(nonce) = claims.get("nonce").and_then(Value::as_str) {
-        if nonce != expected_nonce {
-            return Err(CoreError::AuthenticationRequired(
-                "ChatGPT 登录随机数校验失败，请重试。".to_string(),
-            ));
-        }
+    let nonce = claims.get("nonce").and_then(Value::as_str).ok_or_else(|| {
+        CoreError::AuthenticationRequired("ChatGPT 身份令牌缺少随机数声明。".to_string())
+    })?;
+    if nonce != expected_nonce {
+        return Err(CoreError::AuthenticationRequired(
+            "ChatGPT 登录随机数校验失败，请重试。".to_string(),
+        ));
     }
-    if let Some(aud) = claims.get("aud") {
-        let aud_matches = match aud {
-            Value::String(s) => s == expected_client_id,
-            Value::Array(arr) => arr
-                .iter()
-                .any(|item| item.as_str() == Some(expected_client_id)),
-            _ => false,
-        };
-        if !aud_matches {
+    let aud = claims.get("aud").ok_or_else(|| {
+        CoreError::AuthenticationRequired("ChatGPT 身份令牌缺少受众声明。".to_string())
+    })?;
+    let aud_matches = match aud {
+        Value::String(s) => s == expected_client_id,
+        Value::Array(arr) => arr
+            .iter()
+            .any(|item| item.as_str() == Some(expected_client_id)),
+        _ => false,
+    };
+    if !aud_matches {
+        return Err(CoreError::AuthenticationRequired(
+            "ChatGPT 身份令牌受众不匹配。".to_string(),
+        ));
+    }
+    if let Some(exp) = claims.get("exp").and_then(Value::as_i64) {
+        if exp + 60 < Utc::now().timestamp() {
             return Err(CoreError::AuthenticationRequired(
-                "ChatGPT 身份令牌受众不匹配。".to_string(),
+                "ChatGPT 身份令牌已过期，请重新登录。".to_string(),
             ));
         }
     }
@@ -606,14 +616,29 @@ fn parse_and_validate_id_token(
     })
 }
 
+#[allow(dead_code)]
 async fn wait_for_chatgpt_callback(
     listener: TcpListener,
     saved_client_id: Option<String>,
 ) -> CoreResult<(String, Option<String>, Option<String>)> {
+    wait_for_chatgpt_callback_with_state(listener, saved_client_id, None).await
+}
+
+async fn wait_for_chatgpt_callback_with_state(
+    listener: TcpListener,
+    saved_client_id: Option<String>,
+    expected_state: Option<&str>,
+) -> CoreResult<(String, Option<String>, Option<String>)> {
     loop {
         let (mut socket, _) = listener.accept().await?;
         let mut buf = [0u8; 8192];
-        let n = socket.read(&mut buf).await.unwrap_or(0);
+        let n = match tokio::time::timeout(Duration::from_secs(5), socket.read(&mut buf)).await {
+            Ok(Ok(n)) => n,
+            _ => {
+                let _ = socket.shutdown().await;
+                continue;
+            }
+        };
         let req = String::from_utf8_lossy(&buf[..n]);
         let first_line = req.lines().next().unwrap_or("");
         let path_part = first_line.split_whitespace().nth(1).unwrap_or("/");
@@ -641,6 +666,17 @@ async fn wait_for_chatgpt_callback(
                     "error" => error = Some(v.into_owned()),
                     _ => {}
                 }
+            }
+        }
+        if let Some(exp) = expected_state {
+            if state.as_deref() != Some(exp) {
+                let _ = socket
+                    .write_all(
+                        b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    )
+                    .await;
+                let _ = socket.shutdown().await;
+                continue;
             }
         }
         let body = if code.is_some() {

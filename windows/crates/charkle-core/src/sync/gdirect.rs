@@ -179,10 +179,15 @@ pub fn extract_gdirect_zip_to_dir(zip_path: &Path, install_dir: &Path) -> CoreRe
     };
 
     // Extract `gdirect.exe` and any companion `.dll` files from the same directory.
+    const MAX_GDIRECT_EXTRACT_FILES: usize = 16;
+    const MAX_GDIRECT_TOTAL_EXTRACTED_BYTES: u64 = 128 * 1024 * 1024;
     let mut target_indices = vec![(exe_idx, "gdirect.exe".to_string(), true)];
     for idx in 0..archive.len() {
         if idx == exe_idx {
             continue;
+        }
+        if target_indices.len() >= MAX_GDIRECT_EXTRACT_FILES {
+            break;
         }
         let entry = archive
             .by_index(idx)
@@ -191,19 +196,25 @@ pub fn extract_gdirect_zip_to_dir(zip_path: &Path, install_dir: &Path) -> CoreRe
             continue;
         }
         let normalized = entry.name().replace('\\', "/");
-        if normalized.contains("..") {
+        if normalized.contains("..") || normalized.contains(':') || normalized.contains('\0') {
             continue;
         }
         let (parent, name) = match normalized.rsplit_once('/') {
             Some((p, n)) => (Some(p.to_string()), n),
             None => (None, normalized.as_str()),
         };
-        if parent == exe_parent && name.to_ascii_lowercase().ends_with(".dll") {
+        if parent == exe_parent
+            && !name.is_empty()
+            && !name.contains(':')
+            && !name.contains('\0')
+            && name.to_ascii_lowercase().ends_with(".dll")
+        {
             target_indices.push((idx, name.to_string(), false));
         }
     }
 
     let mut installed_exe_path: Option<PathBuf> = None;
+    let mut cumulative_extracted: u64 = 0;
     for (idx, file_name, is_main_exe) in target_indices {
         let mut entry = archive
             .by_index(idx)
@@ -214,19 +225,23 @@ pub fn extract_gdirect_zip_to_dir(zip_path: &Path, install_dir: &Path) -> CoreRe
             )));
         }
 
+        let remaining_budget =
+            MAX_GDIRECT_TOTAL_EXTRACTED_BYTES.saturating_sub(cumulative_extracted);
+        let entry_cap = MAX_EXTRACTED_BINARY_BYTES.min(remaining_budget);
         let tmp_path = install_dir.join(format!("{file_name}.{}.tmp", Uuid::new_v4().simple()));
         let final_path = install_dir.join(&file_name);
 
         let mut buf = Vec::with_capacity(entry.size().min(16 * 1024 * 1024) as usize);
         entry
             .by_ref()
-            .take(MAX_EXTRACTED_BINARY_BYTES + 1)
+            .take(entry_cap.saturating_add(1))
             .read_to_end(&mut buf)?;
-        if buf.len() as u64 > MAX_EXTRACTED_BINARY_BYTES {
+        if buf.len() as u64 > entry_cap {
             return Err(CoreError::Media(format!(
                 "解压目标 {file_name} 实际体积超出安全限制。"
             )));
         }
+        cumulative_extracted = cumulative_extracted.saturating_add(buf.len() as u64);
         if buf.len() < 2 || &buf[..2] != b"MZ" {
             return Err(CoreError::Media(format!(
                 "解压目标 {file_name} 不是有效的 Windows PE 二进制文件。"
@@ -276,7 +291,7 @@ where
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(15))
         .timeout(Duration::from_secs(180))
-        .redirect(reqwest::redirect::Policy::limited(8))
+        .redirect(crate::net_safety::public_redirect_policy(8, true))
         .build()?;
 
     let latest_url = format!(
@@ -324,21 +339,30 @@ where
         if let Some(sums_asset) = release.assets.iter().find(|a| {
             a.name.eq_ignore_ascii_case("SHA256SUMS") && is_https_url(&a.browser_download_url)
         }) {
-            if let Ok(sums_resp) = client
+            if let Ok(mut sums_resp) = client
                 .get(&sums_asset.browser_download_url)
                 .header(USER_AGENT, "Charkle-Windows/gdirect-installer")
                 .timeout(Duration::from_secs(15))
                 .send()
                 .await
             {
-                if sums_resp.status().is_success() {
-                    if let Ok(sums_text) = sums_resp.text().await {
+                if sums_resp.url().scheme().eq_ignore_ascii_case("https")
+                    && sums_resp.status().is_success()
+                {
+                    if let Ok(sums_text) =
+                        crate::net_safety::read_bounded_text(&mut sums_resp, 256 * 1024).await
+                    {
                         expected_sha256 = extract_sha256_from_sums_file(&sums_text, &asset.name);
                     }
                 }
             }
         }
     }
+    let expected_sha256 = expected_sha256.ok_or_else(|| {
+        CoreError::Media(
+            "未获取到 gdirect 官方 SHA-256 校验值，已拒绝下载并安装未校验二进制文件。".to_string(),
+        )
+    })?;
 
     on_progress(GDirectInstallProgress {
         phase: "downloading".to_string(),
@@ -379,13 +403,13 @@ where
     let staging_dir =
         std::env::temp_dir().join(format!("charkle-gdirect-{}", Uuid::new_v4().simple()));
     fs::create_dir_all(&staging_dir)?;
-    let archive_path = staging_dir.join(&asset.name);
+    let archive_path = staging_dir.join("gdirect-download.bin");
 
     let result = async {
         let mut out_file = File::create(&archive_path)?;
         let mut hasher = Sha256::new();
         let mut downloaded_bytes: u64 = 0;
-        let mut last_emit = Instant::now() - Duration::from_secs(1);
+        let mut last_emit: Option<Instant> = None;
 
         while let Some(chunk) = dl_resp.chunk().await? {
             downloaded_bytes = downloaded_bytes.saturating_add(chunk.len() as u64);
@@ -397,7 +421,11 @@ where
             hasher.update(&chunk);
             out_file.write_all(&chunk)?;
 
-            if Instant::now().duration_since(last_emit) >= Duration::from_millis(90) {
+            let now = Instant::now();
+            if last_emit
+                .map(|prev| now.duration_since(prev) >= Duration::from_millis(90))
+                .unwrap_or(true)
+            {
                 let effective_total = total_bytes.max(downloaded_bytes);
                 let dl_ratio = if effective_total > 0 {
                     (downloaded_bytes as f64 / effective_total as f64).clamp(0.0, 1.0)
@@ -411,7 +439,7 @@ where
                     total_bytes: effective_total,
                     fraction: 0.1 + dl_ratio * 0.75,
                 });
-                last_emit = Instant::now();
+                last_emit = Some(now);
             }
         }
         out_file.flush()?;
@@ -426,12 +454,10 @@ where
             fraction: 0.9,
         });
 
-        if let Some(ref expected) = expected_sha256 {
-            if !actual_sha256.eq_ignore_ascii_case(expected) {
-                return Err(CoreError::Media(format!(
-                    "gdirect 安装包 SHA-256 校验失败（期望 {expected}，实际 {actual_sha256}）。"
-                )));
-            }
+        if !actual_sha256.eq_ignore_ascii_case(&expected_sha256) {
+            return Err(CoreError::Media(format!(
+                "gdirect 安装包 SHA-256 校验失败（期望 {expected_sha256}，实际 {actual_sha256}）。"
+            )));
         }
 
         let target_dir = install_dir
@@ -448,14 +474,22 @@ where
                 ));
             }
             let dest = target_dir.join("gdirect.exe");
-            fs::write(&dest, bytes)?;
+            crate::net_safety::write_bytes_atomic(&dest, &bytes)?;
             dest
         };
 
-        let detected_version = run_gdirect_command(&installed_path, &["--version"])
-            .as_deref()
-            .and_then(parse_gdirect_version)
-            .unwrap_or_else(|| release.tag_name.trim_start_matches(['v', 'V']).to_string());
+        let probe_path = installed_path.clone();
+        let detected_version = tokio::time::timeout(
+            Duration::from_secs(10),
+            tokio::task::spawn_blocking(move || run_gdirect_command(&probe_path, &["--version"])),
+        )
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .flatten()
+        .as_deref()
+        .and_then(parse_gdirect_version)
+        .unwrap_or_else(|| release.tag_name.trim_start_matches(['v', 'V']).to_string());
 
         on_progress(GDirectInstallProgress {
             phase: "done".to_string(),
@@ -486,7 +520,7 @@ where
 
 fn run_gdirect_command(binary: &Path, args: &[&str]) -> Option<String> {
     let mut cmd = Command::new(binary);
-    cmd.args(args);
+    cmd.args(args).stdin(std::process::Stdio::null());
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;

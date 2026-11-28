@@ -496,11 +496,11 @@ impl PinterestImportService {
         let client = Client::builder()
             .timeout(Duration::from_secs(30))
             .user_agent(PINTEREST_BROWSER_UA)
-            .redirect(reqwest::redirect::Policy::limited(8))
+            .redirect(crate::net_safety::public_redirect_policy(8, false))
             .build()
             .map_err(CoreError::Network)?;
 
-        let response = client
+        let mut response = client
             .get(parsed.clone())
             .header("Referer", "https://www.pinterest.com/")
             .header(
@@ -537,7 +537,11 @@ impl PinterestImportService {
             .map(|s| s.split(';').next().unwrap_or(s).trim().to_ascii_lowercase())
             .filter(|s| !s.is_empty());
 
-        let bytes = response.bytes().await.map_err(CoreError::Network)?;
+        let bytes = crate::net_safety::read_bounded_bytes(&mut response, MAX_PINTEREST_MEDIA_BYTES)
+            .await
+            .map_err(|_| {
+                CoreError::InvalidPayload("媒体文件超过 90MB 限制或下载失败".to_string())
+            })?;
 
         if bytes.is_empty() || bytes.len() > MAX_PINTEREST_MEDIA_BYTES {
             return Err(CoreError::InvalidPayload(
@@ -545,16 +549,29 @@ impl PinterestImportService {
             ));
         }
 
-        let mime = header_mime.unwrap_or_else(|| Self::sniff_mime(&bytes, &parsed).to_string());
-        if mime.contains("text/html") || mime.contains("application/json") {
+        let Some(sniffed_mime) = Self::sniff_magic_mime(&bytes) else {
+            let reported = header_mime.as_deref().unwrap_or("unknown");
             return Err(CoreError::InvalidPayload(format!(
-                "媒体链接返回了非媒体内容 ({mime})"
+                "媒体链接返回了不支持的非图片/视频内容 ({reported})"
             )));
+        };
+        if let Some(ref hdr) = header_mime {
+            if hdr.contains("svg")
+                || hdr.contains("html")
+                || hdr.contains("javascript")
+                || hdr.contains("xml")
+                || hdr.contains("json")
+            {
+                return Err(CoreError::InvalidPayload(format!(
+                    "媒体链接返回了非媒体内容 ({hdr})"
+                )));
+            }
         }
 
+        let mime = sniffed_mime.to_string();
         let ext = Self::extension_for(&mime, &parsed);
         Ok(PinterestMediaPayload {
-            data: bytes.to_vec(),
+            data: bytes,
             mime_type: mime,
             suggested_extension: ext,
         })
@@ -574,45 +591,52 @@ impl PinterestImportService {
             .collect();
         let compact = cleaned.split_whitespace().collect::<Vec<_>>().join("_");
         let truncated: String = compact.chars().take(48).collect();
-        if truncated.is_empty() {
-            format!("pinterest_{}", pin.id)
+        let safe_id: String = pin
+            .id
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+            .take(32)
+            .collect();
+        let safe_id = if safe_id.is_empty() {
+            "pin".to_string()
         } else {
-            format!("{truncated}_{}", pin.id)
+            safe_id
+        };
+        if truncated.is_empty() {
+            format!("pinterest_{safe_id}")
+        } else {
+            format!("{truncated}_{safe_id}")
         }
     }
 
-    fn sniff_mime(bytes: &[u8], url: &Url) -> &'static str {
+    /// Sniffs supported raster image / video magic bytes strictly (never trusts URL extension or SVG/HTML).
+    fn sniff_magic_mime(bytes: &[u8]) -> Option<&'static str> {
         if bytes.len() >= 8 && bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A])
         {
-            return "image/png";
+            return Some("image/png");
         }
         if bytes.len() >= 3 && bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF {
-            return "image/jpeg";
+            return Some("image/jpeg");
         }
         if bytes.len() >= 6 && (bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a")) {
-            return "image/gif";
+            return Some("image/gif");
         }
         if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
-            return "image/webp";
+            return Some("image/webp");
         }
         if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" {
             if bytes[8..12] == *b"avif" || bytes[8..12] == *b"avis" {
-                return "image/avif";
+                return Some("image/avif");
             }
-            return "video/mp4";
+            return Some("video/mp4");
         }
-        let path_lower = url.path().to_ascii_lowercase();
-        if path_lower.ends_with(".png") {
-            "image/png"
-        } else if path_lower.ends_with(".webp") {
-            "image/webp"
-        } else if path_lower.ends_with(".gif") {
-            "image/gif"
-        } else if path_lower.ends_with(".mp4") {
-            "video/mp4"
-        } else {
-            "image/jpeg"
+        if bytes.len() >= 4 && bytes.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]) {
+            return Some("video/webm");
         }
+        if bytes.len() >= 2 && &bytes[0..2] == b"BM" {
+            return Some("image/bmp");
+        }
+        None
     }
 
     fn extension_for(mime: &str, url: &Url) -> String {
