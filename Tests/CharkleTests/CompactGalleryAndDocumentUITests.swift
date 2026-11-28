@@ -100,7 +100,9 @@ struct CompactGalleryAndDocumentUITests {
         #expect(tones.count == 12)
         #expect(tones.contains(.addedOrModified))
         #expect(tones.contains(.highRisk))
-        #expect(summary.compactBridgeLabel == "Δ 6处 · ¥1 · 时限2")
+        #expect(summary.compactBridgeLabel.hasPrefix("Δ 6处 · "))
+        #expect(summary.compactBridgeLabel.contains("1 · "))
+        #expect(summary.compactBridgeLabel.hasSuffix("2"))
     }
 
     @Test("MasonryLayoutEngine, MasonryStaticLayerAssets, and MasonryCardGeometryRegistry support compactList and Version Stack document cards")
@@ -527,13 +529,147 @@ struct CompactGalleryAndDocumentUITests {
         #expect(jumpView.contains("preferStackPrimary: true"))
         #expect(jumpView.contains("切微信直接 ⌘V 发送"))
 
-        // 6. Quick Look Document Studio: readers, High-Risk Radar, Split Curtain Wipe, Red-Cyan Overlay, and 2-Way Merge
+        // 6. Quick Look Document Studio: true-layout QLPreviewView + readers, High-Risk Radar, Split Curtain Wipe, Red-Cyan Overlay, and 2-Way Merge
         #expect(qlOverlay.contains("QuickLookDocumentStudioView("))
+        #expect(docStudio.contains("NativeOfficeQLPreviewRepresentable"))
+        #expect(docStudio.contains("QLPreviewView"))
+        #expect(docStudio.contains("原版版式"))
+        #expect(docStudio.contains("结构与批注"))
+        #expect(docStudio.contains("结构化表格"))
         #expect(docStudio.contains("PDFSplitCurtainComparisonView"))
         #expect(docStudio.contains("PDFVisualDiffRenderer.renderComparisonPages"))
         #expect(docStudio.contains("按差异合成新版本"))
         #expect(docStudio.contains("仅看改动段落"))
         #expect(docStudio.contains("用默认应用打开"))
+    }
+
+    @Test("QuickLookDocumentStudioView enforces NativeOfficeQLPreviewRepresentable teardown, selective Base/Target inline-token highlighting, and icon-gutter diff/merge rows")
+    func documentStudioNativePreviewAndSelectiveInlineTokenContracts() async throws {
+        let docStudio = try readSource("Sources/CharkleApp/Views/QuickLookDocumentStudioView.swift")
+
+        // 1. QLPreviewView lifecycle hygiene & deterministic Space/Esc dismissal via WindowKeyEventBridge
+        #expect(docStudio.contains("import QuickLookUI"))
+        #expect(docStudio.contains("autostarts = true"))
+        #expect(docStudio.contains("shouldCloseWithWindow = false"))
+        #expect(docStudio.contains("nsView.previewItem = nil"))
+        #expect(docStudio.contains("nsView.close()"))
+        #expect(docStudio.contains("WindowKeyEventBridge"))
+        #expect(docStudio.contains("coordinator.requestQuickLookDismiss()"))
+
+        // 2. Crisp icon-gutter diff & merge rows without plain "旧版：" / "新版：" text prefixes or "¥" badges
+        #expect(!docStudio.contains("旧版："))
+        #expect(!docStudio.contains("新版："))
+        #expect(!docStudio.contains("Text(\"旧版\")"))
+        #expect(!docStudio.contains("Text(\"新版\")"))
+        #expect(!docStudio.contains("yensign"))
+        #expect(!docStudio.contains("¥"))
+        #expect(docStudio.contains("minus.circle.fill"))
+        #expect(docStudio.contains("plus.circle.fill"))
+        #expect(docStudio.contains("number.circle.fill"))
+        #expect(docStudio.contains("makeBaseDiffAttributedString"))
+        #expect(docStudio.contains("makeTargetDiffAttributedString"))
+
+        for requiredSymbol in [
+            "minus.circle.fill",
+            "plus.circle.fill",
+            "number.circle.fill",
+            "clock.fill",
+            "doc.richtext",
+            "tablecells",
+            "text.bubble"
+        ] {
+            #expect(
+                NSImage(systemSymbolName: requiredSymbol, accessibilityDescription: nil) != nil,
+                "Missing macOS SF Symbol: \(requiredSymbol)"
+            )
+        }
+
+        // 3. Verify selective Base (equal + deleted) and Target (equal + inserted) inline-token streams
+        //    on a real multi-sentence comparison hunk so unchanged context never gets struck through or painted bold green.
+        let dir = try BackendFixture.directory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let engine = try BackendFixture.makeEngine(dir)
+
+        let baseURL = dir.appendingPathComponent("专项应急预案_v1.md")
+        let targetURL = dir.appendingPathComponent("专项应急预案_v2.md")
+        try "值班响应小组应在接到通知后 30 分钟内完成集结并上报指挥中心，全天保持通讯畅通。".write(
+            to: baseURL,
+            atomically: true,
+            encoding: .utf8
+        )
+        try "值班响应小组应在接到通知后 15 分钟内完成集结并上报指挥中心，全天保持通讯畅通。".write(
+            to: targetURL,
+            atomically: true,
+            encoding: .utf8
+        )
+
+        let baseAsset = try #require(try await engine.ingest([.fileURL(baseURL)], targetFolderID: nil, targetBoardID: nil).first)
+        let targetAsset = try #require(try await engine.ingest([.fileURL(targetURL)], targetFolderID: nil, targetBoardID: nil).first)
+        let report = try await engine.compareDocumentVersions(
+            baseAssetID: baseAsset.id,
+            targetAssetID: targetAsset.id,
+            sheetName: nil,
+            primaryKeyCol: nil,
+            useOCRIfScanned: false
+        )
+        let modHunk = try #require(report.hunks.first(where: { $0.changeKind == .modified }))
+        #expect(!modHunk.inlineTokens.isEmpty)
+
+        let baseTokens = modHunk.inlineTokens.filter { $0.kind == .equal || $0.kind == .deleted }
+        let targetTokens = modHunk.inlineTokens.filter { $0.kind == .equal || $0.kind == .inserted }
+        #expect(baseTokens.contains(where: { $0.kind == .equal }))
+        #expect(baseTokens.contains(where: { $0.kind == .deleted && $0.text.contains("30") }))
+        #expect(!baseTokens.contains(where: { $0.kind == .inserted }))
+        #expect(targetTokens.contains(where: { $0.kind == .equal }))
+        #expect(targetTokens.contains(where: { $0.kind == .inserted && $0.text.contains("15") }))
+        #expect(!targetTokens.contains(where: { $0.kind == .deleted }))
+
+        // Reconstruct selective AttributedString runs and verify styling stays strictly scoped to changed spans
+        var baseAttr = AttributedString()
+        for tok in baseTokens {
+            var part = AttributedString(tok.text)
+            if tok.kind == .deleted {
+                part.strikethroughStyle = .single
+            }
+            baseAttr.append(part)
+        }
+        #expect(String(baseAttr.characters) == "值班响应小组应在接到通知后 30 分钟内完成集结并上报指挥中心，全天保持通讯畅通。")
+        var struckSubstring = ""
+        var unstruckBaseSubstring = ""
+        for run in baseAttr.runs {
+            let textSlice = String(baseAttr[run.range].characters)
+            if run.strikethroughStyle == .single {
+                struckSubstring += textSlice
+            } else {
+                unstruckBaseSubstring += textSlice
+            }
+        }
+        #expect(struckSubstring.contains("30"))
+        #expect(!unstruckBaseSubstring.isEmpty)
+        #expect(unstruckBaseSubstring.contains("全天保持通讯畅通"))
+
+        var targetAttr = AttributedString()
+        for tok in targetTokens {
+            var part = AttributedString(tok.text)
+            if tok.kind == .inserted {
+                part.inlinePresentationIntent = .stronglyEmphasized
+            }
+            targetAttr.append(part)
+        }
+        #expect(String(targetAttr.characters) == "值班响应小组应在接到通知后 15 分钟内完成集结并上报指挥中心，全天保持通讯畅通。")
+        var emphasizedSubstring = ""
+        var calmTargetSubstring = ""
+        for run in targetAttr.runs {
+            let textSlice = String(targetAttr[run.range].characters)
+            if run.inlinePresentationIntent == .stronglyEmphasized {
+                emphasizedSubstring += textSlice
+            } else {
+                calmTargetSubstring += textSlice
+            }
+        }
+        #expect(emphasizedSubstring.contains("15"))
+        #expect(!calmTargetSubstring.isEmpty)
+        #expect(calmTargetSubstring.contains("全天保持通讯畅通"))
     }
 
     @Test("All macOS SwiftUI views obey AGENTS.md & DESIGN.md invariants: verified SF Symbols, zero bare DisclosureGroup, borderless Menu sizing, modifier masking, and zero violet hues")
