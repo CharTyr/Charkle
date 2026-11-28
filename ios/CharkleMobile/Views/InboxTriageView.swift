@@ -12,6 +12,7 @@ struct InboxTriageView: View {
     @Bindable var store: MobileAppStore
     let zoomNamespace: Namespace.ID
     let onOpenAsset: (AssetRecord, PreviewZoomOrigin) -> Void
+    var onOpenDiff: ((AssetRecord, UUID, UUID, PreviewZoomOrigin) -> Void)? = nil
     let onFindSimilar: (AssetRecord, PreviewZoomOrigin) -> Void
     let onOpenCapture: () -> Void
 
@@ -22,6 +23,7 @@ struct InboxTriageView: View {
     @State private var currentIndex: Int = 0
     @State private var previewImage: UIImage?
     @State private var suggestion: FolderSuggestion?
+    @State private var stackCandidate: VersionStackCandidate?
     @State private var isFolderPickerPresented: Bool = false
     @State private var swipeDragX: CGFloat = 0
     @State private var didCrossSwipeThreshold: Bool = false
@@ -78,6 +80,9 @@ struct InboxTriageView: View {
                             zoomNamespace: zoomNamespace,
                             zoomOrigin: .inboxGrid,
                             onOpenAsset: { onOpenAsset($0, .inboxGrid) },
+                            onOpenDiff: { asset, baseID, targetID in
+                                onOpenDiff?(asset, baseID, targetID, .inboxGrid)
+                            },
                             onFindSimilar: { onFindSimilar($0, .inboxGrid) },
                             onOpenCapture: onOpenCapture,
                             onOpenSyncSettings: {},
@@ -93,12 +98,14 @@ struct InboxTriageView: View {
             guard let asset = activeAsset else {
                 previewImage = nil
                 suggestion = nil
+                stackCandidate = nil
                 return
             }
             // Immediately swap to cached preview (or placeholder) and clear stale suggestion
             // so switching cards never flashes the previous card's image or recommended folder.
             previewImage = store.thumbnails.bestCachedPreviewImage(for: asset.id)
             suggestion = nil
+            stackCandidate = nil
             swipeDragX = 0
             didCrossSwipeThreshold = false
 
@@ -112,9 +119,14 @@ struct InboxTriageView: View {
             if let loadedPreview {
                 previewImage = loadedPreview
             }
-            let suggested = try? await store.engine.suggestFolder(for: asset.id)
+            async let suggestedFolder = try? store.engine.suggestFolder(for: asset.id)
+            async let detectedStack: VersionStackCandidate? = asset.richMetadata?.versionStack == nil
+                ? (try? await store.engine.detectVersionStackCandidate(forAssetID: asset.id))
+                : nil
+            let (resolvedFolder, resolvedStack) = await (suggestedFolder, detectedStack)
             guard !Task.isCancelled else { return }
-            suggestion = suggested
+            suggestion = resolvedFolder
+            stackCandidate = resolvedStack
         }
     }
 
@@ -233,6 +245,57 @@ struct InboxTriageView: View {
                 ) { configuration in
                     configuration
                         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                }
+
+                // Version Stack candidate 1-tap join CTA (for WeChat / Share Extension files landing in Inbox)
+                if let stackCandidate {
+                    Button {
+                        MobileHaptics.success()
+                        let targetAssetOrGroup = stackCandidate.existingStackExists
+                            ? stackCandidate.targetGroupID
+                            : stackCandidate.targetAssetID
+                        let editor = stackCandidate.suggestedEditorName
+                        let itemID = asset.id
+                        Task {
+                            await store.joinVersionStack(
+                                assetID: itemID,
+                                targetAssetOrGroupID: targetAssetOrGroup,
+                                editorName: editor,
+                                changeNote: nil,
+                                pinAsPrimary: false,
+                                adoptTargetFolder: true
+                            )
+                            currentIndex = min(currentIndex, max(0, store.inboxAssets.count - 1))
+                        }
+                    } label: {
+                        HStack(spacing: 10) {
+                            Image(systemName: "square.stack.3d.up.fill")
+                                .foregroundStyle(MobileTheme.accent(for: colorScheme))
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("识别为《\(stackCandidate.targetTitle)》第 \(stackCandidate.nextVersionNumber) 版")
+                                    .font(.system(size: 13.5, weight: .semibold).monospacedDigit())
+                                    .foregroundStyle(.primary)
+                                    .lineLimit(1)
+                                Text("\(stackCandidate.matchReason.localizedLabel) · 叠入并自动归入事项目录")
+                                    .font(.system(size: 11.5))
+                                    .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
+                                    .lineLimit(1)
+                            }
+                            Spacer()
+                            Text("叠入 v\(stackCandidate.nextVersionNumber)")
+                                .font(.system(size: 12.5, weight: .semibold).monospacedDigit())
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 6)
+                                .background(MobileTheme.accentButtonFill(for: colorScheme), in: Capsule())
+                        }
+                        .padding(12)
+                        .background(
+                            MobileTheme.accentSoft(for: colorScheme),
+                            in: RoundedRectangle(cornerRadius: MobileTheme.Radius.cardOuter, style: .continuous)
+                        )
+                    }
+                    .buttonStyle(MobileTactileButtonStyle())
                 }
 
                 // Smart folder suggestion CTA

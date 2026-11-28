@@ -83,7 +83,7 @@ private enum LoadedProviderValue: Sendable {
 
 private struct ExtractedShareItem: Identifiable {
     enum Source {
-        case stagedFile(URL)
+        case stagedFile(URL, originalFileName: String?)
         case imageData(Data, ext: String)
         case webURL(URL, embeddedNotes: String?)
         case text(String)
@@ -203,7 +203,7 @@ private final class ShareExtensionViewModel {
                 let dir = MobileLibraryContainer.pendingCapturesDirectory()
                 for item in items {
                     switch item.source {
-                    case .stagedFile(let sourceURL):
+                    case .stagedFile(let sourceURL, let originalFileName):
                         let ext = sourceURL.pathExtension.isEmpty ? "bin" : sourceURL.pathExtension
                         let stagedName = "media-\(UUID().uuidString).\(ext)"
                         let dest = dir.appending(path: stagedName)
@@ -211,6 +211,7 @@ private final class ShareExtensionViewModel {
                         let payload = PendingSharePayload(
                             kind: .file,
                             stagedFileName: stagedName,
+                            originalFileName: originalFileName,
                             title: item.explicitTitle,
                             notes: mergedNotes(embedded: nil),
                             tags: parsedTags,
@@ -271,7 +272,7 @@ private final class ShareExtensionViewModel {
 
             for item in items {
                 switch item.source {
-                case .stagedFile(let sourceURL):
+                case .stagedFile(let sourceURL, let originalFileName):
                     let originalExt = sourceURL.pathExtension.isEmpty ? "bin" : sourceURL.pathExtension
                     let fileSize = (try? sourceURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
                     let data: Data
@@ -297,6 +298,7 @@ private final class ShareExtensionViewModel {
                     payloads.append(PendingSharePayload(
                         kind: .file,
                         stagedFileName: stagedName,
+                        originalFileName: originalFileName,
                         title: item.explicitTitle,
                         notes: mergedNotes(embedded: nil),
                         tags: parsedTags,
@@ -422,7 +424,7 @@ private final class ShareExtensionViewModel {
                             subtitle: "本地文件",
                             explicitTitle: nil,
                             previewImage: generatePreview ? downsamplePreview(from: staged) : nil,
-                            source: .stagedFile(staged)
+                            source: .stagedFile(staged, originalFileName: url.lastPathComponent)
                         )
                     }
                 } else {
@@ -441,11 +443,11 @@ private final class ShareExtensionViewModel {
         if provider.hasItemConformingToTypeIdentifier(UTType.image.identifier) {
             if let staged = await stageFileRepresentation(from: provider, typeIdentifier: UTType.image.identifier) {
                 return ExtractedShareItem(
-                    displayTitle: staged.lastPathComponent,
+                    displayTitle: staged.originalFileName ?? staged.url.lastPathComponent,
                     subtitle: "图片素材",
                     explicitTitle: nil,
-                    previewImage: generatePreview ? downsamplePreview(from: staged) : nil,
-                    source: .stagedFile(staged)
+                    previewImage: generatePreview ? downsamplePreview(from: staged.url) : nil,
+                    source: .stagedFile(staged.url, originalFileName: staged.originalFileName)
                 )
             }
             if let loaded = await loadValue(from: provider, typeIdentifier: UTType.image.identifier) {
@@ -457,7 +459,7 @@ private final class ShareExtensionViewModel {
                             subtitle: "图片素材",
                             explicitTitle: nil,
                             previewImage: generatePreview ? downsamplePreview(from: staged) : nil,
-                            source: .stagedFile(staged)
+                            source: .stagedFile(staged, originalFileName: url.lastPathComponent)
                         )
                     }
                 case .imageJPEG(let data, let width, let height):
@@ -468,7 +470,7 @@ private final class ShareExtensionViewModel {
                             subtitle: "\(width) × \(height)",
                             explicitTitle: nil,
                             previewImage: preview,
-                            source: .stagedFile(staged)
+                            source: .stagedFile(staged, originalFileName: nil)
                         )
                     }
                     return ExtractedShareItem(
@@ -487,7 +489,7 @@ private final class ShareExtensionViewModel {
                             subtitle: ByteCountFormatter.string(fromByteCount: Int64(data.count), countStyle: .file),
                             explicitTitle: nil,
                             previewImage: preview,
-                            source: .stagedFile(staged)
+                            source: .stagedFile(staged, originalFileName: nil)
                         )
                     }
                     return ExtractedShareItem(
@@ -507,11 +509,11 @@ private final class ShareExtensionViewModel {
         if provider.hasItemConformingToTypeIdentifier(UTType.movie.identifier) {
             if let staged = await stageFileRepresentation(from: provider, typeIdentifier: UTType.movie.identifier) {
                 return ExtractedShareItem(
-                    displayTitle: staged.lastPathComponent,
+                    displayTitle: staged.originalFileName ?? staged.url.lastPathComponent,
                     subtitle: "视频素材",
                     explicitTitle: nil,
                     previewImage: nil,
-                    source: .stagedFile(staged)
+                    source: .stagedFile(staged.url, originalFileName: staged.originalFileName)
                 )
             }
             if let loaded = await loadValue(from: provider, typeIdentifier: UTType.movie.identifier),
@@ -522,22 +524,66 @@ private final class ShareExtensionViewModel {
                     subtitle: "视频素材",
                     explicitTitle: nil,
                     previewImage: nil,
-                    source: .stagedFile(staged)
+                    source: .stagedFile(staged, originalFileName: url.lastPathComponent)
                 )
             }
         }
 
-        // 4. Plain Text (`public.plain-text`) — extract embedded X / Xiaohongshu / Web URLs cleanly!
+        // 4. PDF & Office / Generic Files (`com.adobe.pdf`, `public.file-url`, `public.data`, `public.item`)
+        // Placed before plain-text fallback for providers that attach a filename/document representation.
+        if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
+            if let loaded = await loadValue(from: provider, typeIdentifier: UTType.fileURL.identifier),
+               let url = Self.extractURL(from: loaded),
+               url.isFileURL,
+               let staged = stageLocalFileCopy(from: url) {
+                return ExtractedShareItem(
+                    displayTitle: url.lastPathComponent,
+                    subtitle: "文件",
+                    explicitTitle: nil,
+                    previewImage: generatePreview ? downsamplePreview(from: staged) : nil,
+                    source: .stagedFile(staged, originalFileName: url.lastPathComponent)
+                )
+            }
+        }
+
+        for docUTI in [UTType.pdf.identifier, UTType.data.identifier, UTType.item.identifier]
+        where provider.hasItemConformingToTypeIdentifier(docUTI) && !provider.hasItemConformingToTypeIdentifier(UTType.plainText.identifier) {
+            if let staged = await stageFileRepresentation(from: provider, typeIdentifier: docUTI) {
+                let display = staged.originalFileName ?? fallbackTitle ?? staged.url.lastPathComponent
+                return ExtractedShareItem(
+                    displayTitle: display,
+                    subtitle: "文档文件",
+                    explicitTitle: nil,
+                    previewImage: nil,
+                    source: .stagedFile(staged.url, originalFileName: staged.originalFileName)
+                )
+            }
+        }
+
+        // 5. Plain Text (`public.plain-text`) — extract embedded X / Xiaohongshu / Web URLs cleanly!
         if provider.hasItemConformingToTypeIdentifier(UTType.plainText.identifier),
            let loaded = await loadValue(from: provider, typeIdentifier: UTType.plainText.identifier),
            let text = Self.extractText(from: loaded) {
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
             if !trimmed.isEmpty {
+                // Check if provider is actually a .md/.txt/.csv document file rather than bare snippet
+                if let suggested = provider.suggestedName,
+                   !suggested.isEmpty,
+                   let staged = await stageFileRepresentation(from: provider, typeIdentifier: UTType.plainText.identifier),
+                   ["md", "markdown", "txt", "csv"].contains(staged.url.pathExtension.lowercased()) {
+                    return ExtractedShareItem(
+                        displayTitle: staged.originalFileName ?? suggested,
+                        subtitle: "文本文档",
+                        explicitTitle: nil,
+                        previewImage: nil,
+                        source: .stagedFile(staged.url, originalFileName: staged.originalFileName ?? suggested)
+                    )
+                }
                 return Self.classifyTextOrURL(trimmed, explicitTitle: fallbackTitle)
             }
         }
 
-        // 5. Safari / Browser Property List (`com.apple.property-list`)
+        // 6. Safari / Browser Property List (`com.apple.property-list`)
         if provider.hasItemConformingToTypeIdentifier(UTType.propertyList.identifier),
            let plistURL = await loadWebURLFromPropertyList(provider) {
             return ExtractedShareItem(
@@ -549,21 +595,6 @@ private final class ShareExtensionViewModel {
             )
         }
 
-        // 6. Generic Files (`public.file-url` / `public.item`)
-        if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
-            if let loaded = await loadValue(from: provider, typeIdentifier: UTType.fileURL.identifier),
-               let url = Self.extractURL(from: loaded),
-               url.isFileURL,
-               let staged = stageLocalFileCopy(from: url) {
-                return ExtractedShareItem(
-                    displayTitle: url.lastPathComponent,
-                    subtitle: "文件",
-                    explicitTitle: nil,
-                    previewImage: generatePreview ? downsamplePreview(from: staged) : nil,
-                    source: .stagedFile(staged)
-                )
-            }
-        }
         return nil
     }
 
@@ -601,8 +632,12 @@ private final class ShareExtensionViewModel {
         }
     }
 
-    private func stageFileRepresentation(from provider: NSItemProvider, typeIdentifier: String) async -> URL? {
+    private func stageFileRepresentation(
+        from provider: NSItemProvider,
+        typeIdentifier: String
+    ) async -> (url: URL, originalFileName: String?)? {
         let targetDir = tempStagingDir
+        let suggested = provider.suggestedName?.trimmingCharacters(in: .whitespacesAndNewlines)
         return await withCheckedContinuation { continuation in
             provider.loadFileRepresentation(forTypeIdentifier: typeIdentifier) { url, _ in
                 guard let url else {
@@ -610,10 +645,20 @@ private final class ShareExtensionViewModel {
                     return
                 }
                 let ext = url.pathExtension.isEmpty ? "bin" : url.pathExtension
+                let rawOriginal = url.lastPathComponent
+                let resolvedOriginal: String? = {
+                    if let suggested, !suggested.isEmpty {
+                        if (suggested as NSString).pathExtension.isEmpty {
+                            return "\(suggested).\(ext)"
+                        }
+                        return suggested
+                    }
+                    return rawOriginal.isEmpty ? nil : rawOriginal
+                }()
                 let dest = targetDir.appending(path: "\(UUID().uuidString).\(ext)")
                 do {
                     try FileManager.default.copyItem(at: url, to: dest)
-                    continuation.resume(returning: dest)
+                    continuation.resume(returning: (dest, resolvedOriginal))
                 } catch {
                     continuation.resume(returning: nil)
                 }

@@ -178,11 +178,12 @@ struct SidebarNavigationView: View {
                     .padding(.vertical, 32)
                 }
             }
-            .padding(.horizontal, 14)
-            .padding(.top, 8)
+            .padding(.horizontal, isCompactSheet ? 14 : 12)
+            .padding(.top, isCompactSheet ? 8 : 10)
             .padding(.bottom, 16)
         }
         .charkleDismissKeyboardOnScroll()
+        .charkleScrollEdgeSoft(for: [.top, .bottom])
         .background(MobileTheme.sidebarBackground(for: colorScheme))
         .safeAreaInset(edge: .top, spacing: 0) {
             quickFilterHeader
@@ -224,7 +225,7 @@ struct SidebarNavigationView: View {
                 Image(systemName: "magnifyingglass")
                     .font(.system(size: 13.5, weight: .medium))
                     .foregroundStyle(MobileTheme.tertiaryInk(for: colorScheme))
-                TextField("快速筛选文件夹、情绪板或标签…", text: $quickFilter)
+                TextField(isCompactSheet ? "快速筛选文件夹、情绪板或标签…" : "筛选目录、情绪板或标签…", text: $quickFilter)
                     .font(.system(size: 14))
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
@@ -239,83 +240,190 @@ struct SidebarNavigationView: View {
                     .buttonStyle(.plain)
                 }
             }
-            .padding(.horizontal, 11)
+            .padding(.horizontal, 12)
             .frame(height: 36)
             .background(
                 MobileTheme.surfaceElevated(for: colorScheme),
-                in: RoundedRectangle(cornerRadius: 11, style: .continuous)
+                in: Capsule()
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                Capsule()
                     .strokeBorder(MobileTheme.hairline(for: colorScheme), lineWidth: 0.75)
             )
-            .padding(.horizontal, 14)
+            .padding(.horizontal, isCompactSheet ? 14 : 12)
             .padding(.top, 8)
             .padding(.bottom, 10)
-
-            Divider().opacity(0.45)
         }
         .background(MobileTheme.sidebarBackground(for: colorScheme))
     }
 
-    // MARK: - Compact 2x2 Quick Scope Tiles + Secondary Pills
+    // MARK: - Adaptive Quick Scopes (Native Photos Single-Column List on iPad, Compact 2-Column on iPhone Sheet)
 
+    @ViewBuilder
     private var quickScopesPanel: some View {
-        VStack(spacing: 8) {
-            LazyVGrid(
-                columns: [
-                    GridItem(.flexible(), spacing: 8),
-                    GridItem(.flexible(), spacing: 8)
-                ],
-                spacing: 8
-            ) {
-                scopeTile(
-                    scope: .allItems,
-                    title: "全部素材",
-                    icon: "square.grid.2x2.fill",
-                    tint: MobileTheme.accent(for: colorScheme),
-                    badge: nil
-                )
-                scopeTile(
-                    scope: .inbox,
-                    title: "收件箱",
-                    icon: "tray.fill",
-                    tint: Color(charkleHex: "#4E7D96"),
-                    badge: store.inboxCount > 0 ? store.inboxCount : nil
-                )
-                scopeTile(
-                    scope: .recent,
-                    title: "最近 14 天",
-                    icon: "clock.fill",
-                    tint: Color(charkleHex: "#6B8E76"),
-                    badge: nil
-                )
-                scopeTile(
-                    scope: .untagged,
-                    title: "未打标",
-                    icon: "tag.slash.fill",
-                    tint: Color(charkleHex: "#C98212"),
-                    badge: nil
-                )
-            }
+        if isCompactSheet {
+            VStack(spacing: 8) {
+                LazyVGrid(
+                    columns: [
+                        GridItem(.flexible(), spacing: 8),
+                        GridItem(.flexible(), spacing: 8)
+                    ],
+                    spacing: 8
+                ) {
+                    scopeTile(
+                        scope: .allItems,
+                        title: "全部素材",
+                        icon: "square.grid.2x2.fill",
+                        tint: MobileTheme.accent(for: colorScheme),
+                        badge: nil
+                    )
+                    scopeTile(
+                        scope: .inbox,
+                        title: "收件箱",
+                        icon: "tray.fill",
+                        tint: Color(charkleHex: "#4E7D96"),
+                        badge: store.inboxCount > 0 ? store.inboxCount : nil
+                    )
+                    scopeTile(
+                        scope: .recent,
+                        title: "最近 14 天",
+                        icon: "clock.fill",
+                        tint: Color(charkleHex: "#6B8E76"),
+                        badge: nil
+                    )
+                    scopeTile(
+                        scope: .untagged,
+                        title: "未打标",
+                        icon: "tag.slash.fill",
+                        tint: Color(charkleHex: "#C98212"),
+                        badge: nil
+                    )
+                }
 
-            HStack(spacing: 8) {
-                compactUtilityPill(
-                    scope: .pinterest,
-                    title: "Pinterest 空间",
-                    icon: "sparkles",
-                    tint: Color(charkleHex: "#BA6B55"),
-                    badge: store.pinterestController.trayCount > 0 ? store.pinterestController.trayCount : nil
-                )
-                compactUtilityPill(
-                    scope: .trash,
-                    title: "回收站",
-                    icon: "trash",
-                    tint: MobileTheme.secondaryInk(for: colorScheme),
-                    badge: nil
-                )
+                HStack(spacing: 8) {
+                    compactUtilityPill(
+                        scope: .pinterest,
+                        title: "Pinterest 空间",
+                        icon: "sparkles",
+                        tint: Color(charkleHex: "#BA6B55"),
+                        badge: store.pinterestController.trayCount > 0 ? store.pinterestController.trayCount : nil
+                    )
+                    compactUtilityPill(
+                        scope: .trash,
+                        title: "回收站",
+                        icon: "trash",
+                        tint: MobileTheme.secondaryInk(for: colorScheme),
+                        badge: nil
+                    )
+                }
+            }
+        } else {
+            // Native Apple Photos iPadOS single-column sidebar rhythm: zero wrapping, zero squished pills
+            VStack(alignment: .leading, spacing: 10) {
+                VStack(spacing: 2) {
+                    sidebarNavigationRow(
+                        scope: .allItems,
+                        title: "全部素材",
+                        icon: "square.grid.2x2.fill",
+                        tint: MobileTheme.accent(for: colorScheme),
+                        badge: nil
+                    )
+                    sidebarNavigationRow(
+                        scope: .inbox,
+                        title: "收件箱",
+                        icon: "tray.fill",
+                        tint: Color(charkleHex: "#4E7D96"),
+                        badge: store.inboxCount > 0 ? store.inboxCount : nil
+                    )
+                    sidebarNavigationRow(
+                        scope: .recent,
+                        title: "最近 14 天",
+                        icon: "clock.fill",
+                        tint: Color(charkleHex: "#6B8E76"),
+                        badge: nil
+                    )
+                    sidebarNavigationRow(
+                        scope: .untagged,
+                        title: "未打标",
+                        icon: "tag.slash.fill",
+                        tint: Color(charkleHex: "#C98212"),
+                        badge: nil
+                    )
+                }
+
+                VStack(spacing: 2) {
+                    sidebarNavigationRow(
+                        scope: .pinterest,
+                        title: "Pinterest 空间",
+                        icon: "sparkles",
+                        tint: Color(charkleHex: "#BA6B55"),
+                        badge: store.pinterestController.trayCount > 0 ? store.pinterestController.trayCount : nil
+                    )
+                    sidebarNavigationRow(
+                        scope: .trash,
+                        title: "回收站",
+                        icon: "trash",
+                        tint: MobileTheme.secondaryInk(for: colorScheme),
+                        badge: nil
+                    )
+                }
             }
         }
+    }
+
+    private func sidebarNavigationRow(
+        scope: MobileScope,
+        title: String,
+        icon: String,
+        tint: Color,
+        badge: Int?
+    ) -> some View {
+        let isSelected = store.scope == scope
+        return Button {
+            MobileHaptics.light()
+            onSelectScope(scope)
+        } label: {
+            HStack(spacing: 10) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .fill(isSelected ? tint : tint.opacity(colorScheme == .dark ? 0.22 : 0.13))
+                        .frame(width: 26, height: 26)
+                    Image(systemName: icon)
+                        .font(.system(size: 12.5, weight: .semibold))
+                        .foregroundStyle(isSelected ? .white : tint)
+                }
+                .fixedSize()
+
+                Text(title)
+                    .font(.system(size: 14.5, weight: isSelected ? .semibold : .medium))
+                    .foregroundStyle(isSelected ? MobileTheme.accent(for: colorScheme) : .primary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .layoutPriority(1)
+
+                Spacer(minLength: 6)
+
+                if let badge {
+                    Text(badge > 999 ? "999+" : "\(badge)")
+                        .font(.system(size: 11, weight: .bold).monospacedDigit())
+                        .foregroundStyle(.white)
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
+                        .padding(.horizontal, 6.5)
+                        .padding(.vertical, 2)
+                        .background(MobileTheme.accent(for: colorScheme), in: Capsule())
+                }
+            }
+            .padding(.horizontal, 10)
+            .frame(maxWidth: .infinity)
+            .frame(height: 38)
+            .background(
+                isSelected ? MobileTheme.accentSoft(for: colorScheme) : .clear,
+                in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        }
+        .buttonStyle(.plain)
     }
 
     private func scopeTile(
@@ -330,7 +438,7 @@ struct SidebarNavigationView: View {
             MobileHaptics.light()
             onSelectScope(scope)
         } label: {
-            HStack(spacing: 9) {
+            HStack(spacing: 8) {
                 ZStack {
                     RoundedRectangle(cornerRadius: 8, style: .continuous)
                         .fill(isSelected ? tint : tint.opacity(colorScheme == .dark ? 0.20 : 0.13))
@@ -339,25 +447,32 @@ struct SidebarNavigationView: View {
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(isSelected ? .white : tint)
                 }
+                .fixedSize()
 
                 Text(title)
                     .font(.system(size: 13.5, weight: isSelected ? .semibold : .medium))
                     .foregroundStyle(.primary)
                     .lineLimit(1)
+                    .minimumScaleFactor(0.84)
+                    .allowsTightening(true)
+                    .layoutPriority(1)
 
                 Spacer(minLength: 2)
 
                 if let badge {
-                    Text("\(badge)")
+                    Text(badge > 99 ? "99+" : "\(badge)")
                         .font(.system(size: 11, weight: .bold).monospacedDigit())
                         .foregroundStyle(.white)
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
                         .background(MobileTheme.accent(for: colorScheme), in: Capsule())
                 }
             }
             .padding(.horizontal, 10)
-            .padding(.vertical, 9)
+            .frame(maxWidth: .infinity)
+            .frame(height: 44)
             .background(
                 isSelected
                     ? MobileTheme.accentSoft(for: colorScheme)
@@ -392,14 +507,20 @@ struct SidebarNavigationView: View {
                 Image(systemName: icon)
                     .font(.system(size: 12.5, weight: .semibold))
                     .foregroundStyle(isSelected ? MobileTheme.accent(for: colorScheme) : tint)
+                    .fixedSize()
                 Text(title)
                     .font(.system(size: 12.5, weight: isSelected ? .semibold : .medium))
                     .foregroundStyle(.primary)
                     .lineLimit(1)
+                    .minimumScaleFactor(0.84)
+                    .allowsTightening(true)
+                    .layoutPriority(1)
                 if let badge {
                     Text("\(badge)")
                         .font(.system(size: 10.5, weight: .bold).monospacedDigit())
                         .foregroundStyle(.white)
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
                         .padding(.horizontal, 5.5)
                         .padding(.vertical, 1)
                         .background(MobileTheme.accent(for: colorScheme), in: Capsule())
@@ -407,7 +528,8 @@ struct SidebarNavigationView: View {
                 Spacer(minLength: 0)
             }
             .padding(.horizontal, 11)
-            .frame(height: 34)
+            .frame(maxWidth: .infinity)
+            .frame(height: 36)
             .background(
                 isSelected
                     ? MobileTheme.accentSoft(for: colorScheme)
@@ -418,6 +540,7 @@ struct SidebarNavigationView: View {
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
                     .strokeBorder(MobileTheme.hairline(for: colorScheme), lineWidth: 0.75)
             )
+            .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
         .buttonStyle(MobileTactileButtonStyle())
     }
@@ -431,7 +554,7 @@ struct SidebarNavigationView: View {
                 count: store.folders.count,
                 isExpanded: $isFoldersSectionExpanded
             ) {
-                HStack(spacing: 10) {
+                HStack(spacing: 4) {
                     if hasNestedFolders && isFoldersSectionExpanded && !isFiltering {
                         Button {
                             MobileHaptics.light()
@@ -443,11 +566,14 @@ struct SidebarNavigationView: View {
                                 }
                             }
                         } label: {
-                            Text(allParentsExpanded ? "收起子目录" : "展开子目录")
-                                .font(.system(size: 11.5, weight: .medium))
+                            Image(systemName: allParentsExpanded ? "rectangle.compress.vertical" : "rectangle.expand.vertical")
+                                .font(.system(size: 12.5, weight: .medium))
                                 .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
+                                .frame(width: 26, height: 26)
+                                .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
+                        .accessibilityLabel(allParentsExpanded ? "收起全部子目录" : "展开全部子目录")
                     }
 
                     Button {
@@ -457,27 +583,31 @@ struct SidebarNavigationView: View {
                         Image(systemName: "folder.badge.plus")
                             .font(.system(size: 13.5, weight: .semibold))
                             .foregroundStyle(MobileTheme.accent(for: colorScheme))
+                            .frame(width: 26, height: 26)
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("新建文件夹")
                 }
+                .fixedSize()
             }
 
             if isFoldersSectionExpanded || isFiltering {
-                VStack(spacing: 0) {
+                VStack(spacing: isCompactSheet ? 0 : 2) {
                     if visibleFolderRows.isEmpty {
                         Text(isFiltering ? "无匹配文件夹" : "尚无文件夹，点右上角新建")
                             .font(.system(size: 13))
                             .foregroundStyle(MobileTheme.tertiaryInk(for: colorScheme))
+                            .lineLimit(1)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(.horizontal, 12)
-                            .padding(.vertical, 12)
+                            .padding(.vertical, 10)
                     } else {
                         ForEach(Array(visibleFolderRows.enumerated()), id: \.element.id) { idx, node in
                             folderRow(node)
-                            if idx < visibleFolderRows.count - 1 || hiddenRootFolderCount > 0 || (showAllRootFolders && filteredFolderTree.count > collapsedRootLimit && !isFiltering) {
+                            if isCompactSheet && (idx < visibleFolderRows.count - 1 || hiddenRootFolderCount > 0 || (showAllRootFolders && filteredFolderTree.count > collapsedRootLimit && !isFiltering)) {
                                 Divider()
-                                    .padding(.leading, 38 + CGFloat(min(node.depth, 4)) * 14)
+                                    .padding(.leading, 38 + CGFloat(min(node.depth, 4)) * 12)
                                     .opacity(0.45)
                             }
                         }
@@ -492,13 +622,14 @@ struct SidebarNavigationView: View {
                                 HStack(spacing: 6) {
                                     Image(systemName: "chevron.down.circle")
                                         .font(.system(size: 13, weight: .medium))
-                                    Text("展开其余 \(hiddenRootFolderCount) 个顶层文件夹")
+                                    Text("展开其余 \(hiddenRootFolderCount) 个文件夹")
                                         .font(.system(size: 13, weight: .medium))
+                                        .lineLimit(1)
                                     Spacer()
                                 }
                                 .foregroundStyle(MobileTheme.accent(for: colorScheme))
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 10)
+                                .padding(.horizontal, 10)
+                                .frame(height: 36)
                                 .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
@@ -514,25 +645,28 @@ struct SidebarNavigationView: View {
                                         .font(.system(size: 13, weight: .medium))
                                     Text("收起多余文件夹")
                                         .font(.system(size: 13, weight: .medium))
+                                        .lineLimit(1)
                                     Spacer()
                                 }
                                 .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 10)
+                                .padding(.horizontal, 10)
+                                .frame(height: 36)
                                 .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
                         }
                     }
                 }
-                .background(
-                    MobileTheme.surfaceElevated(for: colorScheme),
-                    in: RoundedRectangle(cornerRadius: 13, style: .continuous)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 13, style: .continuous)
-                        .strokeBorder(MobileTheme.hairline(for: colorScheme), lineWidth: 0.75)
-                )
+                .background {
+                    if isCompactSheet {
+                        RoundedRectangle(cornerRadius: 13, style: .continuous)
+                            .fill(MobileTheme.surfaceElevated(for: colorScheme))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 13, style: .continuous)
+                                    .strokeBorder(MobileTheme.hairline(for: colorScheme), lineWidth: 0.75)
+                            )
+                    }
+                }
             }
         }
     }
@@ -559,10 +693,11 @@ struct SidebarNavigationView: View {
                         .font(.system(size: 10.5, weight: .bold))
                         .foregroundStyle(MobileTheme.tertiaryInk(for: colorScheme))
                         .rotationEffect(.degrees(isExpanded ? 90 : 0))
-                        .frame(width: 22, height: 32)
+                        .frame(width: 22, height: 34)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .fixedSize()
                 .accessibilityLabel(isExpanded ? "收起子文件夹" : "展开子文件夹")
             } else {
                 Spacer().frame(width: 10)
@@ -577,33 +712,33 @@ struct SidebarNavigationView: View {
                         .font(.system(size: 14, weight: .medium))
                         .foregroundStyle(dotColor)
                         .frame(width: 18)
+                        .fixedSize()
                     Text(node.folder.name)
                         .font(.system(size: 14, weight: isSelected ? .semibold : .regular))
                         .foregroundStyle(isSelected ? MobileTheme.accent(for: colorScheme) : .primary)
                         .lineLimit(1)
-                    Spacer(minLength: 4)
-                    if node.hasChildren && !isExpanded {
-                        Text("\(node.children.count) 子目录")
-                            .font(.system(size: 10.5, weight: .medium).monospacedDigit())
-                            .foregroundStyle(MobileTheme.tertiaryInk(for: colorScheme))
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(MobileTheme.surfaceSubtle(for: colorScheme), in: Capsule())
-                    }
+                        .truncationMode(.tail)
+                        .layoutPriority(1)
+                    Spacer(minLength: 6)
                     if node.folder.assetCount > 0 {
                         Text("\(node.folder.assetCount)")
                             .font(.system(size: 12, weight: .medium).monospacedDigit())
                             .foregroundStyle(isSelected ? MobileTheme.accent(for: colorScheme) : MobileTheme.tertiaryInk(for: colorScheme))
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
                     }
                 }
-                .padding(.vertical, 9)
-                .padding(.trailing, 12)
+                .frame(minHeight: 36)
+                .padding(.trailing, 10)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
         }
-        .padding(.leading, 4 + CGFloat(min(node.depth, 4)) * 14)
-        .background(isSelected ? MobileTheme.accentSoft(for: colorScheme) : .clear)
+        .padding(.leading, 4 + CGFloat(min(node.depth, 4)) * 12)
+        .background(
+            isSelected ? MobileTheme.accentSoft(for: colorScheme) : .clear,
+            in: RoundedRectangle(cornerRadius: isCompactSheet ? 0 : 10, style: .continuous)
+        )
         .contextMenu {
             if node.hasChildren {
                 Button(isExpanded ? "收起子文件夹" : "展开子文件夹", systemImage: isExpanded ? "chevron.up" : "chevron.down") {
@@ -633,7 +768,7 @@ struct SidebarNavigationView: View {
             )
 
             if isSmartFoldersExpanded || isFiltering {
-                VStack(spacing: 0) {
+                VStack(spacing: isCompactSheet ? 0 : 2) {
                     ForEach(Array(filteredSmartFolders.enumerated()), id: \.element.id) { idx, smart in
                         let scope = MobileScope.smartFolder(smart.id)
                         let isSelected = store.scope == scope
@@ -646,32 +781,40 @@ struct SidebarNavigationView: View {
                                     .font(.system(size: 14, weight: .medium))
                                     .foregroundStyle(smart.colorHex.map { Color(charkleHex: $0) } ?? MobileTheme.accent(for: colorScheme))
                                     .frame(width: 20)
+                                    .fixedSize()
                                 Text(smart.name)
                                     .font(.system(size: 14, weight: isSelected ? .semibold : .regular))
                                     .foregroundStyle(isSelected ? MobileTheme.accent(for: colorScheme) : .primary)
                                     .lineLimit(1)
-                                Spacer()
+                                    .truncationMode(.tail)
+                                    .layoutPriority(1)
+                                Spacer(minLength: 4)
                             }
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 9)
-                            .background(isSelected ? MobileTheme.accentSoft(for: colorScheme) : .clear)
+                            .padding(.horizontal, 10)
+                            .frame(minHeight: 36)
+                            .background(
+                                isSelected ? MobileTheme.accentSoft(for: colorScheme) : .clear,
+                                in: RoundedRectangle(cornerRadius: isCompactSheet ? 0 : 10, style: .continuous)
+                            )
                             .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
 
-                        if idx < filteredSmartFolders.count - 1 {
+                        if isCompactSheet && idx < filteredSmartFolders.count - 1 {
                             Divider().padding(.leading, 40).opacity(0.45)
                         }
                     }
                 }
-                .background(
-                    MobileTheme.surfaceElevated(for: colorScheme),
-                    in: RoundedRectangle(cornerRadius: 13, style: .continuous)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 13, style: .continuous)
-                        .strokeBorder(MobileTheme.hairline(for: colorScheme), lineWidth: 0.75)
-                )
+                .background {
+                    if isCompactSheet {
+                        RoundedRectangle(cornerRadius: 13, style: .continuous)
+                            .fill(MobileTheme.surfaceElevated(for: colorScheme))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 13, style: .continuous)
+                                    .strokeBorder(MobileTheme.hairline(for: colorScheme), lineWidth: 0.75)
+                            )
+                    }
+                }
             }
         }
     }
@@ -704,12 +847,15 @@ struct SidebarNavigationView: View {
                                 HStack(spacing: 4) {
                                     Text("#\(item.name)")
                                         .font(.system(size: 12.5, weight: isSelected ? .semibold : .medium))
+                                        .lineLimit(1)
                                     Text("\(item.count)")
                                         .font(.system(size: 11, weight: .medium).monospacedDigit())
                                         .foregroundStyle(
                                             isSelected ? .white.opacity(0.85) : MobileTheme.tertiaryInk(for: colorScheme)
                                         )
+                                        .lineLimit(1)
                                 }
+                                .fixedSize(horizontal: true, vertical: false)
                                 .foregroundStyle(isSelected ? .white : .primary)
                                 .padding(.horizontal, 11)
                                 .frame(height: 30)
@@ -751,8 +897,11 @@ struct SidebarNavigationView: View {
                     Image(systemName: "plus")
                         .font(.system(size: 13.5, weight: .semibold))
                         .foregroundStyle(MobileTheme.accent(for: colorScheme))
+                        .frame(width: 26, height: 26)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .fixedSize()
                 .accessibilityLabel("新建情绪板")
             }
 
@@ -778,7 +927,7 @@ struct SidebarNavigationView: View {
                         .padding(.vertical, 2)
                     }
                 } else {
-                    VStack(spacing: 0) {
+                    VStack(spacing: 2) {
                         moodboardListRow(
                             scope: .moodboardsHome,
                             title: "全部情绪板",
@@ -786,7 +935,6 @@ struct SidebarNavigationView: View {
                             badge: store.boards.isEmpty ? nil : store.boards.count
                         )
                         ForEach(filteredBoards.prefix(8)) { board in
-                            Divider().padding(.leading, 40).opacity(0.45)
                             moodboardListRow(
                                 scope: .moodboard(board.id),
                                 title: board.title,
@@ -795,14 +943,6 @@ struct SidebarNavigationView: View {
                             )
                         }
                     }
-                    .background(
-                        MobileTheme.surfaceElevated(for: colorScheme),
-                        in: RoundedRectangle(cornerRadius: 13, style: .continuous)
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 13, style: .continuous)
-                            .strokeBorder(MobileTheme.hairline(for: colorScheme), lineWidth: 0.75)
-                    )
                 }
             }
         }
@@ -826,8 +966,10 @@ struct SidebarNavigationView: View {
                     Text("\(count)")
                         .font(.system(size: 11, weight: .medium).monospacedDigit())
                         .foregroundStyle(isSelected ? .white.opacity(0.82) : MobileTheme.tertiaryInk(for: colorScheme))
+                        .lineLimit(1)
                 }
             }
+            .fixedSize(horizontal: true, vertical: false)
             .padding(.horizontal, 11)
             .frame(height: 34)
             .background(
@@ -855,21 +997,29 @@ struct SidebarNavigationView: View {
                     .font(.system(size: 13.5, weight: .medium))
                     .foregroundStyle(isSelected ? MobileTheme.accent(for: colorScheme) : MobileTheme.secondaryInk(for: colorScheme))
                     .frame(width: 20)
+                    .fixedSize()
                 Text(title)
                     .font(.system(size: 14, weight: isSelected ? .semibold : .regular))
                     .foregroundStyle(isSelected ? MobileTheme.accent(for: colorScheme) : .primary)
                     .lineLimit(1)
-                Spacer(minLength: 4)
+                    .truncationMode(.tail)
+                    .layoutPriority(1)
+                Spacer(minLength: 6)
                 if let badge {
                     Text("\(badge)")
                         .font(.system(size: 12).monospacedDigit())
                         .foregroundStyle(MobileTheme.tertiaryInk(for: colorScheme))
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
                 }
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 9)
-            .background(isSelected ? MobileTheme.accentSoft(for: colorScheme) : .clear)
-            .contentShape(Rectangle())
+            .padding(.horizontal, 10)
+            .frame(minHeight: 36)
+            .background(
+                isSelected ? MobileTheme.accentSoft(for: colorScheme) : .clear,
+                in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
         .buttonStyle(.plain)
     }
@@ -878,7 +1028,7 @@ struct SidebarNavigationView: View {
 
     private var pinnedSettingsFooter: some View {
         VStack(spacing: 0) {
-            Divider().opacity(0.55)
+            Divider().opacity(0.45)
             Button {
                 MobileHaptics.light()
                 onOpenSyncSettings()
@@ -901,16 +1051,20 @@ struct SidebarNavigationView: View {
                             )
                             .offset(x: 2, y: 2)
                     }
+                    .fixedSize()
 
                     VStack(alignment: .leading, spacing: 2) {
                         Text("设置")
                             .font(.system(size: 14, weight: .semibold))
                             .foregroundStyle(.primary)
+                            .lineLimit(1)
                         Text(syncSummarySubtitle)
                             .font(.system(size: 11.5))
                             .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
                             .lineLimit(1)
+                            .truncationMode(.tail)
                     }
+                    .layoutPriority(1)
 
                     Spacer(minLength: 4)
 
@@ -923,7 +1077,7 @@ struct SidebarNavigationView: View {
                             .foregroundStyle(MobileTheme.tertiaryInk(for: colorScheme))
                     }
                 }
-                .padding(.horizontal, 14)
+                .padding(.horizontal, isCompactSheet ? 14 : 12)
                 .padding(.vertical, 10)
                 .contentShape(Rectangle())
             }
@@ -955,21 +1109,25 @@ struct SidebarNavigationView: View {
                     Text(title)
                         .font(.system(size: 12.5, weight: .semibold))
                         .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
+                        .lineLimit(1)
                     if count > 0 {
                         Text("\(count)")
                             .font(.system(size: 11, weight: .medium).monospacedDigit())
                             .foregroundStyle(MobileTheme.tertiaryInk(for: colorScheme))
+                            .lineLimit(1)
                     }
                 }
+                .fixedSize(horizontal: true, vertical: false)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
 
-            Spacer()
+            Spacer(minLength: 4)
 
             trailing()
         }
-        .padding(.horizontal, 2)
+        .padding(.horizontal, 4)
+        .frame(minHeight: 26)
     }
 
     // MARK: - Tree Ancestor Helpers

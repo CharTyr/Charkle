@@ -115,7 +115,7 @@ struct CaptureSheetView: View {
                                 CaptureSourceTileView(
                                     icon: "folder.badge.plus",
                                     title: "从「文件」导入",
-                                    subtitle: "图片、PDF、设计稿、3D"
+                                    subtitle: "Word、Excel、PDF、图片、设计稿"
                                 )
                             }
                             .buttonStyle(MobileTactileButtonStyle())

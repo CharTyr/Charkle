@@ -476,8 +476,49 @@ struct FilterBarView: View {
                 .buttonStyle(MobileTactileButtonStyle())
                 .accessibilityLabel("筛选与排序")
 
+                // Layout switcher (Masonry <-> Compact Studio View, per-folder remembered)
+                Button {
+                    MobileHaptics.selection()
+                    let next: GalleryLayoutMode = store.activeGalleryLayoutMode == .compactList
+                        ? .verticalMasonry
+                        : .compactList
+                    withAnimation(MobileMotion.settleStrong) {
+                        store.setGalleryLayoutMode(next, rememberForCurrentScope: true)
+                    }
+                } label: {
+                    Image(systemName: store.activeGalleryLayoutMode == .compactList ? "list.bullet" : "square.grid.2x2")
+                        .font(.system(size: 14.5, weight: .semibold))
+                        .foregroundStyle(
+                            store.activeGalleryLayoutMode == .compactList
+                                ? MobileTheme.accent(for: colorScheme)
+                                : .primary
+                        )
+                        .frame(width: 36, height: 36)
+                        .background(
+                            store.activeGalleryLayoutMode == .compactList
+                                ? MobileTheme.accentSoft(for: colorScheme)
+                                : MobileTheme.surfaceElevated(for: colorScheme),
+                            in: Circle()
+                        )
+                        .overlay(Circle().strokeBorder(MobileTheme.hairline(for: colorScheme), lineWidth: 0.75))
+                }
+                .buttonStyle(MobileTactileButtonStyle())
+                .accessibilityLabel(store.activeGalleryLayoutMode == .compactList ? "切回纵向瀑布流" : "切换紧凑视图")
+
                 // Sort, density & multi-select menu
                 Menu {
+                    Picker("画廊视图", selection: Binding(
+                        get: { store.activeGalleryLayoutMode },
+                        set: { store.setGalleryLayoutMode($0, rememberForCurrentScope: true) }
+                    )) {
+                        Label("纵向瀑布流", systemImage: "square.grid.2x2")
+                            .tag(GalleryLayoutMode.verticalMasonry)
+                        Label("紧凑视图", systemImage: "list.bullet")
+                            .tag(GalleryLayoutMode.compactList)
+                    }
+
+                    Divider()
+
                     Picker("排序方式", selection: Binding(
                         get: { store.criteria.sortBy },
                         set: { next in
@@ -644,6 +685,21 @@ struct FilterOptionsSheet: View {
                         Task { await store.reloadAssets() }
                     }
                 ))
+            }
+
+            Section {
+                Picker("视图模式", selection: Binding(
+                    get: { store.activeGalleryLayoutMode },
+                    set: { store.setGalleryLayoutMode($0, rememberForCurrentScope: true) }
+                )) {
+                    Label("纵向瀑布流", systemImage: "square.grid.2x2")
+                        .tag(GalleryLayoutMode.verticalMasonry)
+                    Label("紧凑视图", systemImage: "list.bullet")
+                        .tag(GalleryLayoutMode.compactList)
+                }
+                .pickerStyle(.segmented)
+            } header: {
+                Text("画廊视图（按当前目录自动记忆）")
             }
 
             Section("排序方式") {
@@ -1454,12 +1510,10 @@ struct VisualSearchTabView: View {
     }
 
     private func shareAsset(_ asset: AssetRecord) async {
-        if let url = try? await store.engine.originalURL(for: asset.id) {
+        if let url = await store.shareableOriginalURL(for: asset) {
             shareAssetURL = url
-        } else if let thumb = await store.engine.thumbnailURL(for: asset.id, tier: .preview1400) {
-            shareAssetURL = thumb
         } else {
-            store.showToast("暂无法获取可分享的原图", tone: .warning)
+            store.showToast("暂无法获取可分享的原文件", tone: .warning)
         }
     }
 }

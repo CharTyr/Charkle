@@ -290,6 +290,7 @@ public nonisolated struct PendingSharePayload: Codable, Hashable, Identifiable, 
     public let id: UUID
     public let kind: Kind
     public let stagedFileName: String?
+    public let originalFileName: String?
     public let urlString: String?
     public let text: String?
     public let title: String?
@@ -302,6 +303,7 @@ public nonisolated struct PendingSharePayload: Codable, Hashable, Identifiable, 
         id: UUID = UUID(),
         kind: Kind,
         stagedFileName: String? = nil,
+        originalFileName: String? = nil,
         urlString: String? = nil,
         text: String? = nil,
         title: String? = nil,
@@ -313,6 +315,7 @@ public nonisolated struct PendingSharePayload: Codable, Hashable, Identifiable, 
         self.id = id
         self.kind = kind
         self.stagedFileName = stagedFileName
+        self.originalFileName = originalFileName
         self.urlString = urlString
         self.text = text
         self.title = title

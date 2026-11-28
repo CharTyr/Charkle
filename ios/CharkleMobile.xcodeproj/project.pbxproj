@@ -31,6 +31,9 @@
 		A10000190000000000000001 /* MobileSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000190000000000000001 /* MobileSettingsView.swift */; };
 		A100001A0000000000000001 /* LiquidGlassMorphingTabBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = B100001A0000000000000001 /* LiquidGlassMorphingTabBar.swift */; };
 		A100001B0000000000000001 /* HierarchicalFolderPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = B100001B0000000000000001 /* HierarchicalFolderPicker.swift */; };
+		A100001C0000000000000001 /* MobileVersionStackViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = B100001C0000000000000001 /* MobileVersionStackViews.swift */; };
+		A100001D0000000000000001 /* MobileCompactIndexGalleryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B100001D0000000000000001 /* MobileCompactIndexGalleryView.swift */; };
+		A100001E0000000000000001 /* MobileDocumentReaderAndDiffView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B100001E0000000000000001 /* MobileDocumentReaderAndDiffView.swift */; };
 		A10000100000000000000001 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = B10000100000000000000001 /* Assets.xcassets */; };
 		A10000110000000000000001 /* CharkleCore in Frameworks */ = {isa = PBXBuildFile; productRef = D10000010000000000000001 /* CharkleCore */; };
 		A10000120000000000000001 /* CharkleShareExtension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = B20000020000000000000001 /* CharkleShareExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
@@ -87,6 +90,9 @@
 		B10000190000000000000001 /* MobileSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileSettingsView.swift; sourceTree = "<group>"; };
 		B100001A0000000000000001 /* LiquidGlassMorphingTabBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiquidGlassMorphingTabBar.swift; sourceTree = "<group>"; };
 		B100001B0000000000000001 /* HierarchicalFolderPicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HierarchicalFolderPicker.swift; sourceTree = "<group>"; };
+		B100001C0000000000000001 /* MobileVersionStackViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileVersionStackViews.swift; sourceTree = "<group>"; };
+		B100001D0000000000000001 /* MobileCompactIndexGalleryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileCompactIndexGalleryView.swift; sourceTree = "<group>"; };
+		B100001E0000000000000001 /* MobileDocumentReaderAndDiffView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileDocumentReaderAndDiffView.swift; sourceTree = "<group>"; };
 		B10000100000000000000001 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		B10000110000000000000001 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		B10000120000000000000001 /* CharkleMobile.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = CharkleMobile.entitlements; sourceTree = "<group>"; };
@@ -187,6 +193,9 @@
 				B10000190000000000000001 /* MobileSettingsView.swift */,
 				B100001A0000000000000001 /* LiquidGlassMorphingTabBar.swift */,
 				B100001B0000000000000001 /* HierarchicalFolderPicker.swift */,
+				B100001C0000000000000001 /* MobileVersionStackViews.swift */,
+				B100001D0000000000000001 /* MobileCompactIndexGalleryView.swift */,
+				B100001E0000000000000001 /* MobileDocumentReaderAndDiffView.swift */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -340,6 +349,9 @@
 				A10000190000000000000001 /* MobileSettingsView.swift in Sources */,
 				A100001A0000000000000001 /* LiquidGlassMorphingTabBar.swift in Sources */,
 				A100001B0000000000000001 /* HierarchicalFolderPicker.swift in Sources */,
+				A100001C0000000000000001 /* MobileVersionStackViews.swift in Sources */,
+				A100001D0000000000000001 /* MobileCompactIndexGalleryView.swift in Sources */,
+				A100001E0000000000000001 /* MobileDocumentReaderAndDiffView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

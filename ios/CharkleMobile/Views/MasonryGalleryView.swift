@@ -49,11 +49,14 @@ private struct GalleryViewportBucket: Equatable {
     }
 }
 
-/// Non-reactive scroll offset storage for exact hit-testing in drag-to-multi-select without
-/// causing SwiftUI view invalidations on every 120Hz scroll frame.
+/// Non-reactive scroll offset and chrome-direction storage for exact hit-testing and
+/// Photos-style retracting header hysteresis without triggering 120Hz SwiftUI redraws.
 @MainActor
 private final class MasonryScrollTracker {
     var liveScrollY: CGFloat = 0
+    var lastChromeStepY: CGFloat = 0
+    var chromeAnchorY: CGFloat = 0
+    var lastChromeDirection: Int = 0
 }
 
 private struct VirtualizedMasonrySnapshot {
@@ -941,10 +944,15 @@ struct MasonryGalleryView: View {
     let zoomNamespace: Namespace.ID
     let zoomOrigin: PreviewZoomOrigin
     let onOpenAsset: (AssetRecord) -> Void
+    var onOpenDiff: ((AssetRecord, UUID, UUID) -> Void)? = nil
     let onFindSimilar: (AssetRecord) -> Void
     let onOpenCapture: () -> Void
     let onOpenSyncSettings: () -> Void
     let onOpenFolders: (() -> Void)?
+    var onToggleSidebar: (() -> Void)? = nil
+    var isSidebarVisible: Bool = true
+    var onPasteCapture: (() -> Void)? = nil
+    var onSyncNow: (() -> Void)? = nil
 
     private var displayedAssets: [AssetRecord] {
         assetsOverride ?? store.assets
@@ -954,12 +962,17 @@ struct MasonryGalleryView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @State private var isFilterSheetPresented = false
+    @State private var isColorPopoverPresented = false
+    @State private var isInlineSearchExpanded = false
+    @State private var isHeaderRetracted = false
+    @FocusState private var isInlineSearchFocused: Bool
     @State private var isBatchFolderSheetPresented = false
     @State private var singleMoveAsset: AssetRecord?
     @State private var isBatchBoardSheetPresented = false
     @State private var confirmPermanentDelete = false
     @State private var singleDeleteAssetID: UUID?
     @State private var shareAssetURL: URL?
+    @State private var mergeStackSourceAssets: [AssetRecord]? = nil
 
     // Deterministic Scroll + Coarse Viewport Bucketing + O(1) Layout Snapshot Cache
     @State private var scrollPosition = ScrollPosition(edge: .top)
@@ -988,24 +1001,108 @@ struct MasonryGalleryView: View {
         store.isMultiSelectMode && dragDecision == .sweepSelect
     }
 
+    private var isInlineSearchActive: Bool {
+        !isCompact && (isInlineSearchExpanded || isInlineSearchFocused)
+    }
+
+    private var shouldPinFloatingHeader: Bool {
+        isInlineSearchActive
+            || isColorPopoverPresented
+            || isFilterSheetPresented
+            || store.isMultiSelectMode
+            || pinchController.isMorphActive
+    }
+
+    private var effectiveHeaderRetracted: Bool {
+        showPhotosFloatingHeader && isHeaderRetracted && !shouldPinFloatingHeader
+    }
+
     var body: some View {
         ZStack(alignment: .top) {
             MobileTheme.galleryGround(for: colorScheme)
                 .ignoresSafeArea()
 
             if displayedAssets.isEmpty && store.hasCompletedInitialLoad && !store.isLoadingLibrary && !store.isReloadingAssets {
-                VStack(spacing: 0) {
-                    if showPhotosFloatingHeader {
+                if showPhotosFloatingHeader {
+                    ZStack(alignment: .top) {
+                        emptyStateView
+                            .padding(.top, store.hasActiveFilters ? 116 : 76)
                         photosFloatingHeader
-                    } else {
+                    }
+                } else {
+                    VStack(spacing: 0) {
                         FilterBarView(
                             store: store,
                             isCompact: isCompact,
                             focusSearchTrigger: focusSearchTrigger,
                             onOpenFilterSheet: { isFilterSheetPresented = true }
                         )
+                        emptyStateView
                     }
-                    emptyStateView
+                }
+            } else if store.activeGalleryLayoutMode == .compactList {
+                let compactTopClearance: CGFloat = showPhotosFloatingHeader
+                    ? (store.hasActiveFilters ? 116 : (isCompact ? 74 : 78))
+                    : 8
+                let compactBottomClearance: CGFloat = store.isMultiSelectMode ? 120 : 54
+
+                ZStack(alignment: .top) {
+                    VStack(spacing: 0) {
+                        if !showPhotosFloatingHeader {
+                            FilterBarView(
+                                store: store,
+                                isCompact: isCompact,
+                                focusSearchTrigger: focusSearchTrigger,
+                                onOpenFilterSheet: { isFilterSheetPresented = true }
+                            )
+                        }
+
+                        MobileCompactIndexGalleryView(
+                            store: store,
+                            displayedAssets: displayedAssets,
+                            isCompact: isCompact,
+                            topInset: compactTopClearance,
+                            bottomInset: compactBottomClearance,
+                            zoomNamespace: zoomNamespace,
+                            zoomOrigin: zoomOrigin,
+                            onOpenAsset: onOpenAsset,
+                            onOpenDiff: { asset, baseID, targetID in
+                                if let onOpenDiff {
+                                    onOpenDiff(asset, baseID, targetID)
+                                } else {
+                                    onOpenAsset(asset)
+                                }
+                            },
+                            onFindSimilar: onFindSimilar,
+                            onSharePrimary: { target in
+                                Task { await shareAsset(target) }
+                            },
+                            onRequestMergeStack: { target in
+                                mergeStackSourceAssets = [target]
+                            },
+                            onRequestMoveFolder: { target in
+                                singleMoveAsset = target
+                            },
+                            onRequestPermanentDelete: { targetID in
+                                singleDeleteAssetID = targetID
+                            },
+                            onHeaderScrollStep: { y in
+                                guard showPhotosFloatingHeader else { return }
+                                updateHeaderRetraction(for: y)
+                            }
+                        )
+                    }
+
+                    if showPhotosFloatingHeader {
+                        photosFloatingHeader
+                            .offset(y: effectiveHeaderRetracted ? -140 : 0)
+                            .opacity(effectiveHeaderRetracted ? 0 : 1)
+                            .allowsHitTesting(!effectiveHeaderRetracted)
+                            .animation(
+                                MobileMotion.accessible(MobileMotion.drawerEase, reduced: reduceMotion),
+                                value: effectiveHeaderRetracted
+                            )
+                    }
                 }
             } else {
                 GeometryReader { proxy in
@@ -1017,7 +1114,7 @@ struct MasonryGalleryView: View {
                     let cardCornerRadius = MobileMasonryLayout.adaptiveCornerRadius(for: colCount)
                     let horizontalPadding: CGFloat = colCount >= 4 ? (colCount >= 5 ? 2 : 5) : (isCompact ? 8 : 16)
                     let topClearance: CGFloat = showPhotosFloatingHeader
-                        ? (store.hasActiveFilters ? 116 : 74)
+                        ? (store.hasActiveFilters ? 116 : (isCompact ? 74 : 78))
                         : (colCount >= 5 ? 4 : 8)
                     let bannerExtra: CGFloat = (store.syncStatus.isSyncing && store.syncStatus.progressFraction != nil) ? 62 : 0
                     let liveTopInset = topClearance + bannerExtra
@@ -1177,6 +1274,16 @@ struct MasonryGalleryView: View {
                                             },
                                             onOpenFolderPicker: {
                                                 singleMoveAsset = card.asset
+                                            },
+                                            onOpenDiff: { baseID, targetID in
+                                                if let onOpenDiff {
+                                                    onOpenDiff(card.asset, baseID, targetID)
+                                                } else {
+                                                    onOpenAsset(card.asset)
+                                                }
+                                            },
+                                            onRequestMergeStack: {
+                                                mergeStackSourceAssets = [card.asset]
                                             }
                                         )
                                         .frame(width: card.width, height: card.height)
@@ -1254,7 +1361,7 @@ struct MasonryGalleryView: View {
                                                 },
                                                 onCommit: { targetCols, _ in
                                                     let finalTop = showPhotosFloatingHeader
-                                                        ? (store.hasActiveFilters ? 116 : 74)
+                                                        ? (store.hasActiveFilters ? 116 : (isCompact ? 74 : 78))
                                                         : (targetCols >= 5 ? 4 : 8)
                                                     let finalBanner: CGFloat = (store.syncStatus.isSyncing && store.syncStatus.progressFraction != nil) ? 62 : 0
                                                     let finalBottom: CGFloat = store.isMultiSelectMode ? 120 : 54
@@ -1314,6 +1421,12 @@ struct MasonryGalleryView: View {
                                     }
                                 }
                             }
+                            .onScrollGeometryChange(for: Int.self) { geo in
+                                Int(floor(max(0, geo.visibleRect.minY) / 16.0))
+                            } action: { _, step in
+                                guard showPhotosFloatingHeader, !pinchController.isMorphActive else { return }
+                                updateHeaderRetraction(for: CGFloat(step) * 16.0)
+                            }
                             .charkleScrollEdgeSoft(for: showPhotosFloatingHeader ? [.top, .bottom] : .bottom)
                             .coordinateSpace(name: "galleryViewport")
                             .scrollDisabled(isActivelySweepingSelection)
@@ -1324,6 +1437,11 @@ struct MasonryGalleryView: View {
                                     await store.reloadAll()
                                 }
                             }
+                            .dropDestination(for: URL.self) { urls, _ in
+                                guard !urls.isEmpty else { return false }
+                                Task { await store.importDroppedURLs(urls) }
+                                return true
+                            }
                             .simultaneousGesture(
                                 dragMultiSelectGesture(snapshot: snapshot),
                                 including: store.isMultiSelectMode ? .all : .subviews
@@ -1332,6 +1450,13 @@ struct MasonryGalleryView: View {
 
                         if showPhotosFloatingHeader {
                             photosFloatingHeader
+                                .offset(y: effectiveHeaderRetracted ? -140 : 0)
+                                .opacity(effectiveHeaderRetracted ? 0 : 1)
+                                .allowsHitTesting(!effectiveHeaderRetracted)
+                                .animation(
+                                    MobileMotion.accessible(MobileMotion.drawerEase, reduced: reduceMotion),
+                                    value: effectiveHeaderRetracted
+                                )
                         }
 
                         if let badgeLabel = pinchController.activeBadgeLabel {
@@ -1341,7 +1466,7 @@ struct MasonryGalleryView: View {
                                 .padding(.horizontal, 12)
                                 .padding(.vertical, 6)
                                 .charkleFloatingCapsule(interactive: false)
-                                .padding(.top, showPhotosFloatingHeader ? 84 : 12)
+                                .padding(.top, (showPhotosFloatingHeader && !effectiveHeaderRetracted) ? 84 : 16)
                                 .transition(.opacity.combined(with: .scale(scale: 0.94)))
                                 .allowsHitTesting(false)
                         }
@@ -1377,6 +1502,16 @@ struct MasonryGalleryView: View {
                         pinchController.cancelIfNeeded()
                         if store.pendingRevealAssetID == nil {
                             resetViewportToTop(width: proxy.size.width, height: effectiveViewportHeight)
+                        }
+                    }
+                    .onChange(of: focusSearchTrigger) { _, _ in
+                        guard showPhotosFloatingHeader, !isCompact else { return }
+                        withAnimation(MobileMotion.accessible(MobileMotion.drawerEase, reduced: reduceMotion)) {
+                            isHeaderRetracted = false
+                            isInlineSearchExpanded = true
+                        }
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+                            isInlineSearchFocused = true
                         }
                     }
                     .onChange(of: proxy.size.width) { _, w in
@@ -1483,6 +1618,27 @@ struct MasonryGalleryView: View {
             .presentationDetents([.medium, .large])
         }
         .sheet(isPresented: Binding(
+            get: { mergeStackSourceAssets != nil },
+            set: { if !$0 { mergeStackSourceAssets = nil } }
+        )) {
+            if let mergeStackSourceAssets {
+                NavigationStack {
+                    MergeIntoVersionStackSheet(
+                        store: store,
+                        sourceAssets: mergeStackSourceAssets,
+                        onDone: {
+                            self.mergeStackSourceAssets = nil
+                            if store.isMultiSelectMode {
+                                store.isMultiSelectMode = false
+                                store.selectedAssetIDs.removeAll()
+                            }
+                        }
+                    )
+                }
+                .presentationDetents([.medium, .large])
+            }
+        }
+        .sheet(isPresented: Binding(
             get: { shareAssetURL != nil },
             set: { if !$0 { shareAssetURL = nil } }
         )) {
@@ -1529,11 +1685,54 @@ struct MasonryGalleryView: View {
 
     private func resetViewportToTop(width: CGFloat, height: CGFloat) {
         scrollTracker.liveScrollY = 0
+        scrollTracker.lastChromeStepY = 0
+        scrollTracker.chromeAnchorY = 0
+        scrollTracker.lastChromeDirection = 0
+        if isHeaderRetracted {
+            isHeaderRetracted = false
+        }
         viewportBucket = GalleryViewportBucket(minY: 0, width: width, height: height)
         var tx = Transaction()
         tx.disablesAnimations = true
         withTransaction(tx) {
             scrollPosition.scrollTo(edge: .top)
+        }
+    }
+
+    private func updateHeaderRetraction(for y: CGFloat) {
+        let prevY = scrollTracker.lastChromeStepY
+        scrollTracker.lastChromeStepY = y
+        guard abs(y - prevY) >= 1 else { return }
+
+        if y <= 28 {
+            scrollTracker.chromeAnchorY = y
+            scrollTracker.lastChromeDirection = 0
+            if isHeaderRetracted {
+                withAnimation(MobileMotion.accessible(MobileMotion.drawerEase, reduced: reduceMotion)) {
+                    isHeaderRetracted = false
+                }
+            }
+            return
+        }
+
+        let dir = y > prevY ? 1 : -1
+        if dir != scrollTracker.lastChromeDirection {
+            scrollTracker.lastChromeDirection = dir
+            scrollTracker.chromeAnchorY = prevY
+        }
+
+        if dir > 0, y > 68, (y - scrollTracker.chromeAnchorY) >= 28 {
+            if !isHeaderRetracted && !shouldPinFloatingHeader {
+                withAnimation(MobileMotion.accessible(MobileMotion.drawerEase, reduced: reduceMotion)) {
+                    isHeaderRetracted = true
+                }
+            }
+        } else if dir < 0, (scrollTracker.chromeAnchorY - y) >= 18 {
+            if isHeaderRetracted {
+                withAnimation(MobileMotion.accessible(MobileMotion.drawerEase, reduced: reduceMotion)) {
+                    isHeaderRetracted = false
+                }
+            }
         }
     }
 
@@ -1572,46 +1771,211 @@ struct MasonryGalleryView: View {
         }
     }
 
-    // MARK: - iOS Photos-Style Floating Header (Real iOS 26+ Liquid Glass Cluster)
+    // MARK: - Unified iOS & iPadOS Photos-Style Floating Header (Real iOS 26+ Liquid Glass Cluster)
 
     private var photosFloatingHeader: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .center, spacing: 8) {
-                // Leading bold scope title + item count (tapping opens 目录与筛选)
-                Button {
-                    if let onOpenFolders {
+            HStack(alignment: .center, spacing: isCompact ? 8 : 12) {
+                // iPad leading Liquid Glass sidebar toggle (matches Apple Photos on iPadOS)
+                if let onToggleSidebar {
+                    Button {
                         MobileHaptics.light()
-                        onOpenFolders()
+                        onToggleSidebar()
+                    } label: {
+                        Image(systemName: "sidebar.left")
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundStyle(isSidebarVisible ? MobileTheme.accent(for: colorScheme) : .primary)
+                            .frame(width: 40, height: 40)
+                            .contentShape(Circle())
                     }
-                } label: {
-                    VStack(alignment: .leading, spacing: 1) {
-                        HStack(spacing: 4) {
-                            Text(store.currentScopeTitle)
-                                .font(.system(size: 27, weight: .bold))
-                                .foregroundStyle(.primary)
-                                .lineLimit(1)
-                            if onOpenFolders != nil {
-                                Image(systemName: "chevron.down")
-                                    .font(.system(size: 12, weight: .bold))
-                                    .foregroundStyle(.secondary)
-                                    .offset(y: 1)
-                            }
-                        }
-                        Text(headerSubtitle)
-                            .font(.system(size: 12.5, weight: .semibold).monospacedDigit())
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
-                    .shadow(color: MobileTheme.galleryGround(for: colorScheme).opacity(0.65), radius: 6, y: 1)
-                    .contentShape(Rectangle())
+                    .buttonStyle(.plain)
+                    .charkleFloatingCircle(interactive: true)
+                    .fixedSize()
+                    .accessibilityLabel(isSidebarVisible ? "收起侧边栏" : "展开侧边栏")
                 }
-                .buttonStyle(.plain)
 
-                Spacer(minLength: 8)
+                // Leading bold scope title + item count (hidden smoothly on iPad while inline search expands so narrow Split View never crowds)
+                if !isInlineSearchActive {
+                    Button {
+                        if let onOpenFolders {
+                            MobileHaptics.light()
+                            onOpenFolders()
+                        }
+                    } label: {
+                        VStack(alignment: .leading, spacing: 1) {
+                            HStack(spacing: 4) {
+                                Text(store.currentScopeTitle)
+                                    .font(.system(size: isCompact ? 27 : 25, weight: .bold))
+                                    .foregroundStyle(.primary)
+                                    .lineLimit(1)
+                                    .truncationMode(.tail)
+                                if onOpenFolders != nil {
+                                    Image(systemName: "chevron.down")
+                                        .font(.system(size: 12, weight: .bold))
+                                        .foregroundStyle(.secondary)
+                                        .offset(y: 1)
+                                }
+                            }
+                            Text(headerSubtitle)
+                                .font(.system(size: 12.5, weight: .semibold).monospacedDigit())
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                        }
+                        .shadow(color: MobileTheme.galleryGround(for: colorScheme).opacity(0.65), radius: 6, y: 1)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(onOpenFolders == nil)
+                    .transition(.opacity.combined(with: .move(edge: .leading)))
+
+                    Spacer(minLength: 8)
+                }
 
                 // Trailing floating controls using native iOS 26+ Liquid Glass cluster
                 CharkleGlassCluster(spacing: 8) {
                     HStack(spacing: 8) {
+                        if !isCompact {
+                            // iPad Morphing Inline Liquid Glass Search Pill
+                            if isInlineSearchActive {
+                                HStack(spacing: 7) {
+                                    Group {
+                                        if store.isRunningSemanticSearch {
+                                            ProgressView()
+                                                .controlSize(.mini)
+                                        } else {
+                                            Image(systemName: "magnifyingglass")
+                                                .font(.system(size: 13.5, weight: .semibold))
+                                                .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
+                                        }
+                                    }
+                                    .frame(width: 16, height: 16)
+
+                                    TextField(
+                                        "搜索素材、描述画面、标签或颜色…",
+                                        text: Binding(
+                                            get: { store.criteria.searchQuery },
+                                            set: { store.updateSearchQuery($0) }
+                                        )
+                                    )
+                                    .font(.system(size: 14))
+                                    .textInputAutocapitalization(.never)
+                                    .autocorrectionDisabled()
+                                    .submitLabel(.search)
+                                    .focused($isInlineSearchFocused)
+                                    .onSubmit {
+                                        store.submitSearch()
+                                    }
+
+                                    Button {
+                                        MobileHaptics.light()
+                                        if !store.criteria.searchQuery.isEmpty {
+                                            store.updateSearchQuery("")
+                                        } else {
+                                            isInlineSearchFocused = false
+                                            MobileKeyboard.dismiss()
+                                            withAnimation(MobileMotion.accessible(MobileMotion.settleStrong, reduced: reduceMotion)) {
+                                                isInlineSearchExpanded = false
+                                            }
+                                        }
+                                    } label: {
+                                        Image(systemName: "xmark.circle.fill")
+                                            .font(.system(size: 15))
+                                            .foregroundStyle(MobileTheme.tertiaryInk(for: colorScheme))
+                                    }
+                                    .buttonStyle(.plain)
+                                    .accessibilityLabel(store.criteria.searchQuery.isEmpty ? "收起搜索框" : "清空搜索词")
+                                }
+                                .padding(.horizontal, 12)
+                                .frame(maxWidth: 460)
+                                .frame(height: 40)
+                                .charkleFloatingCapsule(interactive: true)
+                                .transition(.opacity.combined(with: .scale(scale: 0.94, anchor: .trailing)))
+                            } else {
+                                Button {
+                                    MobileHaptics.light()
+                                    withAnimation(MobileMotion.accessible(MobileMotion.settleStrong, reduced: reduceMotion)) {
+                                        isInlineSearchExpanded = true
+                                    }
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+                                        isInlineSearchFocused = true
+                                    }
+                                } label: {
+                                    Image(systemName: "magnifyingglass")
+                                        .font(.system(size: 15.5, weight: .semibold))
+                                        .foregroundStyle(
+                                            store.criteria.searchQuery.isEmpty ? Color.primary : MobileTheme.accent(for: colorScheme)
+                                        )
+                                        .frame(width: 40, height: 40)
+                                        .contentShape(Circle())
+                                }
+                                .buttonStyle(.plain)
+                                .charkleFloatingCircle(interactive: true)
+                                .accessibilityLabel("搜索素材")
+                            }
+
+                            // iPad Studio Color Search Popover Button
+                            Button {
+                                MobileHaptics.light()
+                                isColorPopoverPresented.toggle()
+                            } label: {
+                                ZStack {
+                                    if let hex = store.criteria.selectedColorHex {
+                                        Circle()
+                                            .fill(Color(charkleHex: hex))
+                                            .frame(width: 19, height: 19)
+                                            .overlay(Circle().strokeBorder(.white.opacity(0.88), lineWidth: 1.5))
+                                    } else {
+                                        Image(systemName: "paintpalette")
+                                            .font(.system(size: 15.5, weight: .semibold))
+                                            .foregroundStyle(isColorPopoverPresented ? MobileTheme.accent(for: colorScheme) : .primary)
+                                    }
+                                }
+                                .frame(width: 40, height: 40)
+                                .contentShape(Circle())
+                            }
+                            .buttonStyle(.plain)
+                            .charkleFloatingCircle(interactive: true)
+                            .popover(isPresented: $isColorPopoverPresented, arrowEdge: .top) {
+                                MobileColorFilterPanel(store: store, title: "按色彩搜图", embedded: false)
+                                    .frame(width: 320)
+                                    .padding(12)
+                                    .presentationCompactAdaptation(.popover)
+                            }
+                            .accessibilityLabel("按主色调筛选")
+                        }
+
+                        Button {
+                            MobileHaptics.selection()
+                            let next: GalleryLayoutMode = store.activeGalleryLayoutMode == .compactList
+                                ? .verticalMasonry
+                                : .compactList
+                            withAnimation(MobileMotion.accessible(MobileMotion.settleStrong, reduced: reduceMotion)) {
+                                store.setGalleryLayoutMode(next, rememberForCurrentScope: true)
+                            }
+                        } label: {
+                            Image(
+                                systemName: store.activeGalleryLayoutMode == .compactList
+                                    ? "list.bullet"
+                                    : "square.grid.2x2"
+                            )
+                            .font(.system(size: 15.5, weight: .semibold))
+                            .foregroundStyle(
+                                store.activeGalleryLayoutMode == .compactList
+                                    ? MobileTheme.accent(for: colorScheme)
+                                    : .primary
+                            )
+                            .frame(width: 40, height: 40)
+                            .contentShape(Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .charkleFloatingCircle(interactive: true)
+                        .accessibilityLabel(
+                            store.activeGalleryLayoutMode == .compactList
+                                ? "切回纵向瀑布流"
+                                : "切换紧凑视图"
+                        )
+
                         Button {
                             MobileHaptics.light()
                             isFilterSheetPresented = true
@@ -1628,49 +1992,146 @@ struct MasonryGalleryView: View {
                         .charkleFloatingCircle(interactive: true)
                         .accessibilityLabel("筛选与排序")
 
-                        Button {
-                            MobileHaptics.light()
-                            withAnimation(MobileMotion.accessible(MobileMotion.settleStrong, reduced: reduceMotion)) {
-                                store.isMultiSelectMode.toggle()
-                                if !store.isMultiSelectMode {
-                                    store.selectedAssetIDs.removeAll()
+                        if !isInlineSearchActive {
+                            Button {
+                                MobileHaptics.light()
+                                withAnimation(MobileMotion.accessible(MobileMotion.settleStrong, reduced: reduceMotion)) {
+                                    store.isMultiSelectMode.toggle()
+                                    if !store.isMultiSelectMode {
+                                        store.selectedAssetIDs.removeAll()
+                                    }
                                 }
+                            } label: {
+                                Text(store.isMultiSelectMode ? "取消" : "选取")
+                                    .font(.system(size: 14.5, weight: .semibold))
+                                    .foregroundStyle(
+                                        store.isMultiSelectMode ? MobileTheme.accent(for: colorScheme) : .primary
+                                    )
+                                    .lineLimit(1)
+                                    .fixedSize(horizontal: true, vertical: false)
+                                    .padding(.horizontal, 15)
+                                    .frame(height: 40)
+                                    .contentShape(Capsule())
                             }
-                        } label: {
-                            Text(store.isMultiSelectMode ? "取消" : "选取")
-                                .font(.system(size: 14.5, weight: .semibold))
-                                .foregroundStyle(
-                                    store.isMultiSelectMode ? MobileTheme.accent(for: colorScheme) : .primary
-                                )
-                                .padding(.horizontal, 15)
-                                .frame(height: 40)
-                                .contentShape(Capsule())
-                        }
-                        .buttonStyle(.plain)
-                        .charkleFloatingCapsule(interactive: true)
+                            .buttonStyle(.plain)
+                            .charkleFloatingCapsule(interactive: true)
 
-                        Button(action: onOpenCapture) {
-                            Image(systemName: "plus")
-                                .font(.system(size: 17, weight: .semibold))
-                                .foregroundStyle(.primary)
-                                .frame(width: 40, height: 40)
-                                .contentShape(Circle())
+                            Button(action: onOpenCapture) {
+                                Image(systemName: "plus")
+                                    .font(.system(size: 17, weight: .semibold))
+                                    .foregroundStyle(.primary)
+                                    .frame(width: 40, height: 40)
+                                    .contentShape(Circle())
+                            }
+                            .buttonStyle(.plain)
+                            .charkleFloatingCircle(interactive: true)
+                            .accessibilityLabel("新增素材")
+
+                            if !isCompact {
+                                Menu {
+                                    Picker("画廊视图", selection: Binding(
+                                        get: { store.activeGalleryLayoutMode },
+                                        set: { store.setGalleryLayoutMode($0, rememberForCurrentScope: true) }
+                                    )) {
+                                        Label("纵向瀑布流", systemImage: "square.grid.2x2")
+                                            .tag(GalleryLayoutMode.verticalMasonry)
+                                        Label("紧凑视图", systemImage: "list.bullet")
+                                            .tag(GalleryLayoutMode.compactList)
+                                    }
+
+                                    Divider()
+
+                                    Picker("排序方式", selection: Binding(
+                                        get: { store.criteria.sortBy },
+                                        set: { next in
+                                            store.criteria.sortBy = next
+                                            Task { await store.reloadAssets() }
+                                        }
+                                    )) {
+                                        ForEach(SortOrder.allCases, id: \.self) { order in
+                                            Text(order.localizedLabel).tag(order)
+                                        }
+                                    }
+
+                                    Menu("列数密度") {
+                                        Button("自动适配") { store.columnCountOverride = nil }
+                                        ForEach([2, 3, 4, 5, 6, 7], id: \.self) { count in
+                                            Button("\(count) 列") { store.columnCountOverride = count }
+                                        }
+                                    }
+
+                                    Divider()
+
+                                    if let onPasteCapture {
+                                        Button("粘贴收藏", systemImage: "doc.on.clipboard") {
+                                            onPasteCapture()
+                                        }
+                                    }
+
+                                    if let onSyncNow {
+                                        Button(
+                                            store.hasConnectedCloudBackend ? "立即同步" : "配置云同步",
+                                            systemImage: store.hasConnectedCloudBackend ? "arrow.triangle.2.circlepath" : "icloud.slash"
+                                        ) {
+                                            onSyncNow()
+                                        }
+                                    }
+
+                                    Button("设置", systemImage: "gearshape") {
+                                        onOpenSyncSettings()
+                                    }
+                                } label: {
+                                    Group {
+                                        if store.syncStatus.isSyncing || store.isSyncing {
+                                            ProgressView()
+                                                .controlSize(.mini)
+                                        } else {
+                                            Image(systemName: "ellipsis")
+                                                .font(.system(size: 15.5, weight: .semibold))
+                                                .foregroundStyle(.primary)
+                                        }
+                                    }
+                                    .frame(width: 40, height: 40)
+                                    .contentShape(Circle())
+                                }
+                                .charkleFloatingCircle(interactive: true)
+                                .accessibilityLabel("画廊视图选项")
+                            }
+                        } else {
+                            Button {
+                                MobileHaptics.light()
+                                isInlineSearchFocused = false
+                                MobileKeyboard.dismiss()
+                                withAnimation(MobileMotion.accessible(MobileMotion.settleStrong, reduced: reduceMotion)) {
+                                    isInlineSearchExpanded = false
+                                }
+                            } label: {
+                                Text("完成")
+                                    .font(.system(size: 14, weight: .semibold))
+                                    .foregroundStyle(MobileTheme.accent(for: colorScheme))
+                                    .lineLimit(1)
+                                    .fixedSize(horizontal: true, vertical: false)
+                                    .padding(.horizontal, 14)
+                                    .frame(height: 40)
+                                    .contentShape(Capsule())
+                            }
+                            .buttonStyle(.plain)
+                            .charkleFloatingCapsule(interactive: true)
                         }
-                        .buttonStyle(.plain)
-                        .charkleFloatingCircle(interactive: true)
-                        .accessibilityLabel("新增素材")
                     }
                 }
+                .fixedSize(horizontal: !isInlineSearchActive, vertical: true)
             }
-            .padding(.horizontal, 14)
-            .padding(.top, 6)
+            .animation(MobileMotion.accessible(MobileMotion.settleStrong, reduced: reduceMotion), value: isInlineSearchActive)
+            .padding(.horizontal, isCompact ? 14 : 18)
+            .padding(.top, isCompact ? 6 : 10)
 
             if store.hasActiveFilters {
                 activeFilterChipsStrip
-                    .padding(.horizontal, 14)
+                    .padding(.horizontal, isCompact ? 14 : 18)
             }
         }
-        .padding(.bottom, 8)
+        .padding(.bottom, 10)
         .background(
             // Subtle progressive top readability scrim so full-bleed artwork still refracts cleanly through Liquid Glass
             LinearGradient(
@@ -1845,12 +2306,10 @@ struct MasonryGalleryView: View {
     }
 
     private func shareAsset(_ asset: AssetRecord) async {
-        if let url = try? await store.engine.originalURL(for: asset.id) {
+        if let url = await store.shareableOriginalURL(for: asset) {
             shareAssetURL = url
-        } else if let thumb = await store.engine.thumbnailURL(for: asset.id, tier: .preview1400) {
-            shareAssetURL = thumb
         } else {
-            store.showToast("暂无法获取可分享的原图", tone: .warning)
+            store.showToast("暂无法获取可分享的原文件", tone: .warning)
         }
     }
 
@@ -1958,6 +2417,18 @@ struct MasonryGalleryView: View {
             .disabled(store.selectedAssetIDs.isEmpty)
 
             Menu {
+                if store.selectedAssetIDs.count >= 2 {
+                    Button {
+                        let picked = displayedAssets.filter { store.selectedAssetIDs.contains($0.id) }
+                        if picked.count >= 2 {
+                            mergeStackSourceAssets = picked
+                        }
+                    } label: {
+                        Label("合并为版本叠（\(store.selectedAssetIDs.count) 项）", systemImage: "square.stack.3d.up")
+                    }
+                    Divider()
+                }
+
                 Button {
                     let ids = Array(store.selectedAssetIDs)
                     let title = "Charkle参考(\(ids.count))"
@@ -2088,9 +2559,31 @@ struct GalleryCardView: View {
     let onRequestPermanentDelete: () -> Void
     let onSelectMultiple: () -> Void
     var onOpenFolderPicker: (() -> Void)? = nil
+    var onOpenDiff: ((UUID, UUID) -> Void)? = nil
+    var onRequestMergeStack: (() -> Void)? = nil
 
     @Environment(\.colorScheme) private var colorScheme
     @State private var image: UIImage?
+    @State private var isDropTargeted: Bool = false
+
+    private var stackSiblings: [AssetRecord] {
+        store.stackMembers(for: asset)
+    }
+
+    private var hasStack: Bool {
+        stackSiblings.count > 1
+    }
+
+    private var primaryAsset: AssetRecord {
+        store.primaryVersionAsset(for: asset)
+    }
+
+    private var stackBadgeLabel: String? {
+        guard hasStack else { return nil }
+        let pVer = primaryAsset.richMetadata?.versionStack?.versionNumber ?? stackSiblings.count
+        let pending = store.newerThanPrimaryCount(for: asset)
+        return pending > 0 ? "主版 v\(pVer) · +\(pending)" : "v\(pVer) · 共\(stackSiblings.count)版"
+    }
 
     private var resolvedDisplayImage: UIImage? {
         store.thumbnails.cachedImage(for: asset.id, tier: .grid520) ?? image
@@ -2138,7 +2631,7 @@ struct GalleryCardView: View {
                 }
                 .clipped()
                 .overlay(alignment: .bottom) {
-                    if !isDenseOverview && (mediaBadgeText != nil || asset.pinnedOffline) {
+                    if !isDenseOverview && (mediaBadgeText != nil || stackBadgeLabel != nil || asset.pinnedOffline) {
                         HStack(spacing: 4) {
                             if let badge = mediaBadgeText {
                                 Text(badge)
@@ -2148,6 +2641,19 @@ struct GalleryCardView: View {
                                     .padding(.vertical, 3)
                                     .background(
                                         .black.opacity(0.58),
+                                        in: RoundedRectangle(cornerRadius: MobileTheme.Radius.cardInnerBadge, style: .continuous)
+                                    )
+                            }
+                            if let stackBadge = stackBadgeLabel {
+                                Text(stackBadge)
+                                    .font(.system(size: 10, weight: .bold).monospacedDigit())
+                                    .foregroundStyle(.white)
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 3)
+                                    .background(
+                                        (store.newerThanPrimaryCount(for: asset) > 0
+                                            ? MobileTheme.warning(for: colorScheme)
+                                            : MobileTheme.accentButtonFill(for: colorScheme)).opacity(0.90),
                                         in: RoundedRectangle(cornerRadius: MobileTheme.Radius.cardInnerBadge, style: .continuous)
                                     )
                             }
@@ -2179,10 +2685,10 @@ struct GalleryCardView: View {
                 .overlay(
                     RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                         .strokeBorder(
-                            (isSelected || isHighlighted)
+                            (isDropTargeted || isSelected || isHighlighted)
                                 ? MobileTheme.accent(for: colorScheme)
                                 : MobileTheme.hairline(for: colorScheme),
-                            lineWidth: isHighlighted ? 3.2 : (isSelected ? 2.5 : 0.5)
+                            lineWidth: isDropTargeted ? 2.5 : (isHighlighted ? 3.2 : (isSelected ? 2.5 : 0.5))
                         )
                 )
                 .shadow(
@@ -2205,6 +2711,16 @@ struct GalleryCardView: View {
             if !isMorphing {
                 desktopParityContextMenu
             }
+        }
+        .dropDestination(for: URL.self) { urls, _ in
+            guard !urls.isEmpty else { return false }
+            let targetKey = primaryAsset.richMetadata?.versionStack?.groupID ?? primaryAsset.id
+            Task {
+                await store.importDroppedURLs(urls, ontoStackTargetID: targetKey, targetFolderID: primaryAsset.folderID)
+            }
+            return true
+        } isTargeted: { targeted in
+            isDropTargeted = targeted
         }
         .task(id: "\(asset.id.uuidString)-\(store.thumbnails.revision)") {
             if store.thumbnails.cachedImage(for: asset.id, tier: .grid520) != nil {
@@ -2252,13 +2768,54 @@ struct GalleryCardView: View {
             Divider()
 
             Button {
-                Task { await store.copyAssetToPasteboard(asset) }
+                Task { await store.copyAssetToPasteboard(primaryAsset) }
             } label: {
-                Label("拷贝", systemImage: "doc.on.doc")
+                Label(hasStack ? "拷贝主版本" : "拷贝", systemImage: "doc.on.doc")
             }
 
             Button(action: onShareOriginal) {
-                Label("分享原图", systemImage: "square.and.arrow.up")
+                Label(hasStack ? "分享主版本（防误发）" : "分享原文件", systemImage: "square.and.arrow.up")
+            }
+
+            if hasStack {
+                if stackSiblings.count >= 2, let onOpenDiff {
+                    let pair = Array(stackSiblings.suffix(2))
+                    Button {
+                        onOpenDiff(pair[0].id, pair[1].id)
+                    } label: {
+                        Label("对比版本差异与合成", systemImage: "arrow.left.arrow.right")
+                    }
+                }
+                Menu {
+                    ForEach(Array(stackSiblings.enumerated()), id: \.element.id) { idx, member in
+                        let v = member.richMetadata?.versionStack?.versionNumber ?? (idx + 1)
+                        let isPrimary = member.id == primaryAsset.id
+                        Button {
+                            Task { await store.setPrimaryVersion(assetID: member.id) }
+                        } label: {
+                            Label(
+                                "v\(v) · \(member.title)" + (isPrimary ? "（当前主版 ✓）" : ""),
+                                systemImage: isPrimary ? "checkmark.seal.fill" : "circle"
+                            )
+                        }
+                    }
+                } label: {
+                    Label("切换主版本…", systemImage: "checkmark.seal")
+                }
+                if let onRequestMergeStack {
+                    Button(action: onRequestMergeStack) {
+                        Label("合并其他版本到此叠…", systemImage: "arrow.triangle.merge")
+                    }
+                }
+                Button {
+                    Task { await store.unstackAsset(assetID: primaryAsset.id) }
+                } label: {
+                    Label("拆出当前主版为独立素材", systemImage: "square.stack.3d.up.slash")
+                }
+            } else if let onRequestMergeStack {
+                Button(action: onRequestMergeStack) {
+                    Label("合并入版本叠…", systemImage: "square.stack.3d.up")
+                }
             }
 
             Divider()
