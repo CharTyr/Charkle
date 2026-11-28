@@ -2,11 +2,12 @@ import AppKit
 import CharkleCanvas
 import CharkleCore
 import PDFKit
+import QuickLookUI
 import SwiftUI
 
 /// Dedicated Quick Look Document Studio supporting:
-/// 1. Native high-craft readers for `.docx`, `.xlsx`, `.pdf`, and `.md` / `.txt`
-/// 2. Multi-modal Version Stack Diff with High-Risk Radar (`全部改动` / `数字与金额` / `日期与时限` / `表格变动` / `原生修订/批注`),
+/// 1. Native high-craft readers for `.docx`/Office (`QLPreviewView` true paper layout + structured blocks/comments), `.xlsx`, `.pdf`, and `.md` / `.txt`
+/// 2. Multi-modal Version Stack Diff with High-Risk Radar (`全部改动` / `数字变动` / `日期时间` / `表格变动` / `原生修订/批注`),
 ///    fold-unchanged toggle, `J / K` keyboard hunk stepping, inline & side-by-side Word/text diff,
 ///    Primary-Key-aligned Excel sheet diff, and scanned PDF offline Vision OCR + Red-Cyan blend + Split Curtain Wipe
 /// 3. Scheme B deterministic 2-Way Merge (`按差异合成新版本`) with complex-block protection guardrails and clean preview.
@@ -19,6 +20,13 @@ public struct QuickLookDocumentStudioView: View {
         case reader
         case diff
         case merge
+
+        public var id: String { rawValue }
+    }
+
+    public enum ReaderPresentationMode: String, CaseIterable, Identifiable, Sendable {
+        case nativeLayout
+        case structuredContent
 
         public var id: String { rawValue }
     }
@@ -46,6 +54,7 @@ public struct QuickLookDocumentStudioView: View {
     public let coordinator: AppCoordinatorStore
 
     @State private var studioMode: StudioMode = .reader
+    @State private var readerPresentationMode: ReaderPresentationMode = .nativeLayout
     @State private var payload: StructuredDocumentPayload? = nil
     @State private var isLoadingPayload: Bool = false
     @State private var showRawMarkdownSource: Bool = false
@@ -109,13 +118,170 @@ public struct QuickLookDocumentStudioView: View {
         library.primaryVersionAsset(for: asset.id) ?? asset
     }
 
+    private var fileExtensionLowercased: String {
+        (asset.fileName as NSString).pathExtension.lowercased()
+    }
+
     private var docFamily: DocumentFormatFamily {
         if let familyStr = payload?.formatFamily ?? asset.richMetadata?.document?.formatFamily,
            let parsed = DocumentFormatFamily(rawValue: familyStr),
            parsed != .other {
             return parsed
         }
-        return DocumentFormatFamily.detect(fileExtension: (asset.fileName as NSString).pathExtension)
+        return DocumentFormatFamily.detect(fileExtension: fileExtensionLowercased)
+    }
+
+    private var supportsNativeOfficeLayout: Bool {
+        Self.supportsNativeOfficeLayoutPreview(formatFamily: docFamily, fileExtension: fileExtensionLowercased)
+    }
+
+    private var isSpreadsheetFamily: Bool {
+        docFamily == .xlsx || !(payload?.sheets.isEmpty ?? true)
+    }
+
+    private var baseVersionBadgeLabel: String {
+        versionShortBadge(for: compareBaseAssetID, fallbackNumber: 1)
+    }
+
+    private var targetVersionBadgeLabel: String {
+        versionShortBadge(for: compareTargetAssetID, fallbackNumber: 2)
+    }
+
+    private func versionShortBadge(for assetID: UUID?, fallbackNumber: Int) -> String {
+        if let assetID {
+            if let idx = siblings.firstIndex(where: { $0.id == assetID }) {
+                let ver = siblings[idx]
+                let vNum = ver.richMetadata?.versionStack?.versionNumber ?? (idx + 1)
+                return "v\(vNum)"
+            }
+            if let ver = library.allAssetsByID[assetID],
+               let vMeta = ver.richMetadata?.versionStack {
+                return "v\(vMeta.versionNumber)"
+            }
+        }
+        return "v\(fallbackNumber)"
+    }
+
+    public static func supportsNativeOfficeLayoutPreview(
+        formatFamily: DocumentFormatFamily,
+        fileExtension: String
+    ) -> Bool {
+        let ext = fileExtension.trimmingCharacters(in: CharacterSet(charactersIn: ".")).lowercased()
+        if ext == "pdf" || formatFamily == .pdf {
+            return false
+        }
+        if ["md", "markdown", "txt", "json", "yaml", "yml", "toml", "csv", "log", "xml", "html", "css", "js", "ts", "py", "swift", "rs"].contains(ext) {
+            return false
+        }
+        if ["docx", "doc", "wps", "odt", "rtf", "rtfd", "pages", "pptx", "ppt", "dps", "odp", "key", "xlsx", "xls", "et", "ods", "numbers"].contains(ext) {
+            return true
+        }
+        switch formatFamily {
+        case .docx, .xlsx, .pptx, .legacyOffice:
+            return true
+        case .pdf, .markdown, .plainText, .epub, .ofd, .other:
+            return false
+        }
+    }
+
+    public static func filterBaseInlineTokens(_ tokens: [DocumentInlineDiffToken]) -> [DocumentInlineDiffToken] {
+        tokens.filter { $0.kind == .equal || $0.kind == .deleted }
+    }
+
+    public static func filterTargetInlineTokens(_ tokens: [DocumentInlineDiffToken]) -> [DocumentInlineDiffToken] {
+        tokens.filter { $0.kind == .equal || $0.kind == .inserted }
+    }
+
+    public static func makeBaseDiffAttributedString(
+        tokens: [DocumentInlineDiffToken],
+        fallbackText: String?,
+        textStyle: CharkleTextStyle = .body,
+        isDark: Bool,
+        negColor: Color,
+        strikeFallbackWhenTokensEmpty: Bool = true
+    ) -> AttributedString {
+        let baseTokens = filterBaseInlineTokens(tokens)
+        let calmInk: Color = isDark ? .white.opacity(0.86) : .black.opacity(0.82)
+        if !baseTokens.isEmpty {
+            var combined = AttributedString()
+            for token in baseTokens {
+                var part = AttributedString(token.text)
+                part.font = CharkleTheme.text(textStyle)
+                switch token.kind {
+                case .equal:
+                    part.foregroundColor = calmInk
+                case .deleted:
+                    part.foregroundColor = negColor
+                    part.strikethroughStyle = .single
+                    part.backgroundColor = negColor.opacity(0.13)
+                    if token.isHighRiskNumber || token.isHighRiskDate {
+                        part.font = CharkleTheme.text(textStyle, weight: .semibold)
+                        part.inlinePresentationIntent = .stronglyEmphasized
+                    }
+                case .inserted:
+                    break
+                }
+                combined.append(part)
+            }
+            if !combined.characters.isEmpty {
+                return combined
+            }
+        }
+        var fallback = AttributedString(fallbackText ?? "")
+        fallback.font = CharkleTheme.text(textStyle)
+        if strikeFallbackWhenTokensEmpty {
+            fallback.foregroundColor = negColor
+            fallback.strikethroughStyle = .single
+            fallback.backgroundColor = negColor.opacity(0.13)
+        } else {
+            fallback.foregroundColor = calmInk
+        }
+        return fallback
+    }
+
+    public static func makeTargetDiffAttributedString(
+        tokens: [DocumentInlineDiffToken],
+        fallbackText: String?,
+        textStyle: CharkleTextStyle = .body,
+        isDark: Bool,
+        posColor: Color,
+        emphasizeFallbackWhenTokensEmpty: Bool = true
+    ) -> AttributedString {
+        let targetTokens = filterTargetInlineTokens(tokens)
+        let calmInk: Color = isDark ? .white.opacity(0.88) : .black.opacity(0.84)
+        if !targetTokens.isEmpty {
+            var combined = AttributedString()
+            for token in targetTokens {
+                var part = AttributedString(token.text)
+                switch token.kind {
+                case .equal:
+                    part.font = CharkleTheme.text(textStyle)
+                    part.foregroundColor = calmInk
+                case .inserted:
+                    part.foregroundColor = posColor
+                    part.backgroundColor = posColor.opacity(0.14)
+                    part.font = CharkleTheme.text(textStyle, weight: .semibold)
+                    part.inlinePresentationIntent = .stronglyEmphasized
+                case .deleted:
+                    break
+                }
+                combined.append(part)
+            }
+            if !combined.characters.isEmpty {
+                return combined
+            }
+        }
+        var fallback = AttributedString(fallbackText ?? "")
+        if emphasizeFallbackWhenTokensEmpty {
+            fallback.foregroundColor = posColor
+            fallback.backgroundColor = posColor.opacity(0.14)
+            fallback.font = CharkleTheme.text(textStyle, weight: .semibold)
+            fallback.inlinePresentationIntent = .stronglyEmphasized
+        } else {
+            fallback.font = CharkleTheme.text(textStyle)
+            fallback.foregroundColor = calmInk
+        }
+        return fallback
     }
 
     private var formatAccent: Color {
@@ -182,12 +348,9 @@ public struct QuickLookDocumentStudioView: View {
             )
         )
         .background {
-            DocumentStudioKeyBridge(
-                isEnabled: studioMode == .diff,
-                onStepHunk: { delta in
-                    stepFocusedHunk(delta: delta)
-                }
-            )
+            WindowKeyEventBridge { event, hostWindow in
+                handleStudioKeyDown(event, in: hostWindow)
+            }
             .allowsHitTesting(false)
         }
         .task(id: asset.id) {
@@ -393,7 +556,7 @@ public struct QuickLookDocumentStudioView: View {
         .buttonStyle(CharkleTactileButtonStyle())
     }
 
-    // MARK: - Mode 1: Clean Native Reader (.docx / .xlsx / .pdf / .md / .txt)
+    // MARK: - Mode 1: Clean Native Reader (.docx / Office QLPreviewView + Structured Blocks / .xlsx / .pdf / .md / .txt)
 
     @ViewBuilder
     private var readerStageBody: some View {
@@ -417,6 +580,42 @@ public struct QuickLookDocumentStudioView: View {
                 QuickLookPDFView(url: url)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
+        } else if supportsNativeOfficeLayout, let url = originalURL {
+            VStack(spacing: 0) {
+                officeReaderModeBar
+
+                Rectangle()
+                    .fill(CharkleTheme.hairline(for: colorScheme))
+                    .frame(height: CharkleTheme.hairlineWidth)
+
+                if readerPresentationMode == .nativeLayout {
+                    NativeOfficeQLPreviewRepresentable(url: url)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if isLoadingPayload && payload == nil {
+                    VStack(spacing: 10) {
+                        ProgressView().controlSize(.regular)
+                        Text("正在解析文档结构与批注…")
+                            .font(CharkleTheme.text(.caption))
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if let p = payload, !p.sheets.isEmpty {
+                    spreadsheetReaderView(p)
+                } else if let p = payload {
+                    structuredDocumentReaderView(p)
+                } else {
+                    VStack(spacing: 8) {
+                        Text("暂未提取到结构化段落，可切换回原版版式预览")
+                            .font(CharkleTheme.text(.body, weight: .medium))
+                            .foregroundStyle(.secondary)
+                        Button("切回原版版式") {
+                            readerPresentationMode = .nativeLayout
+                        }
+                        .buttonStyle(CharkleButtonStyle(.standard, size: .sm))
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            }
         } else if isLoadingPayload && payload == nil {
             VStack(spacing: 10) {
                 ProgressView().controlSize(.regular)
@@ -427,7 +626,7 @@ public struct QuickLookDocumentStudioView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if let p = payload, !p.sheets.isEmpty {
             spreadsheetReaderView(p)
-        } else if docFamily == .markdown || docFamily == .plainText {
+        } else if (docFamily == .markdown || docFamily == .plainText) && !supportsNativeOfficeLayout {
             markdownOrTextReaderView
         } else if let p = payload {
             structuredDocumentReaderView(p)
@@ -443,6 +642,95 @@ public struct QuickLookDocumentStudioView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+    }
+
+    private var officeReaderModeBar: some View {
+        let structuredTitle = isSpreadsheetFamily ? "结构化表格" : "结构与批注"
+        let structuredIcon = isSpreadsheetFamily ? "tablecells" : "text.bubble"
+        let commentCount = payload?.comments.count ?? 0
+
+        return HStack(spacing: 10) {
+            HStack(spacing: 6) {
+                Image(systemName: readerPresentationMode == .nativeLayout ? "doc.richtext" : structuredIcon)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.secondary)
+                Text(
+                    readerPresentationMode == .nativeLayout
+                        ? (isSpreadsheetFamily ? "原版工作簿版式预览" : "原版纸面版式预览")
+                        : (isSpreadsheetFamily ? "结构化数据与公式网格（悬停 fx 查看公式）" : "结构化正文与原生批注（可直接选取复制）")
+                )
+                .font(CharkleTheme.text(.caption, weight: .medium))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            }
+
+            Spacer(minLength: 10)
+
+            HStack(spacing: 2) {
+                readerPresentationCapsule(
+                    .nativeLayout,
+                    title: "原版版式",
+                    icon: "doc.richtext",
+                    badgeCount: nil
+                )
+                readerPresentationCapsule(
+                    .structuredContent,
+                    title: structuredTitle,
+                    icon: structuredIcon,
+                    badgeCount: (!isSpreadsheetFamily && commentCount > 0) ? commentCount : nil
+                )
+            }
+            .padding(2)
+            .background(
+                CharkleTheme.surfaceSubtle(for: colorScheme),
+                in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous)
+            )
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 6)
+    }
+
+    private func readerPresentationCapsule(
+        _ mode: ReaderPresentationMode,
+        title: String,
+        icon: String,
+        badgeCount: Int?
+    ) -> some View {
+        let selected = readerPresentationMode == mode
+        let innerR = CharkleTheme.Radius.concentricInner(outer: CharkleTheme.Radius.chip, padding: 2)
+        return Button {
+            withAnimation(CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion)) {
+                readerPresentationMode = mode
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: icon)
+                    .font(.system(size: 10.5, weight: .semibold))
+                Text(title)
+                    .font(CharkleTheme.text(.caption, weight: selected ? .semibold : .medium))
+                if let badgeCount, badgeCount > 0 {
+                    Text("\(badgeCount)")
+                        .font(CharkleTheme.text(.caption, weight: .bold))
+                        .monospacedDigit()
+                        .foregroundStyle(selected ? activeAccent : .secondary)
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 0.5)
+                        .background(
+                            (selected ? activeAccent : Color.primary).opacity(0.12),
+                            in: Capsule(style: .continuous)
+                        )
+                }
+            }
+            .foregroundStyle(selected ? .primary : .secondary)
+            .padding(.horizontal, 8.5)
+            .padding(.vertical, 3.5)
+            .background(
+                selected ? CharkleTheme.surfaceElevated(for: colorScheme) : Color.clear,
+                in: RoundedRectangle(cornerRadius: innerR, style: .continuous)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: innerR, style: .continuous))
+        }
+        .buttonStyle(.plain)
     }
 
     private func spreadsheetReaderView(_ doc: StructuredDocumentPayload) -> some View {
@@ -1184,9 +1472,16 @@ public struct QuickLookDocumentStudioView: View {
             if !hunk.highRiskPairs.isEmpty {
                 HStack(spacing: 8) {
                     ForEach(hunk.highRiskPairs) { pair in
+                        let pairIconName: String = {
+                            switch pair.flag {
+                            case .numberOrCurrency: "number.circle.fill"
+                            case .dateOrDeadline: "clock.fill"
+                            default: "exclamationmark.triangle.fill"
+                            }
+                        }()
                         HStack(spacing: 4) {
-                            Image(systemName: "exclamationmark.triangle.fill")
-                                .font(.system(size: 9.5))
+                            Image(systemName: pairIconName)
+                                .font(.system(size: 10.5))
                                 .foregroundStyle(negColor)
                             if let oldV = pair.oldValue {
                                 Text(oldV)
@@ -1235,27 +1530,77 @@ public struct QuickLookDocumentStudioView: View {
                 }
             } else if textDiffLayout == .sideBySide {
                 HStack(alignment: .top, spacing: 10) {
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("旧版")
-                            .font(CharkleTheme.text(.caption, weight: .semibold))
-                            .foregroundStyle(.tertiary)
-                        Text(hunk.baseText ?? "（无此段落）")
-                            .font(CharkleTheme.text(.body))
-                            .foregroundStyle(hunk.baseText == nil ? .tertiary : .primary)
-                            .textSelection(.enabled)
+                    VStack(alignment: .leading, spacing: 6) {
+                        diffVersionColumnHeader(
+                            icon: "minus.circle.fill",
+                            tint: negColor,
+                            versionBadge: baseVersionBadgeLabel,
+                            tooltip: "修改前基准版本（\(baseVersionBadgeLabel)）"
+                        )
+                        if let baseText = hunk.baseText {
+                            if !hunk.inlineTokens.isEmpty && hunk.changeKind != .unchanged {
+                                Text(
+                                    Self.makeBaseDiffAttributedString(
+                                        tokens: hunk.inlineTokens,
+                                        fallbackText: baseText,
+                                        textStyle: .body,
+                                        isDark: colorScheme == .dark,
+                                        negColor: negColor
+                                    )
+                                )
+                                .font(CharkleTheme.text(.body))
+                                .lineSpacing(3)
+                                .textSelection(.enabled)
+                            } else {
+                                Text(baseText)
+                                    .font(CharkleTheme.text(.body))
+                                    .foregroundStyle(.primary)
+                                    .lineSpacing(3)
+                                    .textSelection(.enabled)
+                            }
+                        } else {
+                            Text("（无此段落）")
+                                .font(CharkleTheme.text(.body))
+                                .foregroundStyle(.tertiary)
+                        }
                     }
                     .padding(10)
                     .frame(maxWidth: .infinity, alignment: .topLeading)
                     .background(negColor.opacity(hunk.changeKind == .unchanged ? 0 : 0.06), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.sm, style: .continuous))
 
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("新版")
-                            .font(CharkleTheme.text(.caption, weight: .semibold))
-                            .foregroundStyle(.tertiary)
-                        Text(hunk.targetText ?? "（已删除）")
-                            .font(CharkleTheme.text(.body))
-                            .foregroundStyle(hunk.targetText == nil ? .tertiary : .primary)
-                            .textSelection(.enabled)
+                    VStack(alignment: .leading, spacing: 6) {
+                        diffVersionColumnHeader(
+                            icon: "plus.circle.fill",
+                            tint: posColor,
+                            versionBadge: targetVersionBadgeLabel,
+                            tooltip: "修改后对比版本（\(targetVersionBadgeLabel)）"
+                        )
+                        if let targetText = hunk.targetText {
+                            if !hunk.inlineTokens.isEmpty && hunk.changeKind != .unchanged {
+                                Text(
+                                    Self.makeTargetDiffAttributedString(
+                                        tokens: hunk.inlineTokens,
+                                        fallbackText: targetText,
+                                        textStyle: .body,
+                                        isDark: colorScheme == .dark,
+                                        posColor: posColor
+                                    )
+                                )
+                                .font(CharkleTheme.text(.body))
+                                .lineSpacing(3)
+                                .textSelection(.enabled)
+                            } else {
+                                Text(targetText)
+                                    .font(CharkleTheme.text(.body))
+                                    .foregroundStyle(.primary)
+                                    .lineSpacing(3)
+                                    .textSelection(.enabled)
+                            }
+                        } else {
+                            Text("（已删除）")
+                                .font(CharkleTheme.text(.body))
+                                .foregroundStyle(.tertiary)
+                        }
                     }
                     .padding(10)
                     .frame(maxWidth: .infinity, alignment: .topLeading)
@@ -1264,20 +1609,59 @@ public struct QuickLookDocumentStudioView: View {
             } else if !hunk.inlineTokens.isEmpty {
                 inlineDiffAttributedText(hunk.inlineTokens, posColor: posColor, negColor: negColor)
                     .textSelection(.enabled)
+            } else if hunk.changeKind == .unchanged || hunk.changeKind == .moved {
+                Text(hunk.targetText ?? hunk.baseText ?? "")
+                    .font(CharkleTheme.text(.body))
+                    .foregroundStyle(.primary)
+                    .lineSpacing(3)
+                    .textSelection(.enabled)
             } else {
-                VStack(alignment: .leading, spacing: 4) {
-                    if let oldText = hunk.baseText, hunk.changeKind != .unchanged, oldText != hunk.targetText {
-                        Text(oldText)
+                VStack(alignment: .leading, spacing: 6) {
+                    if let oldText = hunk.baseText, oldText != hunk.targetText {
+                        HStack(alignment: .top, spacing: 8) {
+                            diffVersionGutterBadge(
+                                icon: "minus.circle.fill",
+                                tint: negColor,
+                                versionBadge: baseVersionBadgeLabel,
+                                tooltip: "修改前（\(baseVersionBadgeLabel)）"
+                            )
+                            Text(
+                                Self.makeBaseDiffAttributedString(
+                                    tokens: [],
+                                    fallbackText: oldText,
+                                    textStyle: .body,
+                                    isDark: colorScheme == .dark,
+                                    negColor: negColor
+                                )
+                            )
                             .font(CharkleTheme.text(.body))
-                            .strikethrough(true, color: negColor)
-                            .foregroundStyle(negColor.opacity(0.88))
+                            .lineSpacing(3)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                             .textSelection(.enabled)
+                        }
                     }
                     if let newText = hunk.targetText {
-                        Text(newText)
+                        HStack(alignment: .top, spacing: 8) {
+                            diffVersionGutterBadge(
+                                icon: "plus.circle.fill",
+                                tint: posColor,
+                                versionBadge: targetVersionBadgeLabel,
+                                tooltip: "修改后（\(targetVersionBadgeLabel)）"
+                            )
+                            Text(
+                                Self.makeTargetDiffAttributedString(
+                                    tokens: [],
+                                    fallbackText: newText,
+                                    textStyle: .body,
+                                    isDark: colorScheme == .dark,
+                                    posColor: posColor
+                                )
+                            )
                             .font(CharkleTheme.text(.body))
-                            .foregroundStyle(hunk.changeKind == .added || hunk.changeKind == .modified ? posColor : .primary)
+                            .lineSpacing(3)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                             .textSelection(.enabled)
+                        }
                     }
                 }
             }
@@ -1292,6 +1676,50 @@ public struct QuickLookDocumentStudioView: View {
                     lineWidth: isFocused ? 1.5 : CharkleTheme.hairlineWidth
                 )
         )
+    }
+
+    private func diffVersionColumnHeader(
+        icon: String,
+        tint: Color,
+        versionBadge: String,
+        tooltip: String
+    ) -> some View {
+        HStack(spacing: 5) {
+            Image(systemName: icon)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(tint)
+            Text(versionBadge)
+                .font(CharkleTheme.text(.caption, weight: .bold))
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 5)
+                .padding(.vertical, 1)
+                .background(tint.opacity(0.12), in: Capsule(style: .continuous))
+        }
+        .help(tooltip)
+    }
+
+    private func diffVersionGutterBadge(
+        icon: String,
+        tint: Color,
+        versionBadge: String,
+        tooltip: String
+    ) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: icon)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(tint)
+            Text(versionBadge)
+                .font(CharkleTheme.text(.caption, weight: .bold))
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 5.5)
+        .padding(.vertical, 2)
+        .background(tint.opacity(0.11), in: Capsule(style: .continuous))
+        .fixedSize()
+        .padding(.top, 1)
+        .help(tooltip)
     }
 
     private func inlineDiffAttributedText(
@@ -1572,6 +2000,8 @@ public struct QuickLookDocumentStudioView: View {
                     PDFSplitCurtainComparisonView(
                         baseImage: baseImg,
                         targetImage: targetImg,
+                        baseBadge: baseVersionBadgeLabel,
+                        targetBadge: targetVersionBadgeLabel,
                         curtainFraction: $curtainFraction
                     )
                     .padding(14)
@@ -1834,17 +2264,105 @@ public struct QuickLookDocumentStudioView: View {
                 .padding(9)
                 .background(CharkleTheme.surfaceElevated(for: colorScheme), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.sm, style: .continuous))
             } else {
-                VStack(alignment: .leading, spacing: 3) {
-                    if let oldT = hunk.baseText {
-                        Text("旧版：\(oldT)")
-                            .font(CharkleTheme.text(.caption))
-                            .strikethrough(activeChoice == .acceptTarget, color: negColor)
-                            .foregroundStyle(activeChoice == .keepBase ? warnColor : .secondary)
+                let innerRowRadius = CharkleTheme.Radius.concentricInner(outer: CharkleTheme.Radius.cardOuter, padding: 6)
+                let isBaseChosen = activeChoice == .keepBase
+                let isTargetChosen = activeChoice == .acceptTarget
+                let hasBaseContent = hunk.baseText != nil || hunk.inlineTokens.contains(where: { $0.kind != .inserted })
+                let hasTargetContent = hunk.targetText != nil || hunk.inlineTokens.contains(where: { $0.kind != .deleted })
+
+                VStack(alignment: .leading, spacing: 6) {
+                    if hasBaseContent || isBaseChosen {
+                        HStack(alignment: .top, spacing: 8) {
+                            ZStack {
+                                Circle()
+                                    .fill(negColor.opacity(colorScheme == .dark ? 0.16 : 0.10))
+                                Image(systemName: "minus.circle.fill")
+                                    .font(.system(size: 12.5, weight: .semibold))
+                                    .foregroundStyle(negColor)
+                            }
+                            .frame(width: 18, height: 18)
+                            .padding(.top, 1)
+                            .help("修改前（旧版）")
+
+                            if hasBaseContent {
+                                Text(
+                                    Self.makeBaseDiffAttributedString(
+                                        tokens: hunk.inlineTokens,
+                                        fallbackText: hunk.baseText,
+                                        textStyle: .body,
+                                        isDark: colorScheme == .dark,
+                                        negColor: negColor
+                                    )
+                                )
+                                .font(CharkleTheme.text(.body))
+                                .lineSpacing(3)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .textSelection(.enabled)
+                            } else {
+                                Text("（修改前无此段落，保留该项将省略）")
+                                    .font(CharkleTheme.text(.caption))
+                                    .foregroundStyle(.secondary)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                        }
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 7)
+                        .background(
+                            isBaseChosen ? CharkleTheme.surfaceElevated(for: colorScheme) : Color.clear,
+                            in: RoundedRectangle(cornerRadius: innerRowRadius, style: .continuous)
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: innerRowRadius, style: .continuous)
+                                .strokeBorder(isBaseChosen ? negColor.opacity(0.42) : Color.clear, lineWidth: 1)
+                        )
+                        .opacity(isBaseChosen ? 1.0 : 0.72)
                     }
-                    if let newT = hunk.targetText {
-                        Text("新版：\(newT)")
-                            .font(CharkleTheme.text(.caption, weight: activeChoice == .acceptTarget ? .semibold : .regular))
-                            .foregroundStyle(activeChoice == .acceptTarget ? posColor : .secondary)
+
+                    if hasTargetContent || isTargetChosen {
+                        HStack(alignment: .top, spacing: 8) {
+                            ZStack {
+                                Circle()
+                                    .fill(posColor.opacity(colorScheme == .dark ? 0.16 : 0.10))
+                                Image(systemName: "plus.circle.fill")
+                                    .font(.system(size: 12.5, weight: .semibold))
+                                    .foregroundStyle(posColor)
+                            }
+                            .frame(width: 18, height: 18)
+                            .padding(.top, 1)
+                            .help("修改后（新版）")
+
+                            if hasTargetContent {
+                                Text(
+                                    Self.makeTargetDiffAttributedString(
+                                        tokens: hunk.inlineTokens,
+                                        fallbackText: hunk.targetText,
+                                        textStyle: .body,
+                                        isDark: colorScheme == .dark,
+                                        posColor: posColor
+                                    )
+                                )
+                                .font(CharkleTheme.text(.body))
+                                .lineSpacing(3)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .textSelection(.enabled)
+                            } else {
+                                Text("（修改后已删除该段落，采用该项将移除）")
+                                    .font(CharkleTheme.text(.caption))
+                                    .foregroundStyle(.secondary)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                        }
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 7)
+                        .background(
+                            isTargetChosen ? CharkleTheme.surfaceElevated(for: colorScheme) : Color.clear,
+                            in: RoundedRectangle(cornerRadius: innerRowRadius, style: .continuous)
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: innerRowRadius, style: .continuous)
+                                .strokeBorder(isTargetChosen ? posColor.opacity(0.45) : Color.clear, lineWidth: 1)
+                        )
+                        .opacity(isTargetChosen ? 1.0 : 0.72)
                     }
                 }
             }
@@ -2030,6 +2548,89 @@ public struct QuickLookDocumentStudioView: View {
         } while n >= 0
         return letters
     }
+
+    private func handleStudioKeyDown(_ event: NSEvent, in hostWindow: NSWindow) -> NSEvent? {
+        guard hostWindow.attachedSheet == nil, NSApp.modalWindow == nil else {
+            return event
+        }
+        let targetWindow = event.window ?? hostWindow
+        if let textInput = targetWindow.firstResponder as? any NSTextInputClient, textInput.hasMarkedText() {
+            return event
+        }
+        if let resp = targetWindow.firstResponder {
+            if let tv = resp as? NSTextView, tv.isEditable {
+                return event
+            }
+            if let tf = resp as? NSTextField, tf.isEditable {
+                return event
+            }
+        }
+        let flags = event.modifierFlags.intersection([.command, .option, .control, .shift])
+        guard flags.isEmpty else {
+            return event
+        }
+        // Deterministic Space / Esc Quick Look dismissal even when QLPreviewView or PDFView holds read-only focus
+        if event.keyCode == 49 || event.keyCode == 53 {
+            guard coordinator.quickLookAssetID != nil else { return event }
+            if !event.isARepeat {
+                hostWindow.makeFirstResponder(nil)
+                coordinator.requestQuickLookDismiss()
+            }
+            return nil
+        }
+        if studioMode == .diff, let chars = event.charactersIgnoringModifiers?.lowercased() {
+            if chars == "j" {
+                stepFocusedHunk(delta: 1)
+                return nil
+            }
+            if chars == "k" {
+                stepFocusedHunk(delta: -1)
+                return nil
+            }
+        }
+        return event
+    }
+}
+
+// MARK: - Native Office / Rich-Layout QuickLook Preview (`QLPreviewView`)
+
+struct NativeOfficeQLPreviewRepresentable: NSViewRepresentable {
+    let url: URL
+
+    final class Coordinator {
+        var currentURL: URL?
+        var isClosed: Bool = false
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    func makeNSView(context: Context) -> QLPreviewView {
+        let maybePreview: QLPreviewView? = QLPreviewView(frame: .zero, style: .normal)
+        let previewView = maybePreview ?? QLPreviewView()
+        previewView.autostarts = true
+        previewView.shouldCloseWithWindow = false
+        context.coordinator.currentURL = url
+        previewView.previewItem = url as NSURL
+        return previewView
+    }
+
+    func updateNSView(_ nsView: QLPreviewView, context: Context) {
+        guard !context.coordinator.isClosed else { return }
+        if context.coordinator.currentURL != url {
+            context.coordinator.currentURL = url
+            nsView.previewItem = url as NSURL
+        }
+    }
+
+    static func dismantleNSView(_ nsView: QLPreviewView, coordinator: Coordinator) {
+        guard !coordinator.isClosed else { return }
+        coordinator.isClosed = true
+        coordinator.currentURL = nil
+        nsView.previewItem = nil
+        nsView.close()
+    }
 }
 
 // MARK: - Interactive PDF Split Curtain Wipe View
@@ -2037,6 +2638,8 @@ public struct QuickLookDocumentStudioView: View {
 private struct PDFSplitCurtainComparisonView: View {
     let baseImage: NSImage
     let targetImage: NSImage
+    let baseBadge: String
+    let targetBadge: String
     @Binding var curtainFraction: CGFloat
 
     var body: some View {
@@ -2074,19 +2677,31 @@ private struct PDFSplitCurtainComparisonView: View {
                 // Corner badges
                 VStack {
                     HStack {
-                        Text("旧版")
-                            .font(CharkleTheme.text(.caption, weight: .bold))
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 7)
-                            .padding(.vertical, 3)
-                            .background(Color.black.opacity(0.62), in: Capsule(style: .continuous))
+                        HStack(spacing: 4) {
+                            Image(systemName: "minus.circle.fill")
+                                .font(.system(size: 10.5, weight: .semibold))
+                            Text(baseBadge)
+                                .font(CharkleTheme.text(.caption, weight: .bold))
+                                .monospacedDigit()
+                        }
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3)
+                        .background(Color.black.opacity(0.62), in: Capsule(style: .continuous))
+
                         Spacer()
-                        Text("新版")
-                            .font(CharkleTheme.text(.caption, weight: .bold))
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 7)
-                            .padding(.vertical, 3)
-                            .background(Color(charkleHex: "#2A60E0").opacity(0.86), in: Capsule(style: .continuous))
+
+                        HStack(spacing: 4) {
+                            Image(systemName: "plus.circle.fill")
+                                .font(.system(size: 10.5, weight: .semibold))
+                            Text(targetBadge)
+                                .font(CharkleTheme.text(.caption, weight: .bold))
+                                .monospacedDigit()
+                        }
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3)
+                        .background(Color(charkleHex: "#2A60E0").opacity(0.86), in: Capsule(style: .continuous))
                     }
                     .padding(10)
                     Spacer()
@@ -2125,86 +2740,6 @@ private struct PDFSplitCurtainComparisonView: View {
                     }
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
-    }
-}
-
-// MARK: - J / K Hunk Keyboard Stepper Bridge
-
-private struct DocumentStudioKeyBridge: NSViewRepresentable {
-    let isEnabled: Bool
-    let onStepHunk: (Int) -> Void
-
-    func makeNSView(context: Context) -> BridgeView {
-        let view = BridgeView()
-        view.isEnabled = isEnabled
-        view.onStepHunk = onStepHunk
-        return view
-    }
-
-    func updateNSView(_ nsView: BridgeView, context: Context) {
-        nsView.isEnabled = isEnabled
-        nsView.onStepHunk = onStepHunk
-    }
-
-    static func dismantleNSView(_ nsView: BridgeView, coordinator: ()) {
-        nsView.teardown()
-    }
-
-    final class BridgeView: NSView {
-        var isEnabled: Bool = false
-        var onStepHunk: ((Int) -> Void)?
-        private var monitor: Any?
-
-        override func hitTest(_ point: NSPoint) -> NSView? { nil }
-
-        override func viewDidMoveToWindow() {
-            super.viewDidMoveToWindow()
-            if window != nil {
-                if monitor == nil {
-                    monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-                        guard let self,
-                              self.isEnabled,
-                              let hostWindow = self.window,
-                              event.window === hostWindow,
-                              hostWindow.attachedSheet == nil,
-                              NSApp?.modalWindow == nil,
-                              !self.isHiddenOrHasHiddenAncestor else {
-                            return event
-                        }
-                        if let resp = hostWindow.firstResponder,
-                           resp is NSTextView || resp is NSTextField || resp is NSText {
-                            return event
-                        }
-                        let flags = event.modifierFlags.intersection([.command, .option, .control, .shift])
-                        guard flags.isEmpty, let chars = event.charactersIgnoringModifiers?.lowercased() else {
-                            return event
-                        }
-                        if chars == "j" {
-                            self.onStepHunk?(1)
-                            return nil
-                        }
-                        if chars == "k" {
-                            self.onStepHunk?(-1)
-                            return nil
-                        }
-                        return event
-                    }
-                }
-            } else {
-                teardown()
-            }
-        }
-
-        func teardown() {
-            if let monitor {
-                NSEvent.removeMonitor(monitor)
-                self.monitor = nil
-            }
-        }
-
-        isolated deinit {
-            teardown()
         }
     }
 }
