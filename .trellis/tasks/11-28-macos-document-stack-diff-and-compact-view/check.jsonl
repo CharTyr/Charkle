@@ -1,0 +1,4 @@
+{"file": ".trellis/spec/cross-platform/index.md", "reason": "Verify /.charkle/ wire compatibility for versionStack, document, compactList, and MediaKind extensions"}
+{"file": ".trellis/spec/macos/native-design-system.md", "reason": "Verify macOS native controls, Menu(.borderlessButton) sizing, SF Symbol validity, and zero-flicker drawers"}
+{"file": "DESIGN.md", "reason": "Verify neutral canvas, zero violet hues, monospacedDigit metrics, and reduced-motion compliance"}
+{"file": "AGENTS.md", "reason": "Verify zero SwiftUI in CharkleCore, iOS simulator buildability, and zero external competitor/author mentions"}
