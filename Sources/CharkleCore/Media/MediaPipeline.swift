@@ -123,6 +123,18 @@ public nonisolated struct MediaPipeline: Sendable {
         }
     }
 
+    public static let richLayoutDocumentExtensions: Set<String> = [
+        "docx", "doc", "wps",
+        "xlsx", "xls", "et", "ods",
+        "pptx", "ppt", "dps", "odp",
+        "rtf", "pages", "numbers", "key",
+        "odt", "epub", "ofd"
+    ]
+
+    public static func isRichLayoutDocumentExtension(_ ext: String) -> Bool {
+        richLayoutDocumentExtensions.contains(ext.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())
+    }
+
     static func fileExistsFast(_ url: URL) -> Bool {
         url.withUnsafeFileSystemRepresentation { path in
             guard let path else { return false }
@@ -436,31 +448,46 @@ public nonisolated struct MediaPipeline: Sendable {
             asset.richMetadata = rich
 
             let excerptForAssetRecord = plain.isEmpty ? nil : String(plain.prefix(2_000))
-            if ext == "pdf", let pdfRender = Self.pdf(file) {
-                render = MediaRender(
-                    pdfRender.poster,
-                    width: pdfRender.width,
-                    height: pdfRender.height,
-                    duration: pdfRender.duration,
-                    text: excerptForAssetRecord ?? pdfRender.text
-                )
-            } else {
-                var firstPagePreview: CGImage?
-                if (parsedDocument?.payload.blocks.isEmpty ?? true) && (parsedDocument?.payload.sheets.isEmpty ?? true) {
-                    firstPagePreview = await Self.quickLook(file)?.poster
+            if ext == "pdf" {
+                if let pdfRender = Self.pdf(file) {
+                    render = MediaRender(
+                        pdfRender.poster,
+                        width: pdfRender.width,
+                        height: pdfRender.height,
+                        duration: pdfRender.duration,
+                        text: excerptForAssetRecord ?? pdfRender.text
+                    )
+                } else if let ql = await Self.quickLook(file, scale: 2), ql.width >= 160, ql.height >= 160 {
+                    render = MediaRender(ql.poster, width: ql.width, height: ql.height, text: excerptForAssetRecord)
                 }
+            } else if Self.isRichLayoutDocumentExtension(ext) {
+                if let ql = await Self.quickLook(file, scale: 2), ql.width >= 160, ql.height >= 160 {
+                    render = MediaRender(
+                        ql.poster,
+                        width: ql.width,
+                        height: ql.height,
+                        text: excerptForAssetRecord
+                    )
+                } else if let docCard = MediaArtwork.documentCard(
+                    title: asset.title,
+                    fileExtension: ext,
+                    payload: parsedDocument?.payload,
+                    firstPageImage: nil,
+                    versionStack: rich.versionStack
+                ) {
+                    render = MediaRender(docCard, text: excerptForAssetRecord)
+                }
+            } else {
                 if let docCard = MediaArtwork.documentCard(
                     title: asset.title,
                     fileExtension: ext,
                     payload: parsedDocument?.payload,
-                    firstPageImage: firstPagePreview,
+                    firstPageImage: nil,
                     versionStack: rich.versionStack
                 ) {
                     render = MediaRender(docCard, text: excerptForAssetRecord)
-                } else if let pageImg = firstPagePreview {
-                    render = MediaRender(pageImg, text: excerptForAssetRecord)
-                } else if render == nil {
-                    render = await Self.quickLook(file)
+                } else if let ql = await Self.quickLook(file, scale: 2), ql.width >= 160, ql.height >= 160 {
+                    render = MediaRender(ql.poster, width: ql.width, height: ql.height, text: excerptForAssetRecord)
                 }
             }
         case .designFile:
@@ -634,9 +661,9 @@ public nonisolated struct MediaPipeline: Sendable {
                            text: String(text.prefix(8_000)))
     }
 
-    private static func quickLook(_ url: URL) async -> MediaRender? {
+    static func quickLook(_ url: URL, scale: CGFloat = 2) async -> MediaRender? {
         let request = QLThumbnailGenerator.Request(fileAt: url, size: CGSize(width: 1_400, height: 1_400),
-                                                    scale: 1, representationTypes: .thumbnail)
+                                                    scale: scale, representationTypes: .thumbnail)
         return await withCheckedContinuation { continuation in
             QLThumbnailGenerator.shared.generateBestRepresentation(for: request) { image, _ in
                 continuation.resume(returning: image.map { MediaRender($0.cgImage) })

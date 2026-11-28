@@ -574,6 +574,43 @@ extension LiveCharkleEngine {
         for var asset in assets where asset.mediaKind == .document {
             let ext = (asset.fileName as NSString).pathExtension.lowercased()
             guard ext != "pdf" else { continue }
+
+            // Never clobber rich-layout / Office page thumbnails with procedural `documentCard`:
+            // preserve existing `QLThumbnailGenerator` page renders, or upgrade legacy `900x1240` procedural posters when original is cached.
+            if MediaPipeline.isRichLayoutDocumentExtension(ext) {
+                let hasRealPageThumb = media.thumbnailURL(for: asset.id, tier: .grid520) != nil
+                    && !(asset.pixelWidth == 900 && asset.pixelHeight == 1_240)
+                if hasRealPageThumb {
+                    continue
+                }
+                guard let localOriginal = media.cachedOriginal(for: asset),
+                      let ql = await MediaPipeline.quickLook(localOriginal, scale: 2),
+                      ql.width >= 160, ql.height >= 160 else {
+                    continue
+                }
+                do {
+                    try media.writeCustomPoster(ql.poster, for: &asset)
+                    let newW = asset.pixelWidth
+                    let newH = asset.pixelHeight
+                    let newColors = asset.dominantColors
+                    let id = asset.id
+                    _ = try await database.transaction { store -> AssetRecord? in
+                        guard var latest = try store.asset(id: id) else { return nil }
+                        latest.pixelWidth = newW
+                        latest.pixelHeight = newH
+                        latest.dominantColors = newColors
+                        let saved = try store.saveAssetLocally(latest)
+                        if currentSync.syncThumbnails {
+                            try store.markProjection("thumbnails", id: id)
+                        }
+                        return saved
+                    }
+                } catch {
+                    continue
+                }
+                continue
+            }
+
             let cached = try? await database.cachedStructuredDocument(assetID: asset.id, expectedContentHash: asset.contentHash)
             guard let card = MediaArtwork.documentCard(
                 title: asset.title,
@@ -603,6 +640,67 @@ extension LiveCharkleEngine {
                 continue
             }
         }
+    }
+
+    /// Idempotent startup migration that scans active rich-layout / Office `.document` assets still carrying
+    /// legacy procedural `900x1240` dimensions (or missing grid thumbnails), re-renders them via `MediaPipeline.refreshed`
+    /// (`QLThumbnailGenerator` true page raster), and persists updated `pixelWidth`/`pixelHeight`/`dominantColors`.
+    public func upgradeLegacyOfficeDocumentThumbnailsIfNeeded() async -> [UUID] {
+        guard !isUpgradingOfficeThumbnails else { return [] }
+        isUpgradingOfficeThumbnails = true
+        defer { isUpgradingOfficeThumbnails = false }
+
+        guard let docAssets = try? await database.fetchAssets(
+            matching: FilterCriteria(kinds: [.document], includeTrashed: false)
+        ) else {
+            return []
+        }
+
+        let candidates = docAssets.filter { asset in
+            guard !attemptedOfficeThumbnailUpgradeIDs.contains(asset.id) else { return false }
+            let ext = (asset.fileName as NSString).pathExtension.lowercased()
+            guard MediaPipeline.isRichLayoutDocumentExtension(ext) else { return false }
+            let isLegacyProceduralSize = (asset.pixelWidth == 900 && asset.pixelHeight == 1_240)
+            let isMissingThumb = media.thumbnailURL(for: asset.id, tier: .grid520) == nil
+            return isLegacyProceduralSize || isMissingThumb
+        }
+        guard !candidates.isEmpty else { return [] }
+
+        let currentSync = await syncConfig()
+        var upgradedIDs: [UUID] = []
+
+        for candidate in candidates {
+            guard !Task.isCancelled else { break }
+            attemptedOfficeThumbnailUpgradeIDs.insert(candidate.id)
+            guard let localOriginal = media.cachedOriginal(for: candidate) else { continue }
+            do {
+                let reRendered = try await media.refreshed(candidate, from: localOriginal)
+                guard !(reRendered.pixelWidth == 900 && reRendered.pixelHeight == 1_240) else {
+                    continue
+                }
+                let id = candidate.id
+                let newW = reRendered.pixelWidth
+                let newH = reRendered.pixelHeight
+                let newColors = reRendered.dominantColors
+                let saved = try await database.transaction { store -> AssetRecord? in
+                    guard var latest = try store.asset(id: id) else { return nil }
+                    latest.pixelWidth = newW
+                    latest.pixelHeight = newH
+                    latest.dominantColors = newColors
+                    let updated = try store.saveAssetLocally(latest)
+                    if currentSync.syncThumbnails {
+                        try store.markProjection("thumbnails", id: id)
+                    }
+                    return updated
+                }
+                if let saved {
+                    upgradedIDs.append(saved.id)
+                }
+            } catch {
+                continue
+            }
+        }
+        return upgradedIDs
     }
 
     private func reloadStackAssets(ids: [UUID]) async throws -> [AssetRecord] {
@@ -861,7 +959,59 @@ extension LiveCharkleEngine {
                 adoptTargetFolder: true
             )
         )
-        return updatedStack.first(where: { $0.id == created.id }) ?? created
+        var joinedCreated = updatedStack.first(where: { $0.id == created.id }) ?? created
+
+        // Guarantee `diffSummary` is computed and attached against the immediately preceding stack version
+        // (or against `baseAsset` when `vN+1` matches `previousTip` identically) so Revision Rail shows `Δ X处`.
+        let ordered = AssetVersionStackMetadata.sortedVersions(updatedStack)
+        if let myIdx = ordered.firstIndex(where: { $0.id == joinedCreated.id }), myIdx > 0 {
+            let prevVer = ordered[myIdx - 1]
+            let currentDiff = joinedCreated.richMetadata?.document?.diffSummary
+            if currentDiff == nil || (currentDiff?.totalChangedBlocks == 0 && prevVer.id != baseAsset.id) {
+                var resolvedSummary = currentDiff
+                if resolvedSummary == nil,
+                   let vsPrev = try? await compareDocumentVersions(
+                       baseAssetID: prevVer.id,
+                       targetAssetID: joinedCreated.id,
+                       sheetName: nil,
+                       primaryKeyCol: nil,
+                       useOCRIfScanned: false
+                   ) {
+                    resolvedSummary = vsPrev.summary
+                }
+                if (resolvedSummary?.totalChangedBlocks ?? 0) == 0,
+                   prevVer.id != baseAsset.id,
+                   let vsBase = try? await compareDocumentVersions(
+                       baseAssetID: baseAsset.id,
+                       targetAssetID: joinedCreated.id,
+                       sheetName: nil,
+                       primaryKeyCol: nil,
+                       useOCRIfScanned: false
+                   ),
+                   vsBase.summary.totalChangedBlocks > 0 {
+                    resolvedSummary = vsBase.summary
+                }
+                if let summaryToAttach = resolvedSummary, summaryToAttach != currentDiff {
+                    let targetID = joinedCreated.id
+                    if let savedWithDiff = try? await database.transaction({ store -> AssetRecord? in
+                        guard var latest = try store.asset(id: targetID) else { return nil }
+                        var rich = latest.richMetadata ?? AssetRichMetadata()
+                        var docMeta = rich.document ?? DocumentRichMetadata(
+                            formatFamily: DocumentFormatFamily.detect(
+                                fileExtension: (latest.fileName as NSString).pathExtension
+                            ).rawValue
+                        )
+                        docMeta.diffSummary = summaryToAttach
+                        rich.document = docMeta
+                        latest.richMetadata = rich
+                        return try store.saveAssetLocally(latest)
+                    }) {
+                        joinedCreated = savedWithDiff
+                    }
+                }
+            }
+        }
+        return joinedCreated
     }
 
     @concurrent

@@ -92,8 +92,8 @@ public nonisolated enum DocumentRiskRadarFilter: String, CaseIterable, Identifia
     public var label: String {
         switch self {
         case .all: "全部改动"
-        case .numberOrCurrency: "数字与金额"
-        case .dateOrDeadline: "日期与时限"
+        case .numberOrCurrency: "数字变动"
+        case .dateOrDeadline: "日期时间"
         case .tableMutation: "表格变动"
         case .nativeRevisionOrComment: "原生修订/批注"
         }

@@ -290,9 +290,9 @@ public nonisolated enum DocumentSimHash {
 // MARK: - 3. Multi-Modal Diff Engine & High-Risk Number/Date Radar
 
 public nonisolated enum DocumentDiffEngine {
-    // High-Risk Date / Deadline regex (checked first so dates are not misclassified as bare numbers)
+    // High-Risk Date / Time / Deadline regex (checked first so dates & clock times never leak into bare number counts)
     private static let dateRiskRegex = try! NSRegularExpression(
-        pattern: #"(?:20\d{2}\s*[年\-/.]\s*\d{1,2}\s*[月\-/.]\s*\d{1,2}\s*日?(?:前|内|底|止)?|\d{4}\s*年\s*\d{1,2}\s*月(?:底|前|初|中旬|下旬)?|\d{1,2}\s*月\s*\d{1,2}\s*日(?:前|内|底|止)?|Q[1-4]|第[一二三四1-4]季度|\d{1,3}\s*(?:个?工作日|自然日|天|小时|个月|周)(?:内|前|以上|以内)?)"#,
+        pattern: #"(?:(?:19|20)\d{2}\s*[年\-/.]\s*\d{1,2}\s*[月\-/.]\s*\d{1,2}\s*日?(?:前|内|底|止)?|(?:19|20)\d{2}\s*[—–\-~至]\s*(?:19|20)\d{2}\s*年度?|(?<!\d)(?:19|20)\d{2}\s*年(?:\s*\d{1,2}\s*月(?:底|前|初|中旬|下旬)?)?|(?<!\d)(?:19|20)\d{2}\s*年度|\d{1,2}\s*月\s*\d{1,2}\s*日(?:前|内|底|止)?|(?:[01]?\d|2[0-3])\s*[:：]\s*[0-5]\d(?:\s*[:：]\s*[0-5]\d)?(?:\s*[—–\-~至]\s*(?:[01]?\d|2[0-3])\s*[:：]\s*[0-5]\d(?:\s*[:：]\s*[0-5]\d)?)?|(?:上午|下午|中午|傍晚|晚|晚上|今晚|明早|凌晨)\s*(?:[01]?\d|2[0-4])\s*[点时](?:\s*[0-5]?\d\s*分(?:\s*[0-5]?\d\s*秒)?|\s*[半整])?|(?<!\d)(?:[01]?\d|2[0-4])\s*时(?:\s*[0-5]?\d\s*分(?:\s*[0-5]?\d\s*秒)?|\s*[半整])?|(?<!\d)(?:[01]?\d|2[0-4])\s*点(?:\s*[0-5]?\d\s*分(?:\s*[0-5]?\d\s*秒)?|\s*(?:半|整|钟)|(?=\s*(?:前|后|左右|开始|召开|集合|出发|签到|结束|截止|下班|上班)))|(?<![¥￥\$+\-\d.])(?:1[0-2]|0?[1-9])\.(?:3[01]|[12]\d|0?[1-9])\s*[—–\-~至]\s*(?:1[0-2]|0?[1-9])\.(?:3[01]|[12]\d|0?[1-9])(?![\d.%‰万亿元])|[“"「『【](?:1[0-2]|0?[1-9])\.(?:3[01]|[12]\d|0?[1-9])[”"」』】]|(?<![¥￥\$+\-\d.])(?:1[0-2]|0?[1-9])\.(?:3[01]|[12]\d|0?[1-9])(?=\s*(?:日|号|前|内|底|止|起|的|舆情|会议|活动|通报|事故|专项|事件|行动|复盘|节点|排期|上线|发布|截稿|截止))|Q[1-4]|第[一二三四1-4]季度|\d{1,3}\s*(?:个?工作日|自然日|天|小时|分钟|个月|周)(?:内|前|以上|以内)?)"#,
         options: [.caseInsensitive]
     )
 
@@ -302,9 +302,9 @@ public nonisolated enum DocumentDiffEngine {
         options: [.caseInsensitive]
     )
 
-    // Fine-grained inline diff tokenizer: keeps contiguous numbers/dates/currency, ASCII words, single CJK chars, and punctuation intact.
+    // Fine-grained inline diff tokenizer: keeps contiguous numbers/dates/times/currency, ASCII words, single CJK chars, and punctuation intact.
     private static let inlineTokenizerRegex = try! NSRegularExpression(
-        pattern: #"(?:[¥￥\$]?\d[\d,./:%‰\-年月日万亿元]*|\p{Han}|[A-Za-z]+|\s+|[^\s\p{Han}A-Za-z\d])"#
+        pattern: #"(?:[¥￥\$]?\d[\d,./:：%‰\-年月日时分秒万亿元]*|\p{Han}|[A-Za-z]+|\s+|[^\s\p{Han}A-Za-z\d])"#
     )
 
     public static func compare(
@@ -768,20 +768,32 @@ public nonisolated enum DocumentDiffEngine {
                 ))
             }
         } else if datePairCount == 0 {
-            // Fallback check on isolated changed spans (e.g. single-digit count change `3处` -> `5处` or `3` -> `5`)
-            let delFallback = scanBareDigits(in: deletedJoined)
-            let insFallback = scanBareDigits(in: insertedJoined)
-            let bareDiff = diffOrderedMultiset(old: delFallback, new: insFallback)
-            if !bareDiff.removed.isEmpty || !bareDiff.added.isEmpty {
-                flags.insert(.numberOrCurrency)
-                let cnt = max(bareDiff.removed.count, bareDiff.added.count)
-                for idx in 0..<cnt {
-                    pairs.append(DocumentHighRiskValuePair(
-                        id: "hr-\(hunkIndex)-barenum-\(idx)",
-                        flag: .numberOrCurrency,
-                        oldValue: idx < bareDiff.removed.count ? bareDiff.removed[idx] : nil,
-                        newValue: idx < bareDiff.added.count ? bareDiff.added[idx] : nil
-                    ))
+            // Fallback check on isolated changed spans (e.g. single-digit count change `3处` -> `5处` or `3` -> `5`),
+            // stripping any matched date/time spans from BOTH full texts and isolated edits first so date/time edits never leak into numbers!
+            let oldNonDate = maskDateRiskSpans(in: oldText)
+            let newNonDate = maskDateRiskSpans(in: newText)
+            let fullNonDateDiff = diffOrderedMultiset(
+                old: scanBareDigits(in: oldNonDate),
+                new: scanBareDigits(in: newNonDate)
+            )
+            if !fullNonDateDiff.removed.isEmpty || !fullNonDateDiff.added.isEmpty {
+                let delMasked = maskDateRiskSpans(in: deletedJoined)
+                let insMasked = maskDateRiskSpans(in: insertedJoined)
+                let delFallback = scanBareDigits(in: delMasked)
+                let insFallback = scanBareDigits(in: insMasked)
+                let bareDiff = diffOrderedMultiset(old: delFallback, new: insFallback)
+                let effectiveDiff = (!bareDiff.removed.isEmpty || !bareDiff.added.isEmpty) ? bareDiff : fullNonDateDiff
+                if !effectiveDiff.removed.isEmpty || !effectiveDiff.added.isEmpty {
+                    flags.insert(.numberOrCurrency)
+                    let cnt = max(effectiveDiff.removed.count, effectiveDiff.added.count)
+                    for idx in 0..<cnt {
+                        pairs.append(DocumentHighRiskValuePair(
+                            id: "hr-\(hunkIndex)-barenum-\(idx)",
+                            flag: .numberOrCurrency,
+                            oldValue: idx < effectiveDiff.removed.count ? effectiveDiff.removed[idx] : nil,
+                            newValue: idx < effectiveDiff.added.count ? effectiveDiff.added[idx] : nil
+                        ))
+                    }
                 }
             }
         }
@@ -840,6 +852,12 @@ public nonisolated enum DocumentDiffEngine {
             }
         }
         return (dates, numbers)
+    }
+
+    private static func maskDateRiskSpans(in text: String) -> String {
+        guard !text.isEmpty else { return "" }
+        let fullRange = NSRange(text.startIndex..., in: text)
+        return dateRiskRegex.stringByReplacingMatches(in: text, options: [], range: fullRange, withTemplate: " ")
     }
 
     private static func scanBareDigits(in text: String) -> [String] {

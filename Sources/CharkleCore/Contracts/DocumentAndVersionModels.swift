@@ -40,16 +40,39 @@ public struct AssetVersionStackMetadata: Codable, Hashable, Sendable {
         self.isPinnedPrimary = try c.decodeIfPresent(Bool.self, forKey: .isPinnedPrimary) ?? false
     }
 
+    private static let leadingVersionPrefixRegex = try! NSRegularExpression(
+        pattern: #"^(?:v|ver|version)\s*\d+(?:\.\d+)?(?![A-Za-z0-9])[\s·•:：\-—]*"#,
+        options: [.caseInsensitive]
+    )
+
+    /// Strips any redundant leading `v1`, `v2 · `, `v2: `, or repeated `v2 v2 · ` prefixes from a label or note
+    /// so UI badges combining `v\(versionNumber)` with a label/note never render `"v1 v1"` or `"v2 v2 · Name"`.
+    public static func strippingRedundantVersionPrefix(_ raw: String) -> String {
+        var current = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        for _ in 0..<4 {
+            guard !current.isEmpty else { break }
+            let range = NSRange(current.startIndex..., in: current)
+            guard let match = leadingVersionPrefixRegex.firstMatch(in: current, range: range),
+                  let swiftRange = Range(match.range(at: 0), in: current) else {
+                break
+            }
+            current = String(current[swiftRange.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return current
+    }
+
     public var displayVersionTag: String {
         "v\(max(1, versionNumber))"
     }
 
     public var displayBadgeText: String {
         if let label = versionLabel?.trimmingCharacters(in: .whitespacesAndNewlines), !label.isEmpty {
-            return label
+            let cleaned = Self.strippingRedundantVersionPrefix(label)
+            return cleaned.isEmpty ? displayVersionTag : "\(displayVersionTag) · \(cleaned)"
         }
         if let editor = editorName?.trimmingCharacters(in: .whitespacesAndNewlines), !editor.isEmpty {
-            return "\(displayVersionTag) · \(editor)"
+            let cleaned = Self.strippingRedundantVersionPrefix(editor)
+            return cleaned.isEmpty ? displayVersionTag : "\(displayVersionTag) · \(cleaned)"
         }
         return displayVersionTag
     }
@@ -206,10 +229,10 @@ public struct DocumentDiffSummary: Codable, Hashable, Sendable {
     public var compactBridgeLabel: String {
         var parts = ["Δ \(totalChangedBlocks)处"]
         if highRiskNumberChanges > 0 {
-            parts.append("¥\(highRiskNumberChanges)")
+            parts.append("数字\(highRiskNumberChanges)")
         }
         if highRiskDateChanges > 0 {
-            parts.append("时限\(highRiskDateChanges)")
+            parts.append("时间\(highRiskDateChanges)")
         }
         return parts.joined(separator: " · ")
     }
@@ -632,8 +655,8 @@ public enum DocumentDiffRiskFlag: String, Codable, CaseIterable, Hashable, Senda
 
     public var localizedLabel: String {
         switch self {
-        case .numberOrCurrency: "数字与金额"
-        case .dateOrDeadline: "日期与时限"
+        case .numberOrCurrency: "数字变动"
+        case .dateOrDeadline: "日期时间"
         case .tableMutation: "表格变动"
         case .nativeRevisionOrComment: "原生修订/批注"
         }

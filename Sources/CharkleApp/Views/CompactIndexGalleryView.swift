@@ -69,6 +69,16 @@ public struct CompactIndexGalleryView: View {
     @State private var visibleCardRects: [UUID: CGRect] = [:]
     @State private var lastHandledRevealNonce: UUID? = nil
 
+    // Rubber-Band Marquee Box Multi-Select geometry & state (`compactStage` + `compactScrollDoc` spaces)
+    @State private var scrollDocOriginInStage: CGPoint = .zero
+    @State private var headerInteractiveStageRects: [Int: CGRect] = [:]
+    @State private var docCardRects: [UUID: CGRect] = [:]
+    @State private var docDragHandleRects: [UUID: CGRect] = [:]
+    @State private var docTrailingRects: [UUID: CGRect] = [:]
+    @State private var docExpandedRailRects: [UUID: CGRect] = [:]
+    @State private var marqueeBaseSelection: Set<UUID> = []
+    @State private var activeMarqueeDocRect: CGRect? = nil
+
     public init(
         assets: [AssetRecord],
         coordinator: AppCoordinatorStore,
@@ -225,6 +235,12 @@ public struct CompactIndexGalleryView: View {
                     .padding(.horizontal, viewportWidth < 560 ? 12 : 20)
                     .padding(.top, topContentInset + 4)
                     .padding(.bottom, bottomContentInset)
+                    .coordinateSpace(name: "compactScrollDoc")
+                    .onGeometryChange(for: CGPoint.self) { proxy in
+                        proxy.frame(in: .named("compactStage")).origin
+                    } action: { _, newOrigin in
+                        scrollDocOriginInStage = newOrigin
+                    }
                     .contentShape(Rectangle())
                     .onTapGesture {
                         if !library.selectedAssetIDs.isEmpty {
@@ -236,10 +252,34 @@ public struct CompactIndexGalleryView: View {
                 .background {
                     CompactStageKeyboardBridge(
                         isSuspended: isOverlayPresented,
+                        topContentInset: topContentInset,
+                        canBeginMarqueeAtStagePoint: { stagePt in
+                            canBeginMarqueeSelection(atStagePoint: stagePt)
+                        },
+                        stageToDocPoint: { stagePt in
+                            CGPoint(
+                                x: stagePt.x - scrollDocOriginInStage.x,
+                                y: stagePt.y - scrollDocOriginInStage.y
+                            )
+                        },
+                        onBeginMarquee: { modifiers in
+                            beginMarqueeSelection(modifiers: modifiers)
+                        },
+                        onUpdateMarquee: { startDocPt, currentStagePt, modifiers in
+                            updateMarqueeSelection(
+                                startDocPoint: startDocPt,
+                                currentStagePoint: currentStagePt,
+                                modifiers: modifiers
+                            )
+                        },
+                        onEndMarquee: {
+                            endMarqueeSelection()
+                        },
                         onKeyDown: { event in
                             handleCompactKeyDown(event, scrollProxy: scrollProxy)
                         }
                     )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .allowsHitTesting(false)
                 }
                 .onChange(of: coordinator.pendingGalleryReveal) { _, req in
@@ -250,10 +290,32 @@ public struct CompactIndexGalleryView: View {
                         scrollProxy.scrollTo(targetID, anchor: .center)
                     }
                 }
+                .onChange(of: scopedAssets.map(\.id)) { _, validIDs in
+                    let validSet = Set(validIDs)
+                    docCardRects = docCardRects.filter { validSet.contains($0.key) }
+                    docDragHandleRects = docDragHandleRects.filter { validSet.contains($0.key) }
+                    docTrailingRects = docTrailingRects.filter { validSet.contains($0.key) }
+                    docExpandedRailRects = docExpandedRailRects.filter { validSet.contains($0.key) }
+                }
+            }
+
+            if let docRect = activeMarqueeDocRect,
+               (docRect.width > 3 || docRect.height > 3) {
+                let stageRect = docRect.offsetBy(dx: scrollDocOriginInStage.x, dy: scrollDocOriginInStage.y)
+                let marqueeShape = RoundedRectangle(cornerRadius: 4, style: .continuous)
+                marqueeShape
+                    .fill(activeAccent.opacity(0.11))
+                    .overlay(
+                        marqueeShape.strokeBorder(activeAccent.opacity(0.68), lineWidth: 1)
+                    )
+                    .frame(width: stageRect.width, height: stageRect.height)
+                    .position(x: stageRect.midX, y: stageRect.midY)
+                    .allowsHitTesting(false)
             }
 
             CanvasDropRingOverlay(isTargeted: isStageDropTargeted && dropTargetedCardID == nil, padding: 12, fillOpacity: 0.05)
         }
+        .coordinateSpace(name: "compactStage")
         .onDrop(of: [.fileURL, .url, .png, .tiff, .plainText], isTargeted: $isStageDropTargeted) { providers in
             handleStageBackgroundDrop(providers: providers)
         }
@@ -291,6 +353,11 @@ public struct CompactIndexGalleryView: View {
             }
             .padding(2.5)
             .background(subtleBg, in: Capsule(style: .continuous))
+            .onGeometryChange(for: CGRect.self) { proxy in
+                proxy.frame(in: .named("compactStage"))
+            } action: { _, rect in
+                headerInteractiveStageRects[0] = rect
+            }
 
             Spacer(minLength: 6)
 
@@ -311,6 +378,15 @@ public struct CompactIndexGalleryView: View {
                 }
                 .padding(2.5)
                 .background(subtleBg, in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous))
+                .onGeometryChange(for: CGRect.self) { proxy in
+                    proxy.frame(in: .named("compactStage"))
+                } action: { _, rect in
+                    headerInteractiveStageRects[1] = rect
+                }
+            } else {
+                Color.clear
+                    .frame(width: 0, height: 0)
+                    .onAppear { headerInteractiveStageRects.removeValue(forKey: 1) }
             }
         }
         .padding(.horizontal, 2)
@@ -441,8 +517,30 @@ public struct CompactIndexGalleryView: View {
             },
             makeDragProvider: {
                 makeDragItemProvider(for: effectiveSelectionIDs(including: asset.id))
+            },
+            onDragHandleDocRectChange: { rect in
+                docDragHandleRects[asset.id] = rect
+            },
+            onTrailingControlsDocRectChange: { rect in
+                docTrailingRects[asset.id] = rect
+            },
+            onExpandedRailDocRectChange: { rect in
+                if let rect {
+                    docExpandedRailRects[asset.id] = rect
+                } else {
+                    docExpandedRailRects.removeValue(forKey: asset.id)
+                }
             }
         )
+        .onGeometryChange(for: CGRect.self) { proxy in
+            proxy.frame(in: .named("compactScrollDoc"))
+        } action: { _, docRect in
+            if docRect.width > 20, docRect.height > 20 {
+                docCardRects[asset.id] = docRect
+            } else {
+                docCardRects.removeValue(forKey: asset.id)
+            }
+        }
         .onGeometryChange(for: CGRect.self) { proxy in
             let f = proxy.frame(in: .global)
             return CGRect(x: floor(f.origin.x), y: floor(f.origin.y), width: floor(f.width), height: floor(f.height))
@@ -745,6 +843,84 @@ public struct CompactIndexGalleryView: View {
         }
     }
 
+    // MARK: - Rubber-Band Marquee Box Multi-Select
+
+    private func canBeginMarqueeSelection(atStagePoint stagePt: CGPoint) -> Bool {
+        guard !isOverlayPresented, !scopedAssets.isEmpty else { return false }
+        for rect in headerInteractiveStageRects.values where rect.insetBy(dx: -2, dy: -2).contains(stagePt) {
+            return false
+        }
+        let docPt = CGPoint(
+            x: stagePt.x - scrollDocOriginInStage.x,
+            y: stagePt.y - scrollDocOriginInStage.y
+        )
+        for rect in docDragHandleRects.values where rect.contains(docPt) {
+            return false
+        }
+        for rect in docTrailingRects.values where rect.insetBy(dx: -2, dy: -2).contains(docPt) {
+            return false
+        }
+        for rect in docExpandedRailRects.values where rect.insetBy(dx: -2, dy: -2).contains(docPt) {
+            return false
+        }
+        return true
+    }
+
+    private func beginMarqueeSelection(modifiers: NSEvent.ModifierFlags) {
+        let keepBase = modifiers.contains(.command) || modifiers.contains(.shift)
+        marqueeBaseSelection = keepBase ? library.selectedAssetIDs : []
+    }
+
+    private func updateMarqueeSelection(
+        startDocPoint: CGPoint,
+        currentStagePoint: CGPoint,
+        modifiers: NSEvent.ModifierFlags
+    ) {
+        let currentDocPoint = CGPoint(
+            x: currentStagePoint.x - scrollDocOriginInStage.x,
+            y: currentStagePoint.y - scrollDocOriginInStage.y
+        )
+        let docRect = CGRect(
+            x: min(startDocPoint.x, currentDocPoint.x),
+            y: min(startDocPoint.y, currentDocPoint.y),
+            width: abs(currentDocPoint.x - startDocPoint.x),
+            height: abs(currentDocPoint.y - startDocPoint.y)
+        )
+        activeMarqueeDocRect = docRect
+
+        guard docRect.width > 3 || docRect.height > 3 else { return }
+
+        var hitIDs = Set<UUID>()
+        for (id, cardRect) in docCardRects where cardRect.intersects(docRect) {
+            hitIDs.insert(id)
+        }
+
+        let nextSelection: Set<UUID>
+        if modifiers.contains(.command) {
+            nextSelection = marqueeBaseSelection.symmetricDifference(hitIDs)
+        } else if modifiers.contains(.shift) {
+            nextSelection = marqueeBaseSelection.union(hitIDs)
+        } else {
+            nextSelection = hitIDs
+        }
+
+        if library.selectedAssetIDs != nextSelection {
+            var transaction = Transaction(animation: nil)
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                library.selectedAssetIDs = nextSelection
+                if let firstHit = scopedAssets.first(where: { nextSelection.contains($0.id) }) {
+                    coordinator.focusedStageAssetID = firstHit.id
+                }
+            }
+        }
+    }
+
+    private func endMarqueeSelection() {
+        activeMarqueeDocRect = nil
+        marqueeBaseSelection = []
+    }
+
     // MARK: - Stage Drop & Instant 0ms Keyboard Navigation
 
     private func handleStageBackgroundDrop(providers: [NSItemProvider]) -> Bool {
@@ -855,7 +1031,11 @@ public struct CompactIndexGalleryView: View {
                     onOpenQuickLook(target)
                     return nil
                 }
-            case 53: // Escape -> Collapse expanded rail or clear selection
+            case 53: // Escape -> Cancel active marquee, collapse expanded rail, or clear selection
+                if activeMarqueeDocRect != nil {
+                    activeMarqueeDocRect = nil
+                    return nil
+                }
                 if expandedGroupID != nil {
                     withAnimation(CharkleMotion.accessible(CharkleMotion.exitSm, reduced: reduceMotion)) {
                         expandedGroupID = nil
@@ -896,6 +1076,9 @@ private struct CompactTactileIndexCard: View {
     let onOpenVersionInQuickLook: (AssetRecord) -> Void
     let onOpenDiffPair: (UUID?, UUID?) -> Void
     let makeDragProvider: () -> NSItemProvider
+    let onDragHandleDocRectChange: (CGRect) -> Void
+    let onTrailingControlsDocRectChange: (CGRect) -> Void
+    let onExpandedRailDocRectChange: (CGRect?) -> Void
 
     @State private var isHovered: Bool = false
 
@@ -956,7 +1139,7 @@ private struct CompactTactileIndexCard: View {
 
         VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .center, spacing: 12) {
-                // Drag & click hit region wrapping left Micro-Folio + center identity
+                // Tight drag & click hit region wrapping ONLY CompactMicroFolioArtifact + intrinsic VStack title/tags
                 HStack(alignment: .center, spacing: 12) {
                     CompactMicroFolioArtifact(
                         asset: asset,
@@ -1016,12 +1199,24 @@ private struct CompactTactileIndexCard: View {
                             }
                         }
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
+                .layoutPriority(1)
                 .contentShape(Rectangle())
                 .onTapGesture(count: 2, perform: onDoubleClickCard)
                 .onTapGesture(perform: onSelectCard)
                 .onDrag(makeDragProvider)
+                .onGeometryChange(for: CGRect.self) { proxy in
+                    proxy.frame(in: .named("compactScrollDoc"))
+                } action: { _, rect in
+                    onDragHandleDocRectChange(rect)
+                }
+
+                // Open middle strip expanse (outside `.onDrag` so dragging starts rubber-band marquee, while clicking still selects row!)
+                Color.clear
+                    .frame(minWidth: 12, maxWidth: .infinity, minHeight: 44)
+                    .contentShape(Rectangle())
+                    .onTapGesture(count: 2, perform: onDoubleClickCard)
+                    .onTapGesture(perform: onSelectCard)
 
                 // Interactive Stack Pill + Hover Copy Button + 12-Segment Diff Minimap / Timestamp
                 HStack(alignment: .center, spacing: 8) {
@@ -1053,12 +1248,27 @@ private struct CompactTactileIndexCard: View {
                     rightSpectrumAndTimestamp(borderStrong: borderStrong)
                 }
                 .fixedSize(horizontal: true, vertical: false)
+                .onGeometryChange(for: CGRect.self) { proxy in
+                    proxy.frame(in: .named("compactScrollDoc"))
+                } action: { _, rect in
+                    onTrailingControlsDocRectChange(rect)
+                }
             }
 
             if isExpanded && hasStack {
                 revisionRailSection(borderSubtle: borderSubtle)
                     .padding(.top, 10)
                     .transition(CharkleMotion.revealTransition(offsetY: -4, reduced: reduceMotion))
+                    .onGeometryChange(for: CGRect.self) { proxy in
+                        proxy.frame(in: .named("compactScrollDoc"))
+                    } action: { _, rect in
+                        onExpandedRailDocRectChange(rect)
+                    }
+            }
+        }
+        .onChange(of: isExpanded) { _, expanded in
+            if !expanded {
+                onExpandedRailDocRectChange(nil)
             }
         }
         .padding(10.5)
@@ -1209,10 +1419,10 @@ private struct CompactTactileIndexCard: View {
     private func minimapTooltip(for diff: DocumentDiffSummary) -> String {
         var parts = ["共 \(diff.totalChangedBlocks) 处改动"]
         if diff.highRiskNumberChanges > 0 {
-            parts.append("数字/金额 \(diff.highRiskNumberChanges) 处")
+            parts.append("数字变动 \(diff.highRiskNumberChanges) 处")
         }
         if diff.highRiskDateChanges > 0 {
-            parts.append("日期/时限 \(diff.highRiskDateChanges) 处")
+            parts.append("日期时间 \(diff.highRiskDateChanges) 处")
         }
         return parts.joined(separator: "，")
     }
@@ -1266,7 +1476,7 @@ private struct CompactTactileIndexCard: View {
                         if idx > 0 {
                             let prevVer = siblings[idx - 1]
                             let deltaLabel: String = {
-                                if let summary = ver.richMetadata?.document?.diffSummary, summary.totalChangedBlocks > 0 {
+                                if let summary = ver.richMetadata?.document?.diffSummary {
                                     return summary.compactBridgeLabel
                                 }
                                 return "Δ 对比"
@@ -1291,11 +1501,13 @@ private struct CompactTactileIndexCard: View {
                         let isPrimary = ver.id == asset.id
                         let isUnreviewed = vNum > primaryVersionNumber && !isPrimary
                         let noteTag: String = {
-                            if let note = vMeta?.changeNote?.trimmingCharacters(in: .whitespacesAndNewlines), !note.isEmpty {
-                                return note
+                            if let note = vMeta?.changeNote {
+                                let cleaned = AssetVersionStackMetadata.strippingRedundantVersionPrefix(note)
+                                if !cleaned.isEmpty { return cleaned }
                             }
-                            if let label = vMeta?.versionLabel?.trimmingCharacters(in: .whitespacesAndNewlines), !label.isEmpty {
-                                return label
+                            if let label = vMeta?.versionLabel {
+                                let cleaned = AssetVersionStackMetadata.strippingRedundantVersionPrefix(label)
+                                if !cleaned.isEmpty { return cleaned }
                             }
                             return idx == 0 ? "初稿" : "修订版"
                         }()
@@ -1471,8 +1683,27 @@ private struct CompactMicroFolioArtifact: View {
     let loader: ThumbnailImageLoader
     let accentColor: Color
 
+    @State private var loadedDocImage: NSImage? = nil
+    @State private var loadedDocAssetID: UUID? = nil
+
     private var extLabel: String {
         CanvasFormatters.fileExtensionBadge(for: asset.fileName)
+    }
+
+    private var expectsRealDocumentPageImage: Bool {
+        guard asset.mediaKind == .document else { return false }
+        let ext = (asset.fileName as NSString).pathExtension.lowercased()
+        let isRichOrPDF = (ext == "pdf") || MediaPipeline.isRichLayoutDocumentExtension(ext)
+        let isLegacyProcedural = (asset.pixelWidth == 900 && asset.pixelHeight == 1_240)
+        return isRichOrPDF && !isLegacyProcedural
+    }
+
+    private var resolvedDocumentPageImage: NSImage? {
+        guard expectsRealDocumentPageImage else { return nil }
+        if loadedDocAssetID == asset.id, let loadedDocImage {
+            return loadedDocImage
+        }
+        return loader.cachedImage(for: asset.id, tier: .grid520)
     }
 
     private var docFamily: DocumentFormatFamily {
@@ -1558,13 +1789,43 @@ private struct CompactMicroFolioArtifact: View {
                 )
         }
         .frame(width: 44, height: 52)
+        .task(id: "\(asset.id.uuidString)-\(loader.invalidationVersion)-\(expectsRealDocumentPageImage)") {
+            guard expectsRealDocumentPageImage else {
+                if loadedDocImage != nil {
+                    loadedDocImage = nil
+                    loadedDocAssetID = nil
+                }
+                return
+            }
+            let targetID = asset.id
+            if let cached = loader.cachedImage(for: targetID, tier: .grid520) {
+                loadedDocAssetID = targetID
+                loadedDocImage = cached
+                return
+            }
+            let fetched = await loader.loadImage(for: targetID, tier: .grid520)
+            if !Task.isCancelled {
+                loadedDocAssetID = targetID
+                loadedDocImage = fetched
+            }
+        }
+        .onDisappear {
+            if loadedDocImage != nil {
+                loadedDocImage = nil
+                loadedDocAssetID = nil
+            }
+        }
     }
 
     @ViewBuilder
     private func coverContent(paperCover: Color, borderStrong: Color, sheetShape: RoundedRectangle) -> some View {
         switch asset.mediaKind {
         case .document:
-            documentPageSkeleton(paperCover: paperCover)
+            if let realPage = resolvedDocumentPageImage {
+                realDocumentPageMiniFolio(pageImage: realPage, paperCover: paperCover)
+            } else {
+                documentPageSkeleton(paperCover: paperCover)
+            }
         case .audio:
             audioMiniFolio(paperCover: paperCover)
         case .webBookmark:
@@ -1572,6 +1833,31 @@ private struct CompactMicroFolioArtifact: View {
         default:
             visualPaletteMiniFolio(paperCover: paperCover)
         }
+    }
+
+    private func realDocumentPageMiniFolio(pageImage: NSImage, paperCover: Color) -> some View {
+        ZStack(alignment: .bottomLeading) {
+            Image(nsImage: pageImage)
+                .resizable()
+                .interpolation(.high)
+                .scaledToFill()
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .clipped()
+
+            Text(docFamily.badgeLabel)
+                .font(CharkleTheme.text(.caption, weight: .bold))
+                .foregroundStyle(.white)
+                .lineLimit(1)
+                .minimumScaleFactor(0.65)
+                .fixedSize(horizontal: true, vertical: false)
+                .padding(.horizontal, 3)
+                .padding(.vertical, 1)
+                .background(formatAccent.opacity(0.88), in: RoundedRectangle(cornerRadius: 2.5, style: .continuous))
+                .scaleEffect(0.72, anchor: .bottomLeading)
+                .padding(2)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(paperCover)
     }
 
     private func visualPaletteMiniFolio(paperCover: Color) -> some View {
@@ -1587,11 +1873,14 @@ private struct CompactMicroFolioArtifact: View {
 
                 Text(extLabel)
                     .font(CharkleTheme.text(.caption, weight: .bold))
-                    .scaleEffect(0.72, anchor: .bottomLeading)
                     .foregroundStyle(.white)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.65)
+                    .fixedSize(horizontal: true, vertical: false)
                     .padding(.horizontal, 3)
                     .padding(.vertical, 1)
                     .background(Color.black.opacity(0.52), in: RoundedRectangle(cornerRadius: 2.5, style: .continuous))
+                    .scaleEffect(0.72, anchor: .bottomLeading)
                     .padding(2.5)
             }
 
@@ -1624,8 +1913,11 @@ private struct CompactMicroFolioArtifact: View {
             Spacer(minLength: 1)
             Text(extLabel)
                 .font(CharkleTheme.text(.caption, weight: .bold))
-                .scaleEffect(0.72)
                 .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
+                .lineLimit(1)
+                .minimumScaleFactor(0.65)
+                .fixedSize(horizontal: true, vertical: false)
+                .scaleEffect(0.72)
         }
         .padding(4)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -1646,8 +1938,11 @@ private struct CompactMicroFolioArtifact: View {
             Spacer(minLength: 0)
             Text(badge)
                 .font(CharkleTheme.text(.caption, weight: .bold))
-                .scaleEffect(0.72, anchor: .bottomLeading)
                 .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
+                .lineLimit(1)
+                .minimumScaleFactor(0.65)
+                .fixedSize(horizontal: true, vertical: false)
+                .scaleEffect(0.72, anchor: .bottomLeading)
         }
         .padding(5)
         .background(paperCover)
@@ -1700,18 +1995,20 @@ private struct CompactMicroFolioArtifact: View {
             HStack(spacing: 2) {
                 Text(docFamily.badgeLabel)
                     .font(CharkleTheme.text(.caption, weight: .bold))
-                    .scaleEffect(0.72, anchor: .bottomLeading)
                     .foregroundStyle(formatAccent)
                     .lineLimit(1)
+                    .minimumScaleFactor(0.65)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .scaleEffect(0.72, anchor: .bottomLeading)
                 Spacer(minLength: 0)
                 if isStamped {
                     Circle()
                         .strokeBorder(Color(charkleHex: "#D93B30").opacity(0.75), lineWidth: 1)
-                        .frame(width: 8.5, height: 8.5)
+                        .frame(width: 7.5, height: 7.5)
                 }
             }
         }
-        .padding(5)
+        .padding(4.5)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(paperCover)
     }
@@ -1764,22 +2061,41 @@ private struct CompactCardStackDropDelegate: DropDelegate {
     }
 }
 
-// MARK: - Compact Stage Local Key Monitor
+// MARK: - Compact Stage Local Key & Rubber-Band Marquee Monitor
 
 private struct CompactStageKeyboardBridge: NSViewRepresentable {
     let isSuspended: Bool
+    let topContentInset: CGFloat
+    let canBeginMarqueeAtStagePoint: (CGPoint) -> Bool
+    let stageToDocPoint: (CGPoint) -> CGPoint
+    let onBeginMarquee: (NSEvent.ModifierFlags) -> Void
+    let onUpdateMarquee: (CGPoint, CGPoint, NSEvent.ModifierFlags) -> Void
+    let onEndMarquee: () -> Void
     let onKeyDown: (NSEvent) -> NSEvent?
 
     func makeNSView(context: Context) -> BridgeView {
         let view = BridgeView()
-        view.isSuspended = isSuspended
-        view.onKeyDown = onKeyDown
+        apply(to: view)
         return view
     }
 
     func updateNSView(_ nsView: BridgeView, context: Context) {
+        apply(to: nsView)
+    }
+
+    private func apply(to nsView: BridgeView) {
+        let wasSuspended = nsView.isSuspended
         nsView.isSuspended = isSuspended
+        nsView.topContentInset = topContentInset
+        nsView.canBeginMarqueeAtStagePoint = canBeginMarqueeAtStagePoint
+        nsView.stageToDocPoint = stageToDocPoint
+        nsView.onBeginMarquee = onBeginMarquee
+        nsView.onUpdateMarquee = onUpdateMarquee
+        nsView.onEndMarquee = onEndMarquee
         nsView.onKeyDown = onKeyDown
+        if !wasSuspended && isSuspended {
+            nsView.cancelActiveMarqueeIfNeeded()
+        }
     }
 
     static func dismantleNSView(_ nsView: BridgeView, coordinator: ()) {
@@ -1787,41 +2103,260 @@ private struct CompactStageKeyboardBridge: NSViewRepresentable {
     }
 
     final class BridgeView: NSView {
+        private struct MarqueeSession {
+            let startStagePoint: CGPoint
+            let startDocPoint: CGPoint
+            let modifiers: NSEvent.ModifierFlags
+            var isActive: Bool
+        }
+
+        override nonisolated var isFlipped: Bool { true }
+
         var isSuspended: Bool = false
+        var topContentInset: CGFloat = 0
+        var canBeginMarqueeAtStagePoint: ((CGPoint) -> Bool)?
+        var stageToDocPoint: ((CGPoint) -> CGPoint)?
+        var onBeginMarquee: ((NSEvent.ModifierFlags) -> Void)?
+        var onUpdateMarquee: ((CGPoint, CGPoint, NSEvent.ModifierFlags) -> Void)?
+        var onEndMarquee: (() -> Void)?
         var onKeyDown: ((NSEvent) -> NSEvent?)?
-        private var monitor: Any?
+
+        private var keyMonitor: Any?
+        private var mouseMonitor: Any?
+        private var autoscrollTimer: Timer?
+        private var marqueeSession: MarqueeSession?
+        private weak var cachedScrollView: NSScrollView?
 
         override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
             if window != nil {
-                if monitor == nil {
-                    monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-                        guard let self,
-                              !self.isSuspended,
-                              let hostWindow = self.window,
-                              event.window === hostWindow,
-                              hostWindow.attachedSheet == nil,
-                              NSApp?.modalWindow == nil,
-                              !self.isHiddenOrHasHiddenAncestor else {
-                            return event
-                        }
-                        if let onKeyDown = self.onKeyDown {
-                            return onKeyDown(event)
-                        }
-                        return event
-                    }
-                }
+                installMonitorsIfNeeded()
             } else {
                 teardown()
             }
         }
 
+        private func installMonitorsIfNeeded() {
+            if keyMonitor == nil {
+                keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                    guard let self,
+                          !self.isSuspended,
+                          let hostWindow = self.window,
+                          event.window === hostWindow,
+                          hostWindow.attachedSheet == nil,
+                          NSApp?.modalWindow == nil,
+                          !self.isHiddenOrHasHiddenAncestor else {
+                        return event
+                    }
+                    if event.keyCode == 53, self.marqueeSession?.isActive == true {
+                        self.cancelActiveMarqueeIfNeeded()
+                        return nil
+                    }
+                    return self.onKeyDown?(event) ?? event
+                }
+            }
+
+            if mouseMonitor == nil {
+                mouseMonitor = NSEvent.addLocalMonitorForEvents(
+                    matching: [.leftMouseDown, .leftMouseDragged, .leftMouseUp]
+                ) { [weak self] event in
+                    self?.handleMouseEvent(event) ?? event
+                }
+            }
+        }
+
+        private func resolveStageScrollView() -> NSScrollView? {
+            if let sv = cachedScrollView, sv.window === self.window {
+                return sv
+            }
+            var cursor: NSView? = self.superview
+            for _ in 0..<3 {
+                guard let container = cursor else { break }
+                if let found = Self.firstScrollView(in: container) {
+                    cachedScrollView = found
+                    return found
+                }
+                cursor = container.superview
+            }
+            return nil
+        }
+
+        private static func firstScrollView(in root: NSView) -> NSScrollView? {
+            if let sv = root as? NSScrollView { return sv }
+            for sub in root.subviews {
+                if let sv = sub as? NSScrollView { return sv }
+            }
+            for sub in root.subviews {
+                if let nested = firstScrollView(in: sub) { return nested }
+            }
+            return nil
+        }
+
+        private func handleMouseEvent(_ event: NSEvent) -> NSEvent? {
+            switch event.type {
+            case .leftMouseDown:
+                stopAutoscrollTimer()
+                marqueeSession = nil
+                guard !isSuspended,
+                      !event.modifierFlags.contains(.control),
+                      let hostWindow = self.window,
+                      event.window === hostWindow,
+                      hostWindow.attachedSheet == nil,
+                      NSApp?.modalWindow == nil,
+                      !self.isHiddenOrHasHiddenAncestor else {
+                    return event
+                }
+                let stagePt = self.convert(event.locationInWindow, from: nil)
+                guard self.bounds.contains(stagePt), stagePt.y >= topContentInset else {
+                    return event
+                }
+                if let hitView = hostWindow.contentView?.hitTest(event.locationInWindow) {
+                    if hitView is NSScroller || hitView is NSText || hitView is NSTextView || hitView is NSControl {
+                        return event
+                    }
+                    if let stageSV = resolveStageScrollView() {
+                        if hitView !== stageSV && !hitView.isDescendant(of: stageSV) {
+                            return event
+                        }
+                        if let enclosingSV = hitView.enclosingScrollView, enclosingSV !== stageSV {
+                            return event
+                        }
+                    }
+                }
+                guard canBeginMarqueeAtStagePoint?(stagePt) == true,
+                      let docPt = stageToDocPoint?(stagePt) else {
+                    return event
+                }
+                let mods = event.modifierFlags.intersection([.command, .shift])
+                marqueeSession = MarqueeSession(
+                    startStagePoint: stagePt,
+                    startDocPoint: docPt,
+                    modifiers: mods,
+                    isActive: false
+                )
+                return event
+
+            case .leftMouseDragged:
+                guard var session = marqueeSession else { return event }
+                guard !isSuspended, let hostWindow = self.window, event.window === hostWindow else {
+                    cancelActiveMarqueeIfNeeded()
+                    return event
+                }
+                let stagePt = self.convert(event.locationInWindow, from: nil)
+                if !session.isActive {
+                    let dx = stagePt.x - session.startStagePoint.x
+                    let dy = stagePt.y - session.startStagePoint.y
+                    guard (dx * dx + dy * dy) >= 16 else { return event }
+                    session.isActive = true
+                    marqueeSession = session
+                    onBeginMarquee?(session.modifiers)
+                }
+                let liveMods = event.modifierFlags.intersection([.command, .shift]).union(session.modifiers)
+                stepAutoscrollIfNeeded(atStagePoint: stagePt)
+                onUpdateMarquee?(session.startDocPoint, stagePt, liveMods)
+                updateAutoscrollTimerState(atStagePoint: stagePt)
+                return nil
+
+            case .leftMouseUp:
+                stopAutoscrollTimer()
+                guard let session = marqueeSession else { return event }
+                marqueeSession = nil
+                if session.isActive {
+                    onEndMarquee?()
+                    return nil
+                }
+                return event
+
+            default:
+                return event
+            }
+        }
+
+        private func autoscrollDeltaY(forStageY y: CGFloat) -> CGFloat {
+            let topZone = topContentInset + 28
+            let bottomZone = max(topZone + 20, bounds.height - 32)
+            if y < topZone {
+                let depth = min(1.0, max(0.0, (topZone - y) / 48.0))
+                return -(3.0 + depth * 12.0)
+            }
+            if y > bottomZone {
+                let depth = min(1.0, max(0.0, (y - bottomZone) / 48.0))
+                return 3.0 + depth * 12.0
+            }
+            return 0
+        }
+
+        @discardableResult
+        private func stepAutoscrollIfNeeded(atStagePoint stagePt: CGPoint) -> Bool {
+            let deltaY = autoscrollDeltaY(forStageY: stagePt.y)
+            guard abs(deltaY) > 0.1,
+                  let scrollView = resolveStageScrollView(),
+                  let docView = scrollView.documentView else {
+                return false
+            }
+            let clip = scrollView.contentView
+            var origin = clip.bounds.origin
+            let maxY = max(0, docView.bounds.height - clip.bounds.height)
+            let nextY = max(0, min(maxY, origin.y + deltaY))
+            guard abs(nextY - origin.y) > 0.25 else { return false }
+            origin.y = nextY
+            clip.scroll(to: origin)
+            scrollView.reflectScrolledClipView(clip)
+            return true
+        }
+
+        private func updateAutoscrollTimerState(atStagePoint stagePt: CGPoint) {
+            if abs(autoscrollDeltaY(forStageY: stagePt.y)) > 0.1 {
+                guard autoscrollTimer == nil else { return }
+                autoscrollTimer = Timer.scheduledTimer(withTimeInterval: 0.016, repeats: true) { [weak self] _ in
+                    Task { @MainActor [weak self] in
+                        guard let self,
+                              !self.isSuspended,
+                              let session = self.marqueeSession,
+                              session.isActive,
+                              let hostWindow = self.window else {
+                            self?.stopAutoscrollTimer()
+                            return
+                        }
+                        let liveWinPt = hostWindow.mouseLocationOutsideOfEventStream
+                        let liveStagePt = self.convert(liveWinPt, from: nil)
+                        if self.stepAutoscrollIfNeeded(atStagePoint: liveStagePt) {
+                            let liveMods = NSEvent.modifierFlags.intersection([.command, .shift]).union(session.modifiers)
+                            self.onUpdateMarquee?(session.startDocPoint, liveStagePt, liveMods)
+                        }
+                    }
+                }
+            } else {
+                stopAutoscrollTimer()
+            }
+        }
+
+        private func stopAutoscrollTimer() {
+            autoscrollTimer?.invalidate()
+            autoscrollTimer = nil
+        }
+
+        func cancelActiveMarqueeIfNeeded() {
+            stopAutoscrollTimer()
+            let wasActive = marqueeSession?.isActive == true
+            marqueeSession = nil
+            if wasActive {
+                onEndMarquee?()
+            }
+        }
+
         func teardown() {
-            if let monitor {
-                NSEvent.removeMonitor(monitor)
-                self.monitor = nil
+            stopAutoscrollTimer()
+            marqueeSession = nil
+            if let keyMonitor {
+                NSEvent.removeMonitor(keyMonitor)
+                self.keyMonitor = nil
+            }
+            if let mouseMonitor {
+                NSEvent.removeMonitor(mouseMonitor)
+                self.mouseMonitor = nil
             }
         }
 

@@ -9,7 +9,7 @@ import UniformTypeIdentifiers
 /// - Adaptive 1-column Folio Strip on iPhone compact width; toggleable 2-column Bento Index Grid ⇄ 1-column Strip on iPad regular width.
 /// - 3D Micro-Folio layered stack artwork (pointer-hover fan-out on iPad, pure transform, Reduce Motion safe).
 /// - 12-Segment Diff Minimap on versioned documents + `.monospacedDigit()` timestamps.
-/// - Tap-to-expand inline horizontal Revision Rail (`v3` ── `Δ 6处 · ¥1` ── `v4 主版` ── `Δ 3处 · ¥2` ── `v5`)
+/// - Tap-to-expand inline horizontal Revision Rail (`v3` ── `Δ 6处 · 数字1` ── `v4 主版` ── `Δ 3处 · 数字2` ── `v5`)
 ///   with 1-tap `设为主版` (`isPinnedPrimary`) and 1-tap `Δ` bridge to launch Document Diff!
 struct MobileCompactIndexGalleryView: View {
     private enum QuickCategoryFilter: String, CaseIterable, Identifiable {
@@ -583,7 +583,13 @@ private struct CompactFolioIndexCard: View {
             compactCardContextMenu
         }
         .task(id: "\(primaryAsset.id.uuidString)-\(store.thumbnails.revision)") {
-            guard primaryAsset.mediaKind != .document && primaryAsset.mediaKind != .audio else { return }
+            if primaryAsset.mediaKind == .audio { return }
+            if primaryAsset.mediaKind == .document {
+                let ext = (primaryAsset.fileName as NSString).pathExtension.lowercased()
+                let hasRealPagePoster = (ext == "pdf" || MediaPipeline.isRichLayoutDocumentExtension(ext))
+                    && !(primaryAsset.pixelWidth == 900 && primaryAsset.pixelHeight == 1_240)
+                guard hasRealPagePoster else { return }
+            }
             if store.thumbnails.cachedImage(for: primaryAsset.id, tier: .grid520) != nil { return }
             thumbImage = await store.thumbnails.loadImage(for: primaryAsset.id, tier: .grid520)
         }
@@ -856,7 +862,7 @@ private struct CompactFolioIndexCard: View {
                         } label: {
                             VStack(alignment: .leading, spacing: 2.5) {
                                 HStack(spacing: 5) {
-                                    Text(versionNodeHeadline(verAsset, vNum: vNum))
+                                    Text(versionNodeHeadline(verAsset, vNum: vNum, isFirst: index == 0))
                                         .font(.system(size: 12, weight: .semibold).monospacedDigit())
                                         .foregroundStyle(.primary)
                                         .lineLimit(1)
@@ -942,16 +948,20 @@ private struct CompactFolioIndexCard: View {
         return (primaryAsset.id, primaryAsset.id)
     }
 
-    private func versionNodeHeadline(_ item: AssetRecord, vNum: Int) -> String {
-        if let note = item.richMetadata?.versionStack?.changeNote?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !note.isEmpty {
-            return "v\(vNum) · \(String(note.prefix(10)))"
+    private func versionNodeHeadline(_ item: AssetRecord, vNum: Int, isFirst: Bool) -> String {
+        if let note = item.richMetadata?.versionStack?.changeNote {
+            let cleaned = AssetVersionStackMetadata.strippingRedundantVersionPrefix(note)
+            if !cleaned.isEmpty {
+                return "v\(vNum) · \(String(cleaned.prefix(10)))"
+            }
         }
-        if let label = item.richMetadata?.versionStack?.versionLabel?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !label.isEmpty {
-            return label
+        if let label = item.richMetadata?.versionStack?.versionLabel {
+            let cleaned = AssetVersionStackMetadata.strippingRedundantVersionPrefix(label)
+            if !cleaned.isEmpty {
+                return "v\(vNum) · \(cleaned)"
+            }
         }
-        return "v\(vNum)"
+        return isFirst ? "v\(vNum) · 初稿" : "v\(vNum) · 修订版"
     }
 
     private func versionNodeSubline(_ item: AssetRecord) -> String {
@@ -1009,11 +1019,13 @@ private struct CompactFolioIndexCard: View {
                 ForEach(Array(siblings.enumerated()), id: \.element.id) { idx, member in
                     let v = member.richMetadata?.versionStack?.versionNumber ?? (idx + 1)
                     let isPrimary = member.id == primaryAsset.id
+                    let cleanTitle = AssetVersionStackMetadata.strippingRedundantVersionPrefix(member.title)
+                    let displayMemberTitle = cleanTitle.isEmpty ? member.title : cleanTitle
                     Button {
                         Task { await store.setPrimaryVersion(assetID: member.id) }
                     } label: {
                         Label(
-                            "v\(v) · \(member.title)" + (isPrimary ? "（当前主版 ✓）" : ""),
+                            "v\(v) · \(displayMemberTitle)" + (isPrimary ? "（当前主版 ✓）" : ""),
                             systemImage: isPrimary ? "checkmark.seal.fill" : "circle"
                         )
                     }
@@ -1211,12 +1223,42 @@ private struct MicroFolioArtifactStage: View {
     private var frontSheetContent: some View {
         switch asset.mediaKind {
         case .document:
-            documentSkeletonCover
+            let lowerExt = (asset.fileName as NSString).pathExtension.lowercased()
+            let hasRealPagePoster = (lowerExt == "pdf" || MediaPipeline.isRichLayoutDocumentExtension(lowerExt))
+                && !(asset.pixelWidth == 900 && asset.pixelHeight == 1_240)
+            if hasRealPagePoster, let thumbnail {
+                realDocumentPageCover(thumbnail: thumbnail)
+            } else {
+                documentSkeletonCover
+            }
         case .audio:
             audioCover
         default:
             visualMediaCover
         }
+    }
+
+    private func realDocumentPageCover(thumbnail: UIImage) -> some View {
+        ZStack(alignment: .bottomLeading) {
+            Image(uiImage: thumbnail)
+                .resizable()
+                .scaledToFill()
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .clipped()
+
+            Text(extText)
+                .font(.system(size: 7.5, weight: .bold, design: .rounded))
+                .foregroundStyle(.white)
+                .lineLimit(1)
+                .minimumScaleFactor(0.65)
+                .fixedSize(horizontal: true, vertical: false)
+                .padding(.horizontal, 3)
+                .padding(.vertical, 1)
+                .background(formatAccent.opacity(0.88), in: RoundedRectangle(cornerRadius: 2.5, style: .continuous))
+                .padding(2.5)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(paperFront)
     }
 
     private var documentSkeletonCover: some View {
@@ -1265,14 +1307,16 @@ private struct MicroFolioArtifactStage: View {
 
             HStack(spacing: 2) {
                 Text(extText)
-                    .font(.system(size: 8, weight: .bold, design: .rounded))
+                    .font(.system(size: 7.5, weight: .bold, design: .rounded))
                     .foregroundStyle(formatAccent)
                     .lineLimit(1)
+                    .minimumScaleFactor(0.65)
+                    .fixedSize(horizontal: true, vertical: false)
                 Spacer(minLength: 0)
                 if isStamped {
                     Circle()
                         .strokeBorder(Color(charkleHex: "#D93B30").opacity(0.75), lineWidth: 1)
-                        .frame(width: 8, height: 8)
+                        .frame(width: 7.5, height: 7.5)
                 }
             }
         }
@@ -1300,8 +1344,11 @@ private struct MicroFolioArtifactStage: View {
             }
             Spacer(minLength: 0)
             Text(extText)
-                .font(.system(size: 8, weight: .bold))
+                .font(.system(size: 7.5, weight: .bold, design: .rounded))
                 .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
+                .lineLimit(1)
+                .minimumScaleFactor(0.65)
+                .fixedSize(horizontal: true, vertical: false)
         }
         .padding(4)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -1328,12 +1375,15 @@ private struct MicroFolioArtifactStage: View {
                 }
 
                 Text(extText)
-                    .font(.system(size: 7.5, weight: .bold))
+                    .font(.system(size: 7.5, weight: .bold, design: .rounded))
                     .foregroundStyle(.white)
-                    .padding(.horizontal, 3.5)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.65)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .padding(.horizontal, 3)
                     .padding(.vertical, 1)
                     .background(.black.opacity(0.52), in: RoundedRectangle(cornerRadius: 3, style: .continuous))
-                    .padding(3)
+                    .padding(2.5)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .clipped()

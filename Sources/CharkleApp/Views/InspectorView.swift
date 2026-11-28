@@ -2791,6 +2791,18 @@ public struct InspectorView: View {
                             let isCurrent = ver.id == asset.id
                             let editor = (vMeta?.editorName?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 }
                             let note = (vMeta?.changeNote?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 }
+                            let cleanRowTitle: String = {
+                                if let note {
+                                    let stripped = AssetVersionStackMetadata.strippingRedundantVersionPrefix(note)
+                                    if !stripped.isEmpty { return stripped }
+                                }
+                                if let label = vMeta?.versionLabel {
+                                    let stripped = AssetVersionStackMetadata.strippingRedundantVersionPrefix(label)
+                                    if !stripped.isEmpty { return stripped }
+                                }
+                                let strippedTitle = AssetVersionStackMetadata.strippingRedundantVersionPrefix(ver.title)
+                                return strippedTitle.isEmpty ? ver.title : strippedTitle
+                            }()
 
                             HStack(spacing: 8) {
                                 Button {
@@ -2811,7 +2823,7 @@ public struct InspectorView: View {
                                                 .monospacedDigit()
                                                 .foregroundStyle(isCurrent ? accentColor : .primary)
 
-                                            Text(note ?? vMeta?.versionLabel ?? ver.title)
+                                            Text(cleanRowTitle)
                                                 .font(CharkleTheme.text(.caption, weight: isCurrent ? .semibold : .medium))
                                                 .foregroundStyle(.primary)
                                                 .lineLimit(1)
@@ -2832,7 +2844,8 @@ public struct InspectorView: View {
                                             }
                                             Text(Self.mediaTimestampFormatter.string(from: ver.updatedAt))
                                                 .monospacedDigit()
-                                            if let diff = ver.richMetadata?.document?.diffSummary, diff.totalChangedBlocks > 0 {
+                                            if let diff = ver.richMetadata?.document?.diffSummary,
+                                               (idx > 0 || diff.totalChangedBlocks > 0) {
                                                 Text(diff.compactBridgeLabel)
                                                     .monospacedDigit()
                                                     .foregroundStyle(warnInk)

@@ -518,6 +518,11 @@ struct DocumentCoreAndVersionStackTests {
 
         #expect(createdV3.versionStack?.versionNumber == 3)
         #expect(createdV3.versionStack?.groupID == baseV1.versionGroupID)
+        // Synthesized vN+1 must immediately carry a populated `diffSummary` so Revision Rail shows `Δ X处` instead of `Δ 对比`!
+        let synthDiffSummary = try #require(createdV3.documentMetadata?.diffSummary)
+        #expect(synthDiffSummary.totalChangedBlocks >= 1)
+        #expect(synthDiffSummary.compactBridgeLabel.hasPrefix("Δ "))
+        #expect(!synthDiffSummary.compactBridgeLabel.contains("¥"))
         // Pinned primary v1 must remain preserved!
         let refreshedV1 = try #require(try await engine.fetchAsset(id: baseV1.id))
         #expect(refreshedV1.versionStack?.isPinnedPrimary == true)
@@ -583,6 +588,104 @@ struct DocumentCoreAndVersionStackTests {
         #expect(syncedV2.versionStack == primaryA.versionStack)
         #expect(syncedV2.documentMetadata == primaryA.documentMetadata)
         #expect(syncedV2.documentMetadata?.diffSummary?.minimapBuckets.count == 12)
+    }
+
+    // MARK: - 8. Pure Number Bridge Labels, Clock-Time / Year / Dotted-Date Isolation & Prefix Deduplication
+
+    @Test("compactBridgeLabel uses 数字/时间 (no ¥), clock times & dates never leak into highRiskNumberChanges, and v1/v2 prefixes deduplicate")
+    func bridgeLabelsTimeClassificationAndPrefixDeduplication() async throws {
+        // 1. Pure number & time bridge labels (zero `¥` symbol)
+        let summary = DocumentDiffSummary(
+            comparedToAssetID: UUID(),
+            addedBlocks: 10,
+            removedBlocks: 4,
+            modifiedBlocks: 12,
+            movedBlocks: 0,
+            highRiskNumberChanges: 2,
+            highRiskDateChanges: 5
+        )
+        #expect(summary.compactBridgeLabel == "Δ 26处 · 数字2 · 时间5")
+        #expect(!summary.compactBridgeLabel.contains("¥"))
+        #expect(DocumentDiffRiskFlag.numberOrCurrency.localizedLabel == "数字变动")
+        #expect(DocumentDiffRiskFlag.dateOrDeadline.localizedLabel == "日期时间")
+
+        // 2. Clock times (`14:30 -> 15:00`), spoken Chinese times, years/year-ranges, and dotted dates
+        // must count ONLY as `highRiskDateChanges` with `highRiskNumberChanges == 0`!
+        let basePayload = StructuredDocumentPayload(
+            assetID: UUID(),
+            formatFamily: DocumentFormatFamily.docx.rawValue,
+            title: "会议通知_v1",
+            blocks: [
+                DocumentBlock(id: "b0", index: 0, kind: .paragraph, text: "一、集中评审会定于 14:30 准时开始，请下午2点15分前签到。"),
+                DocumentBlock(id: "b1", index: 1, kind: .paragraph, text: "二、围绕 2024—2025年度 工作台账及 5.12的通报 开展复盘，于 2025年 完成归档。")
+            ],
+            plainText: ""
+        )
+        let targetPayload = StructuredDocumentPayload(
+            assetID: UUID(),
+            formatFamily: DocumentFormatFamily.docx.rawValue,
+            title: "会议通知_v2",
+            blocks: [
+                DocumentBlock(id: "t0", index: 0, kind: .paragraph, text: "一、集中评审会定于 15:00 准时开始，请下午2点45分前签到。"),
+                DocumentBlock(id: "t1", index: 1, kind: .paragraph, text: "二、围绕 2025—2026年度 工作台账及 5.18的通报 开展复盘，于 2026年 完成归档。")
+            ],
+            plainText: ""
+        )
+
+        let timeOnlyReport = DocumentDiffEngine.compare(base: basePayload, target: targetPayload)
+        #expect(timeOnlyReport.summary.highRiskDateChanges >= 4)
+        #expect(timeOnlyReport.summary.highRiskNumberChanges == 0)
+        #expect(timeOnlyReport.summary.compactBridgeLabel.contains("时间"))
+        #expect(!timeOnlyReport.summary.compactBridgeLabel.contains("数字"))
+        for hunk in timeOnlyReport.hunks where hunk.changeKind.isChanged {
+            #expect(hunk.riskFlags.contains(.dateOrDeadline))
+            #expect(!hunk.riskFlags.contains(.numberOrCurrency))
+        }
+
+        // Meanwhile genuine decimal/count edits (`12.5万元 -> 15.2万元`, `3处 -> 5处`) still register as `highRiskNumberChanges`!
+        let numBase = StructuredDocumentPayload(
+            assetID: UUID(),
+            formatFamily: DocumentFormatFamily.docx.rawValue,
+            title: "预算_v1",
+            blocks: [DocumentBlock(id: "n0", index: 0, kind: .paragraph, text: "整改预算为 12.5万元，涉及隐患 3处。")]
+        )
+        let numTarget = StructuredDocumentPayload(
+            assetID: UUID(),
+            formatFamily: DocumentFormatFamily.docx.rawValue,
+            title: "预算_v2",
+            blocks: [DocumentBlock(id: "n0", index: 0, kind: .paragraph, text: "整改预算为 15.2万元，涉及隐患 5处。")]
+        )
+        let numReport = DocumentDiffEngine.compare(base: numBase, target: numTarget)
+        #expect(numReport.summary.highRiskNumberChanges >= 1)
+        #expect(numReport.summary.highRiskDateChanges == 0)
+        #expect(numReport.summary.compactBridgeLabel.contains("数字"))
+
+        // 3. Redundant version prefix stripping (`v1 v1`, `v2 v2 · Name`) & Office extension classification
+        #expect(AssetVersionStackMetadata.strippingRedundantVersionPrefix("v1") == "")
+        #expect(AssetVersionStackMetadata.strippingRedundantVersionPrefix("v1 · 初稿") == "初稿")
+        #expect(AssetVersionStackMetadata.strippingRedundantVersionPrefix("v2 v2 · 张主任") == "张主任")
+        #expect(AssetVersionStackMetadata.strippingRedundantVersionPrefix("V3: 终审定稿") == "终审定稿")
+
+        let metaV1 = AssetVersionStackMetadata(groupID: UUID(), versionNumber: 1, versionLabel: "v1")
+        let metaV2 = AssetVersionStackMetadata(groupID: UUID(), versionNumber: 2, versionLabel: "v2 v2 · 张主任")
+        #expect(metaV1.displayBadgeText == "v1")
+        #expect(metaV2.displayBadgeText == "v2 · 张主任")
+
+        for officeExt in ["docx", "doc", "wps", "xlsx", "xls", "et", "pptx", "ppt", "dps", "rtf", "pages", "numbers", "key", "odt", "epub", "ofd"] {
+            #expect(MediaPipeline.isRichLayoutDocumentExtension(officeExt))
+        }
+        for textExt in ["md", "markdown", "txt", "json", "yaml", "yml", "toml", "csv"] {
+            #expect(!MediaPipeline.isRichLayoutDocumentExtension(textExt))
+        }
+
+        // 4. Idempotent legacy Office thumbnail upgrade call safety
+        let dir = try BackendFixture.directory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let engine = try BackendFixture.makeEngine(dir)
+        let firstUpgrade = await engine.upgradeLegacyOfficeDocumentThumbnailsIfNeeded()
+        let secondUpgrade = await engine.upgradeLegacyOfficeDocumentThumbnailsIfNeeded()
+        #expect(firstUpgrade.isEmpty)
+        #expect(secondUpgrade.isEmpty)
     }
 
     // MARK: - Test Fixture Builders

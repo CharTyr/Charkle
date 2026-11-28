@@ -223,7 +223,9 @@ public final class LibraryStore {
             hasBootstrapped = true
             Task { [weak self] in
                 guard let self else { return }
-                let upgradedIDs = await self.engine.upgradeLegacyXiaohongshuCoversIfNeeded()
+                let upgradedXHS = await self.engine.upgradeLegacyXiaohongshuCoversIfNeeded()
+                let upgradedDocs = await self.engine.upgradeLegacyOfficeDocumentThumbnailsIfNeeded()
+                let upgradedIDs = upgradedXHS + upgradedDocs
                 guard !upgradedIDs.isEmpty else { return }
                 self.thumbnailLoader.invalidate(assetIDs: upgradedIDs)
                 await self.refreshAll()

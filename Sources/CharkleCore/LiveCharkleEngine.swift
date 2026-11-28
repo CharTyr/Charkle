@@ -27,6 +27,8 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
     private var seeding = false
     private var isMigrating = false
     private var isUpgradingXHSCovers = false
+    var isUpgradingOfficeThumbnails = false
+    var attemptedOfficeThumbnailUpgradeIDs: Set<UUID> = []
     private var cachedWebDAVPassword: String?
     private var hasLoadedWebDAVPassword = false
 
