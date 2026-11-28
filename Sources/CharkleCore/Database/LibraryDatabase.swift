@@ -401,6 +401,16 @@ public final actor LibraryDatabase {
         return try hydrateAssets(forOrderedIDs: ids)
     }
 
+    /// Returns all assets carrying a non-null `richMetadata.versionStack.groupID` in SQLite.
+    func versionStackedAssets() throws -> [AssetRecord] {
+        syncExternalDataVersionIfNeeded()
+        let ids = try connection.query("""
+            SELECT id FROM assets
+            WHERE json_extract(CAST(payload AS TEXT), '$.richMetadata.versionStack.groupID') IS NOT NULL
+            """) { $0.text(0) }
+        return try hydrateAssets(forOrderedIDs: ids)
+    }
+
     /// Lightweight SQLite JSON projection returning only source URLs & media kinds without decoding full `AssetRecord` payloads.
     func fetchAssetSourceKeys(includeTrashed: Bool = false) throws -> [(sourceURL: String?, socialOriginalURL: String?, mediaKind: MediaKind)] {
         syncExternalDataVersionIfNeeded()
@@ -761,7 +771,9 @@ public final actor LibraryDatabase {
     }
 
     public func inboxCount() throws -> Int {
-        Int(try connection.query("SELECT COUNT(*) FROM assets WHERE folder_id IS NULL AND trashed=0") {
+        Int(try connection.query(
+            "SELECT COUNT(DISTINCT COALESCE(json_extract(CAST(payload AS TEXT), '$.richMetadata.versionStack.groupID'), id)) FROM assets WHERE folder_id IS NULL AND trashed=0"
+        ) {
             $0.integer(0)
         }.first ?? 0)
     }

@@ -29,6 +29,8 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
     private var isUpgradingXHSCovers = false
     var isUpgradingOfficeThumbnails = false
     var attemptedOfficeThumbnailUpgradeIDs: Set<UUID> = []
+    private var didHealSplitVersionStacks = false
+    private var healSplitVersionStacksTask: Task<[AssetRecord], Error>?
     private var cachedWebDAVPassword: String?
     private var hasLoadedWebDAVPassword = false
 
@@ -54,13 +56,92 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
     }
 
     public func fetchAssets(matching criteria: FilterCriteria) async throws -> [AssetRecord] {
-        try await database.fetchAssets(matching: criteria)
+        await healSplitVersionStacksIfNeeded()
+        return try await database.fetchAssets(matching: criteria)
     }
 
     public func fetchAsset(id: UUID) async throws -> AssetRecord? { try await database.asset(id: id) }
     public func fetchFolders() async throws -> [FolderRecord] { try await database.fetchFolders() }
     public func fetchTagCounts() async throws -> [TagCount] { try await database.fetchTagCounts() }
-    public func inboxCount() async throws -> Int { try await database.inboxCount() }
+    public func inboxCount() async throws -> Int {
+        await healSplitVersionStacksIfNeeded()
+        return try await database.inboxCount()
+    }
+
+    /// Runs split-stack folder self-healing at most once per engine lifetime unless explicitly invoked via `healSplitVersionStacks()`.
+    public func healSplitVersionStacksIfNeeded() async {
+        guard !didHealSplitVersionStacks else { return }
+        _ = try? await runCoalescedSplitVersionStackHeal(force: false)
+    }
+
+    /// Aligns any unfiled (`folderID == nil`) Version Stack siblings to their stack's authoritative existing `folderID`
+    /// (preferring non-trashed pinned/highest version, then trashed pinned/highest version) when that folder exists in `folders`.
+    @discardableResult
+    public func healSplitVersionStacks() async throws -> [AssetRecord] {
+        try await runCoalescedSplitVersionStackHeal(force: true)
+    }
+
+    private func runCoalescedSplitVersionStackHeal(force: Bool) async throws -> [AssetRecord] {
+        if !force && didHealSplitVersionStacks {
+            return []
+        }
+        if let inFlight = healSplitVersionStacksTask {
+            return try await inFlight.value
+        }
+        let db = self.database
+        let task = Task<[AssetRecord], Error> {
+            try await Self.performSplitVersionStackHeal(in: db)
+        }
+        healSplitVersionStacksTask = task
+        do {
+            let healed = try await task.value
+            didHealSplitVersionStacks = true
+            healSplitVersionStacksTask = nil
+            return healed
+        } catch {
+            healSplitVersionStacksTask = nil
+            throw error
+        }
+    }
+
+    private static func performSplitVersionStackHeal(in database: LibraryDatabase) async throws -> [AssetRecord] {
+        try await database.transaction { store -> [AssetRecord] in
+            let stacked = try store.versionStackedAssets()
+            guard !stacked.isEmpty else { return [] }
+            let validFolderIDs = Set(try store.fetchFolders().map(\.id))
+            guard !validFolderIDs.isEmpty else { return [] }
+
+            var byGroup: [UUID: [AssetRecord]] = [:]
+            for asset in stacked {
+                if let gid = asset.versionGroupID {
+                    byGroup[gid, default: []].append(asset)
+                }
+            }
+
+            var updated: [AssetRecord] = []
+            for (_, members) in byGroup where members.count > 1 {
+                guard members.contains(where: { $0.folderID == nil }) else { continue }
+                let validFiled = members.filter { member in
+                    guard let fid = member.folderID else { return false }
+                    return validFolderIDs.contains(fid)
+                }
+                guard !validFiled.isEmpty else { continue }
+
+                let activeFiled = validFiled.filter { !$0.isTrashed }
+                let authoritativePool = activeFiled.isEmpty ? validFiled : activeFiled
+                guard let authoritativeFolderID = AssetVersionStackMetadata.resolvePrimaryAsset(in: authoritativePool)?.folderID else {
+                    continue
+                }
+
+                for member in AssetVersionStackMetadata.sortedVersions(members) where member.folderID == nil {
+                    guard var latest = try store.asset(id: member.id), latest.folderID == nil else { continue }
+                    latest.folderID = authoritativeFolderID
+                    updated.append(try store.saveAssetLocally(latest))
+                }
+            }
+            return updated
+        }
+    }
 
     public func createFolder(name: String, parentID: UUID?) async throws -> FolderRecord {
         let name = try Self.folderName(name, parent: parentID)
@@ -2231,43 +2312,100 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         return asset
     }
 
+    private static func applyBatchPatch(
+        _ patch: AssetBatchPatch,
+        in store: isolated LibraryDatabase
+    ) throws -> [AssetRecord] {
+        if case .folder(let id) = patch.folderAssignment, try store.folder(id: id) == nil {
+            throw DriveTransportError.fileNotFound(id.uuidString)
+        }
+        var seen = Set<UUID>()
+        var explicitIDs: [UUID] = []
+        explicitIDs.reserveCapacity(patch.assetIDs.count)
+        for id in patch.assetIDs where seen.insert(id).inserted {
+            explicitIDs.append(id)
+        }
+
+        let shouldPropagateStack = patch.propagateToVersionStack
+            && (patch.folderAssignment != .unchanged || patch.isTrashed != nil)
+        var affectedGroupIDs: [UUID] = []
+        var seenGroupIDs = Set<UUID>()
+        var changed: [AssetRecord] = []
+        changed.reserveCapacity(explicitIDs.count)
+
+        for id in explicitIDs {
+            guard var asset = try store.asset(id: id) else { continue }
+            if shouldPropagateStack, let gid = asset.versionGroupID, seenGroupIDs.insert(gid).inserted {
+                affectedGroupIDs.append(gid)
+            }
+            if let title = patch.title { asset.title = title }
+            if let notes = patch.notes { asset.notes = notes }
+            if let sourceURL = patch.sourceURL {
+                let trimmed = sourceURL.trimmingCharacters(in: .whitespacesAndNewlines)
+                asset.sourceURL = trimmed.isEmpty ? nil : trimmed
+                asset.sourceDomain = URL(string: trimmed).flatMap(WebURLParser.cleanDomain)
+                    ?? URL(string: trimmed)?.host()
+            }
+            if let rating = patch.rating { asset.rating = min(5, max(0, rating)) }
+            var tags = tagMap(asset.tags + patch.addTags)
+            let dismissed = Set(patch.dismissSuggestedTags.map(SearchText.normalize))
+            asset.suggestedTags.removeAll { dismissed.contains(SearchText.normalize($0)) }
+            if patch.acceptSuggestedTags {
+                tags.merge(tagMap(asset.suggestedTags)) { first, _ in first }
+                asset.suggestedTags.removeAll()
+            }
+            for tag in patch.removeTags { tags.removeValue(forKey: SearchText.normalize(tag)) }
+            asset.tags = tags.values.sorted()
+            switch patch.folderAssignment {
+            case .unchanged: break
+            case .inbox: asset.folderID = nil
+            case .folder(let folder): asset.folderID = folder
+            }
+            if let pinned = patch.pinnedOffline { asset.pinnedOffline = pinned }
+            if let trashed = patch.isTrashed { asset.isTrashed = trashed }
+            changed.append(try store.saveAssetLocally(asset))
+        }
+
+        if shouldPropagateStack && !affectedGroupIDs.isEmpty {
+            for gid in affectedGroupIDs {
+                let candidates = try store.assetsWithPayloadContaining(gid.uuidString, includeTrashed: true)
+                let siblings = AssetVersionStackMetadata.sortedVersions(
+                    candidates.filter { $0.versionGroupID == gid && !seen.contains($0.id) }
+                )
+                for var sibling in siblings {
+                    guard seen.insert(sibling.id).inserted else { continue }
+                    var siblingMutated = false
+                    switch patch.folderAssignment {
+                    case .unchanged:
+                        break
+                    case .inbox:
+                        if sibling.folderID != nil {
+                            sibling.folderID = nil
+                            siblingMutated = true
+                        }
+                    case .folder(let folder):
+                        if sibling.folderID != folder {
+                            sibling.folderID = folder
+                            siblingMutated = true
+                        }
+                    }
+                    if let targetTrashed = patch.isTrashed, sibling.isTrashed != targetTrashed {
+                        sibling.isTrashed = targetTrashed
+                        siblingMutated = true
+                    }
+                    if siblingMutated {
+                        changed.append(try store.saveAssetLocally(sibling))
+                    }
+                }
+            }
+        }
+
+        return changed
+    }
+
     public func updateAssets(_ patch: AssetBatchPatch) async throws -> [AssetRecord] {
         let result = try await database.transaction { store in
-            if case .folder(let id) = patch.folderAssignment, try store.folder(id: id) == nil {
-                throw DriveTransportError.fileNotFound(id.uuidString)
-            }
-            var seen = Set<UUID>()
-            var changed: [AssetRecord] = []
-            for id in patch.assetIDs where seen.insert(id).inserted {
-                guard var asset = try store.asset(id: id) else { continue }
-                if let title = patch.title { asset.title = title }
-                if let notes = patch.notes { asset.notes = notes }
-                if let sourceURL = patch.sourceURL {
-                    let trimmed = sourceURL.trimmingCharacters(in: .whitespacesAndNewlines)
-                    asset.sourceURL = trimmed.isEmpty ? nil : trimmed
-                    asset.sourceDomain = URL(string: trimmed).flatMap(WebURLParser.cleanDomain)
-                        ?? URL(string: trimmed)?.host()
-                }
-                if let rating = patch.rating { asset.rating = min(5, max(0, rating)) }
-                var tags = tagMap(asset.tags + patch.addTags)
-                let dismissed = Set(patch.dismissSuggestedTags.map(SearchText.normalize))
-                asset.suggestedTags.removeAll { dismissed.contains(SearchText.normalize($0)) }
-                if patch.acceptSuggestedTags {
-                    tags.merge(tagMap(asset.suggestedTags)) { first, _ in first }
-                    asset.suggestedTags.removeAll()
-                }
-                for tag in patch.removeTags { tags.removeValue(forKey: SearchText.normalize(tag)) }
-                asset.tags = tags.values.sorted()
-                switch patch.folderAssignment {
-                case .unchanged: break
-                case .inbox: asset.folderID = nil
-                case .folder(let folder): asset.folderID = folder
-                }
-                if let pinned = patch.pinnedOffline { asset.pinnedOffline = pinned }
-                if let trashed = patch.isTrashed { asset.isTrashed = trashed }
-                changed.append(try store.saveAssetLocally(asset))
-            }
-            return changed
+            try Self.applyBatchPatch(patch, in: store)
         }
         if !patch.addTags.isEmpty || !patch.removeTags.isEmpty || patch.acceptSuggestedTags {
             cachedClosedSetFunnel = nil
@@ -2290,39 +2428,7 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
             var changed: [AssetRecord] = []
             changed.reserveCapacity(patches.count)
             for patch in patches {
-                if case .folder(let id) = patch.folderAssignment, try store.folder(id: id) == nil {
-                    throw DriveTransportError.fileNotFound(id.uuidString)
-                }
-                var seen = Set<UUID>()
-                for id in patch.assetIDs where seen.insert(id).inserted {
-                    guard var asset = try store.asset(id: id) else { continue }
-                    if let title = patch.title { asset.title = title }
-                    if let notes = patch.notes { asset.notes = notes }
-                    if let sourceURL = patch.sourceURL {
-                        let trimmed = sourceURL.trimmingCharacters(in: .whitespacesAndNewlines)
-                        asset.sourceURL = trimmed.isEmpty ? nil : trimmed
-                        asset.sourceDomain = URL(string: trimmed).flatMap(WebURLParser.cleanDomain)
-                            ?? URL(string: trimmed)?.host()
-                    }
-                    if let rating = patch.rating { asset.rating = min(5, max(0, rating)) }
-                    var tags = tagMap(asset.tags + patch.addTags)
-                    let dismissed = Set(patch.dismissSuggestedTags.map(SearchText.normalize))
-                    asset.suggestedTags.removeAll { dismissed.contains(SearchText.normalize($0)) }
-                    if patch.acceptSuggestedTags {
-                        tags.merge(tagMap(asset.suggestedTags)) { first, _ in first }
-                        asset.suggestedTags.removeAll()
-                    }
-                    for tag in patch.removeTags { tags.removeValue(forKey: SearchText.normalize(tag)) }
-                    asset.tags = tags.values.sorted()
-                    switch patch.folderAssignment {
-                    case .unchanged: break
-                    case .inbox: asset.folderID = nil
-                    case .folder(let folder): asset.folderID = folder
-                    }
-                    if let pinned = patch.pinnedOffline { asset.pinnedOffline = pinned }
-                    if let trashed = patch.isTrashed { asset.isTrashed = trashed }
-                    changed.append(try store.saveAssetLocally(asset))
-                }
+                changed.append(contentsOf: try Self.applyBatchPatch(patch, in: store))
             }
             return changed
         }
@@ -5463,9 +5569,10 @@ public extension LiveCharkleEngine {
         let media = try MediaPipeline(directory: directory)
         let database = try LibraryDatabase(url: directory.appending(path: "Library.sqlite3"))
         let engine = LiveCharkleEngine(database: database, media: media)
-        if startAutoSync {
-            Task { [weak engine] in
-                guard let engine else { return }
+        Task { [weak engine] in
+            guard let engine else { return }
+            await engine.healSplitVersionStacksIfNeeded()
+            if startAutoSync {
                 await engine.refreshAutoSync(config: engine.syncConfig())
             }
         }

@@ -261,15 +261,16 @@ extension LiveCharkleEngine {
 
         let groupID = existingMembers.compactMap(\.versionGroupID).first ?? UUID()
         let orderedExisting = AssetVersionStackMetadata.sortedVersions(existingMembers)
-        let targetFolderID = orderedExisting.compactMap(\.folderID).first
         var previousTip = orderedExisting.last!
         let maxVersion = orderedExisting.map { $0.versionStack?.versionNumber ?? 1 }.max() ?? 1
 
         // Precompute DocumentDiffSummary off-transaction against the previous version
+        var joiningAssets: [AssetRecord] = []
         var computedDiffByJoiningID: [UUID: DocumentDiffSummary] = [:]
         var inferredEditorByJoiningID: [UUID: String] = [:]
         for joinID in joiningIDs {
             guard let joinAsset = try await database.asset(id: joinID) else { continue }
+            joiningAssets.append(joinAsset)
             if joinAsset.mediaKind == .document && previousTip.mediaKind == .document {
                 if let report = try? await compareDocumentVersions(
                     baseAssetID: previousTip.id,
@@ -294,6 +295,9 @@ extension LiveCharkleEngine {
             previousTip = joinAsset
         }
 
+        let unifiedFolderID: UUID? = mutation.adoptTargetFolder
+            ? (orderedExisting.compactMap(\.folderID).first ?? joiningAssets.compactMap(\.folderID).first)
+            : nil
         let initialMaxVersion = maxVersion
         let diffSnapshot = computedDiffByJoiningID
         let editorSnapshot = inferredEditorByJoiningID
@@ -303,11 +307,16 @@ extension LiveCharkleEngine {
             let shouldClearExistingPins = mutation.pinAsPrimary
             var runningMaxVersion = initialMaxVersion
 
-            // 1. Ensure existing standalone target has `v1` metadata, and preserve any existing `isPinnedPrimary`!
+            // 1. Ensure existing standalone target has `v1` metadata, preserve any existing `isPinnedPrimary`,
+            //    and unify `folderID` across existing members when adopting a folder across Inbox + Folder!
             for existing in orderedExisting {
                 guard var latest = try store.asset(id: existing.id) else { continue }
                 var rich = latest.richMetadata ?? AssetRichMetadata()
                 var changed = false
+                if mutation.adoptTargetFolder, let unifiedFolderID, latest.folderID != unifiedFolderID {
+                    latest.folderID = unifiedFolderID
+                    changed = true
+                }
                 if var stack = rich.versionStack {
                     if shouldClearExistingPins && stack.isPinnedPrimary {
                         stack.isPinnedPrimary = false
@@ -335,13 +344,13 @@ extension LiveCharkleEngine {
                 }
             }
 
-            // 2. Append joining asset(s) as `vN+1`, adopting target folder if requested
+            // 2. Append joining asset(s) as `vN+1`, adopting unified folder if requested
             var parentID = savedMembers.last?.id
             for (idx, joinID) in joiningIDs.enumerated() {
                 guard var joining = try store.asset(id: joinID) else { continue }
                 runningMaxVersion += 1
-                if mutation.adoptTargetFolder, let targetFolderID, joining.folderID != targetFolderID {
-                    joining.folderID = targetFolderID
+                if mutation.adoptTargetFolder, let unifiedFolderID, joining.folderID != unifiedFolderID {
+                    joining.folderID = unifiedFolderID
                 }
                 let editor = mutation.editorName?.nonEmptyTrimmed ?? editorSnapshot[joinID]
                 let note = mutation.changeNote?.nonEmptyTrimmed
@@ -392,7 +401,13 @@ extension LiveCharkleEngine {
         // otherwise preserve caller's supplied order.
         let orderedInput = Self.orderAssetsForInitialStack(fetched, suppliedOrder: uniqueIDs)
         let groupID = UUID()
-        let targetFolder = orderedInput.compactMap(\.folderID).first
+        let primaryOrOrderedFolderID: UUID? = {
+            if let primaryID = mutation.primaryAssetID,
+               let explicitFolder = orderedInput.first(where: { $0.id == primaryID })?.folderID {
+                return explicitFolder
+            }
+            return orderedInput.compactMap(\.folderID).first
+        }()
 
         var diffsByID: [UUID: DocumentDiffSummary] = [:]
         if orderedInput.count >= 2 {
@@ -417,7 +432,7 @@ extension LiveCharkleEngine {
             var saved: [AssetRecord] = []
             for (idx, item) in orderedInput.enumerated() {
                 guard var latest = try store.asset(id: item.id) else { continue }
-                if mutation.adoptTargetFolder, let targetFolder, latest.folderID == nil {
+                if mutation.adoptTargetFolder, let targetFolder = primaryOrOrderedFolderID, latest.folderID != targetFolder {
                     latest.folderID = targetFolder
                 }
                 let stemInfo = VersionStemNormalizer.normalize(fileNameOrTitle: latest.fileName)
