@@ -1,3 +1,6 @@
+#if canImport(AppKit)
+import AppKit
+#endif
 import AVFoundation
 import CoreGraphics
 import CoreText
@@ -664,11 +667,125 @@ public nonisolated struct MediaPipeline: Sendable {
     static func quickLook(_ url: URL, scale: CGFloat = 2) async -> MediaRender? {
         let request = QLThumbnailGenerator.Request(fileAt: url, size: CGSize(width: 1_400, height: 1_400),
                                                     scale: scale, representationTypes: .thumbnail)
-        return await withCheckedContinuation { continuation in
+        let qlRender: MediaRender? = await withCheckedContinuation { continuation in
             QLThumbnailGenerator.shared.generateBestRepresentation(for: request) { image, _ in
                 continuation.resume(returning: image.map { MediaRender($0.cgImage) })
             }
         }
+        if let qlRender, qlRender.width >= 160, qlRender.height >= 160 {
+            return qlRender
+        }
+        if let officeFallback = renderOfficeAttributedPage(url: url, ext: url.pathExtension) {
+            return officeFallback
+        }
+        return qlRender
+    }
+
+    /// Renders page 1 of rich text / Word documents (`docx`, `doc`, `rtf`, `odt`) onto an opaque white
+    /// A4 bitmap (`990 × 1400` px with `99pt` margins and `792 × 1120` text container) when `QLThumbnailGenerator`
+    /// has no third-party Office thumbnail provider installed on macOS.
+    static func renderOfficeAttributedPage(url: URL, ext: String? = nil) -> MediaRender? {
+        #if canImport(AppKit)
+        let resolvedExt = (ext ?? url.pathExtension).trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard ["docx", "doc", "rtf", "odt"].contains(resolvedExt) else { return nil }
+        return autoreleasepool {
+            let pageWidth = 990
+            let pageHeight = 1_400
+            let margin: CGFloat = 99
+            let containerSize = CGSize(width: 792, height: 1_120)
+            let layoutScale: CGFloat = 1.65
+
+            var renderedImage: CGImage?
+            let aqua = NSAppearance(named: .aqua)
+            let renderBlock = {
+                guard let rawAttributed = try? NSAttributedString(url: url, options: [:], documentAttributes: nil),
+                      !rawAttributed.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    return
+                }
+
+                let mutable = NSMutableAttributedString(attributedString: rawAttributed)
+                let fullRange = NSRange(location: 0, length: mutable.length)
+                let defaultInk = NSColor(calibratedWhite: 0.10, alpha: 1.0)
+                let defaultFont = NSFont.systemFont(ofSize: 12 * layoutScale)
+
+                mutable.enumerateAttribute(.font, in: fullRange, options: []) { value, range, _ in
+                    if let font = value as? NSFont {
+                        let scaledSize = max(14, min(72, font.pointSize * layoutScale))
+                        let scaledFont = NSFontManager.shared.convert(font, toSize: scaledSize)
+                        mutable.addAttribute(.font, value: scaledFont, range: range)
+                    } else {
+                        mutable.addAttribute(.font, value: defaultFont, range: range)
+                    }
+                }
+                mutable.enumerateAttribute(.foregroundColor, in: fullRange, options: []) { value, range, _ in
+                    if value == nil {
+                        mutable.addAttribute(.foregroundColor, value: defaultInk, range: range)
+                    }
+                }
+                mutable.enumerateAttribute(.paragraphStyle, in: fullRange, options: []) { value, range, _ in
+                    if let style = (value as? NSParagraphStyle)?.mutableCopy() as? NSMutableParagraphStyle {
+                        style.firstLineHeadIndent *= layoutScale
+                        style.headIndent *= layoutScale
+                        style.tailIndent *= layoutScale
+                        style.paragraphSpacing *= layoutScale
+                        style.paragraphSpacingBefore *= layoutScale
+                        style.lineSpacing = max(style.lineSpacing * layoutScale, 4)
+                        if style.minimumLineHeight > 0 { style.minimumLineHeight *= layoutScale }
+                        if style.maximumLineHeight > 0 { style.maximumLineHeight *= layoutScale }
+                        mutable.addAttribute(.paragraphStyle, value: style, range: range)
+                    } else {
+                        let fallbackStyle = NSMutableParagraphStyle()
+                        fallbackStyle.lineSpacing = 5
+                        fallbackStyle.paragraphSpacing = 8
+                        mutable.addAttribute(.paragraphStyle, value: fallbackStyle, range: range)
+                    }
+                }
+
+                let textStorage = NSTextStorage(attributedString: mutable)
+                let layoutManager = NSLayoutManager()
+                let textContainer = NSTextContainer(size: containerSize)
+                textContainer.lineFragmentPadding = 0
+                layoutManager.addTextContainer(textContainer)
+                textStorage.addLayoutManager(layoutManager)
+                layoutManager.ensureLayout(for: textContainer)
+
+                let glyphRange = layoutManager.glyphRange(for: textContainer)
+                guard glyphRange.length > 0,
+                      let cgCtx = MediaArtwork.context(width: pageWidth, height: pageHeight) else {
+                    return
+                }
+
+                cgCtx.setFillColor(CGColor(gray: 1.0, alpha: 1.0))
+                cgCtx.fill(CGRect(x: 0, y: 0, width: pageWidth, height: pageHeight))
+
+                cgCtx.saveGState()
+                cgCtx.translateBy(x: 0, y: CGFloat(pageHeight))
+                cgCtx.scaleBy(x: 1, y: -1)
+
+                let previousContext = NSGraphicsContext.current
+                let nsContext = NSGraphicsContext(cgContext: cgCtx, flipped: true)
+                NSGraphicsContext.current = nsContext
+                let origin = NSPoint(x: margin, y: margin)
+                layoutManager.drawBackground(forGlyphRange: glyphRange, at: origin)
+                layoutManager.drawGlyphs(forGlyphRange: glyphRange, at: origin)
+                NSGraphicsContext.current = previousContext
+                cgCtx.restoreGState()
+
+                renderedImage = cgCtx.makeImage()
+            }
+
+            if let aqua {
+                aqua.performAsCurrentDrawingAppearance(renderBlock)
+            } else {
+                renderBlock()
+            }
+
+            guard let image = renderedImage else { return nil }
+            return MediaRender(image, width: pageWidth, height: pageHeight)
+        }
+        #else
+        return nil
+        #endif
     }
 
     func writeCustomPoster(_ image: CGImage, for asset: inout AssetRecord) throws {

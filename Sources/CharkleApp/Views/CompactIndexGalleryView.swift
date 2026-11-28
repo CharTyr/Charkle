@@ -5,10 +5,10 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 /// 5th Universal Gallery Mode (`GalleryLayoutMode.compactList`, shortcut `5`):
-/// Tactile Studio Compact View supporting both 2-Column Tactile Index Cards (`双列索引卡`)
-/// and 1-Column Folio Strips (`单列折页条`), 3D hover-fanning Micro-Folio stacks,
-/// 12-segment Diff Minimaps, inline expandable Revision Rails, Primary-Version drag-out,
-/// drop-to-stack merging, and full keyboard/multi-select parity.
+/// Precision 1-Column Hairline Table (`单列列表`) and 2-Column Non-Splitting Bento Grid (`双列网格`),
+/// paired with crisp optical-rimmed miniature covers, smart-suppressed hairline dividers,
+/// anchored vertical version-history popovers, Primary-Version file drag/copy, drop-to-stack merging,
+/// rubber-band marquee selection, and 0ms keyboard navigation.
 public struct CompactIndexGalleryView: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.charkleAccentSource) private var accentSource
@@ -58,11 +58,9 @@ public struct CompactIndexGalleryView: View {
         }
     }
 
-    @Namespace private var filterPillNamespace
-    @Namespace private var columnModeNamespace
-
     @State private var quickScope: QuickMediaScope = .all
-    @State private var expandedGroupID: UUID? = nil
+    @State private var activePopoverGroupID: UUID? = nil
+    @State private var hoveredAssetID: UUID? = nil
     @State private var lastClickedAssetID: UUID? = nil
     @State private var isStageDropTargeted: Bool = false
     @State private var dropTargetedCardID: UUID? = nil
@@ -75,7 +73,6 @@ public struct CompactIndexGalleryView: View {
     @State private var docCardRects: [UUID: CGRect] = [:]
     @State private var docDragHandleRects: [UUID: CGRect] = [:]
     @State private var docTrailingRects: [UUID: CGRect] = [:]
-    @State private var docExpandedRailRects: [UUID: CGRect] = [:]
     @State private var marqueeBaseSelection: Set<UUID> = []
     @State private var activeMarqueeDocRect: CGRect? = nil
 
@@ -158,37 +155,22 @@ public struct CompactIndexGalleryView: View {
         }
     }
 
+    /// Pairs items strictly 2-by-2 (`0,1`, `2,3`, ...) in 2-column mode and NEVER splits pairs into single rows.
     private var displayRows: [DisplayRow] {
         let items = scopedAssets
         guard effectiveColumns == 2 else {
             return items.enumerated().map { DisplayRow.single(asset: $0.element, index: $0.offset) }
         }
-
         var rows: [DisplayRow] = []
         rows.reserveCapacity((items.count + 1) / 2)
-        var pendingLeft: (asset: AssetRecord, index: Int)? = nil
-
-        for (index, item) in items.enumerated() {
-            let siblings = library.versionStackSiblings(for: item.id)
-            let isExpandedStack = siblings.count > 1
-                && item.richMetadata?.versionStack?.groupID != nil
-                && item.richMetadata?.versionStack?.groupID == expandedGroupID
-
-            if isExpandedStack {
-                if let left = pendingLeft {
-                    rows.append(.pair(left: left.asset, leftIndex: left.index, right: nil, rightIndex: nil))
-                    pendingLeft = nil
-                }
-                rows.append(.single(asset: item, index: index))
-            } else if let left = pendingLeft {
-                rows.append(.pair(left: left.asset, leftIndex: left.index, right: item, rightIndex: index))
-                pendingLeft = nil
+        for leftIndex in stride(from: 0, to: items.count, by: 2) {
+            let left = items[leftIndex]
+            let rightIndex = leftIndex + 1
+            if rightIndex < items.count {
+                rows.append(.pair(left: left, leftIndex: leftIndex, right: items[rightIndex], rightIndex: rightIndex))
             } else {
-                pendingLeft = (item, index)
+                rows.append(.pair(left: left, leftIndex: leftIndex, right: nil, rightIndex: nil))
             }
-        }
-        if let left = pendingLeft {
-            rows.append(.pair(left: left.asset, leftIndex: left.index, right: nil, rightIndex: nil))
         }
         return rows
     }
@@ -200,36 +182,15 @@ public struct CompactIndexGalleryView: View {
 
             ScrollViewReader { scrollProxy in
                 ScrollView(.vertical) {
-                    VStack(alignment: .leading, spacing: 10) {
+                    VStack(alignment: .leading, spacing: 8) {
                         compactStudioHeaderBar
 
                         if scopedAssets.isEmpty {
                             emptyFilteredScopePlaceholder
+                        } else if effectiveColumns == 1 {
+                            unifiedSingleColumnTable(scrollProxy: scrollProxy)
                         } else {
-                            LazyVStack(alignment: .leading, spacing: 10) {
-                                ForEach(displayRows) { row in
-                                    switch row {
-                                    case .single(let asset, let idx):
-                                        compactCardCell(asset: asset, index: idx, scrollProxy: scrollProxy)
-                                            .id(asset.id)
-                                    case .pair(let left, let leftIdx, let right, let rightIdx):
-                                        HStack(alignment: .top, spacing: 10) {
-                                            compactCardCell(asset: left, index: leftIdx, scrollProxy: scrollProxy)
-                                                .id(left.id)
-                                                .frame(maxWidth: .infinity)
-                                            if let right, let rightIdx {
-                                                compactCardCell(asset: right, index: rightIdx, scrollProxy: scrollProxy)
-                                                    .id(right.id)
-                                                    .frame(maxWidth: .infinity)
-                                            } else {
-                                                Color.clear
-                                                    .frame(maxWidth: .infinity, minHeight: 1)
-                                                    .allowsHitTesting(false)
-                                            }
-                                        }
-                                    }
-                                }
-                            }
+                            twoColumnBentoGrid(scrollProxy: scrollProxy)
                         }
                     }
                     .padding(.horizontal, viewportWidth < 560 ? 12 : 20)
@@ -295,14 +256,16 @@ public struct CompactIndexGalleryView: View {
                     docCardRects = docCardRects.filter { validSet.contains($0.key) }
                     docDragHandleRects = docDragHandleRects.filter { validSet.contains($0.key) }
                     docTrailingRects = docTrailingRects.filter { validSet.contains($0.key) }
-                    docExpandedRailRects = docExpandedRailRects.filter { validSet.contains($0.key) }
+                    if let hoveredAssetID, !validSet.contains(hoveredAssetID) {
+                        self.hoveredAssetID = nil
+                    }
                 }
             }
 
             if let docRect = activeMarqueeDocRect,
                (docRect.width > 3 || docRect.height > 3) {
                 let stageRect = docRect.offsetBy(dx: scrollDocOriginInStage.x, dy: scrollDocOriginInStage.y)
-                let marqueeShape = RoundedRectangle(cornerRadius: 4, style: .continuous)
+                let marqueeShape = RoundedRectangle(cornerRadius: CharkleTheme.Radius.xs, style: .continuous)
                 marqueeShape
                     .fill(activeAccent.opacity(0.11))
                     .overlay(
@@ -339,45 +302,55 @@ public struct CompactIndexGalleryView: View {
         }
     }
 
-    // MARK: - Studio Sub-Bar (Media Scope Pills + Sort + 2-Col Index Grid ⇄ 1-Col Folio Strip)
+    // MARK: - 1. Minimal Sub-Toolbar (`CharkleSegmentedControl`)
 
     private var compactStudioHeaderBar: some View {
-        let subtleBg = colorScheme == .dark ? Color(charkleHex: "#23262E") : Color(charkleHex: "#EAE9E4")
-        let cardBg = CharkleTheme.surfaceElevated(for: colorScheme)
+        let showScopeFilter = (docAndStackCount > 0 && visualMediaCount > 0) || quickScope != .all
 
         return HStack(spacing: 8) {
-            HStack(spacing: 2) {
-                scopeCapsuleButton(.all, title: "全部 \(assets.count)", cardBg: cardBg)
-                scopeCapsuleButton(.docAndStacks, title: "文档叠 \(docAndStackCount)", cardBg: cardBg)
-                scopeCapsuleButton(.visualAndMedia, title: "视觉与媒体 \(visualMediaCount)", cardBg: cardBg)
-            }
-            .padding(2.5)
-            .background(subtleBg, in: Capsule(style: .continuous))
-            .onGeometryChange(for: CGRect.self) { proxy in
-                proxy.frame(in: .named("compactStage"))
-            } action: { _, rect in
-                headerInteractiveStageRects[0] = rect
-            }
-
-            Spacer(minLength: 6)
-
-            if viewportWidth >= 820 {
-                HStack(spacing: 12) {
-                    Text("悬停叠卡微翻纸层")
-                    Text("点胶囊抽拉版本轨")
+            if showScopeFilter {
+                CharkleSegmentedControl(
+                    selection: $quickScope,
+                    items: [
+                        .init(.all, title: "全部", badge: "\(assets.count)"),
+                        .init(.docAndStacks, title: "文档", badge: "\(docAndStackCount)"),
+                        .init(.visualAndMedia, title: "媒体", badge: "\(visualMediaCount)")
+                    ],
+                    size: .compact,
+                    fullWidth: false,
+                    useAccentForSelected: false
+                )
+                .onGeometryChange(for: CGRect.self) { proxy in
+                    proxy.frame(in: .named("compactStage"))
+                } action: { _, rect in
+                    headerInteractiveStageRects[0] = rect
                 }
-                .font(CharkleTheme.text(.caption))
-                .foregroundStyle(.tertiary)
-                .lineLimit(1)
+            } else {
+                Text("\(assets.count) 项")
+                    .font(CharkleTheme.text(.caption))
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+                    .padding(.leading, 4)
+                    .frame(minHeight: 26)
+                    .onAppear { headerInteractiveStageRects.removeValue(forKey: 0) }
             }
 
-            if viewportWidth >= 680 {
-                HStack(spacing: 2) {
-                    columnModeButton(columns: 2, title: "双列索引卡", icon: "rectangle.grid.2x2", cardBg: cardBg)
-                    columnModeButton(columns: 1, title: "单列折页条", icon: "rectangle.grid.1x2", cardBg: cardBg)
-                }
-                .padding(2.5)
-                .background(subtleBg, in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous))
+            Spacer(minLength: 8)
+
+            if viewportWidth >= CompactIndexLayoutMetrics.twoColumnMinViewportWidth {
+                CharkleSegmentedControl(
+                    selection: Binding(
+                        get: { coordinator.compactViewColumnMode == 1 ? 1 : 2 },
+                        set: { coordinator.compactViewColumnMode = $0 }
+                    ),
+                    items: [
+                        .init(1, systemImage: "list.bullet", helpText: "单列列表"),
+                        .init(2, systemImage: "square.grid.2x2", helpText: "双列网格")
+                    ],
+                    size: .compact,
+                    fullWidth: false,
+                    useAccentForSelected: false
+                )
                 .onGeometryChange(for: CGRect.self) { proxy in
                     proxy.frame(in: .named("compactStage"))
                 } action: { _, rect in
@@ -393,66 +366,9 @@ public struct CompactIndexGalleryView: View {
         .padding(.bottom, 2)
     }
 
-    private func scopeCapsuleButton(_ scope: QuickMediaScope, title: String, cardBg: Color) -> some View {
-        let selected = quickScope == scope
-        return Button {
-            withAnimation(CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion)) {
-                quickScope = scope
-            }
-        } label: {
-            Text(title)
-                .font(CharkleTheme.text(.caption, weight: selected ? .semibold : .medium))
-                .monospacedDigit()
-                .foregroundStyle(selected ? Color.primary : CharkleTheme.secondaryInk(for: colorScheme))
-                .padding(.horizontal, 10)
-                .padding(.vertical, 4)
-                .background {
-                    if selected {
-                        Capsule(style: .continuous)
-                            .fill(cardBg)
-                            .shadow(color: Color.black.opacity(colorScheme == .dark ? 0.26 : 0.05), radius: 2, y: 1)
-                            .matchedGeometryEffect(id: "compact-scope-pill", in: filterPillNamespace)
-                    }
-                }
-                .contentShape(Capsule(style: .continuous))
-        }
-        .buttonStyle(CharkleTactileButtonStyle())
-    }
-
-    private func columnModeButton(columns: Int, title: String, icon: String, cardBg: Color) -> some View {
-        let selected = coordinator.compactViewColumnMode == columns
-        let innerRadius = CharkleTheme.Radius.concentricInner(outer: CharkleTheme.Radius.chip, padding: 2.5)
-        return Button {
-            withAnimation(CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion)) {
-                coordinator.compactViewColumnMode = columns
-            }
-        } label: {
-            HStack(spacing: 4) {
-                Image(systemName: icon)
-                    .font(.system(size: 10.5, weight: .medium))
-                Text(title)
-                    .font(CharkleTheme.text(.caption, weight: selected ? .semibold : .medium))
-                    .lineLimit(1)
-            }
-            .foregroundStyle(selected ? Color.primary : CharkleTheme.secondaryInk(for: colorScheme))
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background {
-                if selected {
-                    RoundedRectangle(cornerRadius: innerRadius, style: .continuous)
-                        .fill(cardBg)
-                        .shadow(color: Color.black.opacity(colorScheme == .dark ? 0.26 : 0.05), radius: 2, y: 1)
-                        .matchedGeometryEffect(id: "compact-col-pill", in: columnModeNamespace)
-                }
-            }
-            .contentShape(RoundedRectangle(cornerRadius: innerRadius, style: .continuous))
-        }
-        .buttonStyle(CharkleTactileButtonStyle())
-    }
-
     private var emptyFilteredScopePlaceholder: some View {
         VStack(spacing: 8) {
-            Text(quickScope == .docAndStacks ? "当前范围暂无文档或版本叠" : "当前范围暂无视觉与媒体素材")
+            Text(quickScope == .docAndStacks ? "当前范围暂无文档" : "当前范围暂无媒体素材")
                 .font(CharkleTheme.text(.body, weight: .medium))
                 .foregroundStyle(.secondary)
             Button("查看全部 \(assets.count) 项") {
@@ -460,31 +376,138 @@ public struct CompactIndexGalleryView: View {
                     quickScope = .all
                 }
             }
-            .buttonStyle(CharkleButtonStyle(.standard, size: .xs))
+            .buttonStyle(.charkle(.standard, size: .xs))
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 48)
     }
 
-    // MARK: - Card Cell Wiring
+    // MARK: - 2. 1-Column Unified Hairline Table & 2-Column Non-Splitting Bento Grid
 
-    private func compactCardCell(asset: AssetRecord, index: Int, scrollProxy: ScrollViewProxy) -> some View {
+    private func isRowVisuallyHighlighted(_ id: UUID) -> Bool {
+        library.selectedAssetIDs.contains(id) || hoveredAssetID == id || dropTargetedCardID == id
+    }
+
+    private func unifiedSingleColumnTable(scrollProxy: ScrollViewProxy) -> some View {
+        let items = scopedAssets
+        let tableShape = RoundedRectangle(cornerRadius: CharkleTheme.Radius.cardOuter, style: .continuous)
+
+        return LazyVStack(alignment: .leading, spacing: 0) {
+            ForEach(Array(items.enumerated()), id: \.element.id) { index, asset in
+                let suppressDivider = (index >= items.count - 1)
+                    || isRowVisuallyHighlighted(asset.id)
+                    || isRowVisuallyHighlighted(items[index + 1].id)
+
+                compactItemCell(
+                    asset: asset,
+                    index: index,
+                    isTwoColumnGrid: false,
+                    showsBottomHairline: !suppressDivider
+                )
+                .id(asset.id)
+            }
+        }
+        .padding(.vertical, 4)
+        .background(CharkleTheme.surfaceElevated(for: colorScheme), in: tableShape)
+        .clipShape(tableShape)
+        .overlay(
+            tableShape.strokeBorder(
+                CharkleTheme.hairline(for: colorScheme),
+                lineWidth: CharkleTheme.hairlineWidth
+            )
+        )
+    }
+
+    private func twoColumnBentoGrid(scrollProxy: ScrollViewProxy) -> some View {
+        LazyVStack(alignment: .leading, spacing: 8) {
+            ForEach(displayRows) { row in
+                switch row {
+                case .single(let asset, let idx):
+                    compactItemCell(
+                        asset: asset,
+                        index: idx,
+                        isTwoColumnGrid: true,
+                        showsBottomHairline: false
+                    )
+                    .id(asset.id)
+                case .pair(let left, let leftIdx, let right, let rightIdx):
+                    HStack(alignment: .center, spacing: 8) {
+                        compactItemCell(
+                            asset: left,
+                            index: leftIdx,
+                            isTwoColumnGrid: true,
+                            showsBottomHairline: false
+                        )
+                        .id(left.id)
+                        .frame(maxWidth: .infinity)
+
+                        if let right, let rightIdx {
+                            compactItemCell(
+                                asset: right,
+                                index: rightIdx,
+                                isTwoColumnGrid: true,
+                                showsBottomHairline: false
+                            )
+                            .id(right.id)
+                            .frame(maxWidth: .infinity)
+                        } else {
+                            Color.clear
+                                .frame(maxWidth: .infinity, minHeight: 58)
+                                .allowsHitTesting(false)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: - Row / Tile Cell Wiring
+
+    private func compactItemCell(
+        asset: AssetRecord,
+        index: Int,
+        isTwoColumnGrid: Bool,
+        showsBottomHairline: Bool
+    ) -> some View {
         let siblings = library.versionStackSiblings(for: asset.id)
         let groupID = asset.richMetadata?.versionStack?.groupID
         let isSelected = library.selectedAssetIDs.contains(asset.id)
         let isCut = library.cutAssetIDs.contains(asset.id)
-        let isExpanded = siblings.count > 1 && groupID != nil && groupID == expandedGroupID
         let isCardDropTargeted = dropTargetedCardID == asset.id
 
-        return CompactTactileIndexCard(
+        let popoverBinding = Binding<Bool>(
+            get: {
+                guard let gid = groupID, siblings.count > 1 else { return false }
+                return activePopoverGroupID == gid
+            },
+            set: { presented in
+                if presented, let gid = groupID, siblings.count > 1 {
+                    activePopoverGroupID = gid
+                } else if activePopoverGroupID == groupID {
+                    activePopoverGroupID = nil
+                }
+            }
+        )
+
+        return CompactPrecisionItemCell(
             asset: asset,
             siblings: siblings,
             loader: library.thumbnailLoader,
             accentColor: activeAccent,
+            accentSource: coordinator.accentSource,
+            isTwoColumnGrid: isTwoColumnGrid,
+            showsBottomHairline: showsBottomHairline,
             isSelected: isSelected,
             isCut: isCut,
-            isExpanded: isExpanded,
             isDropTargeted: isCardDropTargeted,
+            isPopoverPresented: popoverBinding,
+            onHoverChanged: { hovering in
+                if hovering {
+                    hoveredAssetID = asset.id
+                } else if hoveredAssetID == asset.id {
+                    hoveredAssetID = nil
+                }
+            },
             onSelectCard: {
                 handleCardClick(asset: asset, index: index)
             },
@@ -494,14 +517,14 @@ public struct CompactIndexGalleryView: View {
                 coordinator.focusedStageAssetID = asset.id
                 onOpenQuickLook(asset)
             },
-            onToggleRevisionRail: {
+            onToggleVersionPopover: {
                 guard let gid = groupID, siblings.count > 1 else { return }
-                library.selectedAssetIDs = [asset.id]
+                if !library.selectedAssetIDs.contains(asset.id) {
+                    library.selectedAssetIDs = [asset.id]
+                }
                 lastClickedAssetID = asset.id
                 coordinator.focusedStageAssetID = asset.id
-                withAnimation(CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion)) {
-                    expandedGroupID = (expandedGroupID == gid) ? nil : gid
-                }
+                activePopoverGroupID = (activePopoverGroupID == gid) ? nil : gid
             },
             onCopyPrimaryFile: {
                 copyPrimaryFileWithToast(for: asset, siblings: siblings)
@@ -522,13 +545,10 @@ public struct CompactIndexGalleryView: View {
                 docDragHandleRects[asset.id] = rect
             },
             onTrailingControlsDocRectChange: { rect in
-                docTrailingRects[asset.id] = rect
-            },
-            onExpandedRailDocRectChange: { rect in
-                if let rect {
-                    docExpandedRailRects[asset.id] = rect
+                if let rect, rect.width > 1, rect.height > 1 {
+                    docTrailingRects[asset.id] = rect
                 } else {
-                    docExpandedRailRects.removeValue(forKey: asset.id)
+                    docTrailingRects.removeValue(forKey: asset.id)
                 }
             }
         )
@@ -613,9 +633,9 @@ public struct CompactIndexGalleryView: View {
             }
             let primary = library.primaryVersionAsset(for: asset.id) ?? asset
             let vNum = primary.richMetadata?.versionStack?.versionNumber ?? 1
-            let suffix = siblings.count > 1 ? " (主版 v\(vNum))" : ""
+            let suffix = siblings.count > 1 ? " (v\(vNum))" : ""
             coordinator.showToast(
-                "已拷贝「\(primary.title)\(suffix)」原文件实体，切微信直接 ⌘V 发送",
+                "已拷贝「\(primary.title)\(suffix)」",
                 icon: "doc.on.doc.fill",
                 tone: .success
             )
@@ -657,7 +677,10 @@ public struct CompactIndexGalleryView: View {
         Button {
             onOpenQuickLook(asset)
         } label: {
-            Label(asset.isExternalWebLink ? "在默认浏览器中打开 (Space)" : "快速预览 (Space)", systemImage: asset.isExternalWebLink ? "safari" : "eye")
+            Label(
+                asset.isExternalWebLink ? "在默认浏览器中打开 (Space)" : "快速预览 (Space)",
+                systemImage: asset.isExternalWebLink ? "safari" : "eye"
+            )
         }
 
         Button {
@@ -696,7 +719,7 @@ public struct CompactIndexGalleryView: View {
                 } else {
                     Task {
                         let count = await library.copyAssetsToPasteboard(targets, preferStackPrimary: true)
-                        coordinator.showToast("已拷贝 \(count) 项主版本原文件到剪贴板", icon: "doc.on.doc")
+                        coordinator.showToast("已拷贝 \(count) 项原文件", icon: "doc.on.doc")
                     }
                 }
             } label: {
@@ -706,7 +729,7 @@ public struct CompactIndexGalleryView: View {
             Button {
                 Task {
                     let count = await library.cutAssets(targets)
-                    coordinator.showToast("已剪切 \(count) 项素材，前往目标文件夹按 ⌘V 移动", icon: "scissors")
+                    coordinator.showToast("已剪切 \(count) 项素材", icon: "scissors")
                 }
             } label: {
                 Label("剪切 (⌘X)", systemImage: "scissors")
@@ -717,18 +740,16 @@ public struct CompactIndexGalleryView: View {
                 Button {
                     onMergeIntoVersionStack(targets, asset.id)
                 } label: {
-                    Label("合并为版本叠（\(targets.count) 项）", systemImage: "square.stack.3d.up")
+                    Label("合并版本（\(targets.count) 项）", systemImage: "square.stack.3d.up")
                 }
             } else if siblings.count > 1 {
                 Divider()
                 Button {
                     if let gid = asset.richMetadata?.versionStack?.groupID {
-                        withAnimation(CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion)) {
-                            expandedGroupID = (expandedGroupID == gid) ? nil : gid
-                        }
+                        activePopoverGroupID = gid
                     }
                 } label: {
-                    Label(expandedGroupID == asset.richMetadata?.versionStack?.groupID ? "收起版本演进轨" : "展开版本演进轨（共 \(siblings.count) 版）", systemImage: "point.3.connected.trianglepath.dotted")
+                    Label("历史版本（\(siblings.count)）", systemImage: "square.stack.3d.up")
                 }
 
                 Button {
@@ -736,20 +757,27 @@ public struct CompactIndexGalleryView: View {
                     let targetID = siblings.last?.id
                     onOpenDiff(asset, baseID, targetID)
                 } label: {
-                    Label("进入精细对比与取舍", systemImage: "arrow.left.arrow.right")
+                    Label("对比差异", systemImage: "arrow.left.arrow.right")
                 }
 
-                Menu("切换锁定主版本") {
-                    ForEach(siblings) { ver in
+                Menu("设为主版本") {
+                    ForEach(siblings.reversed()) { ver in
                         let vMeta = ver.richMetadata?.versionStack
-                        let isPrimary = ver.id == asset.id && (vMeta?.isPinnedPrimary == true || siblings.last?.id == ver.id)
+                        let vNum = vMeta?.versionNumber ?? 1
+                        let isPrimary = ver.id == asset.id
+                        let descriptor = AssetVersionStackMetadata.cleanDisplayDescriptor(
+                            changeNote: vMeta?.changeNote,
+                            versionLabel: vMeta?.versionLabel,
+                            editorName: nil
+                        )
+                        let itemTitle = descriptor.map { "v\(vNum)  \($0)" } ?? "v\(vNum)"
                         Button {
                             onSetPrimaryVersion(ver.id)
                         } label: {
                             if isPrimary {
-                                Label("\(vMeta?.displayBadgeText ?? ver.title)（当前主版）", systemImage: "checkmark")
+                                Label(itemTitle, systemImage: "checkmark")
                             } else {
-                                Text(vMeta?.displayBadgeText ?? ver.title)
+                                Text(itemTitle)
                             }
                         }
                     }
@@ -758,7 +786,7 @@ public struct CompactIndexGalleryView: View {
                 Button {
                     onUnstackVersion(asset.id)
                 } label: {
-                    Label("将当前主版拆出为独立素材", systemImage: "rectangle.portrait.and.arrow.right")
+                    Label("拆分为独立素材", systemImage: "rectangle.portrait.and.arrow.right")
                 }
             }
 
@@ -811,7 +839,10 @@ public struct CompactIndexGalleryView: View {
                     )
                 }
             } label: {
-                Label(asset.pinnedOffline ? "取消始终保留在本地" : "始终保留在本地", systemImage: asset.pinnedOffline ? "icloud" : "arrow.down.circle")
+                Label(
+                    asset.pinnedOffline ? "取消始终保留在本地" : "始终保留在本地",
+                    systemImage: asset.pinnedOffline ? "icloud" : "arrow.down.circle"
+                )
             }
 
             Button {
@@ -858,9 +889,6 @@ public struct CompactIndexGalleryView: View {
             return false
         }
         for rect in docTrailingRects.values where rect.insetBy(dx: -2, dy: -2).contains(docPt) {
-            return false
-        }
-        for rect in docExpandedRailRects.values where rect.insetBy(dx: -2, dy: -2).contains(docPt) {
             return false
         }
         return true
@@ -963,7 +991,7 @@ public struct CompactIndexGalleryView: View {
                 } else {
                     Task {
                         let count = await library.copyAssetsToPasteboard(ids, preferStackPrimary: true)
-                        coordinator.showToast("已拷贝 \(count) 项主版本原文件到剪贴板", icon: "doc.on.doc")
+                        coordinator.showToast("已拷贝 \(count) 项原文件", icon: "doc.on.doc")
                     }
                 }
                 return nil
@@ -1031,15 +1059,13 @@ public struct CompactIndexGalleryView: View {
                     onOpenQuickLook(target)
                     return nil
                 }
-            case 53: // Escape -> Cancel active marquee, collapse expanded rail, or clear selection
+            case 53: // Escape -> Cancel active marquee, dismiss popover, or clear selection
                 if activeMarqueeDocRect != nil {
                     activeMarqueeDocRect = nil
                     return nil
                 }
-                if expandedGroupID != nil {
-                    withAnimation(CharkleMotion.accessible(CharkleMotion.exitSm, reduced: reduceMotion)) {
-                        expandedGroupID = nil
-                    }
+                if activePopoverGroupID != nil {
+                    activePopoverGroupID = nil
                     return nil
                 }
                 if !library.selectedAssetIDs.isEmpty {
@@ -1054,9 +1080,9 @@ public struct CompactIndexGalleryView: View {
     }
 }
 
-// MARK: - Individual Tactile Index Card (3D Micro-Folio + 12-Seg Minimap + Inline Revision Rail)
+// MARK: - Precision 1-Column Table Row & 2-Column Bento Tile
 
-private struct CompactTactileIndexCard: View {
+private struct CompactPrecisionItemCell: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -1064,29 +1090,27 @@ private struct CompactTactileIndexCard: View {
     let siblings: [AssetRecord]
     let loader: ThumbnailImageLoader
     let accentColor: Color
+    let accentSource: CharkleAccentSource
+    let isTwoColumnGrid: Bool
+    let showsBottomHairline: Bool
     let isSelected: Bool
     let isCut: Bool
-    let isExpanded: Bool
     let isDropTargeted: Bool
+    @Binding var isPopoverPresented: Bool
+    let onHoverChanged: (Bool) -> Void
     let onSelectCard: () -> Void
     let onDoubleClickCard: () -> Void
-    let onToggleRevisionRail: () -> Void
+    let onToggleVersionPopover: () -> Void
     let onCopyPrimaryFile: () -> Void
     let onPinPrimaryVersion: (AssetRecord) -> Void
     let onOpenVersionInQuickLook: (AssetRecord) -> Void
     let onOpenDiffPair: (UUID?, UUID?) -> Void
     let makeDragProvider: () -> NSItemProvider
     let onDragHandleDocRectChange: (CGRect) -> Void
-    let onTrailingControlsDocRectChange: (CGRect) -> Void
-    let onExpandedRailDocRectChange: (CGRect?) -> Void
+    let onTrailingControlsDocRectChange: (CGRect?) -> Void
 
     @State private var isHovered: Bool = false
-
-    private static let shortTimeFormatter: DateFormatter = {
-        let fmt = DateFormatter()
-        fmt.dateFormat = "MM-dd HH:mm"
-        return fmt
-    }()
+    @State private var isBadgeHovered: Bool = false
 
     private var hasStack: Bool {
         siblings.count > 1
@@ -1102,576 +1126,689 @@ private struct CompactTactileIndexCard: View {
         hasStack ? AssetVersionStackMetadata.newerThanPrimaryCount(in: siblings) : 0
     }
 
-    private var resolvedDiffSummary: DocumentDiffSummary? {
-        if let direct = asset.richMetadata?.document?.diffSummary,
-           direct.totalChangedBlocks > 0 || direct.minimapBuckets.contains(where: { $0 > 0 }) {
-            return direct
+    private var sheetSize: CGSize {
+        if asset.mediaKind == .document {
+            return CGSize(width: 36, height: 46)
         }
-        for ver in siblings.reversed() {
-            if let summary = ver.richMetadata?.document?.diffSummary,
-               summary.totalChangedBlocks > 0 || summary.minimapBuckets.contains(where: { $0 > 0 }) {
-                return summary
-            }
-        }
-        return asset.richMetadata?.document?.diffSummary
+        return CGSize(width: 38, height: 42)
     }
 
     var body: some View {
-        let shape = RoundedRectangle(cornerRadius: CharkleTheme.Radius.cardOuter, style: .continuous)
-        let cardBg: Color = {
-            if isHovered && !isSelected {
-                return colorScheme == .dark ? Color(charkleHex: "#21242B") : Color(charkleHex: "#FCFBF9")
+        Group {
+            if isTwoColumnGrid {
+                twoColumnBentoCellBody
+            } else {
+                singleColumnTableRowBody
             }
-            return colorScheme == .dark ? Color(charkleHex: "#1C1E23") : Color.white
-        }()
-        let borderStrong = colorScheme == .dark ? Color.white.opacity(0.16) : Color.black.opacity(0.14)
-        let borderSubtle = colorScheme == .dark ? Color.white.opacity(0.08) : Color.black.opacity(0.075)
-        let strokeColor: Color = if isDropTargeted {
-            accentColor
-        } else if isSelected {
-            accentColor.opacity(colorScheme == .dark ? 0.62 : 0.48)
-        } else if isHovered {
-            borderStrong
-        } else {
-            borderSubtle
         }
-        let strokeWidth: CGFloat = (isSelected || isDropTargeted) ? 1.5 : CharkleTheme.hairlineWidth
+        .opacity(isCut ? 0.54 : 1.0)
+        .onHover { hovering in
+            if isHovered != hovering {
+                isHovered = hovering
+                onHoverChanged(hovering)
+            }
+        }
+        .onChange(of: isHovered) { _, hovering in
+            if !hovering && !hasStack {
+                onTrailingControlsDocRectChange(nil)
+            }
+        }
+    }
 
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(alignment: .center, spacing: 12) {
-                // Tight drag & click hit region wrapping ONLY CompactMicroFolioArtifact + intrinsic VStack title/tags
-                HStack(alignment: .center, spacing: 12) {
-                    CompactMicroFolioArtifact(
-                        asset: asset,
-                        hasStack: hasStack,
-                        isCardHovered: isHovered,
-                        loader: loader,
-                        accentColor: accentColor
-                    )
+    // MARK: - 1-Column Unified Hairline Table Row (`minHeight: 54`)
 
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack(spacing: 6) {
-                            Text(asset.title)
-                                .font(CharkleTheme.text(.body, weight: .semibold))
-                                .foregroundStyle(.primary)
-                                .lineLimit(1)
-                                .truncationMode(.tail)
+    private var singleColumnTableRowBody: some View {
+        let highlightShape = RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous)
+        let highlightFill: Color = if isDropTargeted {
+            accentColor.opacity(0.10)
+        } else if isSelected {
+            CharkleTheme.accentSoft(for: colorScheme, source: accentSource)
+        } else if isHovered {
+            Color.primary.opacity(0.04)
+        } else {
+            .clear
+        }
 
-                            if asset.rating > 0 {
-                                Text("★\(asset.rating)")
-                                    .font(CharkleTheme.text(.caption, weight: .semibold))
-                                    .monospacedDigit()
-                                    .foregroundStyle(Color(charkleHex: "#E5B243"))
-                            }
+        return HStack(alignment: .center, spacing: 10) {
+            // Col 1 + Col 2 tight drag & click handle
+            HStack(alignment: .center, spacing: 10) {
+                CompactMicroFolioArtifact(
+                    asset: asset,
+                    hasStack: hasStack,
+                    isCardHovered: isHovered,
+                    loader: loader,
+                    accentColor: accentColor,
+                    sheetSize: sheetSize,
+                    outerSlotSize: CGSize(width: 40, height: 48)
+                )
 
-                            if asset.pinnedOffline {
-                                Image(systemName: "arrow.down.circle.fill")
-                                    .font(.system(size: 10.5))
-                                    .foregroundStyle(accentColor.opacity(0.85))
-                                    .help("已始终保留在本地")
-                            }
-                        }
+                HStack(alignment: .center, spacing: 6) {
+                    Text(asset.title)
+                        .font(CharkleTheme.text(.body, weight: .medium))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
 
-                        HStack(spacing: 6) {
-                            Text(adaptiveMetadataSummary)
-                                .font(CharkleTheme.text(.caption))
-                                .monospacedDigit()
-                                .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
-                                .lineLimit(1)
+                    if asset.rating > 0 {
+                        Text("★\(asset.rating)")
+                            .font(CharkleTheme.text(.caption, weight: .medium))
+                            .monospacedDigit()
+                            .foregroundStyle(CharkleTheme.warning(for: colorScheme))
+                            .fixedSize()
+                    }
 
-                            ForEach(asset.tags.prefix(2), id: \.self) { tag in
-                                Text("#\(tag)")
-                                    .font(CharkleTheme.text(.caption, weight: .medium))
-                                    .foregroundStyle(.tertiary)
-                                    .padding(.horizontal, 5.5)
-                                    .padding(.vertical, 1.5)
-                                    .background(
-                                        colorScheme == .dark ? Color.white.opacity(0.06) : Color(charkleHex: "#EAE9E4"),
-                                        in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.xs, style: .continuous)
-                                    )
-                                    .lineLimit(1)
-                            }
-                            if asset.tags.count > 2 {
-                                Text("+\(asset.tags.count - 2)")
-                                    .font(CharkleTheme.text(.caption, weight: .medium))
-                                    .monospacedDigit()
-                                    .foregroundStyle(.tertiary)
-                            }
-                        }
+                    if asset.pinnedOffline {
+                        Image(systemName: "arrow.down.circle.fill")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(.tertiary)
+                            .help("已始终保留在本地")
+                    }
+
+                    ForEach(asset.tags.prefix(2), id: \.self) { tag in
+                        Text("#\(tag)")
+                            .font(CharkleTheme.text(.caption))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 1.5)
+                            .background(Color.primary.opacity(0.055), in: Capsule(style: .continuous))
+                            .fixedSize(horizontal: true, vertical: false)
                     }
                 }
-                .layoutPriority(1)
+            }
+            .layoutPriority(1)
+            .contentShape(Rectangle())
+            .onTapGesture(count: 2, perform: onDoubleClickCard)
+            .onTapGesture(perform: onSelectCard)
+            .onDrag(makeDragProvider)
+            .onGeometryChange(for: CGRect.self) { proxy in
+                proxy.frame(in: .named("compactScrollDoc"))
+            } action: { _, rect in
+                onDragHandleDocRectChange(rect)
+            }
+
+            // Open middle expanse outside `.onDrag` so rubber-band marquee works seamlessly
+            Color.clear
+                .frame(minWidth: 16, maxWidth: .infinity, minHeight: 38)
                 .contentShape(Rectangle())
                 .onTapGesture(count: 2, perform: onDoubleClickCard)
                 .onTapGesture(perform: onSelectCard)
-                .onDrag(makeDragProvider)
-                .onGeometryChange(for: CGRect.self) { proxy in
-                    proxy.frame(in: .named("compactScrollDoc"))
-                } action: { _, rect in
-                    onDragHandleDocRectChange(rect)
+
+            // Col 3: Right-aligned tabular metadata & quiet actions
+            HStack(alignment: .center, spacing: 10) {
+                interactiveActionCluster
+
+                if asset.mediaKind == .audio {
+                    audioWaveformSparkbar
+                        .contentShape(Rectangle())
+                        .onTapGesture(count: 2, perform: onDoubleClickCard)
+                        .onTapGesture(perform: onSelectCard)
                 }
 
-                // Open middle strip expanse (outside `.onDrag` so dragging starts rubber-band marquee, while clicking still selects row!)
-                Color.clear
-                    .frame(minWidth: 12, maxWidth: .infinity, minHeight: 44)
+                Text(CompactMetadataFormatters.specSummary(for: asset))
+                    .font(CharkleTheme.text(.caption))
+                    .monospacedDigit()
+                    .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
+                    .lineLimit(1)
                     .contentShape(Rectangle())
                     .onTapGesture(count: 2, perform: onDoubleClickCard)
                     .onTapGesture(perform: onSelectCard)
 
-                // Interactive Stack Pill + Hover Copy Button + 12-Segment Diff Minimap / Timestamp
-                HStack(alignment: .center, spacing: 8) {
-                    if hasStack {
-                        stackCapsuleButton
-                    }
-
-                    if isHovered {
-                        Button(action: onCopyPrimaryFile) {
-                            Text("拷贝文件")
-                                .font(CharkleTheme.text(.caption, weight: .medium))
-                                .foregroundStyle(.primary)
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 4)
-                                .background(
-                                    colorScheme == .dark ? Color(charkleHex: "#282C35") : Color.white,
-                                    in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.sm, style: .continuous)
-                                )
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: CharkleTheme.Radius.sm, style: .continuous)
-                                        .strokeBorder(borderStrong, lineWidth: CharkleTheme.hairlineWidth)
-                                )
-                        }
-                        .buttonStyle(CharkleTactileButtonStyle())
-                        .transition(.opacity.combined(with: .offset(x: reduceMotion ? 0 : 4)))
-                        .help(hasStack ? "直接拷贝锁定的「主版本」原文件实体 (⌘C)" : "拷贝原文件实体到剪贴板 (⌘C)")
-                    }
-
-                    rightSpectrumAndTimestamp(borderStrong: borderStrong)
-                }
-                .fixedSize(horizontal: true, vertical: false)
-                .onGeometryChange(for: CGRect.self) { proxy in
-                    proxy.frame(in: .named("compactScrollDoc"))
-                } action: { _, rect in
-                    onTrailingControlsDocRectChange(rect)
-                }
+                Text(CompactMetadataFormatters.relativeTimestamp(asset.updatedAt))
+                    .font(CharkleTheme.text(.caption))
+                    .monospacedDigit()
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                    .frame(width: 68, alignment: .trailing)
+                    .contentShape(Rectangle())
+                    .onTapGesture(count: 2, perform: onDoubleClickCard)
+                    .onTapGesture(perform: onSelectCard)
             }
-
-            if isExpanded && hasStack {
-                revisionRailSection(borderSubtle: borderSubtle)
-                    .padding(.top, 10)
-                    .transition(CharkleMotion.revealTransition(offsetY: -4, reduced: reduceMotion))
-                    .onGeometryChange(for: CGRect.self) { proxy in
-                        proxy.frame(in: .named("compactScrollDoc"))
-                    } action: { _, rect in
-                        onExpandedRailDocRectChange(rect)
-                    }
-            }
+            .fixedSize(horizontal: true, vertical: false)
         }
-        .onChange(of: isExpanded) { _, expanded in
-            if !expanded {
-                onExpandedRailDocRectChange(nil)
-            }
-        }
-        .padding(10.5)
-        .opacity(isCut ? 0.54 : 1.0)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 4)
+        .frame(minHeight: 54)
         .background {
-            shape
-                .fill(isDropTargeted ? accentColor.opacity(0.08) : cardBg)
-                .shadow(
-                    color: Color.black.opacity(colorScheme == .dark ? 0.24 : 0.035),
-                    radius: isHovered ? 6 : 3,
-                    y: isHovered ? 2.5 : 1
-                )
+            highlightShape
+                .fill(highlightFill)
+                .padding(.horizontal, 4)
+                .padding(.vertical, 1)
+        }
+        .overlay(alignment: .leading) {
+            if isSelected {
+                Capsule(style: .continuous)
+                    .fill(accentColor)
+                    .frame(width: 2.5, height: 22)
+                    .padding(.leading, 4)
+                    .allowsHitTesting(false)
+            }
+        }
+        .overlay(alignment: .bottom) {
+            if showsBottomHairline {
+                Rectangle()
+                    .fill(CharkleTheme.hairline(for: colorScheme))
+                    .frame(height: CharkleTheme.hairlineWidth)
+                    .padding(.leading, 60)
+                    .padding(.trailing, 10)
+                    .allowsHitTesting(false)
+            }
         }
         .overlay {
-            shape.strokeBorder(strokeColor, lineWidth: strokeWidth)
-        }
-        .onHover { hovering in
-            withAnimation(CharkleMotion.accessible(CharkleMotion.hoverPress, reduced: reduceMotion)) {
-                isHovered = hovering
+            if isDropTargeted {
+                highlightShape
+                    .strokeBorder(accentColor, lineWidth: 1.5)
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 1)
+                    .allowsHitTesting(false)
             }
         }
     }
 
-    // MARK: - Stack Pill
+    // MARK: - 2-Column Non-Splitting Bento Tile (`height: 60`)
 
-    private var stackCapsuleButton: some View {
-        let warnInk = colorScheme == .dark ? Color(charkleHex: "#FBBF24") : Color(charkleHex: "#B45309")
-        let warnBg = colorScheme == .dark ? Color(charkleHex: "#F2B23E").opacity(0.18) : Color(charkleHex: "#C98212").opacity(0.14)
-        let softAccent = CharkleTheme.accentSoft(for: colorScheme, source: .studio)
+    private var twoColumnBentoCellBody: some View {
+        let tileShape = RoundedRectangle(cornerRadius: CharkleTheme.Radius.cardOuter, style: .continuous)
+        let overlayFill: Color = if isDropTargeted {
+            accentColor.opacity(0.10)
+        } else if isSelected {
+            CharkleTheme.accentSoft(for: colorScheme, source: accentSource)
+        } else if isHovered {
+            Color.primary.opacity(0.04)
+        } else {
+            .clear
+        }
+        let borderColor: Color = (isSelected || isDropTargeted)
+            ? accentColor
+            : CharkleTheme.hairline(for: colorScheme)
+        let borderWidth: CGFloat = (isSelected || isDropTargeted) ? 1.5 : CharkleTheme.hairlineWidth
 
-        return Button(action: onToggleRevisionRail) {
-            HStack(spacing: 4) {
-                Text("主版 v\(primaryVersionNumber)")
-                    .monospacedDigit()
+        return HStack(alignment: .center, spacing: 10) {
+            HStack(alignment: .center, spacing: 10) {
+                CompactMicroFolioArtifact(
+                    asset: asset,
+                    hasStack: hasStack,
+                    isCardHovered: isHovered,
+                    loader: loader,
+                    accentColor: accentColor,
+                    sheetSize: sheetSize,
+                    outerSlotSize: CGSize(width: 40, height: 48)
+                )
 
-                if newerThanPrimaryCount > 0 {
-                    Text("+\(newerThanPrimaryCount) 新版")
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 5) {
+                        Text(asset.title)
+                            .font(CharkleTheme.text(.body, weight: .medium))
+                            .foregroundStyle(.primary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+
+                        if asset.rating > 0 {
+                            Text("★\(asset.rating)")
+                                .font(CharkleTheme.text(.caption, weight: .medium))
+                                .monospacedDigit()
+                                .foregroundStyle(CharkleTheme.warning(for: colorScheme))
+                                .fixedSize()
+                        }
+                    }
+
+                    HStack(spacing: 6) {
+                        Text(CompactMetadataFormatters.specSummary(for: asset))
+                            .font(CharkleTheme.text(.caption))
+                            .monospacedDigit()
+                            .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
+                            .lineLimit(1)
+
+                        Text(CompactMetadataFormatters.relativeTimestamp(asset.updatedAt))
+                            .font(CharkleTheme.text(.caption))
+                            .monospacedDigit()
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                            .fixedSize()
+                    }
+                }
+            }
+            .layoutPriority(1)
+            .contentShape(Rectangle())
+            .onTapGesture(count: 2, perform: onDoubleClickCard)
+            .onTapGesture(perform: onSelectCard)
+            .onDrag(makeDragProvider)
+            .onGeometryChange(for: CGRect.self) { proxy in
+                proxy.frame(in: .named("compactScrollDoc"))
+            } action: { _, rect in
+                onDragHandleDocRectChange(rect)
+            }
+
+            // Open middle space for rubber-band marquee selection
+            Color.clear
+                .frame(minWidth: 10, maxWidth: .infinity, minHeight: 42)
+                .contentShape(Rectangle())
+                .onTapGesture(count: 2, perform: onDoubleClickCard)
+                .onTapGesture(perform: onSelectCard)
+
+            interactiveActionCluster
+                .fixedSize(horizontal: true, vertical: false)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .frame(height: 60)
+        .background {
+            tileShape
+                .fill(CharkleTheme.surfaceElevated(for: colorScheme))
+                .overlay(tileShape.fill(overlayFill))
+        }
+        .overlay {
+            tileShape
+                .strokeBorder(borderColor, lineWidth: borderWidth)
+                .allowsHitTesting(false)
+        }
+    }
+
+    // MARK: - Quiet Hover Copy + Anchored Version Trigger Badge
+
+    @ViewBuilder
+    private var interactiveActionCluster: some View {
+        HStack(alignment: .center, spacing: 6) {
+            Button(action: onCopyPrimaryFile) {
+                Image(systemName: "doc.on.doc")
+                    .font(.system(size: 11.5, weight: .medium))
+            }
+            .buttonStyle(.charkle(.subtle, size: .icon, iconDimension: 24))
+            .help(hasStack ? "拷贝主版本原文件 (⌘C)" : "拷贝原文件 (⌘C)")
+            .opacity(isHovered ? 1 : 0)
+            .allowsHitTesting(isHovered)
+
+            if hasStack {
+                quietVersionTriggerBadge
+            }
+        }
+        .onGeometryChange(for: CGRect.self) { proxy in
+            proxy.frame(in: .named("compactScrollDoc"))
+        } action: { _, rect in
+            if hasStack || isHovered {
+                onTrailingControlsDocRectChange(rect)
+            } else {
+                onTrailingControlsDocRectChange(nil)
+            }
+        }
+    }
+
+    private var quietVersionTriggerBadge: some View {
+        let badgeFill = Color.primary.opacity((isBadgeHovered || isPopoverPresented) ? 0.09 : 0.055)
+
+        return Button(action: onToggleVersionPopover) {
+            HStack(spacing: 3.5) {
+                Image(systemName: "square.stack.3d.up")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(isPopoverPresented ? Color.primary : CharkleTheme.secondaryInk(for: colorScheme))
+
+                HStack(spacing: 0) {
+                    Text("v\(primaryVersionNumber)")
                         .font(CharkleTheme.text(.caption, weight: .semibold))
                         .monospacedDigit()
-                        .foregroundStyle(isExpanded ? Color.white : warnInk)
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 1)
-                        .background(
-                            isExpanded ? Color.white.opacity(0.22) : warnBg,
-                            in: Capsule(style: .continuous)
-                        )
-                } else {
-                    Text("共\(siblings.count)版")
+                        .foregroundStyle(.primary)
+
+                    Text("/\(siblings.count)")
+                        .font(CharkleTheme.text(.caption))
                         .monospacedDigit()
-                        .opacity(0.76)
+                        .foregroundStyle(.tertiary)
                 }
 
-                Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
-                    .font(.system(size: 8.5, weight: .bold))
+                if newerThanPrimaryCount > 0 {
+                    Circle()
+                        .fill(CharkleTheme.warning(for: colorScheme))
+                        .frame(width: 5, height: 5)
+                }
+
+                CharkleDropdownChevron(size: 7.5)
             }
-            .font(CharkleTheme.text(.caption, weight: .semibold))
-            .foregroundStyle(isExpanded ? Color.white : accentColor)
-            .padding(.horizontal, 8.5)
+            .padding(.horizontal, 8)
             .padding(.vertical, 3.5)
-            .background(
-                isExpanded ? accentColor : softAccent,
-                in: Capsule(style: .continuous)
-            )
+            .background(badgeFill, in: Capsule(style: .continuous))
+            .overlay {
+                if isPopoverPresented {
+                    Capsule(style: .continuous)
+                        .strokeBorder(CharkleTheme.hairline(for: colorScheme), lineWidth: CharkleTheme.hairlineWidth)
+                }
+            }
             .contentShape(Capsule(style: .continuous))
         }
         .buttonStyle(CharkleTactileButtonStyle())
-        .help("点击展开或收起版本演进脉络轨")
-    }
-
-    // MARK: - 12-Segment Diff Minimap / Audio Spectrum + Timestamp
-
-    @ViewBuilder
-    private func rightSpectrumAndTimestamp(borderStrong: Color) -> some View {
-        let subtleWell = colorScheme == .dark ? Color(charkleHex: "#252830") : Color(charkleHex: "#EAE9E4")
-        let positiveColor = CharkleTheme.positive(for: colorScheme)
-        let dangerColor = CharkleTheme.destructive(for: colorScheme)
-
-        if let diff = resolvedDiffSummary,
-           (hasStack || diff.totalChangedBlocks > 0 || diff.minimapBuckets.contains(where: { $0 > 0 })) {
-            let buckets = DocumentDiffSummary.normalizeBuckets(diff.minimapBuckets)
-            VStack(alignment: .trailing, spacing: 4) {
-                HStack(alignment: .center, spacing: 2) {
-                    ForEach(Array(buckets.enumerated()), id: \.offset) { _, level in
-                        let barColor: Color = switch level {
-                        case 2: dangerColor
-                        case 1: positiveColor
-                        default: borderStrong
-                        }
-                        let barHeight: CGFloat = switch level {
-                        case 2: 14
-                        case 1: 11.5
-                        default: 7.5
-                        }
-                        Capsule(style: .continuous)
-                            .fill(barColor)
-                            .frame(width: 3, height: barHeight)
-                    }
-                }
-                .padding(.horizontal, 6)
-                .padding(.vertical, 4)
-                .background(subtleWell, in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.sm, style: .continuous))
-                .help(minimapTooltip(for: diff))
-
-                Text(formattedTimestamp(asset.updatedAt))
-                    .font(CharkleTheme.text(.caption))
-                    .monospacedDigit()
-                    .foregroundStyle(.tertiary)
+        .onHover { hovering in
+            if isBadgeHovered != hovering {
+                isBadgeHovered = hovering
             }
-        } else if asset.mediaKind == .audio {
-            let peaks = asset.waveformPeaks.isEmpty
-                ? [Float](repeating: 0.45, count: 12)
-                : asset.waveformPeaks
-            VStack(alignment: .trailing, spacing: 4) {
-                HStack(alignment: .center, spacing: 2) {
-                    ForEach(0..<12, id: \.self) { idx in
-                        let sample = peaks[idx * peaks.count / max(1, 12)]
-                        let barH = max(4, min(14, CGFloat(sample) * 14))
-                        Capsule(style: .continuous)
-                            .fill(CharkleTheme.secondaryInk(for: colorScheme))
-                            .frame(width: 2.5, height: barH)
-                    }
-                }
-                .padding(.horizontal, 6)
-                .padding(.vertical, 4)
-                .background(subtleWell, in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.sm, style: .continuous))
-
-                Text(formattedTimestamp(asset.updatedAt))
-                    .font(CharkleTheme.text(.caption))
-                    .monospacedDigit()
-                    .foregroundStyle(.tertiary)
-            }
-        } else {
-            VStack(alignment: .trailing, spacing: 3) {
-                if asset.fileSizeBytes > 0 {
-                    Text(ByteCountFormatter.string(fromByteCount: asset.fileSizeBytes, countStyle: .file))
-                        .font(CharkleTheme.text(.caption))
-                        .monospacedDigit()
-                        .foregroundStyle(.secondary)
-                }
-                Text(formattedTimestamp(asset.updatedAt))
-                    .font(CharkleTheme.text(.caption))
-                    .monospacedDigit()
-                    .foregroundStyle(.tertiary)
-            }
+        }
+        .help("查看历史版本")
+        .popover(isPresented: $isPopoverPresented, arrowEdge: .bottom) {
+            VersionTimelinePopoverView(
+                primaryAsset: asset,
+                siblings: siblings,
+                accentColor: accentColor,
+                accentSource: accentSource,
+                onPinPrimaryVersion: onPinPrimaryVersion,
+                onOpenVersionInQuickLook: onOpenVersionInQuickLook,
+                onOpenDiffPair: onOpenDiffPair,
+                onDismiss: { isPopoverPresented = false }
+            )
+            .environment(\.charkleAccentSource, accentSource)
+            .tint(accentColor)
         }
     }
 
-    private func minimapTooltip(for diff: DocumentDiffSummary) -> String {
-        var parts = ["共 \(diff.totalChangedBlocks) 处改动"]
-        if diff.highRiskNumberChanges > 0 {
-            parts.append("数字变动 \(diff.highRiskNumberChanges) 处")
+    private var audioWaveformSparkbar: some View {
+        let peaks = asset.waveformPeaks.isEmpty
+            ? [Float]([0.35, 0.70, 0.45, 0.88, 0.62, 0.78, 0.50, 0.84, 0.42, 0.68])
+            : asset.waveformPeaks
+        let barCount = 10
+
+        return HStack(alignment: .center, spacing: 2) {
+            ForEach(0..<barCount, id: \.self) { idx in
+                let sample = peaks[idx * peaks.count / max(1, barCount)]
+                let barHeight = max(4, min(14, CGFloat(sample) * 14))
+                Capsule(style: .continuous)
+                    .fill(CharkleTheme.secondaryInk(for: colorScheme))
+                    .frame(width: 2, height: barHeight)
+            }
         }
-        if diff.highRiskDateChanges > 0 {
-            parts.append("日期时间 \(diff.highRiskDateChanges) 处")
-        }
-        return parts.joined(separator: "，")
+        .padding(.horizontal, 4)
+        .frame(height: 20)
+    }
+}
+
+// MARK: - 4. Universal Vertical Version History Popover (`VersionTimelinePopoverView`)
+
+private struct VersionTimelinePopoverView: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+
+    let primaryAsset: AssetRecord
+    let siblings: [AssetRecord]
+    let accentColor: Color
+    let accentSource: CharkleAccentSource
+    let onPinPrimaryVersion: (AssetRecord) -> Void
+    let onOpenVersionInQuickLook: (AssetRecord) -> Void
+    let onOpenDiffPair: (UUID?, UUID?) -> Void
+    let onDismiss: () -> Void
+
+    private var primaryVersionNumber: Int {
+        primaryAsset.richMetadata?.versionStack?.versionNumber
+            ?? siblings.last?.richMetadata?.versionStack?.versionNumber
+            ?? 1
     }
 
-    // MARK: - Inline Expandable Revision Rail
+    var body: some View {
+        let reversedSiblings = Array(siblings.reversed())
 
-    private func revisionRailSection(borderSubtle: Color) -> some View {
-        let railBg = colorScheme == .dark ? Color(charkleHex: "#17191E") : Color(charkleHex: "#F1F0EC")
-        let warnInk = colorScheme == .dark ? Color(charkleHex: "#FBBF24") : Color(charkleHex: "#B45309")
-        let warnBg = colorScheme == .dark ? Color(charkleHex: "#F2B23E").opacity(0.16) : Color(charkleHex: "#C98212").opacity(0.13)
-        let positiveInk = CharkleTheme.positive(for: colorScheme)
-        let positiveBg = positiveInk.opacity(colorScheme == .dark ? 0.16 : 0.12)
+        VStack(alignment: .leading, spacing: 0) {
+            // Header (`padding: 12 14 8 14`)
+            HStack(alignment: .center, spacing: 6) {
+                Text("历史版本")
+                    .font(CharkleTheme.text(.caption, weight: .semibold))
+                    .foregroundStyle(.primary)
 
-        return VStack(alignment: .leading, spacing: 8) {
-            Rectangle()
-                .fill(borderSubtle)
-                .frame(height: CharkleTheme.hairlineWidth)
+                Text("\(siblings.count)")
+                    .font(CharkleTheme.text(.caption))
+                    .monospacedDigit()
+                    .foregroundStyle(.tertiary)
 
-            HStack(spacing: 8) {
-                Text("版本演进脉络 — 点击任意版锁定对外「主版本」，点中间 Δ 直接对比挑拣")
-                    .font(CharkleTheme.text(.caption, weight: .medium))
-                    .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
-                    .lineLimit(1)
-
-                Spacer(minLength: 6)
+                Spacer(minLength: 8)
 
                 if siblings.count >= 2 {
                     Button {
                         let baseID = siblings[siblings.count - 2].id
                         let targetID = siblings[siblings.count - 1].id
+                        onDismiss()
                         onOpenDiffPair(baseID, targetID)
                     } label: {
-                        HStack(spacing: 4) {
-                            Text("进入精细对比与取舍")
-                            Image(systemName: "arrow.right")
-                                .font(.system(size: 9.5, weight: .bold))
-                        }
-                        .font(CharkleTheme.text(.caption, weight: .semibold))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 9)
-                        .padding(.vertical, 4)
-                        .background(accentColor, in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.sm, style: .continuous))
+                        Label("对比差异", systemImage: "arrow.left.arrow.right")
                     }
-                    .buttonStyle(CharkleTactileButtonStyle())
+                    .buttonStyle(.charkle(.subtle, size: .xs))
                 }
             }
+            .padding(.top, 12)
+            .padding(.horizontal, 14)
+            .padding(.bottom, 8)
 
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 6) {
-                    ForEach(Array(siblings.enumerated()), id: \.element.id) { idx, ver in
-                        if idx > 0 {
-                            let prevVer = siblings[idx - 1]
-                            let deltaLabel: String = {
-                                if let summary = ver.richMetadata?.document?.diffSummary {
-                                    return summary.compactBridgeLabel
-                                }
-                                return "Δ 对比"
-                            }()
-                            Button {
-                                onOpenDiffPair(prevVer.id, ver.id)
-                            } label: {
-                                Text(deltaLabel)
-                                    .font(CharkleTheme.text(.caption, weight: .semibold))
-                                    .monospacedDigit()
-                                    .foregroundStyle(warnInk)
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 3.5)
-                                    .background(warnBg, in: Capsule(style: .continuous))
-                            }
-                            .buttonStyle(CharkleTactileButtonStyle())
-                            .help("点击直接对比 \(prevVer.richMetadata?.versionStack?.displayVersionTag ?? "上一版") 与 \(ver.richMetadata?.versionStack?.displayVersionTag ?? "此版")")
-                        }
+            CharkleHairlineDivider()
 
-                        let vMeta = ver.richMetadata?.versionStack
-                        let vNum = vMeta?.versionNumber ?? (idx + 1)
-                        let isPrimary = ver.id == asset.id
-                        let isUnreviewed = vNum > primaryVersionNumber && !isPrimary
-                        let noteTag: String = {
-                            if let note = vMeta?.changeNote {
-                                let cleaned = AssetVersionStackMetadata.strippingRedundantVersionPrefix(note)
-                                if !cleaned.isEmpty { return cleaned }
-                            }
-                            if let label = vMeta?.versionLabel {
-                                let cleaned = AssetVersionStackMetadata.strippingRedundantVersionPrefix(label)
-                                if !cleaned.isEmpty { return cleaned }
-                            }
-                            return idx == 0 ? "初稿" : "修订版"
-                        }()
-                        let editor = (vMeta?.editorName?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 } ?? "本机"
-
-                        HStack(spacing: 8) {
-                            Button {
-                                if !isPrimary {
-                                    onPinPrimaryVersion(ver)
-                                } else {
-                                    onOpenVersionInQuickLook(ver)
-                                }
-                            } label: {
-                                VStack(alignment: .leading, spacing: 2.5) {
-                                    HStack(spacing: 5) {
-                                        Text("v\(vNum) \(noteTag)")
-                                            .font(CharkleTheme.text(.caption, weight: .semibold))
-                                            .monospacedDigit()
-                                            .foregroundStyle(.primary)
-                                            .lineLimit(1)
-
-                                        if isPrimary {
-                                            Text("主版")
-                                                .font(CharkleTheme.text(.caption, weight: .bold))
-                                                .foregroundStyle(positiveInk)
-                                                .padding(.horizontal, 5)
-                                                .padding(.vertical, 1)
-                                                .background(positiveBg, in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.xs, style: .continuous))
-                                        } else if isUnreviewed {
-                                            Circle()
-                                                .fill(warnInk)
-                                                .frame(width: 6, height: 6)
-                                                .help("新叠入待审版本")
-                                        }
-                                    }
-
-                                    Text("\(editor)  \(formattedTimestamp(ver.updatedAt))")
-                                        .font(CharkleTheme.text(.caption))
-                                        .monospacedDigit()
-                                        .foregroundStyle(.tertiary)
-                                        .lineLimit(1)
-                                }
-                            }
-                            .buttonStyle(.plain)
-                            .help(isPrimary ? "当前锁定的对外主版本（点击打开预览）" : "点击将 v\(vNum) 锁定为主版本")
-
-                            if !isPrimary {
-                                Button {
-                                    onPinPrimaryVersion(ver)
-                                } label: {
-                                    Text("设为主版")
-                                        .font(CharkleTheme.text(.caption, weight: .semibold))
-                                        .foregroundStyle(accentColor)
-                                        .padding(.horizontal, 6)
-                                        .padding(.vertical, 2.5)
-                                        .background(accentColor.opacity(0.12), in: Capsule(style: .continuous))
-                                }
-                                .buttonStyle(.plain)
-                                .help("将 v\(vNum) 锁定为对外主版本")
-                            }
-
-                            Button {
-                                onOpenVersionInQuickLook(ver)
-                            } label: {
-                                Image(systemName: "eye")
-                                    .font(.system(size: 10.5, weight: .medium))
-                                    .foregroundStyle(.secondary)
-                                    .frame(width: 22, height: 22)
-                                    .background(Color.primary.opacity(0.06), in: Circle())
-                            }
-                            .buttonStyle(.plain)
-                            .help("预览 v\(vNum) 内容")
-                        }
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 6.5)
-                        .background(
-                            isPrimary
-                                ? accentColor.opacity(colorScheme == .dark ? 0.16 : 0.09)
-                                : railBg,
-                            in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous)
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous)
-                                .strokeBorder(
-                                    isPrimary ? accentColor.opacity(0.45) : borderSubtle,
-                                    lineWidth: CharkleTheme.hairlineWidth
-                                )
-                        )
-                    }
-                }
-                .padding(.vertical, 1)
-            }
-            .background(HorizontalWheelScrollRedirector())
-        }
-    }
-
-    // MARK: - Adaptive Metadata Summary & Relative Time
-
-    private var adaptiveMetadataSummary: String {
-        let ext = CanvasFormatters.fileExtensionBadge(for: asset.fileName)
-        switch asset.mediaKind {
-        case .document:
-            var parts: [String] = []
-            if let doc = asset.richMetadata?.document {
-                if !doc.sheetNames.isEmpty {
-                    parts.append("\(doc.sheetNames.count) 工作表")
-                } else if doc.pageCount > 0 {
-                    parts.append("\(doc.pageCount) 页")
-                }
-                if doc.wordCount > 0 {
-                    parts.append("\(doc.wordCount) 字")
-                }
-                if !doc.hasTextLayer {
-                    parts.append("扫描件")
-                }
+            if reversedSiblings.count <= 5 {
+                timelineRowsContent(reversedSiblings: reversedSiblings)
             } else {
-                parts.append(ext)
+                ScrollView(.vertical) {
+                    timelineRowsContent(reversedSiblings: reversedSiblings)
+                }
+                .charkleCleanScrollbars(hidden: false)
+                .frame(maxHeight: 280)
             }
-            if let editor = asset.richMetadata?.versionStack?.editorName?.trimmingCharacters(in: .whitespacesAndNewlines),
-               !editor.isEmpty {
-                parts.append("\(editor)核定")
-            } else if let note = asset.richMetadata?.versionStack?.changeNote?.trimmingCharacters(in: .whitespacesAndNewlines),
-                      !note.isEmpty {
-                parts.append(note)
+        }
+        .frame(width: 312)
+        .background {
+            if reduceTransparency {
+                CharkleTheme.surfaceElevated(for: colorScheme)
+            } else {
+                Rectangle().fill(.ultraThinMaterial)
             }
-            return parts.isEmpty ? ext : parts.joined(separator: " / ")
-
-        case .image, .animatedImage, .designFile:
-            if asset.pixelWidth > 0 && asset.pixelHeight > 0 {
-                return "\(asset.pixelWidth) × \(asset.pixelHeight) / \(ext)"
-            }
-            return ext
-
-        case .video, .audio:
-            let dur = CanvasFormatters.durationString(asset.durationSeconds)
-            if asset.pixelWidth > 0 && asset.pixelHeight > 0 {
-                return "\(dur) / \(asset.pixelWidth)×\(asset.pixelHeight) / \(ext)"
-            }
-            return "\(dur) / \(ext)"
-
-        case .webBookmark:
-            if let repo = asset.richMetadata?.githubRepo {
-                return "\(repo.fullName) / ★\(repo.stars)"
-            }
-            if let post = asset.richMetadata?.socialPost {
-                return "\(post.platform.displayName) / \(post.displayAuthorName)"
-            }
-            return asset.sourceDomain ?? "网页书签"
-
-        case .model3D:
-            return "三维模型 / \(asset.richMetadata?.model3DFormat ?? ext)"
         }
     }
 
-    private func formattedTimestamp(_ date: Date) -> String {
-        let elapsed = max(0, Date().timeIntervalSince(date))
-        if elapsed < 60 { return "刚刚" }
-        if elapsed < 3600 { return "\(Int(elapsed / 60)) 分钟前" }
-        if elapsed < 86400 { return "\(Int(elapsed / 3600)) 小时前" }
-        return Self.shortTimeFormatter.string(from: date)
+    private func timelineRowsContent(reversedSiblings: [AssetRecord]) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(Array(reversedSiblings.enumerated()), id: \.element.id) { revIdx, ver in
+                let origIdx = siblings.count - 1 - revIdx
+                let prevVer: AssetRecord? = origIdx > 0 ? siblings[origIdx - 1] : nil
+                VersionTimelineRow(
+                    versionAsset: ver,
+                    previousAsset: prevVer,
+                    fallbackVersionNumber: origIdx + 1,
+                    isPrimary: ver.id == primaryAsset.id,
+                    primaryVersionNumber: primaryVersionNumber,
+                    isFirstInTimeline: revIdx == 0,
+                    isLastInTimeline: revIdx == reversedSiblings.count - 1,
+                    accentColor: accentColor,
+                    accentSource: accentSource,
+                    onPinPrimary: {
+                        onPinPrimaryVersion(ver)
+                    },
+                    onOpenQuickLook: {
+                        onDismiss()
+                        onOpenVersionInQuickLook(ver)
+                    },
+                    onOpenDiffWithPrevious: {
+                        guard let prevVer else { return }
+                        onDismiss()
+                        onOpenDiffPair(prevVer.id, ver.id)
+                    }
+                )
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
     }
 }
 
-// MARK: - 3D Miniature Physical Folio Artifact (44 × 52pt)
+private struct VersionTimelineRow: View {
+    @Environment(\.colorScheme) private var colorScheme
+
+    let versionAsset: AssetRecord
+    let previousAsset: AssetRecord?
+    let fallbackVersionNumber: Int
+    let isPrimary: Bool
+    let primaryVersionNumber: Int
+    let isFirstInTimeline: Bool
+    let isLastInTimeline: Bool
+    let accentColor: Color
+    let accentSource: CharkleAccentSource
+    let onPinPrimary: () -> Void
+    let onOpenQuickLook: () -> Void
+    let onOpenDiffWithPrevious: () -> Void
+
+    @State private var isHovered: Bool = false
+
+    var body: some View {
+        let vMeta = versionAsset.richMetadata?.versionStack
+        let vNum = vMeta?.versionNumber ?? fallbackVersionNumber
+        let isUnreviewed = vNum > primaryVersionNumber && !isPrimary
+        let descriptor = AssetVersionStackMetadata.cleanDisplayDescriptor(
+            changeNote: vMeta?.changeNote,
+            versionLabel: vMeta?.versionLabel,
+            editorName: vMeta?.editorName
+        )
+        let cleanEditor: String? = {
+            guard let raw = vMeta?.editorName?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !raw.isEmpty,
+                  raw != "本机" else {
+                return nil
+            }
+            if let descriptor, descriptor.localizedCaseInsensitiveContains(raw) {
+                return nil
+            }
+            return raw
+        }()
+        let changedCount = (previousAsset != nil)
+            ? (versionAsset.richMetadata?.document?.diffSummary?.totalChangedBlocks ?? 0)
+            : 0
+        let hasHighRisk = (versionAsset.richMetadata?.document?.diffSummary?.totalHighRiskChanges ?? 0) > 0
+        let rowShape = RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous)
+        let rowBg: Color = if isPrimary {
+            CharkleTheme.accentSoft(for: colorScheme, source: accentSource)
+        } else if isHovered {
+            Color.primary.opacity(0.045)
+        } else {
+            .clear
+        }
+
+        HStack(alignment: .center, spacing: 6) {
+            // Left gutter (`width: 20`): continuous 1pt vertical spine connecting 8pt circular nodes
+            ZStack {
+                VStack(spacing: 0) {
+                    Rectangle()
+                        .fill(isFirstInTimeline ? Color.clear : CharkleTheme.hairline(for: colorScheme))
+                        .frame(width: 1)
+                        .frame(maxHeight: .infinity)
+                    Rectangle()
+                        .fill(isLastInTimeline ? Color.clear : CharkleTheme.hairline(for: colorScheme))
+                        .frame(width: 1)
+                        .frame(maxHeight: .infinity)
+                }
+
+                if isPrimary {
+                    Circle()
+                        .fill(accentColor)
+                        .frame(width: 8, height: 8)
+                } else {
+                    Circle()
+                        .fill(CharkleTheme.surfaceElevated(for: colorScheme))
+                        .overlay(
+                            Circle().strokeBorder(
+                                isUnreviewed
+                                    ? CharkleTheme.warning(for: colorScheme)
+                                    : Color.secondary.opacity(0.45),
+                                lineWidth: 1.5
+                            )
+                        )
+                        .frame(width: 8, height: 8)
+                }
+            }
+            .frame(width: 20)
+
+            // Row body (`padding: 7 10`)
+            HStack(alignment: .center, spacing: 6) {
+                Button(action: onOpenQuickLook) {
+                    VStack(alignment: .leading, spacing: 2.5) {
+                        HStack(alignment: .center, spacing: 6) {
+                            Text("v\(vNum)")
+                                .font(CharkleTheme.text(.body, weight: .semibold))
+                                .monospacedDigit()
+                                .foregroundStyle(.primary)
+
+                            if let descriptor {
+                                Text(descriptor)
+                                    .font(CharkleTheme.text(.caption, weight: .medium))
+                                    .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
+                                    .lineLimit(1)
+                            }
+
+                            if isPrimary {
+                                Text("主版")
+                                    .font(CharkleTheme.text(.caption, weight: .semibold))
+                                    .foregroundStyle(accentColor)
+                                    .padding(.horizontal, 5)
+                                    .padding(.vertical, 1)
+                                    .background(
+                                        CharkleTheme.accentSoft(for: colorScheme, source: accentSource),
+                                        in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.xs, style: .continuous)
+                                    )
+                                    .fixedSize()
+                            }
+                        }
+
+                        HStack(alignment: .center, spacing: 6) {
+                            Text(CompactMetadataFormatters.relativeTimestamp(versionAsset.updatedAt))
+                                .font(CharkleTheme.text(.caption))
+                                .monospacedDigit()
+                                .foregroundStyle(.tertiary)
+
+                            if let cleanEditor {
+                                Text(cleanEditor)
+                                    .font(CharkleTheme.text(.caption))
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("预览 v\(vNum)")
+
+                if changedCount > 0 {
+                    let deltaInk = hasHighRisk
+                        ? CharkleTheme.warning(for: colorScheme)
+                        : CharkleTheme.secondaryInk(for: colorScheme)
+                    let deltaBg = hasHighRisk
+                        ? CharkleTheme.warning(for: colorScheme).opacity(colorScheme == .dark ? 0.16 : 0.12)
+                        : Color.primary.opacity(0.055)
+
+                    Button(action: onOpenDiffWithPrevious) {
+                        Text("Δ \(changedCount)")
+                            .font(CharkleTheme.text(.caption, weight: .semibold))
+                            .monospacedDigit()
+                            .foregroundStyle(deltaInk)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(deltaBg, in: Capsule(style: .continuous))
+                    }
+                    .buttonStyle(CharkleTactileButtonStyle())
+                    .fixedSize()
+                    .help("对比此版本改动")
+                }
+
+                if !isPrimary {
+                    Button(action: onPinPrimary) {
+                        Image(systemName: "pin")
+                            .font(.system(size: 11, weight: .medium))
+                    }
+                    .buttonStyle(.charkle(.subtle, size: .icon, iconDimension: 24))
+                    .opacity(isHovered ? 1.0 : 0.45)
+                    .help("设为主版本")
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(rowBg, in: rowShape)
+        }
+        .padding(.vertical, 1)
+        .onHover { hovering in
+            if isHovered != hovering {
+                isHovered = hovering
+            }
+        }
+    }
+}
+
+// MARK: - Crisp Miniature Artwork / Page Cover (`36 × 46pt` Docs / `38 × 42pt` Media)
 
 private struct CompactMicroFolioArtifact: View {
     @Environment(\.colorScheme) private var colorScheme
@@ -1682,6 +1819,8 @@ private struct CompactMicroFolioArtifact: View {
     let isCardHovered: Bool
     let loader: ThumbnailImageLoader
     let accentColor: Color
+    let sheetSize: CGSize
+    let outerSlotSize: CGSize
 
     @State private var loadedDocImage: NSImage? = nil
     @State private var loadedDocAssetID: UUID? = nil
@@ -1710,85 +1849,46 @@ private struct CompactMicroFolioArtifact: View {
         asset.richMetadata?.document?.parsedFormatFamily ?? DocumentFormatFamily.detect(fileExtension: extLabel)
     }
 
-    private var formatAccent: Color {
-        switch asset.mediaKind {
-        case .document:
-            switch docFamily {
-            case .xlsx: return Color(charkleHex: "#1D7A46")
-            case .pdf: return Color(charkleHex: "#C83E37")
-            case .pptx: return Color(charkleHex: "#C96A1B")
-            case .docx, .legacyOffice: return Color(charkleHex: "#2A60E0")
-            default: return Color(charkleHex: "#4B5563")
-            }
-        case .audio:
-            return Color(charkleHex: "#5C6B73")
-        default:
-            return accentColor
-        }
-    }
-
     var body: some View {
-        let paperCover = colorScheme == .dark ? Color(charkleHex: "#282B33") : Color.white
-        let paperBack1 = colorScheme == .dark ? Color(charkleHex: "#21242B") : Color(charkleHex: "#F3F2EE")
-        let paperBack2 = colorScheme == .dark ? Color(charkleHex: "#1A1C22") : Color(charkleHex: "#E6E4DE")
-        let borderStrong = colorScheme == .dark ? Color.white.opacity(0.16) : Color.black.opacity(0.14)
         let sheetShape = RoundedRectangle(cornerRadius: CharkleTheme.Radius.sm, style: .continuous)
+        let opticalRim = Color.primary.opacity(0.08)
         let fanActive = hasStack && isCardHovered && !reduceMotion
-        let poses = CompactIndexLayoutMetrics.microFolioLayerPoses(
-            isHovered: hasStack && isCardHovered,
-            reduceMotion: reduceMotion
-        )
-        let pivot = UnitPoint(x: 0.0, y: 0.85)
 
         ZStack {
             if hasStack {
                 sheetShape
-                    .fill(paperBack2)
-                    .overlay(sheetShape.strokeBorder(borderStrong, lineWidth: CharkleTheme.hairlineWidth))
-                    .frame(width: 38, height: 48)
-                    .rotationEffect(.degrees(poses.back.rotationZDegrees), anchor: pivot)
-                    .offset(x: poses.back.offsetX, y: poses.back.offsetY)
+                    .fill(CharkleTheme.surfaceSubtle(for: colorScheme))
+                    .overlay(sheetShape.strokeBorder(opticalRim, lineWidth: CharkleTheme.hairlineWidth))
+                    .frame(width: sheetSize.width, height: sheetSize.height)
+                    .rotationEffect(.degrees(fanActive ? 3.5 : 0), anchor: .bottomLeading)
+                    .offset(x: fanActive ? 3.5 : 2.5, y: fanActive ? -2.0 : -1.5)
                     .animation(
-                        reduceMotion ? nil : CharkleMotion.microOvershoot.delay(fanActive ? 0.045 : 0),
-                        value: fanActive
-                    )
-
-                sheetShape
-                    .fill(paperBack1)
-                    .overlay(sheetShape.strokeBorder(borderStrong, lineWidth: CharkleTheme.hairlineWidth))
-                    .frame(width: 38, height: 48)
-                    .rotation3DEffect(
-                        .degrees(poses.mid.rotationYDegrees),
-                        axis: (x: 0, y: 1, z: 0),
-                        anchor: .leading,
-                        perspective: 0.45
-                    )
-                    .rotationEffect(.degrees(poses.mid.rotationZDegrees), anchor: pivot)
-                    .offset(x: poses.mid.offsetX, y: poses.mid.offsetY)
-                    .animation(
-                        reduceMotion ? nil : CharkleMotion.microOvershoot.delay(fanActive ? 0.022 : 0.022),
+                        reduceMotion ? nil : CharkleMotion.hoverPress,
                         value: fanActive
                     )
             }
 
-            coverContent(paperCover: paperCover, borderStrong: borderStrong, sheetShape: sheetShape)
-                .frame(width: 38, height: 48)
+            coverContent
+                .frame(width: sheetSize.width, height: sheetSize.height)
                 .clipShape(sheetShape)
-                .overlay(sheetShape.strokeBorder(borderStrong, lineWidth: CharkleTheme.hairlineWidth))
-                .shadow(color: Color.black.opacity(colorScheme == .dark ? 0.28 : 0.08), radius: 2.5, y: 1)
+                .overlay(sheetShape.strokeBorder(opticalRim, lineWidth: CharkleTheme.hairlineWidth))
+                .shadow(
+                    color: .black.opacity(colorScheme == .dark ? 0.28 : 0.08),
+                    radius: 3,
+                    y: 1.5
+                )
                 .rotation3DEffect(
-                    .degrees(poses.front.rotationYDegrees),
+                    .degrees(fanActive ? -8 : 0),
                     axis: (x: 0, y: 1, z: 0),
                     anchor: .leading,
-                    perspective: 0.45
+                    perspective: 0.4
                 )
-                .offset(x: poses.front.offsetX, y: poses.front.offsetY)
                 .animation(
-                    reduceMotion ? nil : CharkleMotion.microOvershoot.delay(fanActive ? 0 : 0.044),
+                    reduceMotion ? nil : CharkleMotion.hoverPress,
                     value: fanActive
                 )
         }
-        .frame(width: 44, height: 52)
+        .frame(width: outerSlotSize.width, height: outerSlotSize.height)
         .task(id: "\(asset.id.uuidString)-\(loader.invalidationVersion)-\(expectsRealDocumentPageImage)") {
             guard expectsRealDocumentPageImage else {
                 if loadedDocImage != nil {
@@ -1818,199 +1918,161 @@ private struct CompactMicroFolioArtifact: View {
     }
 
     @ViewBuilder
-    private func coverContent(paperCover: Color, borderStrong: Color, sheetShape: RoundedRectangle) -> some View {
+    private var coverContent: some View {
         switch asset.mediaKind {
         case .document:
             if let realPage = resolvedDocumentPageImage {
-                realDocumentPageMiniFolio(pageImage: realPage, paperCover: paperCover)
+                Image(nsImage: realPage)
+                    .resizable()
+                    .interpolation(.high)
+                    .scaledToFill()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .clipped()
+                    .background(Color.white)
             } else {
-                documentPageSkeleton(paperCover: paperCover)
+                minimalPaperSheet
             }
         case .audio:
-            audioMiniFolio(paperCover: paperCover)
-        case .webBookmark:
-            webBookmarkMiniFolio(paperCover: paperCover)
+            minimalAudioSheet
         default:
-            visualPaletteMiniFolio(paperCover: paperCover)
+            AssetThumbnailSurface(
+                asset: asset,
+                loader: loader,
+                tier: .grid520,
+                cornerRadius: CharkleTheme.Radius.sm,
+                enableHoverPlayback: false
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 
-    private func realDocumentPageMiniFolio(pageImage: NSImage, paperCover: Color) -> some View {
-        ZStack(alignment: .bottomLeading) {
-            Image(nsImage: pageImage)
-                .resizable()
-                .interpolation(.high)
-                .scaledToFill()
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .clipped()
+    /// Clean minimal paper rectangle with only a subtle muted monospaced format tag near the bottom.
+    private var minimalPaperSheet: some View {
+        let paperFill = colorScheme == .dark
+            ? CharkleTheme.surfaceSubtle(for: .dark)
+            : CharkleTheme.surfaceElevated(for: .light)
 
+        return VStack(spacing: 0) {
+            Spacer(minLength: 0)
             Text(docFamily.badgeLabel)
-                .font(CharkleTheme.text(.caption, weight: .bold))
-                .foregroundStyle(.white)
+                .font(CharkleTheme.text(.caption, weight: .medium, design: .monospaced))
+                .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .minimumScaleFactor(0.65)
                 .fixedSize(horizontal: true, vertical: false)
-                .padding(.horizontal, 3)
-                .padding(.vertical, 1)
-                .background(formatAccent.opacity(0.88), in: RoundedRectangle(cornerRadius: 2.5, style: .continuous))
-                .scaleEffect(0.72, anchor: .bottomLeading)
-                .padding(2)
+                .scaleEffect(0.78)
+                .padding(.bottom, 3)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(paperCover)
+        .background(paperFill)
     }
 
-    private func visualPaletteMiniFolio(paperCover: Color) -> some View {
-        VStack(spacing: 0) {
-            ZStack(alignment: .bottomLeading) {
-                AssetThumbnailSurface(
-                    asset: asset,
-                    loader: loader,
-                    tier: .grid520,
-                    cornerRadius: 0
-                )
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-                Text(extLabel)
-                    .font(CharkleTheme.text(.caption, weight: .bold))
-                    .foregroundStyle(.white)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.65)
-                    .fixedSize(horizontal: true, vertical: false)
-                    .padding(.horizontal, 3)
-                    .padding(.vertical, 1)
-                    .background(Color.black.opacity(0.52), in: RoundedRectangle(cornerRadius: 2.5, style: .continuous))
-                    .scaleEffect(0.72, anchor: .bottomLeading)
-                    .padding(2.5)
-            }
-
-            if !asset.dominantColors.isEmpty {
-                HStack(spacing: 0) {
-                    ForEach(asset.dominantColors.prefix(4), id: \.hex) { swatch in
-                        Rectangle()
-                            .fill(Color(charkleHex: swatch.hex))
-                    }
-                }
-                .frame(height: 6)
-            }
-        }
-        .background(paperCover)
-    }
-
-    private func audioMiniFolio(paperCover: Color) -> some View {
-        let peaks = asset.waveformPeaks.isEmpty
-            ? [Float]([0.35, 0.72, 0.48, 0.92, 0.85, 0.55, 0.76, 0.42])
-            : Array(asset.waveformPeaks.prefix(8))
-        return VStack(spacing: 3) {
+    private var minimalAudioSheet: some View {
+        VStack(spacing: 2) {
             Spacer(minLength: 2)
-            HStack(alignment: .center, spacing: 1.5) {
-                ForEach(Array(peaks.enumerated()), id: \.offset) { _, p in
-                    Capsule(style: .continuous)
-                        .fill(accentColor)
-                        .frame(width: 2, height: max(4, min(22, CGFloat(p) * 22)))
-                }
-            }
-            Spacer(minLength: 1)
+            Image(systemName: "waveform")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 0)
             Text(extLabel)
-                .font(CharkleTheme.text(.caption, weight: .bold))
-                .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
+                .font(CharkleTheme.text(.caption, weight: .medium, design: .monospaced))
+                .foregroundStyle(.tertiary)
                 .lineLimit(1)
                 .minimumScaleFactor(0.65)
                 .fixedSize(horizontal: true, vertical: false)
-                .scaleEffect(0.72)
+                .scaleEffect(0.75)
+                .padding(.bottom, 2)
         }
-        .padding(4)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(paperCover)
+        .background(CharkleTheme.surfaceSubtle(for: colorScheme))
     }
+}
 
-    private func webBookmarkMiniFolio(paperCover: Color) -> some View {
-        let badge = asset.isGitHubRepo ? "GH" : (asset.richMetadata?.socialPost?.platform.displayName.prefix(3).uppercased() ?? "WEB")
-        return VStack(alignment: .leading, spacing: 4) {
-            RoundedRectangle(cornerRadius: 1, style: .continuous)
-                .fill(accentColor)
-                .frame(height: 3)
-            Spacer(minLength: 0)
-            Image(systemName: asset.isGitHubRepo ? "chevron.left.forwardslash.chevron.right" : "globe")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(accentColor.opacity(0.85))
-                .frame(maxWidth: .infinity)
-            Spacer(minLength: 0)
-            Text(badge)
-                .font(CharkleTheme.text(.caption, weight: .bold))
-                .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
-                .lineLimit(1)
-                .minimumScaleFactor(0.65)
-                .fixedSize(horizontal: true, vertical: false)
-                .scaleEffect(0.72, anchor: .bottomLeading)
-        }
-        .padding(5)
-        .background(paperCover)
-    }
+// MARK: - Concise Tabular Metadata & Timestamp Formatters
 
-    private func documentPageSkeleton(paperCover: Color) -> some View {
-        let lineColor = colorScheme == .dark ? Color.white.opacity(0.16) : Color.black.opacity(0.12)
-        let isSheet = docFamily == .xlsx
-        let isRedHeader = docFamily == .pdf || asset.title.contains("红头") || asset.title.contains("通知") || asset.title.contains("汇报")
-        let isStamped = (asset.richMetadata?.document?.hasTextLayer == false) || asset.title.contains("扫描") || asset.title.contains("签")
+private enum CompactMetadataFormatters {
+    private static let sameYearDateFormatter: DateFormatter = {
+        let fmt = DateFormatter()
+        fmt.dateFormat = "MM-dd"
+        return fmt
+    }()
 
-        return VStack(alignment: .leading, spacing: 3.5) {
-            if isSheet {
-                RoundedRectangle(cornerRadius: 1, style: .continuous)
-                    .fill(formatAccent)
-                    .frame(height: 4)
+    private static let olderYearDateFormatter: DateFormatter = {
+        let fmt = DateFormatter()
+        fmt.dateFormat = "yy-MM-dd"
+        return fmt
+    }()
 
-                VStack(spacing: 2) {
-                    ForEach(0..<3, id: \.self) { r in
-                        HStack(spacing: 2) {
-                            ForEach(0..<3, id: \.self) { c in
-                                let fill: Color = (r == 0 && c == 1)
-                                    ? Color(charkleHex: "#249A4B").opacity(0.32)
-                                    : ((r == 1 && c == 1)
-                                        ? Color(charkleHex: "#D93B30").opacity(0.32)
-                                        : lineColor)
-                                RoundedRectangle(cornerRadius: 1, style: .continuous)
-                                    .fill(fill)
-                            }
-                        }
-                    }
+    static func specSummary(for asset: AssetRecord) -> String {
+        let ext = CanvasFormatters.fileExtensionBadge(for: asset.fileName)
+        switch asset.mediaKind {
+        case .document:
+            var parts: [String] = []
+            if let doc = asset.richMetadata?.document {
+                if !doc.sheetNames.isEmpty {
+                    parts.append("\(doc.sheetNames.count) 工作表")
+                } else if doc.pageCount > 0 {
+                    parts.append("\(doc.pageCount) 页")
                 }
-                .frame(maxHeight: .infinity)
-            } else {
-                RoundedRectangle(cornerRadius: 1.5, style: .continuous)
-                    .fill(isRedHeader ? Color(charkleHex: "#D93B30") : formatAccent)
-                    .frame(width: 22, height: 3)
-                    .frame(maxWidth: .infinity)
-
-                VStack(alignment: .leading, spacing: 2.5) {
-                    Capsule().fill(lineColor).frame(height: 2)
-                    Capsule().fill(lineColor).frame(width: 22, height: 2)
-                    Capsule().fill(accentColor.opacity(0.38)).frame(height: 2)
-                    Capsule().fill(lineColor).frame(width: 18, height: 2)
+                if doc.wordCount > 0 {
+                    parts.append("\(doc.wordCount.formatted()) 字")
                 }
-
-                Spacer(minLength: 0)
-            }
-
-            HStack(spacing: 2) {
-                Text(docFamily.badgeLabel)
-                    .font(CharkleTheme.text(.caption, weight: .bold))
-                    .foregroundStyle(formatAccent)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.65)
-                    .fixedSize(horizontal: true, vertical: false)
-                    .scaleEffect(0.72, anchor: .bottomLeading)
-                Spacer(minLength: 0)
-                if isStamped {
-                    Circle()
-                        .strokeBorder(Color(charkleHex: "#D93B30").opacity(0.75), lineWidth: 1)
-                        .frame(width: 7.5, height: 7.5)
+                if !doc.hasTextLayer {
+                    parts.append("扫描件")
                 }
             }
+            if parts.isEmpty {
+                if asset.fileSizeBytes > 0 {
+                    return ByteCountFormatter.string(fromByteCount: asset.fileSizeBytes, countStyle: .file)
+                }
+                return ext
+            }
+            return parts.joined(separator: " / ")
+
+        case .image, .animatedImage, .designFile:
+            if asset.pixelWidth > 0 && asset.pixelHeight > 0 {
+                return "\(asset.pixelWidth) × \(asset.pixelHeight)"
+            }
+            if asset.fileSizeBytes > 0 {
+                return ByteCountFormatter.string(fromByteCount: asset.fileSizeBytes, countStyle: .file)
+            }
+            return ext
+
+        case .video, .audio:
+            let dur = CanvasFormatters.durationString(asset.durationSeconds)
+            if asset.pixelWidth > 0 && asset.pixelHeight > 0 {
+                return "\(dur) / \(asset.pixelWidth) × \(asset.pixelHeight)"
+            }
+            return dur
+
+        case .webBookmark:
+            if let repo = asset.richMetadata?.githubRepo {
+                return "\(repo.fullName) / ★\(repo.stars)"
+            }
+            if let post = asset.richMetadata?.socialPost {
+                return post.platform.displayName
+            }
+            return asset.sourceDomain ?? "网页书签"
+
+        case .model3D:
+            if asset.fileSizeBytes > 0 {
+                return ByteCountFormatter.string(fromByteCount: asset.fileSizeBytes, countStyle: .file)
+            }
+            return asset.richMetadata?.model3DFormat ?? ext
         }
-        .padding(4.5)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(paperCover)
+    }
+
+    static func relativeTimestamp(_ date: Date) -> String {
+        let now = Date()
+        let elapsed = max(0, now.timeIntervalSince(date))
+        if elapsed < 60 { return "刚刚" }
+        if elapsed < 3600 { return "\(Int(elapsed / 60)) 分钟前" }
+        if elapsed < 86400 { return "\(Int(elapsed / 3600)) 小时前" }
+        let cal = Calendar.current
+        if cal.component(.year, from: date) == cal.component(.year, from: now) {
+            return sameYearDateFormatter.string(from: date)
+        }
+        return olderYearDateFormatter.string(from: date)
     }
 }
 
