@@ -32,7 +32,10 @@ public enum MediaKind: String, Codable, CaseIterable, Hashable, Sendable {
             return .image
         case "mp4", "mov", "m4v", "webm", "mkv", "avi":
             return .video
-        case "pdf", "md", "markdown", "txt", "rtf", "docx", "pptx", "key", "pages", "json", "yaml", "yml", "toml", "csv":
+        case "pdf", "md", "markdown", "txt", "rtf",
+             "doc", "docx", "wps", "et", "dps", "xlsx", "xls", "pptx", "ppt",
+             "odt", "ods", "odp", "epub", "ofd",
+             "key", "pages", "numbers", "json", "yaml", "yml", "toml", "csv":
             return .document
         case "svg", "psd", "psb", "sketch", "fig", "ai", "eps", "xd", "afdesign", "afphoto":
             return .designFile
@@ -50,7 +53,16 @@ public enum MediaKind: String, Codable, CaseIterable, Hashable, Sendable {
                 if mime.hasPrefix("video/") { return .video }
                 if mime.hasPrefix("audio/") { return .audio }
                 if mime.hasPrefix("model/") { return .model3D }
-                if mime == "application/pdf" || mime.hasPrefix("text/") { return .document }
+                if mime == "application/pdf"
+                    || mime.hasPrefix("text/")
+                    || mime.contains("officedocument")
+                    || mime.contains("msword")
+                    || mime.contains("ms-excel")
+                    || mime.contains("ms-powerpoint")
+                    || mime.contains("opendocument")
+                    || mime == "application/epub+zip" {
+                    return .document
+                }
             }
             return .document
         }
@@ -782,7 +794,9 @@ public struct AssetRichMetadata: Codable, Hashable, Sendable {
             aiGeneration: nil,
             textExcerpt: nil,
             isMarkdown: false,
-            model3DFormat: nil
+            model3DFormat: nil,
+            versionStack: nil,
+            document: nil
         )
 
         let githubRepo: ImmutableMetadataBox<GitHubRepoMetadata>?
@@ -793,6 +807,8 @@ public struct AssetRichMetadata: Codable, Hashable, Sendable {
         let textExcerpt: String?
         let isMarkdown: Bool
         let model3DFormat: String?
+        let versionStack: ImmutableMetadataBox<AssetVersionStackMetadata>?
+        let document: ImmutableMetadataBox<DocumentRichMetadata>?
 
         init(
             githubRepo: ImmutableMetadataBox<GitHubRepoMetadata>?,
@@ -802,7 +818,9 @@ public struct AssetRichMetadata: Codable, Hashable, Sendable {
             aiGeneration: ImmutableMetadataBox<AIGenerationMetadata>?,
             textExcerpt: String?,
             isMarkdown: Bool,
-            model3DFormat: String?
+            model3DFormat: String?,
+            versionStack: ImmutableMetadataBox<AssetVersionStackMetadata>?,
+            document: ImmutableMetadataBox<DocumentRichMetadata>?
         ) {
             self.githubRepo = githubRepo
             self.socialPost = socialPost
@@ -812,6 +830,8 @@ public struct AssetRichMetadata: Codable, Hashable, Sendable {
             self.textExcerpt = textExcerpt
             self.isMarkdown = isMarkdown
             self.model3DFormat = model3DFormat
+            self.versionStack = versionStack
+            self.document = document
         }
 
         static func == (lhs: Storage, rhs: Storage) -> Bool {
@@ -824,6 +844,8 @@ public struct AssetRichMetadata: Codable, Hashable, Sendable {
                 && lhs.webPage == rhs.webPage
                 && lhs.photoExif == rhs.photoExif
                 && lhs.aiGeneration == rhs.aiGeneration
+                && lhs.versionStack == rhs.versionStack
+                && lhs.document == rhs.document
         }
 
         func hash(into hasher: inout Hasher) {
@@ -835,6 +857,8 @@ public struct AssetRichMetadata: Codable, Hashable, Sendable {
             hasher.combine(textExcerpt)
             hasher.combine(isMarkdown)
             hasher.combine(model3DFormat)
+            hasher.combine(versionStack)
+            hasher.combine(document)
         }
     }
 
@@ -847,6 +871,8 @@ public struct AssetRichMetadata: Codable, Hashable, Sendable {
         case textExcerpt
         case isMarkdown
         case model3DFormat
+        case versionStack
+        case document
     }
 
     private var storage: Storage
@@ -862,7 +888,9 @@ public struct AssetRichMetadata: Codable, Hashable, Sendable {
                 aiGeneration: storage.aiGeneration,
                 textExcerpt: storage.textExcerpt,
                 isMarkdown: storage.isMarkdown,
-                model3DFormat: storage.model3DFormat
+                model3DFormat: storage.model3DFormat,
+                versionStack: storage.versionStack,
+                document: storage.document
             )
         }
     }
@@ -878,7 +906,9 @@ public struct AssetRichMetadata: Codable, Hashable, Sendable {
                 aiGeneration: storage.aiGeneration,
                 textExcerpt: storage.textExcerpt,
                 isMarkdown: storage.isMarkdown,
-                model3DFormat: storage.model3DFormat
+                model3DFormat: storage.model3DFormat,
+                versionStack: storage.versionStack,
+                document: storage.document
             )
         }
     }
@@ -894,7 +924,9 @@ public struct AssetRichMetadata: Codable, Hashable, Sendable {
                 aiGeneration: storage.aiGeneration,
                 textExcerpt: storage.textExcerpt,
                 isMarkdown: storage.isMarkdown,
-                model3DFormat: storage.model3DFormat
+                model3DFormat: storage.model3DFormat,
+                versionStack: storage.versionStack,
+                document: storage.document
             )
         }
     }
@@ -910,7 +942,9 @@ public struct AssetRichMetadata: Codable, Hashable, Sendable {
                 aiGeneration: storage.aiGeneration,
                 textExcerpt: storage.textExcerpt,
                 isMarkdown: storage.isMarkdown,
-                model3DFormat: storage.model3DFormat
+                model3DFormat: storage.model3DFormat,
+                versionStack: storage.versionStack,
+                document: storage.document
             )
         }
     }
@@ -926,7 +960,9 @@ public struct AssetRichMetadata: Codable, Hashable, Sendable {
                 aiGeneration: newValue.map(ImmutableMetadataBox.init),
                 textExcerpt: storage.textExcerpt,
                 isMarkdown: storage.isMarkdown,
-                model3DFormat: storage.model3DFormat
+                model3DFormat: storage.model3DFormat,
+                versionStack: storage.versionStack,
+                document: storage.document
             )
         }
     }
@@ -942,7 +978,9 @@ public struct AssetRichMetadata: Codable, Hashable, Sendable {
                 aiGeneration: storage.aiGeneration,
                 textExcerpt: newValue,
                 isMarkdown: storage.isMarkdown,
-                model3DFormat: storage.model3DFormat
+                model3DFormat: storage.model3DFormat,
+                versionStack: storage.versionStack,
+                document: storage.document
             )
         }
     }
@@ -958,7 +996,9 @@ public struct AssetRichMetadata: Codable, Hashable, Sendable {
                 aiGeneration: storage.aiGeneration,
                 textExcerpt: storage.textExcerpt,
                 isMarkdown: newValue,
-                model3DFormat: storage.model3DFormat
+                model3DFormat: storage.model3DFormat,
+                versionStack: storage.versionStack,
+                document: storage.document
             )
         }
     }
@@ -974,7 +1014,45 @@ public struct AssetRichMetadata: Codable, Hashable, Sendable {
                 aiGeneration: storage.aiGeneration,
                 textExcerpt: storage.textExcerpt,
                 isMarkdown: storage.isMarkdown,
-                model3DFormat: newValue
+                model3DFormat: newValue,
+                versionStack: storage.versionStack,
+                document: storage.document
+            )
+        }
+    }
+
+    public var versionStack: AssetVersionStackMetadata? {
+        get { storage.versionStack?.value }
+        set {
+            storage = Storage(
+                githubRepo: storage.githubRepo,
+                socialPost: storage.socialPost,
+                webPage: storage.webPage,
+                photoExif: storage.photoExif,
+                aiGeneration: storage.aiGeneration,
+                textExcerpt: storage.textExcerpt,
+                isMarkdown: storage.isMarkdown,
+                model3DFormat: storage.model3DFormat,
+                versionStack: newValue.map(ImmutableMetadataBox.init),
+                document: storage.document
+            )
+        }
+    }
+
+    public var document: DocumentRichMetadata? {
+        get { storage.document?.value }
+        set {
+            storage = Storage(
+                githubRepo: storage.githubRepo,
+                socialPost: storage.socialPost,
+                webPage: storage.webPage,
+                photoExif: storage.photoExif,
+                aiGeneration: storage.aiGeneration,
+                textExcerpt: storage.textExcerpt,
+                isMarkdown: storage.isMarkdown,
+                model3DFormat: storage.model3DFormat,
+                versionStack: storage.versionStack,
+                document: newValue.map(ImmutableMetadataBox.init)
             )
         }
     }
@@ -987,10 +1065,12 @@ public struct AssetRichMetadata: Codable, Hashable, Sendable {
         aiGeneration: AIGenerationMetadata? = nil,
         textExcerpt: String? = nil,
         isMarkdown: Bool = false,
-        model3DFormat: String? = nil
+        model3DFormat: String? = nil,
+        versionStack: AssetVersionStackMetadata? = nil,
+        document: DocumentRichMetadata? = nil
     ) {
         if githubRepo == nil, socialPost == nil, webPage == nil, photoExif == nil, aiGeneration == nil,
-           textExcerpt == nil, !isMarkdown, model3DFormat == nil {
+           textExcerpt == nil, !isMarkdown, model3DFormat == nil, versionStack == nil, document == nil {
             self.storage = .empty
         } else {
             self.storage = Storage(
@@ -1001,7 +1081,9 @@ public struct AssetRichMetadata: Codable, Hashable, Sendable {
                 aiGeneration: aiGeneration.map(ImmutableMetadataBox.init),
                 textExcerpt: textExcerpt,
                 isMarkdown: isMarkdown,
-                model3DFormat: model3DFormat
+                model3DFormat: model3DFormat,
+                versionStack: versionStack.map(ImmutableMetadataBox.init),
+                document: document.map(ImmutableMetadataBox.init)
             )
         }
     }
@@ -1016,6 +1098,8 @@ public struct AssetRichMetadata: Codable, Hashable, Sendable {
         let textExcerpt = try container.decodeIfPresent(String.self, forKey: .textExcerpt)
         let isMarkdown = try container.decodeIfPresent(Bool.self, forKey: .isMarkdown) ?? false
         let model3DFormat = try container.decodeIfPresent(String.self, forKey: .model3DFormat)
+        let versionStack = try container.decodeIfPresent(AssetVersionStackMetadata.self, forKey: .versionStack)
+        let document = try container.decodeIfPresent(DocumentRichMetadata.self, forKey: .document)
         self.init(
             githubRepo: githubRepo,
             socialPost: socialPost,
@@ -1024,7 +1108,9 @@ public struct AssetRichMetadata: Codable, Hashable, Sendable {
             aiGeneration: aiGeneration,
             textExcerpt: textExcerpt,
             isMarkdown: isMarkdown,
-            model3DFormat: model3DFormat
+            model3DFormat: model3DFormat,
+            versionStack: versionStack,
+            document: document
         )
     }
 
@@ -1038,6 +1124,8 @@ public struct AssetRichMetadata: Codable, Hashable, Sendable {
         try container.encodeIfPresent(storage.textExcerpt, forKey: .textExcerpt)
         try container.encode(storage.isMarkdown, forKey: .isMarkdown)
         try container.encodeIfPresent(storage.model3DFormat, forKey: .model3DFormat)
+        try container.encodeIfPresent(storage.versionStack?.value, forKey: .versionStack)
+        try container.encodeIfPresent(storage.document?.value, forKey: .document)
     }
 }
 
@@ -1288,6 +1376,18 @@ public struct AssetRecord: Codable, Hashable, Identifiable, Sendable {
     public var isPlainTextDocument: Bool {
         let ext = (fileName as NSString).pathExtension.lowercased()
         return mediaKind == .document && ["txt", "md", "markdown", "json", "yaml", "yml", "toml", "csv", "rtf"].contains(ext)
+    }
+
+    public var versionStack: AssetVersionStackMetadata? {
+        richMetadata?.versionStack
+    }
+
+    public var documentMetadata: DocumentRichMetadata? {
+        richMetadata?.document
+    }
+
+    public var versionGroupID: UUID? {
+        richMetadata?.versionStack?.groupID
     }
 
     public init(
@@ -1919,6 +2019,7 @@ public enum GalleryLayoutMode: String, Codable, CaseIterable, Hashable, Sendable
     case horizontalJustified
     case galleryFilmstrip
     case ringGallery
+    case compactList
 
     public var localizedLabel: String {
         switch self {
@@ -1926,6 +2027,7 @@ public enum GalleryLayoutMode: String, Codable, CaseIterable, Hashable, Sendable
         case .horizontalJustified: "横向瀑布流"
         case .galleryFilmstrip: "画廊视图"
         case .ringGallery: "环形画廊"
+        case .compactList: "紧凑视图"
         }
     }
 }

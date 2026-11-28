@@ -159,6 +159,27 @@ public protocol CharkleEngineProtocol: Sendable {
     func hasICloudBookmark(for backendID: UUID) async -> Bool
     func testBackendConnection(_ profile: SyncBackendProfile, webDAVPassword: String?) async throws -> DriveAccountInfo
 
+    // MARK: - Documents & Version Stacks
+    func detectVersionStackCandidate(for fileURL: URL, targetFolderID: UUID?) async throws -> VersionStackCandidate?
+    func detectVersionStackCandidate(forAssetID assetID: UUID) async throws -> VersionStackCandidate?
+    func manageVersionStack(_ mutation: VersionStackMutation) async throws -> [AssetRecord]
+    func readStructuredDocument(assetID: UUID) async throws -> StructuredDocumentPayload
+    func compareDocumentVersions(
+        baseAssetID: UUID,
+        targetAssetID: UUID,
+        sheetName: String?,
+        primaryKeyCol: Int?,
+        useOCRIfScanned: Bool
+    ) async throws -> DocumentComparisonReport
+    func synthesizeDocumentVersion(
+        baseAssetID: UUID,
+        targetAssetID: UUID,
+        preferTargetAsTemplate: Bool,
+        decisions: [DocumentMergeDecision],
+        editorName: String?,
+        changeNote: String?
+    ) async throws -> AssetRecord
+
     // MARK: - First-Launch Curated Demo
     func seedSampleLibraryIfEmpty() async throws -> Bool
 }
@@ -324,6 +345,82 @@ public extension CharkleEngineProtocol {
             return try await testWebDAVConnection(config: single, password: webDAVPassword)
         }
         return DriveAccountInfo(email: profile.locationSummary, source: profile.mode.localizedLabel)
+    }
+
+    func detectVersionStackCandidate(for fileURL: URL, targetFolderID: UUID?) async throws -> VersionStackCandidate? {
+        nil
+    }
+
+    func detectVersionStackCandidate(forAssetID assetID: UUID) async throws -> VersionStackCandidate? {
+        nil
+    }
+
+    func manageVersionStack(_ mutation: VersionStackMutation) async throws -> [AssetRecord] {
+        var records: [AssetRecord] = []
+        for id in mutation.assetIDs {
+            if let record = try await fetchAsset(id: id) {
+                records.append(record)
+            }
+        }
+        return records
+    }
+
+    func readStructuredDocument(assetID: UUID) async throws -> StructuredDocumentPayload {
+        guard let asset = try await fetchAsset(id: assetID) else {
+            throw DriveTransportError.fileNotFound(assetID.uuidString)
+        }
+        let ext = (asset.fileName as NSString).pathExtension
+        let family = asset.richMetadata?.document?.formatFamily ?? DocumentFormatFamily.detect(fileExtension: ext).rawValue
+        let fallbackText = asset.ocrText ?? asset.richMetadata?.textExcerpt ?? asset.notes
+        let blocks: [DocumentBlock] = fallbackText.isEmpty ? [] : [
+            DocumentBlock(id: "blk-0", index: 0, kind: .paragraph, text: fallbackText)
+        ]
+        return StructuredDocumentPayload(
+            assetID: asset.id,
+            formatFamily: family,
+            title: asset.title,
+            authorOrEditor: asset.richMetadata?.versionStack?.editorName,
+            wordCount: asset.richMetadata?.document?.wordCount ?? fallbackText.count,
+            pageCount: max(1, asset.richMetadata?.document?.pageCount ?? 1),
+            hasTextLayer: asset.richMetadata?.document?.hasTextLayer ?? true,
+            hasNativeRevisions: asset.richMetadata?.document?.hasNativeRevisions ?? false,
+            blocks: blocks,
+            plainText: fallbackText
+        )
+    }
+
+    func compareDocumentVersions(
+        baseAssetID: UUID,
+        targetAssetID: UUID,
+        sheetName: String?,
+        primaryKeyCol: Int?,
+        useOCRIfScanned: Bool
+    ) async throws -> DocumentComparisonReport {
+        let base = try await fetchAsset(id: baseAssetID)
+        let target = try await fetchAsset(id: targetAssetID)
+        let ext = ((target ?? base)?.fileName as NSString?)?.pathExtension ?? ""
+        let family = target?.richMetadata?.document?.formatFamily
+            ?? base?.richMetadata?.document?.formatFamily
+            ?? DocumentFormatFamily.detect(fileExtension: ext).rawValue
+        return DocumentComparisonReport(
+            baseAssetID: baseAssetID,
+            targetAssetID: targetAssetID,
+            baseTitle: base?.title ?? "",
+            targetTitle: target?.title ?? "",
+            formatFamily: family,
+            summary: DocumentDiffSummary(comparedToAssetID: baseAssetID)
+        )
+    }
+
+    func synthesizeDocumentVersion(
+        baseAssetID: UUID,
+        targetAssetID: UUID,
+        preferTargetAsTemplate: Bool,
+        decisions: [DocumentMergeDecision],
+        editorName: String?,
+        changeNote: String?
+    ) async throws -> AssetRecord {
+        throw LibraryDatabaseError("当前演示引擎不支持合成新文档版本。")
     }
 }
 
