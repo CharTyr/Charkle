@@ -2,7 +2,7 @@ import CharkleCore
 import SwiftUI
 import UIKit
 
-// MARK: - Pending Stack Candidate Model & Diff Launch Request
+// MARK: - Pending Stack Candidate Model, Diff Launch Request & Display Sanitizer
 
 struct MobilePendingStackPrompt: Identifiable, Equatable {
     var id: UUID { importedAsset.id }
@@ -16,10 +16,74 @@ struct MobileDiffLaunchRequest: Identifiable, Equatable {
     let targetAssetID: UUID
 }
 
+/// Shared clean version label & attribution formatter across iOS Compact View, Inspector, and Document Studio.
+/// Standalone without external symbol dependencies: strips redundant `vN` prefixes, unwraps parentheses,
+/// suppresses system boilerplate, and prevents duplicate editor names.
+enum MobileVersionDisplayFormatting {
+    private static let ignoredBoilerplateTokens: Set<String> = [
+        "本机",
+        "初稿",
+        "修订版",
+        "基于差异审阅合成",
+        "确认合成定稿",
+    ]
+
+    static func cleanDescriptor(
+        changeNote: String?,
+        versionLabel: String?,
+        editorName: String?
+    ) -> String? {
+        let trimmedEditor = normalizedNonBoilerplate(editorName)
+        if let cleanedNote = normalizedNonBoilerplate(changeNote) {
+            if cleanedNote == trimmedEditor {
+                return nil
+            }
+            return cleanedNote
+        }
+        if let cleanedLabel = normalizedNonBoilerplate(versionLabel) {
+            if cleanedLabel == trimmedEditor {
+                return nil
+            }
+            return cleanedLabel
+        }
+        return nil
+    }
+
+    static func cleanEditor(_ editorName: String?, excluding descriptor: String? = nil) -> String? {
+        guard let cleaned = normalizedNonBoilerplate(editorName) else {
+            return nil
+        }
+        if let descriptor, !descriptor.isEmpty, (descriptor == cleaned || descriptor.contains(cleaned)) {
+            return nil
+        }
+        return cleaned
+    }
+
+    private static func normalizedNonBoilerplate(_ raw: String?) -> String? {
+        guard let raw else { return nil }
+        var current = AssetVersionStackMetadata.strippingRedundantVersionPrefix(raw)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !current.isEmpty else { return nil }
+
+        if (current.hasPrefix("(") && current.hasSuffix(")"))
+            || (current.hasPrefix("（") && current.hasSuffix("）")) {
+            current = String(current.dropFirst().dropLast()).trimmingCharacters(in: .whitespacesAndNewlines)
+            current = AssetVersionStackMetadata.strippingRedundantVersionPrefix(current)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        guard !current.isEmpty else { return nil }
+        if ignoredBoilerplateTokens.contains(current) || current.hasPrefix("挑拣合成") {
+            return nil
+        }
+        return current
+    }
+}
+
 // MARK: - Non-Blocking Import Version Stack Prompt Banner
 
 /// Lightweight non-blocking stacking prompt presented above bottom chrome when importing files
-/// from WeChat Open-In, Files picker, Share Extension, or iPad drag-and-drop.
+/// from Open-In, Files picker, Share Extension, or iPad drag-and-drop.
 struct MobileVersionStackPromptBanner: View {
     @Bindable var store: MobileAppStore
     let prompt: MobilePendingStackPrompt
@@ -52,7 +116,7 @@ struct MobileVersionStackPromptBanner: View {
 
                 VStack(alignment: .leading, spacing: 3) {
                     HStack(spacing: 6) {
-                        Text("叠入《\(prompt.candidate.targetTitle)》作为 v\(prompt.candidate.nextVersionNumber)？")
+                        Text("归入《\(prompt.candidate.targetTitle)》历史版本 (v\(prompt.candidate.nextVersionNumber))？")
                             .font(.system(size: 13.5, weight: .semibold).monospacedDigit())
                             .foregroundStyle(.primary)
                             .lineLimit(2)
@@ -71,7 +135,7 @@ struct MobileVersionStackPromptBanner: View {
                             .font(.system(size: 11.5, weight: .medium))
                             .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
                         if let folderLabel {
-                            Text("· 自动归入「\(folderLabel)」")
+                            Text("· 归入「\(folderLabel)」")
                                 .font(.system(size: 11.5, weight: .medium))
                                 .foregroundStyle(MobileTheme.positive(for: colorScheme))
                                 .lineLimit(1)
@@ -98,27 +162,22 @@ struct MobileVersionStackPromptBanner: View {
             if isExpandedForDetails {
                 VStack(spacing: 8) {
                     HStack(spacing: 8) {
-                        HStack(spacing: 6) {
-                            Image(systemName: "person")
-                                .font(.system(size: 11.5, weight: .medium))
-                                .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
-                            TextField("修改人（可选）", text: $editorDraft)
-                                .font(.system(size: 12.5))
-                                .submitLabel(.next)
-                        }
-                        .padding(.horizontal, 9)
-                        .padding(.vertical, 7)
-                        .frame(maxWidth: 148)
-                        .background(
-                            MobileTheme.inspectorFieldSurface(for: colorScheme),
-                            in: RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .strokeBorder(MobileTheme.hairline(for: colorScheme), lineWidth: 0.75)
-                        )
+                        TextField("修改人", text: $editorDraft)
+                            .font(.system(size: 12.5))
+                            .submitLabel(.next)
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 7)
+                            .frame(maxWidth: 120)
+                            .background(
+                                MobileTheme.inspectorFieldSurface(for: colorScheme),
+                                in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                    .strokeBorder(MobileTheme.hairline(for: colorScheme), lineWidth: 0.5)
+                            )
 
-                        TextField("1 行改动备注（如：核定第三部分预算数字）", text: $changeNoteDraft)
+                        TextField("备注（可选）", text: $changeNoteDraft)
                             .font(.system(size: 12.5))
                             .submitLabel(.done)
                             .onSubmit { submitJoin() }
@@ -130,13 +189,13 @@ struct MobileVersionStackPromptBanner: View {
                             )
                             .overlay(
                                 RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                    .strokeBorder(MobileTheme.hairline(for: colorScheme), lineWidth: 0.75)
+                                    .strokeBorder(MobileTheme.hairline(for: colorScheme), lineWidth: 0.5)
                             )
                     }
 
                     Toggle(isOn: $pinAsPrimary) {
-                        Text("同时将此版锁定为对外「主版本」（未勾选则保留原主版本防误发）")
-                            .font(.system(size: 11.5))
+                        Text("同时设为主版本")
+                            .font(.system(size: 12))
                             .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
                     }
                     .tint(accent)
@@ -167,7 +226,7 @@ struct MobileVersionStackPromptBanner: View {
 
                 Spacer(minLength: 4)
 
-                Button("保留独立") {
+                Button("单独保留") {
                     MobileHaptics.light()
                     store.dismissStackPrompt(prompt.id)
                 }
@@ -187,7 +246,7 @@ struct MobileVersionStackPromptBanner: View {
                             Image(systemName: "checkmark")
                                 .font(.system(size: 11, weight: .bold))
                         }
-                        Text("叠入 v\(prompt.candidate.nextVersionNumber)")
+                        Text("归入版本")
                             .font(.system(size: 12.5, weight: .semibold).monospacedDigit())
                     }
                     .foregroundStyle(.white)
@@ -217,13 +276,14 @@ struct MobileVersionStackPromptBanner: View {
             return "\(trimmedEditor) · \(trimmedNote)"
         }
         if !trimmedEditor.isEmpty {
-            return "修改人：\(trimmedEditor)（点此补备注）"
+            return trimmedEditor
         }
-        return "填写修改人 / 备注"
+        return "备注（可选）"
     }
 
     private func syncInitialFields() {
-        editorDraft = prompt.candidate.suggestedEditorName ?? ""
+        let suggested = prompt.candidate.suggestedEditorName ?? ""
+        editorDraft = suggested == "本机" ? "" : suggested
         changeNoteDraft = ""
         pinAsPrimary = false
     }
@@ -238,7 +298,7 @@ struct MobileVersionStackPromptBanner: View {
         Task {
             await store.confirmStackPrompt(
                 prompt,
-                editorName: editor.isEmpty ? nil : editor,
+                editorName: (editor.isEmpty || editor == "本机") ? nil : editor,
                 changeNote: note.isEmpty ? nil : note,
                 pinAsPrimary: pin
             )
@@ -277,17 +337,17 @@ struct MergeIntoVersionStackSheet: View {
 
     var body: some View {
         List {
-            Section("新版本备注（可选）") {
-                TextField("修改人（如：张主任）", text: $editorDraft)
+            Section("版本信息（可选）") {
+                TextField("修改人", text: $editorDraft)
                     .font(.system(size: 14))
-                TextField("改动说明（如：核定第三节经费明细）", text: $changeNoteDraft)
+                TextField("备注（可选）", text: $changeNoteDraft)
                     .font(.system(size: 14))
-                Toggle("设为主版本（对外分享与导出的默认版本）", isOn: $pinAsPrimary)
+                Toggle("同时设为主版本", isOn: $pinAsPrimary)
                     .font(.system(size: 13.5))
             }
 
             if sourceAssets.count >= 2 {
-                Section("将所选项目直接合为一叠") {
+                Section("合并所选项目") {
                     Button {
                         guard !isSubmitting else { return }
                         isSubmitting = true
@@ -298,7 +358,7 @@ struct MergeIntoVersionStackSheet: View {
                             await store.createVersionStack(
                                 assetIDs: ids,
                                 primaryAssetID: pinAsPrimary ? ids.last : nil,
-                                editorName: editor.isEmpty ? nil : editor,
+                                editorName: (editor.isEmpty || editor == "本机") ? nil : editor,
                                 changeNote: note.isEmpty ? nil : note
                             )
                             isSubmitting = false
@@ -309,10 +369,10 @@ struct MergeIntoVersionStackSheet: View {
                             Image(systemName: "square.stack.3d.up.fill")
                                 .foregroundStyle(MobileTheme.accent(for: colorScheme))
                             VStack(alignment: .leading, spacing: 2) {
-                                Text("将选中的 \(sourceAssets.count) 项合并为新建版本叠")
+                                Text("将选中的 \(sourceAssets.count) 项合并为历史版本")
                                     .font(.system(size: 14, weight: .semibold))
                                     .foregroundStyle(.primary)
-                                Text("按时间顺序自动编号 v1 → v\(sourceAssets.count)，原文件独立保留")
+                                Text("自动编号 v1 → v\(sourceAssets.count)，原文件独立保留")
                                     .font(.system(size: 12).monospacedDigit())
                                     .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
                             }
@@ -323,9 +383,9 @@ struct MergeIntoVersionStackSheet: View {
                 }
             }
 
-            Section("叠入已有素材或版本叠") {
+            Section("归入已有素材的历史版本") {
                 if candidateTargets.isEmpty {
-                    Text("没有找到可叠入的目标素材")
+                    Text("没有找到可归入的目标素材")
                         .font(.system(size: 13))
                         .foregroundStyle(.secondary)
                 } else {
@@ -344,7 +404,7 @@ struct MergeIntoVersionStackSheet: View {
                                     await store.joinVersionStack(
                                         assetID: item.id,
                                         targetAssetOrGroupID: targetKey,
-                                        editorName: editor.isEmpty ? nil : editor,
+                                        editorName: (editor.isEmpty || editor == "本机") ? nil : editor,
                                         changeNote: note.isEmpty ? nil : note,
                                         pinAsPrimary: pin && (idx == sourceAssets.count - 1),
                                         adoptTargetFolder: true
@@ -367,8 +427,8 @@ struct MergeIntoVersionStackSheet: View {
                                         .lineLimit(1)
                                     Text(
                                         siblings.count > 1
-                                            ? "已有 \(siblings.count) 个版本 · 叠入为 v\(nextVer)"
-                                            : "\(target.displayTypeLabel) · 合并后成为 v2"
+                                            ? "已有 \(siblings.count) 版 · 归入为 v\(nextVer)"
+                                            : "\(target.displayTypeLabel) · 合并为 v2"
                                     )
                                     .font(.system(size: 11.5).monospacedDigit())
                                     .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
@@ -378,10 +438,10 @@ struct MergeIntoVersionStackSheet: View {
 
                                 Text("v\(nextVer)")
                                     .font(.system(size: 11.5, weight: .semibold).monospacedDigit())
-                                    .foregroundStyle(MobileTheme.accent(for: colorScheme))
+                                    .foregroundStyle(.primary)
                                     .padding(.horizontal, 8)
                                     .padding(.vertical, 3)
-                                    .background(MobileTheme.accentSoft(for: colorScheme), in: Capsule())
+                                    .background(Color.primary.opacity(0.06), in: Capsule())
                             }
                         }
                         .disabled(isSubmitting)
@@ -390,7 +450,7 @@ struct MergeIntoVersionStackSheet: View {
             }
         }
         .searchable(text: $searchText, prompt: "搜索目标文档或设计稿标题…")
-        .navigationTitle("合并入版本叠")
+        .navigationTitle("合并版本")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
@@ -400,7 +460,7 @@ struct MergeIntoVersionStackSheet: View {
     }
 }
 
-// MARK: - Inspector Version Stack Section (1:1 Shared by iPad Docked Inspector & iPhone Sheet)
+// MARK: - Inspector Version Stack Section (Newest-First Vertical Timeline Spine)
 
 struct InspectorVersionStackCard: View {
     @Bindable var store: MobileAppStore
@@ -426,8 +486,21 @@ struct InspectorVersionStackCard: View {
         store.primaryVersionAsset(for: asset)
     }
 
+    private var primaryVersionNumber: Int {
+        if let explicit = primaryAsset.richMetadata?.versionStack?.versionNumber {
+            return explicit
+        }
+        if let idx = siblings.firstIndex(where: { $0.id == primaryAsset.id }) {
+            return idx + 1
+        }
+        return 1
+    }
+
     var body: some View {
         let accent = MobileTheme.accent(for: colorScheme)
+        let pos = MobileTheme.positive(for: colorScheme)
+        let warn = MobileTheme.warning(for: colorScheme)
+        let danger = MobileTheme.destructive(for: colorScheme)
         let hasStack = siblings.count > 1 || asset.richMetadata?.versionStack != nil
 
         VStack(alignment: .leading, spacing: 10) {
@@ -438,22 +511,19 @@ struct InspectorVersionStackCard: View {
                 }
             } label: {
                 HStack(spacing: 6) {
-                    Image(systemName: hasStack ? "square.stack.3d.up.fill" : "square.stack.3d.up")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(accent)
-                    Text(hasStack ? "版本叠（共 \(siblings.count) 版）" : "版本叠")
-                        .font(.system(size: 11.5, weight: .semibold).monospacedDigit())
-                        .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
+                    Text(hasStack ? "历史版本 · 共 \(siblings.count) 版 · 主版 v\(primaryVersionNumber)" : "历史版本")
+                        .font(.system(size: 12.5, weight: .medium).monospacedDigit())
+                        .foregroundStyle(.primary)
                     Spacer()
                     if hasStack {
                         let pending = store.newerThanPrimaryCount(for: asset)
                         if pending > 0 {
-                            Text("+\(pending) 待审新版")
+                            Text("+\(pending)")
                                 .font(.system(size: 10.5, weight: .semibold).monospacedDigit())
-                                .foregroundStyle(MobileTheme.warning(for: colorScheme))
+                                .foregroundStyle(warn)
                                 .padding(.horizontal, 6)
-                                .padding(.vertical, 2)
-                                .background(MobileTheme.warning(for: colorScheme).opacity(0.14), in: Capsule())
+                                .padding(.vertical, 1.5)
+                                .background(warn.opacity(0.14), in: Capsule())
                         }
                     }
                     Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
@@ -468,7 +538,7 @@ struct InspectorVersionStackCard: View {
             if isExpanded {
                 if !hasStack {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("将同一份汇报、表格或设计稿的历次修改叠在一起，锁定「主版本」防止误发未审草稿。")
+                        Text("合并同一文档或设计稿的历次修改")
                             .font(.system(size: 12))
                             .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
 
@@ -476,213 +546,59 @@ struct InspectorVersionStackCard: View {
                             MobileHaptics.light()
                             onRequestMergeSheet()
                         } label: {
-                            Label("合并入已有版本叠…", systemImage: "arrow.triangle.merge")
-                                .font(.system(size: 12.5, weight: .semibold))
-                                .foregroundStyle(accent)
+                            Label("合并版本…", systemImage: "arrow.triangle.merge")
+                                .font(.system(size: 12.5, weight: .medium))
+                                .foregroundStyle(.primary)
                                 .frame(maxWidth: .infinity)
-                                .padding(.vertical, 8)
-                                .background(MobileTheme.accentSoft(for: colorScheme), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                                .padding(.vertical, 7.5)
+                                .background(
+                                    MobileTheme.inspectorFieldSurface(for: colorScheme),
+                                    in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                )
                         }
                         .buttonStyle(MobileTactileButtonStyle())
                     }
                 } else {
                     VStack(alignment: .leading, spacing: 8) {
-                        ForEach(Array(siblings.enumerated()), id: \.element.id) { index, member in
-                            let verMeta = member.richMetadata?.versionStack
-                            let vNum = verMeta?.versionNumber ?? (index + 1)
-                            let isCurrent = member.id == asset.id
-                            let isPrimary = member.id == primaryAsset.id
-                            let prevMember: AssetRecord? = index > 0 ? siblings[index - 1] : nil
-
-                            VStack(alignment: .leading, spacing: 6) {
-                                HStack(spacing: 8) {
-                                    Button {
-                                        MobileHaptics.light()
-                                        onSelectVersion(member)
-                                    } label: {
-                                        VStack(alignment: .leading, spacing: 2) {
-                                            HStack(spacing: 5) {
-                                                Text("v\(vNum)")
-                                                    .font(.system(size: 12.5, weight: .bold).monospacedDigit())
-                                                    .foregroundStyle(isCurrent ? accent : .primary)
-
-                                                if let note = verMeta?.changeNote, !note.isEmpty {
-                                                    Text("· \(note)")
-                                                        .font(.system(size: 12, weight: .medium))
-                                                        .foregroundStyle(.primary)
-                                                        .lineLimit(1)
-                                                } else if let label = verMeta?.versionLabel, !label.isEmpty {
-                                                    Text("· \(label)")
-                                                        .font(.system(size: 12, weight: .medium))
-                                                        .foregroundStyle(.primary)
-                                                        .lineLimit(1)
-                                                }
-
-                                                if isPrimary {
-                                                    Text("主版")
-                                                        .font(.system(size: 10, weight: .bold))
-                                                        .foregroundStyle(MobileTheme.positive(for: colorScheme))
-                                                        .padding(.horizontal, 5.5)
-                                                        .padding(.vertical, 1.5)
-                                                        .background(
-                                                            MobileTheme.positive(for: colorScheme).opacity(0.14),
-                                                            in: RoundedRectangle(cornerRadius: 4, style: .continuous)
-                                                        )
-                                                }
-                                            }
-
-                                            HStack(spacing: 5) {
-                                                if let editor = verMeta?.editorName, !editor.isEmpty {
-                                                    Text(editor)
-                                                        .font(.system(size: 11, weight: .medium))
-                                                        .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
-                                                }
-                                                Text(MobileFormatters.relativeDate(member.updatedAt))
-                                                    .font(.system(size: 11).monospacedDigit())
-                                                    .foregroundStyle(MobileTheme.tertiaryInk(for: colorScheme))
-                                                if let diff = member.richMetadata?.document?.diffSummary, diff.totalChangedBlocks > 0 {
-                                                    Text(diff.compactBridgeLabel)
-                                                        .font(.system(size: 10.5, weight: .semibold).monospacedDigit())
-                                                        .foregroundStyle(
-                                                            diff.totalHighRiskChanges > 0
-                                                                ? MobileTheme.destructive(for: colorScheme)
-                                                                : MobileTheme.warning(for: colorScheme)
-                                                        )
-                                                }
-                                            }
-                                        }
-                                        .frame(maxWidth: .infinity, alignment: .leading)
-                                        .contentShape(Rectangle())
-                                    }
-                                    .buttonStyle(.plain)
-
-                                    HStack(spacing: 4) {
-                                        if let prevMember {
-                                            Button {
-                                                MobileHaptics.light()
-                                                onOpenDiff(prevMember.id, member.id)
-                                            } label: {
-                                                Text("Δ 对比")
-                                                    .font(.system(size: 11, weight: .semibold))
-                                                    .foregroundStyle(MobileTheme.warning(for: colorScheme))
-                                                    .padding(.horizontal, 7)
-                                                    .padding(.vertical, 4)
-                                                    .background(
-                                                        MobileTheme.warning(for: colorScheme).opacity(0.14),
-                                                        in: Capsule()
-                                                    )
-                                            }
-                                            .buttonStyle(.plain)
-                                        }
-
-                                        Menu {
-                                            if !isPrimary {
-                                                Button {
-                                                    Task { await store.setPrimaryVersion(assetID: member.id) }
-                                                } label: {
-                                                    Label("设为主版本（防误发锁定）", systemImage: "checkmark.seal.fill")
-                                                }
-                                            }
-                                            if let prevMember {
-                                                Button {
-                                                    onOpenDiff(prevMember.id, member.id)
-                                                } label: {
-                                                    Label("与上一版对比差异", systemImage: "arrow.left.arrow.right")
-                                                }
-                                            }
-                                            Button {
-                                                editingVersionID = member.id
-                                                editorDraft = verMeta?.editorName ?? ""
-                                                noteDraft = verMeta?.changeNote ?? ""
-                                                labelDraft = verMeta?.versionLabel ?? ""
-                                            } label: {
-                                                Label("编辑修改人与版本备注", systemImage: "pencil")
-                                            }
-                                            Divider()
-                                            Button(role: .destructive) {
-                                                Task { await store.unstackAsset(assetID: member.id) }
-                                            } label: {
-                                                Label("拆出为独立素材", systemImage: "square.stack.3d.up.slash")
-                                            }
-                                        } label: {
-                                            Image(systemName: "ellipsis")
-                                                .font(.system(size: 12, weight: .semibold))
-                                                .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
-                                                .frame(width: 26, height: 26)
-                                                .contentShape(Circle())
-                                        }
-                                    }
-                                }
-
-                                if editingVersionID == member.id {
-                                    VStack(spacing: 6) {
-                                        TextField("修改人（如：张主任）", text: $editorDraft)
-                                            .font(.system(size: 12))
-                                            .padding(7)
-                                            .background(MobileTheme.inspectorFieldSurface(for: colorScheme), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
-                                        TextField("改动备注（如：核定第三部分预算）", text: $noteDraft)
-                                            .font(.system(size: 12))
-                                            .padding(7)
-                                            .background(MobileTheme.inspectorFieldSurface(for: colorScheme), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
-                                        HStack {
-                                            Spacer()
-                                            Button("取消") {
-                                                editingVersionID = nil
-                                            }
-                                            .font(.system(size: 11.5))
-                                            .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
-
-                                            Button("保存") {
-                                                let id = member.id
-                                                let ed = editorDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-                                                let nt = noteDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-                                                let lb = labelDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-                                                editingVersionID = nil
-                                                Task {
-                                                    await store.updateVersionStackMetadata(
-                                                        assetID: id,
-                                                        versionLabel: lb.isEmpty ? nil : lb,
-                                                        editorName: ed.isEmpty ? nil : ed,
-                                                        changeNote: nt.isEmpty ? nil : nt
-                                                    )
-                                                }
-                                            }
-                                            .font(.system(size: 11.5, weight: .semibold))
-                                            .foregroundStyle(accent)
-                                        }
-                                    }
-                                    .padding(.top, 2)
-                                }
-                            }
-                            .padding(8)
-                            .background(
-                                isCurrent
-                                    ? MobileTheme.accentSoft(for: colorScheme)
-                                    : MobileTheme.inspectorFieldSurface(for: colorScheme),
-                                in: RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            )
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                    .strokeBorder(
-                                        isCurrent ? accent.opacity(0.42) : MobileTheme.hairline(for: colorScheme),
-                                        lineWidth: 0.75
-                                    )
-                            )
-                        }
-
-                        HStack(spacing: 8) {
+                        // Top Compact Action Row
+                        HStack(spacing: 6) {
                             if siblings.count >= 2 {
                                 let lastTwo = Array(siblings.suffix(2))
                                 Button {
                                     MobileHaptics.light()
                                     onOpenDiff(lastTwo[0].id, lastTwo[1].id)
                                 } label: {
-                                    Label("对比最近两版", systemImage: "arrow.left.arrow.right")
+                                    Label("对比差异", systemImage: "arrow.left.arrow.right")
                                         .font(.system(size: 12, weight: .semibold))
-                                        .foregroundStyle(.white)
+                                        .foregroundStyle(.primary)
                                         .frame(maxWidth: .infinity)
-                                        .padding(.vertical, 7)
-                                        .background(MobileTheme.accentButtonFill(for: colorScheme), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                                        .padding(.vertical, 6.5)
+                                        .background(
+                                            MobileTheme.inspectorFieldSurface(for: colorScheme),
+                                            in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                        )
+                                        .overlay(
+                                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                                .strokeBorder(MobileTheme.hairline(for: colorScheme), lineWidth: 0.5)
+                                        )
+                                }
+                                .buttonStyle(MobileTactileButtonStyle())
+                            }
+
+                            if asset.id != primaryAsset.id {
+                                Button {
+                                    MobileHaptics.success()
+                                    Task { await store.setPrimaryVersion(assetID: asset.id) }
+                                } label: {
+                                    Label("设为主版", systemImage: "pin")
+                                        .font(.system(size: 12, weight: .semibold))
+                                        .foregroundStyle(accent)
+                                        .padding(.horizontal, 10)
+                                        .padding(.vertical, 6.5)
+                                        .background(
+                                            MobileTheme.accentSoft(for: colorScheme),
+                                            in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                        )
                                 }
                                 .buttonStyle(MobileTactileButtonStyle())
                             }
@@ -692,13 +608,270 @@ struct InspectorVersionStackCard: View {
                                 onRequestMergeSheet()
                             } label: {
                                 Image(systemName: "plus")
-                                    .font(.system(size: 12.5, weight: .semibold))
+                                    .font(.system(size: 12, weight: .semibold))
                                     .foregroundStyle(accent)
-                                    .frame(width: 32, height: 30)
-                                    .background(MobileTheme.accentSoft(for: colorScheme), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                                    .frame(width: 30, height: 29)
+                                    .background(
+                                        MobileTheme.accentSoft(for: colorScheme),
+                                        in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                    )
                             }
                             .buttonStyle(MobileTactileButtonStyle())
                             .accessibilityLabel("叠入更多版本")
+                        }
+
+                        // Newest-First Vertical Timeline (`vN → v1`)
+                        let reversedItems = Array(siblings.enumerated().reversed())
+                        VStack(alignment: .leading, spacing: 2) {
+                            ForEach(Array(reversedItems.enumerated()), id: \.element.element.id) { displayIdx, entry in
+                                let ascIndex = entry.offset
+                                let member = entry.element
+                                let verMeta = member.richMetadata?.versionStack
+                                let vNum = verMeta?.versionNumber ?? (ascIndex + 1)
+                                let isCurrent = member.id == asset.id
+                                let isPrimary = member.id == primaryAsset.id
+                                let isUnreviewed = vNum > primaryVersionNumber
+                                let prevMember: AssetRecord? = ascIndex > 0 ? siblings[ascIndex - 1] : nil
+                                let descriptor = MobileVersionDisplayFormatting.cleanDescriptor(
+                                    changeNote: verMeta?.changeNote,
+                                    versionLabel: verMeta?.versionLabel,
+                                    editorName: verMeta?.editorName
+                                )
+                                let cleanEditor = MobileVersionDisplayFormatting.cleanEditor(
+                                    verMeta?.editorName,
+                                    excluding: descriptor
+                                )
+                                let diffSummary = member.richMetadata?.document?.diffSummary
+                                let changedBlocks = diffSummary?.totalChangedBlocks ?? 0
+                                let hasHighRisk = (diffSummary?.totalHighRiskChanges ?? 0) > 0
+
+                                VStack(alignment: .leading, spacing: 6) {
+                                    HStack(alignment: .center, spacing: 8) {
+                                        // Left 16pt Spine Column
+                                        GeometryReader { geo in
+                                            let midX = geo.size.width * 0.5
+                                            let midY = geo.size.height * 0.5
+                                            ZStack {
+                                                if displayIdx > 0 {
+                                                    Path { p in
+                                                        p.move(to: CGPoint(x: midX, y: 0))
+                                                        p.addLine(to: CGPoint(x: midX, y: midY))
+                                                    }
+                                                    .stroke(MobileTheme.hairline(for: colorScheme), lineWidth: 1)
+                                                }
+                                                if displayIdx < reversedItems.count - 1 {
+                                                    Path { p in
+                                                        p.move(to: CGPoint(x: midX, y: midY))
+                                                        p.addLine(to: CGPoint(x: midX, y: geo.size.height))
+                                                    }
+                                                    .stroke(MobileTheme.hairline(for: colorScheme), lineWidth: 1)
+                                                }
+
+                                                if isPrimary {
+                                                    Circle()
+                                                        .fill(accent)
+                                                        .frame(width: 7.5, height: 7.5)
+                                                        .position(x: midX, y: midY)
+                                                } else {
+                                                    Circle()
+                                                        .fill(MobileTheme.surfaceElevated(for: colorScheme))
+                                                        .frame(width: 7.5, height: 7.5)
+                                                        .overlay(
+                                                            Circle().strokeBorder(
+                                                                isUnreviewed ? warn : MobileTheme.secondaryInk(for: colorScheme).opacity(0.50),
+                                                                lineWidth: 1.5
+                                                            )
+                                                        )
+                                                        .position(x: midX, y: midY)
+                                                }
+                                            }
+                                        }
+                                        .frame(width: 16)
+
+                                        // Version Row Body
+                                        HStack(spacing: 4) {
+                                            Button {
+                                                MobileHaptics.light()
+                                                onSelectVersion(member)
+                                            } label: {
+                                                VStack(alignment: .leading, spacing: 2) {
+                                                    HStack(spacing: 5) {
+                                                        Text("v\(vNum)")
+                                                            .font(.system(size: 12.5, weight: .bold).monospacedDigit())
+                                                            .foregroundStyle(isCurrent ? accent : .primary)
+
+                                                        if let descriptor {
+                                                            Text(descriptor)
+                                                                .font(.system(size: 12, weight: .regular))
+                                                                .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
+                                                                .lineLimit(1)
+                                                        }
+
+                                                        if isPrimary {
+                                                            Text("主版")
+                                                                .font(.system(size: 10, weight: .semibold))
+                                                                .foregroundStyle(pos)
+                                                                .padding(.horizontal, 5)
+                                                                .padding(.vertical, 1)
+                                                                .background(
+                                                                    pos.opacity(0.14),
+                                                                    in: RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                                                )
+                                                        }
+                                                    }
+
+                                                    HStack(spacing: 4) {
+                                                        Text(MobileFormatters.relativeDate(member.updatedAt))
+                                                            .font(.system(size: 11).monospacedDigit())
+                                                            .foregroundStyle(MobileTheme.tertiaryInk(for: colorScheme))
+
+                                                        if let cleanEditor {
+                                                            Text("· \(cleanEditor)")
+                                                                .font(.system(size: 11))
+                                                                .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
+                                                                .lineLimit(1)
+                                                        }
+                                                    }
+                                                }
+                                                .frame(maxWidth: .infinity, alignment: .leading)
+                                                .contentShape(Rectangle())
+                                            }
+                                            .buttonStyle(.plain)
+
+                                            if let prevMember, changedBlocks > 0 {
+                                                Button {
+                                                    MobileHaptics.light()
+                                                    onOpenDiff(prevMember.id, member.id)
+                                                } label: {
+                                                    Text("Δ \(changedBlocks)")
+                                                        .font(.system(size: 10.5, weight: .semibold).monospacedDigit())
+                                                        .foregroundStyle(hasHighRisk ? danger : MobileTheme.secondaryInk(for: colorScheme))
+                                                        .padding(.horizontal, 6)
+                                                        .padding(.vertical, 3)
+                                                        .background(
+                                                            hasHighRisk ? danger.opacity(0.12) : MobileTheme.surfaceSubtle(for: colorScheme),
+                                                            in: Capsule()
+                                                        )
+                                                }
+                                                .buttonStyle(.plain)
+                                            }
+
+                                            if !isPrimary {
+                                                Button {
+                                                    MobileHaptics.success()
+                                                    Task { await store.setPrimaryVersion(assetID: member.id) }
+                                                } label: {
+                                                    Image(systemName: "pin")
+                                                        .font(.system(size: 11, weight: .semibold))
+                                                        .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
+                                                        .frame(width: 24, height: 24)
+                                                        .contentShape(Circle())
+                                                }
+                                                .buttonStyle(.plain)
+                                                .accessibilityLabel("设为主版本")
+                                            }
+
+                                            Menu {
+                                                if !isPrimary {
+                                                    Button {
+                                                        Task { await store.setPrimaryVersion(assetID: member.id) }
+                                                    } label: {
+                                                        Label("设为主版本", systemImage: "pin")
+                                                    }
+                                                }
+                                                if let prevMember {
+                                                    Button {
+                                                        onOpenDiff(prevMember.id, member.id)
+                                                    } label: {
+                                                        Label("与上一版对比差异", systemImage: "arrow.left.arrow.right")
+                                                    }
+                                                }
+                                                Button {
+                                                    editingVersionID = member.id
+                                                    let rawEditor = verMeta?.editorName ?? ""
+                                                    editorDraft = rawEditor == "本机" ? "" : rawEditor
+                                                    noteDraft = MobileVersionDisplayFormatting.cleanDescriptor(
+                                                        changeNote: verMeta?.changeNote,
+                                                        versionLabel: nil,
+                                                        editorName: verMeta?.editorName
+                                                    ) ?? ""
+                                                    labelDraft = verMeta?.versionLabel ?? ""
+                                                } label: {
+                                                    Label("编辑备注", systemImage: "pencil")
+                                                }
+                                                Divider()
+                                                Button(role: .destructive) {
+                                                    Task { await store.unstackAsset(assetID: member.id) }
+                                                } label: {
+                                                    Label("拆分为独立素材", systemImage: "square.stack.3d.up.slash")
+                                                }
+                                            } label: {
+                                                Image(systemName: "ellipsis")
+                                                    .font(.system(size: 11.5, weight: .semibold))
+                                                    .foregroundStyle(MobileTheme.tertiaryInk(for: colorScheme))
+                                                    .frame(width: 24, height: 24)
+                                                    .contentShape(Circle())
+                                            }
+                                        }
+                                        .padding(.horizontal, 8)
+                                        .padding(.vertical, 6)
+                                        .background(
+                                            isCurrent ? MobileTheme.accentSoft(for: colorScheme) : .clear,
+                                            in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                        )
+                                    }
+
+                                    if editingVersionID == member.id {
+                                        VStack(spacing: 6) {
+                                            HStack(spacing: 6) {
+                                                TextField("修改人", text: $editorDraft)
+                                                    .font(.system(size: 12))
+                                                    .padding(7)
+                                                    .frame(maxWidth: 96)
+                                                    .background(
+                                                        MobileTheme.inspectorFieldSurface(for: colorScheme),
+                                                        in: RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                                    )
+                                                TextField("备注（可选）", text: $noteDraft)
+                                                    .font(.system(size: 12))
+                                                    .padding(7)
+                                                    .background(
+                                                        MobileTheme.inspectorFieldSurface(for: colorScheme),
+                                                        in: RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                                    )
+                                            }
+                                            HStack {
+                                                Spacer()
+                                                Button("取消") {
+                                                    editingVersionID = nil
+                                                }
+                                                .font(.system(size: 11.5))
+                                                .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
+
+                                                Button("保存") {
+                                                    let id = member.id
+                                                    let ed = editorDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+                                                    let nt = noteDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+                                                    let lb = labelDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+                                                    editingVersionID = nil
+                                                    Task {
+                                                        await store.updateVersionStackMetadata(
+                                                            assetID: id,
+                                                            versionLabel: lb.isEmpty ? nil : lb,
+                                                            editorName: (ed.isEmpty || ed == "本机") ? nil : ed,
+                                                            changeNote: nt.isEmpty ? nil : nt
+                                                        )
+                                                    }
+                                                }
+                                                .font(.system(size: 11.5, weight: .semibold))
+                                                .foregroundStyle(accent)
+                                            }
+                                        }
+                                        .padding(.leading, 24)
+                                        .padding(.bottom, 4)
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -712,7 +885,7 @@ struct InspectorVersionStackCard: View {
         )
         .overlay(
             RoundedRectangle(cornerRadius: MobileTheme.Radius.cardOuter, style: .continuous)
-                .strokeBorder(MobileTheme.hairline(for: colorScheme), lineWidth: 0.75)
+                .strokeBorder(MobileTheme.hairline(for: colorScheme), lineWidth: 0.5)
         )
     }
 }

@@ -5,31 +5,22 @@ import QuickLook
 import SwiftUI
 import UIKit
 
-// MARK: - Unified Document & Version-Stack Stage for AssetDetailView
+// MARK: - Unified Document Studio Stage (`阅读 | 对比 | 合并`)
 
 enum MobileDocumentStageMode: String, CaseIterable {
     case read = "阅读"
-    case diff = "对比差异"
+    case diff = "对比"
+    case merge = "合并"
 }
 
 enum MobileRadarFilter: String, CaseIterable, Identifiable {
-    case all = "全部改动"
-    case numberOrCurrency = "数字变动"
-    case dateOrDeadline = "日期时间"
-    case tableMutation = "表格变动"
-    case nativeRevisionOrComment = "原生修订/批注"
+    case all = "全部"
+    case numberOrCurrency = "数字"
+    case dateOrDeadline = "时间"
+    case tableMutation = "表格"
+    case nativeRevisionOrComment = "批注"
 
     var id: String { rawValue }
-
-    var symbol: String {
-        switch self {
-        case .all: "line.3.horizontal.decrease.circle"
-        case .numberOrCurrency: "number.circle"
-        case .dateOrDeadline: "calendar"
-        case .tableMutation: "tablecells"
-        case .nativeRevisionOrComment: "text.bubble"
-        }
-    }
 
     var riskFlag: DocumentDiffRiskFlag? {
         switch self {
@@ -42,9 +33,9 @@ enum MobileRadarFilter: String, CaseIterable, Identifiable {
     }
 }
 
-/// Hosts native iOS/iPadOS structured document reading (`.docx`, `.xlsx`, `.pdf`, `.md/.txt`),
-/// Version Stack top switcher, High-Risk Diff Radar, Red-Cyan & Split-Curtain scanned PDF diff,
-/// and Scheme B zero-corruption 2-Way Merge (`按差异合成新版本`).
+/// Hosts native iOS/iPadOS structured & true-layout document reading (`.docx`, `.xlsx`, `.pdf`, `.md/.txt`),
+/// single unified header (`阅读 | 对比 | 合成` + compact `vN ▾` menu), Continuous Paper Sheet diff & synchronized
+/// iPad 2-column split sheet, Red-Cyan / Split-Curtain scanned PDF diff, and interactive paper 2-Way Merge.
 struct MobileDocumentStageView: View {
     @Bindable var store: MobileAppStore
     let asset: AssetRecord
@@ -58,6 +49,7 @@ struct MobileDocumentStageView: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     @State private var mode: MobileDocumentStageMode
     @State private var payload: StructuredDocumentPayload?
@@ -74,15 +66,13 @@ struct MobileDocumentStageView: View {
     @State private var pdfContinuousMode: Bool = true
 
     private enum OfficeReaderDisplayMode: String, CaseIterable {
-        case trueLayout = "原版版式"
-        case structured = "结构与批注"
+        case trueLayout
+        case structured
+    }
 
-        var symbol: String {
-            switch self {
-            case .trueLayout: "doc.richtext"
-            case .structured: "text.bubble"
-            }
-        }
+    private enum TextDiffLayoutMode: String, CaseIterable {
+        case inlinePaper = "审阅"
+        case splitPaper = "双栏"
     }
 
     // Diff states
@@ -93,17 +83,26 @@ struct MobileDocumentStageView: View {
     @State private var diffError: String?
     @State private var radarFilter: MobileRadarFilter = .all
     @State private var onlyChangedBlocks: Bool = true
+    @State private var textDiffLayout: TextDiffLayoutMode = .inlinePaper
     @State private var selectedDiffSheetName: String?
     @State private var selectedPrimaryKeyCol: Int?
     @State private var useOCRIfScanned: Bool = true
     @State private var focusedHunkCursor: Int = 0
     @State private var pdfDiffSubMode: PDFDiffSubMode = .textOrOCR
-    @State private var isMergeSheetPresented: Bool = false
+
+    // Inline Continuous Paper Merge states (`mergeNoteDraft` strictly defaults to empty `""`)
+    @State private var preferTargetAsTemplate: Bool = true
+    @State private var mergeChoiceByHunkID: [String: DocumentMergeDecision.Choice] = [:]
+    @State private var mergeCustomTextByHunkID: [String: String] = [:]
+    @State private var isMergePreviewExpanded: Bool = false
+    @State private var mergeEditorDraft: String = ""
+    @State private var mergeNoteDraft: String = ""
+    @State private var isSynthesizingMerge: Bool = false
 
     private enum PDFDiffSubMode: String, CaseIterable {
-        case textOrOCR = "文本/OCR"
-        case redCyan = "红青叠层"
-        case splitCurtain = "卷帘拉条"
+        case textOrOCR = "文本"
+        case redCyan = "叠层"
+        case splitCurtain = "卷帘"
     }
 
     init(
@@ -152,6 +151,16 @@ struct MobileDocumentStageView: View {
         store.primaryVersionAsset(for: asset)
     }
 
+    private var currentVersionNumber: Int {
+        if let explicit = asset.richMetadata?.versionStack?.versionNumber {
+            return explicit
+        }
+        if let idx = stackSiblings.firstIndex(where: { $0.id == asset.id }) {
+            return idx + 1
+        }
+        return 1
+    }
+
     private var fileExtensionLower: String {
         (asset.fileName as NSString).pathExtension.lowercased()
     }
@@ -185,45 +194,53 @@ struct MobileDocumentStageView: View {
         }
     }
 
+    private var availableStageModes: [MobileDocumentStageMode] {
+        if asset.mediaKind != .document {
+            return [.read, .diff]
+        }
+        return [.read, .diff, .merge]
+    }
+
     private var isInteractiveSpreadsheetGridActive: Bool {
         mode == .read
             && formatFamily == .xlsx
             && (fileExtensionLower == "csv" || officeReaderMode == .structured || localOriginalURL == nil)
     }
 
+    private var shouldBlockOuterPaging: Bool {
+        (mode == .diff && (pdfDiffSubMode == .splitCurtain || formatFamily == .xlsx))
+            || isInteractiveSpreadsheetGridActive
+    }
+
     var body: some View {
         VStack(spacing: 0) {
-            if hasStack || mode == .diff {
-                versionStackTopBar
+            if hasStack || mode != .read {
+                unifiedStudioHeaderBar
                     .padding(.horizontal, 12)
                     .padding(.top, 4)
-                    .padding(.bottom, 8)
+                    .padding(.bottom, 6)
             }
 
             if mode == .diff && stackSiblings.count >= 2 {
                 diffWorkspace
+            } else if mode == .merge && stackSiblings.count >= 2 {
+                mergeWorkspace
             } else {
                 readerWorkspace
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onChange(of: mode) { _, nextMode in
-            onBlockPagingChanged(
-                (nextMode == .diff && (pdfDiffSubMode == .splitCurtain || formatFamily == .xlsx))
-                    || isInteractiveSpreadsheetGridActive
-            )
-            if nextMode == .diff {
+            onBlockPagingChanged(shouldBlockOuterPaging)
+            if nextMode == .diff || nextMode == .merge {
                 Task { await reloadDiffReport() }
             }
         }
         .onChange(of: officeReaderMode) { _, _ in
-            onBlockPagingChanged(
-                (mode == .diff && (pdfDiffSubMode == .splitCurtain || formatFamily == .xlsx))
-                    || isInteractiveSpreadsheetGridActive
-            )
+            onBlockPagingChanged(shouldBlockOuterPaging)
         }
-        .onChange(of: pdfDiffSubMode) { _, sub in
-            onBlockPagingChanged(mode == .diff && sub == .splitCurtain)
+        .onChange(of: pdfDiffSubMode) { _, _ in
+            onBlockPagingChanged(shouldBlockOuterPaging)
         }
         .onChange(of: externalDiffTrigger) { _, req in
             guard let req else { return }
@@ -237,133 +254,119 @@ struct MobileDocumentStageView: View {
         }
         .task(id: asset.id) {
             await loadReaderData(for: asset)
-            onBlockPagingChanged(
-                (mode == .diff && (pdfDiffSubMode == .splitCurtain || formatFamily == .xlsx))
-                    || isInteractiveSpreadsheetGridActive
-            )
+            onBlockPagingChanged(shouldBlockOuterPaging)
             if hasStack, initialComparePair == nil, externalDiffTrigger == nil {
                 alignDefaultComparePair(around: asset)
             }
-            if mode == .diff && stackSiblings.count >= 2 {
+            if (mode == .diff || mode == .merge) && stackSiblings.count >= 2 {
                 await reloadDiffReport()
-            }
-        }
-        .sheet(isPresented: $isMergeSheetPresented) {
-            if let report = diffReport {
-                NavigationStack {
-                    DocumentTwoWayMergeSheet(
-                        store: store,
-                        report: report,
-                        baseAsset: store.liveAsset(id: baseVersionID) ?? asset,
-                        targetAsset: store.liveAsset(id: targetVersionID) ?? asset,
-                        nextVersionNumber: (stackSiblings.compactMap { $0.richMetadata?.versionStack?.versionNumber }.max() ?? stackSiblings.count) + 1,
-                        onShareCreated: { url in
-                            isMergeSheetPresented = false
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
-                                onShareURL(url)
-                            }
-                        },
-                        onOpenCreatedVersion: { created in
-                            isMergeSheetPresented = false
-                            mode = .read
-                            onSelectVersionAsset(created)
-                        },
-                        onCancel: {
-                            isMergeSheetPresented = false
-                        }
-                    )
-                }
-                .presentationDetents([.large])
             }
         }
     }
 
-    // MARK: - Top Version Stack Bar & Reader/Diff Switcher
+    // MARK: - Single Unified Top Header (`阅读 | 对比 | 合成` + Compact `vN ▾` Menu)
 
-    private var versionStackTopBar: some View {
-        let accent = MobileTheme.accent(for: colorScheme)
+    private var unifiedStudioHeaderBar: some View {
         let pos = MobileTheme.positive(for: colorScheme)
         let warn = MobileTheme.warning(for: colorScheme)
-        let primaryVer = primaryAsset.richMetadata?.versionStack?.versionNumber ?? stackSiblings.count
+        let newerCount = store.newerThanPrimaryCount(for: asset)
 
         return HStack(spacing: 8) {
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 5) {
-                    ForEach(Array(stackSiblings.enumerated()), id: \.element.id) { idx, item in
-                        let vNum = item.richMetadata?.versionStack?.versionNumber ?? (idx + 1)
-                        let isCurrent = item.id == asset.id && mode == .read
-                        let isPrimary = item.id == primaryAsset.id
-                        let isUnreviewed = vNum > primaryVer
+            // Left: Format Badge + Concise Spec
+            HStack(spacing: 6) {
+                Text(formatFamily.badgeLabel)
+                    .font(.system(size: 10.5, weight: .bold, design: .monospaced))
+                    .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2.5)
+                    .background(
+                        MobileTheme.surfaceSubtle(for: colorScheme),
+                        in: RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    )
 
-                        Button {
-                            MobileHaptics.light()
-                            mode = .read
-                            onSelectVersionAsset(item)
-                        } label: {
-                            HStack(spacing: 4) {
-                                Text("v\(vNum)")
-                                    .font(.system(size: 12, weight: .bold).monospacedDigit())
-                                if isPrimary {
-                                    Text("主版")
-                                        .font(.system(size: 9.5, weight: .bold))
-                                        .foregroundStyle(isCurrent ? .white : pos)
-                                        .padding(.horizontal, 4.5)
-                                        .padding(.vertical, 1)
-                                        .background(
-                                            isCurrent ? Color.white.opacity(0.22) : pos.opacity(0.15),
-                                            in: RoundedRectangle(cornerRadius: 3.5, style: .continuous)
-                                        )
-                                } else if isUnreviewed {
-                                    Circle()
-                                        .fill(isCurrent ? .white : warn)
-                                        .frame(width: 5.5, height: 5.5)
-                                }
-                            }
-                            .foregroundStyle(isCurrent ? .white : .primary)
-                            .padding(.horizontal, 9)
-                            .padding(.vertical, 5.5)
-                            .background(
-                                isCurrent
-                                    ? MobileTheme.accentButtonFill(for: colorScheme)
-                                    : MobileTheme.surfaceElevated(for: colorScheme),
-                                in: Capsule()
-                            )
-                            .overlay(
-                                Capsule().strokeBorder(
-                                    isCurrent ? .clear : MobileTheme.hairline(for: colorScheme),
-                                    lineWidth: 0.75
-                                )
-                            )
-                        }
-                        .buttonStyle(.plain)
-                        .contextMenu {
-                            if !isPrimary {
-                                Button {
-                                    Task { await store.setPrimaryVersion(assetID: item.id) }
-                                } label: {
-                                    Label("锁定 v\(vNum) 为对外主版本", systemImage: "checkmark.seal.fill")
-                                }
-                            }
-                            if idx > 0 {
-                                Button {
-                                    baseVersionID = stackSiblings[idx - 1].id
-                                    targetVersionID = item.id
-                                    mode = .diff
-                                    Task { await reloadDiffReport() }
-                                } label: {
-                                    Label("对比 v\(idx) → v\(vNum) 差异", systemImage: "arrow.left.arrow.right")
-                                }
-                            }
-                        }
-                    }
+                if !conciseHeaderSpec.isEmpty {
+                    Text(conciseHeaderSpec)
+                        .font(.system(size: 11.5).monospacedDigit())
+                        .foregroundStyle(MobileTheme.tertiaryInk(for: colorScheme))
+                        .lineLimit(1)
                 }
             }
 
             Spacer(minLength: 4)
 
+            // Compact `vN ▾` Version Dropdown in Reader Mode (Replaces Second Horizontal Pill Bar)
+            if hasStack && mode == .read {
+                Menu {
+                    ForEach(Array(stackSiblings.enumerated().reversed()), id: \.element.id) { idx, item in
+                        let verMeta = item.richMetadata?.versionStack
+                        let vNum = verMeta?.versionNumber ?? (idx + 1)
+                        let isPrimary = item.id == primaryAsset.id
+                        let desc = MobileVersionDisplayFormatting.cleanDescriptor(
+                            changeNote: verMeta?.changeNote,
+                            versionLabel: verMeta?.versionLabel,
+                            editorName: verMeta?.editorName
+                        )
+                        Button {
+                            MobileHaptics.light()
+                            onSelectVersionAsset(item)
+                        } label: {
+                            Label(
+                                "v\(vNum)" + (desc.map { " · \($0)" } ?? "") + (isPrimary ? "（主版）" : ""),
+                                systemImage: item.id == asset.id ? "checkmark" : (isPrimary ? "pin.fill" : "doc.text")
+                            )
+                        }
+                    }
+
+                    if asset.id != primaryAsset.id {
+                        Divider()
+                        Button {
+                            MobileHaptics.success()
+                            Task { await store.setPrimaryVersion(assetID: asset.id) }
+                        } label: {
+                            Label("设当前版为主版本", systemImage: "pin")
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Text("v\(currentVersionNumber)")
+                            .font(.system(size: 12, weight: .semibold).monospacedDigit())
+                            .foregroundStyle(.primary)
+
+                        if asset.id == primaryAsset.id {
+                            Text("主版")
+                                .font(.system(size: 9.5, weight: .semibold))
+                                .foregroundStyle(pos)
+                                .padding(.horizontal, 4.5)
+                                .padding(.vertical, 1)
+                                .background(pos.opacity(0.14), in: RoundedRectangle(cornerRadius: 3.5, style: .continuous))
+                        } else if newerCount > 0 {
+                            Circle()
+                                .fill(warn)
+                                .frame(width: 5, height: 5)
+                        }
+
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 8, weight: .bold))
+                            .foregroundStyle(MobileTheme.tertiaryInk(for: colorScheme))
+                    }
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 5)
+                    .background(
+                        MobileTheme.surfaceElevated(for: colorScheme),
+                        in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .strokeBorder(MobileTheme.hairline(for: colorScheme), lineWidth: 0.5)
+                    )
+                }
+            }
+
+            // Segmented Mode Control (`阅读 | 对比 | 合成`)
             if stackSiblings.count >= 2 {
+                let diffCount = radarCount(for: .all)
                 HStack(spacing: 2) {
-                    ForEach(MobileDocumentStageMode.allCases, id: \.self) { m in
+                    ForEach(availableStageModes, id: \.self) { m in
                         let selected = mode == m
                         Button {
                             MobileHaptics.selection()
@@ -371,26 +374,53 @@ struct MobileDocumentStageView: View {
                                 mode = m
                             }
                         } label: {
-                            Text(m.rawValue)
-                                .font(.system(size: 12, weight: selected ? .semibold : .medium))
-                                .foregroundStyle(selected ? .white : .primary)
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 5)
-                                .background(
-                                    selected ? accent : .clear,
-                                    in: Capsule()
-                                )
+                            HStack(spacing: 3.5) {
+                                Text(m.rawValue)
+                                    .font(.system(size: 12, weight: selected ? .semibold : .medium))
+                                if m == .diff && diffCount > 0 {
+                                    Text("\(diffCount)")
+                                        .font(.system(size: 10.5, weight: .semibold).monospacedDigit())
+                                        .foregroundStyle(selected ? .primary : MobileTheme.tertiaryInk(for: colorScheme))
+                                }
+                            }
+                            .foregroundStyle(selected ? .primary : MobileTheme.secondaryInk(for: colorScheme))
+                            .padding(.horizontal, 9.5)
+                            .padding(.vertical, 4.5)
+                            .background(
+                                selected ? MobileTheme.surfaceElevated(for: colorScheme) : .clear,
+                                in: RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            )
+                            .shadow(color: .black.opacity(selected ? 0.06 : 0), radius: 2, y: 1)
                         }
                         .buttonStyle(.plain)
                     }
                 }
                 .padding(2.5)
-                .background(MobileTheme.surfaceSubtle(for: colorScheme), in: Capsule())
+                .background(
+                    MobileTheme.surfaceSubtle(for: colorScheme),
+                    in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                )
             }
         }
     }
 
-    // MARK: - Native Document Reader Workspace
+    private var conciseHeaderSpec: String {
+        var parts: [String] = []
+        let pages = payload?.pageCount ?? asset.richMetadata?.document?.pageCount ?? 0
+        let words = payload?.wordCount ?? asset.richMetadata?.document?.wordCount ?? 0
+        let sheets = payload?.sheets.count ?? asset.richMetadata?.document?.sheetNames.count ?? 0
+        if sheets > 0 {
+            parts.append("\(sheets) 表")
+        } else if pages > 0 {
+            parts.append("\(pages) 页")
+        }
+        if words > 0 && sheets == 0 {
+            parts.append("\(words.formatted()) 字")
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    // MARK: - Mode 1: Native Document Reader Workspace (Zero Instructional Banners)
 
     @ViewBuilder
     private var readerWorkspace: some View {
@@ -409,13 +439,13 @@ struct MobileDocumentStageView: View {
         }
     }
 
-    private var officeLayoutToggleCapsule: some View {
-        let accent = MobileTheme.accent(for: colorScheme)
+    private func officeModeToggleSegmented(structuredLabel: String) -> some View {
         let commentCount = payload?.comments.count ?? 0
 
         return HStack(spacing: 2) {
             ForEach(OfficeReaderDisplayMode.allCases, id: \.self) { sub in
                 let selected = officeReaderMode == sub
+                let title = sub == .trueLayout ? "原版版式" : structuredLabel
                 Button {
                     MobileHaptics.selection()
                     withAnimation(MobileMotion.accessible(MobileMotion.settleStrong, reduced: reduceMotion)) {
@@ -423,61 +453,48 @@ struct MobileDocumentStageView: View {
                     }
                 } label: {
                     HStack(spacing: 4) {
-                        Image(systemName: sub.symbol)
-                            .font(.system(size: 11, weight: .semibold))
-                        Text(sub.rawValue)
-                            .font(.system(size: 12, weight: selected ? .semibold : .medium))
+                        Text(title)
+                            .font(.system(size: 11.5, weight: selected ? .semibold : .medium))
                         if sub == .structured && commentCount > 0 {
                             Text("\(commentCount)")
-                                .font(.system(size: 10, weight: .bold).monospacedDigit())
-                                .foregroundStyle(selected ? .white : MobileTheme.warning(for: colorScheme))
-                                .padding(.horizontal, 4.5)
-                                .padding(.vertical, 0.5)
-                                .background(
-                                    selected
-                                        ? Color.white.opacity(0.22)
-                                        : MobileTheme.warning(for: colorScheme).opacity(0.15),
-                                    in: Capsule()
-                                )
+                                .font(.system(size: 10, weight: .semibold).monospacedDigit())
+                                .foregroundStyle(MobileTheme.warning(for: colorScheme))
                         }
                     }
-                    .foregroundStyle(selected ? .white : .primary)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 5)
-                    .background(selected ? accent : .clear, in: Capsule())
+                    .foregroundStyle(selected ? .primary : MobileTheme.secondaryInk(for: colorScheme))
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 4)
+                    .background(
+                        selected ? MobileTheme.surfaceElevated(for: colorScheme) : .clear,
+                        in: RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    )
+                    .shadow(color: .black.opacity(selected ? 0.06 : 0), radius: 2, y: 1)
                 }
                 .buttonStyle(.plain)
             }
         }
         .padding(2.5)
-        .background(MobileTheme.surfaceSubtle(for: colorScheme), in: Capsule())
+        .background {
+            if reduceTransparency {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(MobileTheme.surfaceSubtle(for: colorScheme))
+            } else {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(.ultraThinMaterial)
+            }
+        }
         .overlay(
-            Capsule().strokeBorder(MobileTheme.hairline(for: colorScheme), lineWidth: 0.75)
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(MobileTheme.hairline(for: colorScheme), lineWidth: 0.5)
         )
     }
 
     private var officeReaderStage: some View {
-        VStack(spacing: 8) {
+        VStack(spacing: 6) {
             if localOriginalURL != nil {
-                HStack(spacing: 8) {
-                    officeLayoutToggleCapsule
-
-                    Spacer(minLength: 4)
-
-                    if let payload {
-                        HStack(spacing: 6) {
-                            if payload.pageCount > 0 {
-                                Text("\(payload.pageCount) 页")
-                                    .font(.system(size: 11.5, weight: .medium).monospacedDigit())
-                                    .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
-                            }
-                            if payload.hasNativeRevisions {
-                                Label("含修订", systemImage: "pencil.line")
-                                    .font(.system(size: 11, weight: .semibold))
-                                    .foregroundStyle(MobileTheme.warning(for: colorScheme))
-                            }
-                        }
-                    }
+                HStack {
+                    Spacer()
+                    officeModeToggleSegmented(structuredLabel: "正文批注")
                 }
                 .padding(.horizontal, 12)
             }
@@ -487,13 +504,12 @@ struct MobileDocumentStageView: View {
                     .clipShape(RoundedRectangle(cornerRadius: MobileTheme.Radius.cardOuter, style: .continuous))
                     .overlay(
                         RoundedRectangle(cornerRadius: MobileTheme.Radius.cardOuter, style: .continuous)
-                            .strokeBorder(MobileTheme.hairline(for: colorScheme), lineWidth: 0.75)
+                            .strokeBorder(MobileTheme.hairline(for: colorScheme), lineWidth: 0.5)
                     )
                     .padding(.horizontal, 12)
                     .padding(.bottom, 10)
             } else if officeReaderMode == .trueLayout && isLoadingPayload {
-                ProgressView("正在加载原版文档版式…")
-                    .font(.system(size: 13))
+                ProgressView()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 richBlocksReaderStage
@@ -502,21 +518,19 @@ struct MobileDocumentStageView: View {
     }
 
     private var pdfReaderStage: some View {
-        ZStack(alignment: .bottom) {
+        ZStack(alignment: .bottomTrailing) {
             if let localOriginalURL {
                 MobileEnhancedPDFKitView(url: localOriginalURL, continuous: pdfContinuousMode)
                     .clipShape(RoundedRectangle(cornerRadius: MobileTheme.Radius.cardOuter, style: .continuous))
                     .padding(.horizontal, 12)
                     .padding(.bottom, 8)
             } else if isLoadingPayload {
-                ProgressView("正在加载 PDF 原件…")
-                    .font(.system(size: 13))
+                ProgressView()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if let payload, !payload.plainText.isEmpty {
                 richBlocksReaderStage
             } else {
-                ProgressView("正在同步离线 PDF…")
-                    .font(.system(size: 13))
+                ProgressView()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
 
@@ -525,38 +539,39 @@ struct MobileDocumentStageView: View {
                 let hasText = payload?.hasTextLayer ?? asset.richMetadata?.document?.hasTextLayer ?? true
                 if pageCnt > 0 {
                     Text("\(pageCnt) 页")
-                        .font(.system(size: 11.5, weight: .semibold).monospacedDigit())
-                        .foregroundStyle(.primary)
+                        .font(.system(size: 11.5, weight: .medium).monospacedDigit())
+                        .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
                 }
-                Text(hasText ? "含可选文本层" : "签批扫描件 · 支持 OCR 对比")
-                    .font(.system(size: 11.5, weight: .medium))
-                    .foregroundStyle(hasText ? MobileTheme.secondaryInk(for: colorScheme) : MobileTheme.warning(for: colorScheme))
-
-                Divider().frame(height: 12)
+                if !hasText {
+                    Text("扫描件")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(MobileTheme.warning(for: colorScheme))
+                }
 
                 Button {
                     MobileHaptics.light()
                     pdfContinuousMode.toggle()
                 } label: {
-                    Text(pdfContinuousMode ? "单页翻阅" : "连续滚动")
+                    Text(pdfContinuousMode ? "单页" : "连续")
                         .font(.system(size: 11.5, weight: .semibold))
                         .foregroundStyle(MobileTheme.accent(for: colorScheme))
                 }
                 .buttonStyle(.plain)
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
+            .padding(.horizontal, 11)
+            .padding(.vertical, 5.5)
             .charkleFloatingCapsule()
+            .padding(.trailing, 20)
             .padding(.bottom, 16)
         }
     }
 
     private var spreadsheetReaderStage: some View {
-        VStack(spacing: 8) {
+        VStack(spacing: 6) {
             if localOriginalURL != nil && supportsTrueLayoutOfficePreview {
-                HStack(spacing: 8) {
-                    officeLayoutToggleCapsule
-                    Spacer(minLength: 4)
+                HStack {
+                    Spacer()
+                    officeModeToggleSegmented(structuredLabel: "数据表格")
                 }
                 .padding(.horizontal, 12)
             }
@@ -566,19 +581,17 @@ struct MobileDocumentStageView: View {
                     .clipShape(RoundedRectangle(cornerRadius: MobileTheme.Radius.cardOuter, style: .continuous))
                     .overlay(
                         RoundedRectangle(cornerRadius: MobileTheme.Radius.cardOuter, style: .continuous)
-                            .strokeBorder(MobileTheme.hairline(for: colorScheme), lineWidth: 0.75)
+                            .strokeBorder(MobileTheme.hairline(for: colorScheme), lineWidth: 0.5)
                     )
                     .padding(.horizontal, 12)
                     .padding(.bottom, 10)
             } else if isLoadingPayload {
-                ProgressView("正在解析电子表格…")
-                    .font(.system(size: 13))
+                ProgressView()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if let sheets = payload?.sheets, !sheets.isEmpty {
                 let safeIdx = max(0, min(selectedSheetIndex, sheets.count - 1))
                 let activeSheet = sheets[safeIdx]
 
-                // Sheet Switcher Pills
                 HStack(spacing: 8) {
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 6) {
@@ -593,25 +606,21 @@ struct MobileDocumentStageView: View {
                                         Image(systemName: "tablecells")
                                             .font(.system(size: 11, weight: .semibold))
                                         Text(sheet.name)
-                                            .font(.system(size: 12.5, weight: selected ? .semibold : .medium))
-                                        Text("\(sheet.rows.count)行")
+                                            .font(.system(size: 12, weight: selected ? .semibold : .medium))
+                                        Text("\(sheet.rows.count)")
                                             .font(.system(size: 10.5).monospacedDigit())
-                                            .opacity(0.75)
+                                            .foregroundStyle(MobileTheme.tertiaryInk(for: colorScheme))
                                     }
-                                    .foregroundStyle(selected ? .white : .primary)
-                                    .padding(.horizontal, 11)
-                                    .padding(.vertical, 6)
+                                    .foregroundStyle(selected ? .primary : MobileTheme.secondaryInk(for: colorScheme))
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 5.5)
                                     .background(
-                                        selected
-                                            ? Color(charkleHex: "#1D7A46")
-                                            : MobileTheme.surfaceElevated(for: colorScheme),
-                                        in: Capsule()
+                                        selected ? MobileTheme.surfaceElevated(for: colorScheme) : MobileTheme.surfaceSubtle(for: colorScheme),
+                                        in: RoundedRectangle(cornerRadius: 7, style: .continuous)
                                     )
                                     .overlay(
-                                        Capsule().strokeBorder(
-                                            selected ? .clear : MobileTheme.hairline(for: colorScheme),
-                                            lineWidth: 0.75
-                                        )
+                                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                            .strokeBorder(MobileTheme.hairline(for: colorScheme), lineWidth: 0.5)
                                     )
                                 }
                                 .buttonStyle(.plain)
@@ -623,13 +632,13 @@ struct MobileDocumentStageView: View {
                         HStack(spacing: 6) {
                             Text("fx")
                                 .font(.system(size: 11, weight: .bold, design: .monospaced))
-                                .foregroundStyle(Color(charkleHex: "#1D7A46"))
+                                .foregroundStyle(MobileTheme.positive(for: colorScheme))
                             Text(selectedFormulaDetail)
                                 .font(.system(size: 11.5, design: .monospaced))
                                 .lineLimit(1)
                             Button {
                                 UIPasteboard.general.string = selectedFormulaDetail
-                                store.showToast("已复制单元格公式", tone: .info)
+                                store.showToast("已复制公式", tone: .info)
                             } label: {
                                 Image(systemName: "doc.on.doc")
                                     .font(.system(size: 11))
@@ -643,11 +652,9 @@ struct MobileDocumentStageView: View {
                 }
                 .padding(.horizontal, 12)
 
-                // 2D Scrollable Spreadsheet Grid
                 ScrollView([.horizontal, .vertical]) {
                     let colCount = max(1, activeSheet.columnCount)
                     VStack(alignment: .leading, spacing: 0) {
-                        // Column Header Row
                         HStack(spacing: 0) {
                             Text("#")
                                 .font(.system(size: 11, weight: .bold, design: .monospaced))
@@ -658,29 +665,26 @@ struct MobileDocumentStageView: View {
                             ForEach(0..<colCount, id: \.self) { col in
                                 let letter = Self.excelColumnName(col)
                                 let headerTitle = col < activeSheet.headers.count ? activeSheet.headers[col] : ""
-                                VStack(alignment: .leading, spacing: 1) {
-                                    Text(headerTitle.isEmpty ? letter : "\(letter) · \(headerTitle)")
-                                        .font(.system(size: 11.5, weight: .semibold))
-                                        .foregroundStyle(.primary)
-                                        .lineLimit(1)
-                                }
-                                .padding(.horizontal, 8)
-                                .frame(width: 132, height: 34, alignment: .leading)
-                                .background(MobileTheme.surfaceSubtle(for: colorScheme))
-                                .overlay(alignment: .leading) {
-                                    Rectangle()
-                                        .fill(MobileTheme.hairline(for: colorScheme))
-                                        .frame(width: 0.5)
-                                }
+                                Text(headerTitle.isEmpty ? letter : "\(letter) · \(headerTitle)")
+                                    .font(.system(size: 11.5, weight: .semibold))
+                                    .foregroundStyle(.primary)
+                                    .lineLimit(1)
+                                    .padding(.horizontal, 8)
+                                    .frame(width: 132, height: 34, alignment: .leading)
+                                    .background(MobileTheme.surfaceSubtle(for: colorScheme))
+                                    .overlay(alignment: .leading) {
+                                        Rectangle()
+                                            .fill(MobileTheme.hairline(for: colorScheme))
+                                            .frame(width: 0.5)
+                                    }
                             }
                         }
                         .overlay(alignment: .bottom) {
                             Rectangle()
                                 .fill(MobileTheme.borderStrong(for: colorScheme))
-                                .frame(height: 0.75)
+                                .frame(height: 0.5)
                         }
 
-                        // Data Rows
                         LazyVStack(alignment: .leading, spacing: 0) {
                             ForEach(activeSheet.rows) { row in
                                 HStack(spacing: 0) {
@@ -708,10 +712,13 @@ struct MobileDocumentStageView: View {
                                                 if formula != nil {
                                                     Text("fx")
                                                         .font(.system(size: 9, weight: .bold, design: .monospaced))
-                                                        .foregroundStyle(Color(charkleHex: "#1D7A46"))
+                                                        .foregroundStyle(MobileTheme.positive(for: colorScheme))
                                                         .padding(.horizontal, 3.5)
                                                         .padding(.vertical, 1)
-                                                        .background(Color(charkleHex: "#1D7A46").opacity(0.14), in: RoundedRectangle(cornerRadius: 3, style: .continuous))
+                                                        .background(
+                                                            MobileTheme.positive(for: colorScheme).opacity(0.14),
+                                                            in: RoundedRectangle(cornerRadius: 3, style: .continuous)
+                                                        )
                                                 }
                                             }
                                             .padding(.horizontal, 8)
@@ -737,7 +744,7 @@ struct MobileDocumentStageView: View {
                     .clipShape(RoundedRectangle(cornerRadius: MobileTheme.Radius.cardOuter, style: .continuous))
                     .overlay(
                         RoundedRectangle(cornerRadius: MobileTheme.Radius.cardOuter, style: .continuous)
-                            .strokeBorder(MobileTheme.hairline(for: colorScheme), lineWidth: 0.75)
+                            .strokeBorder(MobileTheme.hairline(for: colorScheme), lineWidth: 0.5)
                     )
                     .padding(.horizontal, 12)
                     .padding(.bottom, 12)
@@ -752,11 +759,11 @@ struct MobileDocumentStageView: View {
         VStack(spacing: 8) {
             HStack {
                 Picker("阅读视图", selection: $showRawTextMode) {
-                    Text("排版阅读").tag(false)
-                    Text("源码行号").tag(true)
+                    Text("排版").tag(false)
+                    Text("源码").tag(true)
                 }
                 .pickerStyle(.segmented)
-                .frame(maxWidth: 200)
+                .frame(maxWidth: 168)
 
                 Spacer()
 
@@ -764,7 +771,7 @@ struct MobileDocumentStageView: View {
                     Button {
                         UIPasteboard.general.string = text
                         MobileHaptics.light()
-                        store.showToast("已复制全文内容", tone: .success)
+                        store.showToast("已复制全文", tone: .success)
                     } label: {
                         Label("复制全文", systemImage: "doc.on.doc")
                             .font(.system(size: 12, weight: .semibold))
@@ -804,7 +811,7 @@ struct MobileDocumentStageView: View {
                     )
                     .overlay(
                         RoundedRectangle(cornerRadius: MobileTheme.Radius.cardOuter, style: .continuous)
-                            .strokeBorder(MobileTheme.hairline(for: colorScheme), lineWidth: 0.75)
+                            .strokeBorder(MobileTheme.hairline(for: colorScheme), lineWidth: 0.5)
                     )
                     .padding(.horizontal, 14)
                     .padding(.bottom, 16)
@@ -818,63 +825,24 @@ struct MobileDocumentStageView: View {
     private var richBlocksReaderStage: some View {
         ScrollView {
             if isLoadingPayload {
-                ProgressView("正在解析文档排版与表格…")
-                    .font(.system(size: 13))
+                ProgressView()
                     .padding(.top, 64)
             } else if let payload {
                 VStack(alignment: .leading, spacing: 14) {
-                    // Paper Document Sheet
                     VStack(alignment: .leading, spacing: 14) {
                         if payload.isRedHeaderStyle {
                             Rectangle()
-                                .fill(Color(charkleHex: "#D93B30"))
-                                .frame(height: 3)
+                                .fill(MobileTheme.destructive(for: colorScheme))
+                                .frame(height: 2.5)
                                 .clipShape(Capsule())
                         }
-
-                        // Document Metadata Header
-                        HStack(spacing: 8) {
-                            Text(formatFamily.badgeLabel)
-                                .font(.system(size: 11, weight: .bold))
-                                .foregroundStyle(.white)
-                                .padding(.horizontal, 7)
-                                .padding(.vertical, 2.5)
-                                .background(MobileTheme.accent(for: colorScheme), in: RoundedRectangle(cornerRadius: 5, style: .continuous))
-
-                            if payload.pageCount > 0 {
-                                Text("\(payload.pageCount) 页")
-                                    .font(.system(size: 12, weight: .medium).monospacedDigit())
-                                    .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
-                            }
-                            if payload.wordCount > 0 {
-                                Text("· \(payload.wordCount) 字")
-                                    .font(.system(size: 12, weight: .medium).monospacedDigit())
-                                    .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
-                            }
-                            if let editor = payload.authorOrEditor, !editor.isEmpty {
-                                Text("· \(editor)")
-                                    .font(.system(size: 12, weight: .medium))
-                                    .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
-                            }
-                            Spacer()
-                            if payload.hasNativeRevisions {
-                                Label("含原生修订", systemImage: "pencil.line")
-                                    .font(.system(size: 11, weight: .semibold))
-                                    .foregroundStyle(MobileTheme.warning(for: colorScheme))
-                                    .padding(.horizontal, 7)
-                                    .padding(.vertical, 3)
-                                    .background(MobileTheme.warning(for: colorScheme).opacity(0.14), in: Capsule())
-                            }
-                        }
-
-                        Divider()
 
                         if payload.blocks.isEmpty && payload.plainText.isEmpty {
                             VStack(spacing: 8) {
                                 Image(systemName: "doc.text")
-                                    .font(.system(size: 24))
+                                    .font(.system(size: 22))
                                     .foregroundStyle(MobileTheme.tertiaryInk(for: colorScheme))
-                                Text(payloadError ?? "该文档暂无可直接提取的正文段落，可点击左下角分享用系统应用打开。")
+                                Text(payloadError ?? "暂无可直接提取的正文段落")
                                     .font(.system(size: 13))
                                     .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
                                     .multilineTextAlignment(.center)
@@ -893,18 +861,17 @@ struct MobileDocumentStageView: View {
                             }
                         }
                     }
-                    .padding(horizontalSizeClass == .regular ? 24 : 16)
+                    .padding(horizontalSizeClass == .regular ? 28 : 16)
                     .frame(maxWidth: 780, alignment: .leading)
                     .background(
                         MobileTheme.surfaceElevated(for: colorScheme),
-                        in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        in: RoundedRectangle(cornerRadius: 12, style: .continuous)
                     )
                     .overlay(
-                        RoundedRectangle(cornerRadius: 14, style: .continuous)
-                            .strokeBorder(MobileTheme.hairline(for: colorScheme), lineWidth: 0.75)
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .strokeBorder(MobileTheme.hairline(for: colorScheme), lineWidth: 0.5)
                     )
 
-                    // Native Word Comments Section
                     if !payload.comments.isEmpty {
                         VStack(alignment: .leading, spacing: 10) {
                             Button {
@@ -914,12 +881,12 @@ struct MobileDocumentStageView: View {
                                 }
                             } label: {
                                 HStack {
-                                    Label("原生批注（\(payload.comments.count) 条）", systemImage: "text.bubble.fill")
-                                        .font(.system(size: 13, weight: .semibold).monospacedDigit())
-                                        .foregroundStyle(MobileTheme.warning(for: colorScheme))
+                                    Label("批注 \(payload.comments.count)", systemImage: "text.bubble")
+                                        .font(.system(size: 12.5, weight: .semibold).monospacedDigit())
+                                        .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
                                     Spacer()
                                     Image(systemName: areCommentsExpanded ? "chevron.up" : "chevron.down")
-                                        .font(.system(size: 11, weight: .bold))
+                                        .font(.system(size: 10.5, weight: .bold))
                                         .foregroundStyle(MobileTheme.tertiaryInk(for: colorScheme))
                                 }
                                 .contentShape(Rectangle())
@@ -930,7 +897,7 @@ struct MobileDocumentStageView: View {
                                 ForEach(payload.comments) { comment in
                                     VStack(alignment: .leading, spacing: 4) {
                                         HStack {
-                                            Text(comment.author.isEmpty ? "审阅批注" : comment.author)
+                                            Text(comment.author.isEmpty ? "批注" : comment.author)
                                                 .font(.system(size: 12, weight: .semibold))
                                             if let date = comment.dateText, !date.isEmpty {
                                                 Text(date)
@@ -955,7 +922,7 @@ struct MobileDocumentStageView: View {
                                     .frame(maxWidth: .infinity, alignment: .leading)
                                     .background(
                                         MobileTheme.inspectorFieldSurface(for: colorScheme),
-                                        in: RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                        in: RoundedRectangle(cornerRadius: 8, style: .continuous)
                                     )
                                 }
                             }
@@ -964,11 +931,11 @@ struct MobileDocumentStageView: View {
                         .frame(maxWidth: 780, alignment: .leading)
                         .background(
                             MobileTheme.surfaceElevated(for: colorScheme),
-                            in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            in: RoundedRectangle(cornerRadius: 12, style: .continuous)
                         )
                         .overlay(
-                            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                .strokeBorder(MobileTheme.hairline(for: colorScheme), lineWidth: 0.75)
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .strokeBorder(MobileTheme.hairline(for: colorScheme), lineWidth: 0.5)
                         )
                     }
                 }
@@ -1020,7 +987,7 @@ struct MobileDocumentStageView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                     .overlay(
                         RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .strokeBorder(MobileTheme.borderStrong(for: colorScheme), lineWidth: 0.75)
+                            .strokeBorder(MobileTheme.borderStrong(for: colorScheme), lineWidth: 0.5)
                     )
                 }
             }
@@ -1050,13 +1017,13 @@ struct MobileDocumentStageView: View {
 
         case .pageBreak:
             HStack {
-                Rectangle().fill(MobileTheme.hairline(for: colorScheme)).frame(height: 0.75)
+                Rectangle().fill(MobileTheme.hairline(for: colorScheme)).frame(height: 0.5)
                 if let p = block.pageNumber {
                     Text("第 \(p) 页")
                         .font(.system(size: 10.5, weight: .medium).monospacedDigit())
                         .foregroundStyle(MobileTheme.tertiaryInk(for: colorScheme))
                 }
-                Rectangle().fill(MobileTheme.hairline(for: colorScheme)).frame(height: 0.75)
+                Rectangle().fill(MobileTheme.hairline(for: colorScheme)).frame(height: 0.5)
             }
             .padding(.vertical, 4)
 
@@ -1081,12 +1048,12 @@ struct MobileDocumentStageView: View {
                             ForEach(block.nativeRevisions) { rev in
                                 let isIns = rev.kind == .inserted
                                 let tint = isIns ? MobileTheme.positive(for: colorScheme) : MobileTheme.destructive(for: colorScheme)
-                                Text("\(isIns ? "+插入" : "-删除")：\(rev.text)" + (rev.author.map { " (\($0))" } ?? ""))
+                                Text("\(isIns ? "+" : "−") \(rev.text)")
                                     .font(.system(size: 11, weight: .medium))
                                     .strikethrough(!isIns)
                                     .foregroundStyle(tint)
                                     .padding(.horizontal, 7)
-                                    .padding(.vertical, 2.5)
+                                    .padding(.vertical, 2)
                                     .background(tint.opacity(0.12), in: Capsule())
                             }
                         }
@@ -1113,7 +1080,7 @@ struct MobileDocumentStageView: View {
         }
     }
 
-    // MARK: - Multi-Modal Diff Workspace (High-Risk Radar + Word/Excel/Scanned PDF + 2-Way Merge)
+    // MARK: - Mode 2: Continuous Paper Diff & Synchronized 2-Column Split Sheet
 
     private var filteredDiffHunks: [DocumentDiffHunk] {
         guard let report = diffReport else { return [] }
@@ -1129,7 +1096,12 @@ struct MobileDocumentStageView: View {
     }
 
     private func radarCount(for filter: MobileRadarFilter) -> Int {
-        guard let report = diffReport else { return 0 }
+        guard let report = diffReport else {
+            if filter == .all {
+                return asset.richMetadata?.document?.diffSummary?.totalChangedBlocks ?? 0
+            }
+            return 0
+        }
         switch filter {
         case .all:
             if !report.sheetDiffs.isEmpty {
@@ -1155,7 +1127,7 @@ struct MobileDocumentStageView: View {
         }
     }
 
-    private var canLaunchTwoWayMerge: Bool {
+    private var canSynthesizeTwoWay: Bool {
         guard let report = diffReport else { return false }
         if report.canSynthesizeTwoWay { return true }
         let fam = DocumentFormatFamily(rawValue: report.formatFamily) ?? formatFamily
@@ -1163,153 +1135,271 @@ struct MobileDocumentStageView: View {
             && report.hunks.contains(where: { $0.changeKind.isChanged && !$0.isProtectedComplex })
     }
 
+    private var isVisualOrPDFDiffTarget: Bool {
+        formatFamily == .pdf || diffReport?.supportsVisualPageOverlay == true || asset.mediaKind != .document
+    }
+
+    private var isTextPaperDiffTarget: Bool {
+        !isVisualOrPDFDiffTarget && formatFamily != .xlsx && (diffReport?.sheetDiffs.isEmpty ?? true)
+    }
+
     private var diffWorkspace: some View {
-        VStack(spacing: 8) {
-            diffVersionSelectorHeader
-                .padding(.horizontal, 12)
-
-            highRiskRadarFilterBar
-                .padding(.horizontal, 12)
-
-            if formatFamily == .pdf || diffReport?.supportsVisualPageOverlay == true || asset.mediaKind != .document {
-                pdfVisualModeSelectorBar
+        ScrollViewReader { scrollProxy in
+            VStack(spacing: 6) {
+                slimDiffControlBar(scrollProxy: scrollProxy)
                     .padding(.horizontal, 12)
-            }
 
-            if isLoadingDiff {
-                ProgressView("正在比对两版差异与高危数值雷达…")
-                    .font(.system(size: 13))
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if (formatFamily == .pdf || asset.mediaKind != .document) && pdfDiffSubMode != .textOrOCR {
-                PDFAndImageVisualOverlayDiffView(
-                    store: store,
-                    baseAsset: store.liveAsset(id: baseVersionID) ?? asset,
-                    targetAsset: store.liveAsset(id: targetVersionID) ?? asset,
-                    isSplitCurtain: pdfDiffSubMode == .splitCurtain
-                )
-                .padding(.horizontal, 12)
-                .padding(.bottom, 10)
-            } else if let report = diffReport, !report.sheetDiffs.isEmpty || formatFamily == .xlsx {
-                excelSmartPKDiffStage(report: report)
-            } else if let report = diffReport {
-                wordAndTextDiffStage(report: report)
-            } else if let diffError {
-                Text(diffError)
-                    .font(.system(size: 13))
-                    .foregroundStyle(MobileTheme.destructive(for: colorScheme))
-                    .padding(24)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                if !(isVisualOrPDFDiffTarget && pdfDiffSubMode != .textOrOCR) {
+                    compactFilterChipBar
+                        .padding(.horizontal, 12)
+                }
+
+                if isLoadingDiff {
+                    ProgressView()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if (formatFamily == .pdf || asset.mediaKind != .document) && pdfDiffSubMode != .textOrOCR {
+                    PDFAndImageVisualOverlayDiffView(
+                        store: store,
+                        baseAsset: store.liveAsset(id: baseVersionID) ?? asset,
+                        targetAsset: store.liveAsset(id: targetVersionID) ?? asset,
+                        isSplitCurtain: pdfDiffSubMode == .splitCurtain
+                    )
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 10)
+                } else if let report = diffReport, !report.sheetDiffs.isEmpty || formatFamily == .xlsx {
+                    excelSmartPKDiffStage(report: report)
+                } else if let report = diffReport {
+                    if horizontalSizeClass == .regular && textDiffLayout == .splitPaper {
+                        synchronizedTwoColumnSplitSheet(report: report)
+                    } else {
+                        continuousPaperDiffSheet(report: report)
+                    }
+                } else if let diffError {
+                    Text(diffError)
+                        .font(.system(size: 13))
+                        .foregroundStyle(MobileTheme.destructive(for: colorScheme))
+                        .padding(24)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
             }
         }
     }
 
-    private var diffVersionSelectorHeader: some View {
-        let baseVer = versionLabelForPicker(id: baseVersionID)
-        let targetVer = versionLabelForPicker(id: targetVersionID)
+    private func slimDiffControlBar(scrollProxy: ScrollViewProxy) -> some View {
+        let accent = MobileTheme.accent(for: colorScheme)
+        let baseTag = shortVersionTag(id: baseVersionID)
+        let targetTag = shortVersionTag(id: targetVersionID)
+        let hunks = filteredDiffHunks
 
-        return HStack(spacing: 8) {
-            Menu {
-                ForEach(stackSiblings) { member in
-                    Button(versionLabelForPicker(id: member.id)) {
-                        baseVersionID = member.id
-                        if baseVersionID == targetVersionID,
-                           let alt = stackSiblings.first(where: { $0.id != member.id }) {
-                            targetVersionID = alt.id
+        return HStack(spacing: 6) {
+            // Base ▾ → Target ▾
+            HStack(spacing: 4) {
+                Menu {
+                    ForEach(stackSiblings) { member in
+                        Button(versionLabelForPicker(id: member.id)) {
+                            baseVersionID = member.id
+                            if baseVersionID == targetVersionID,
+                               let alt = stackSiblings.first(where: { $0.id != member.id }) {
+                                targetVersionID = alt.id
+                            }
+                            Task { await reloadDiffReport() }
                         }
-                        Task { await reloadDiffReport() }
                     }
+                } label: {
+                    HStack(spacing: 3) {
+                        Text(baseTag)
+                            .font(.system(size: 12, weight: .semibold).monospacedDigit())
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 7.5, weight: .bold))
+                            .foregroundStyle(MobileTheme.tertiaryInk(for: colorScheme))
+                    }
+                    .foregroundStyle(.primary)
+                    .padding(.horizontal, 8.5)
+                    .padding(.vertical, 5)
+                    .background(
+                        MobileTheme.surfaceElevated(for: colorScheme),
+                        in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .strokeBorder(MobileTheme.hairline(for: colorScheme), lineWidth: 0.5)
+                    )
                 }
-            } label: {
-                HStack(spacing: 4) {
-                    Text("旧版 \(baseVer)")
-                        .font(.system(size: 12, weight: .semibold).monospacedDigit())
-                        .lineLimit(1)
-                    Image(systemName: "chevron.down")
-                        .font(.system(size: 9, weight: .bold))
+
+                Button {
+                    MobileHaptics.light()
+                    let tmp = baseVersionID
+                    baseVersionID = targetVersionID
+                    targetVersionID = tmp
+                    Task { await reloadDiffReport() }
+                } label: {
+                    Image(systemName: "arrow.left.arrow.right")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(MobileTheme.tertiaryInk(for: colorScheme))
+                        .frame(width: 22, height: 24)
                 }
-                .foregroundStyle(.primary)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .background(MobileTheme.surfaceElevated(for: colorScheme), in: Capsule())
-                .overlay(Capsule().strokeBorder(MobileTheme.hairline(for: colorScheme), lineWidth: 0.75))
-            }
+                .buttonStyle(.plain)
+                .accessibilityLabel("互换对比版本")
 
-            Button {
-                MobileHaptics.light()
-                let tmp = baseVersionID
-                baseVersionID = targetVersionID
-                targetVersionID = tmp
-                Task { await reloadDiffReport() }
-            } label: {
-                Image(systemName: "arrow.left.arrow.right")
-                    .font(.system(size: 11.5, weight: .semibold))
-                    .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
-                    .frame(width: 28, height: 28)
-                    .background(MobileTheme.surfaceSubtle(for: colorScheme), in: Circle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("互换对比基准")
-
-            Menu {
-                ForEach(stackSiblings) { member in
-                    Button(versionLabelForPicker(id: member.id)) {
-                        targetVersionID = member.id
-                        if targetVersionID == baseVersionID,
-                           let alt = stackSiblings.first(where: { $0.id != member.id }) {
-                            baseVersionID = alt.id
+                Menu {
+                    ForEach(stackSiblings) { member in
+                        Button(versionLabelForPicker(id: member.id)) {
+                            targetVersionID = member.id
+                            if targetVersionID == baseVersionID,
+                               let alt = stackSiblings.first(where: { $0.id != member.id }) {
+                                baseVersionID = alt.id
+                            }
+                            Task { await reloadDiffReport() }
                         }
-                        Task { await reloadDiffReport() }
                     }
+                } label: {
+                    HStack(spacing: 3) {
+                        Text(targetTag)
+                            .font(.system(size: 12, weight: .semibold).monospacedDigit())
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 7.5, weight: .bold))
+                            .foregroundStyle(MobileTheme.tertiaryInk(for: colorScheme))
+                    }
+                    .foregroundStyle(.primary)
+                    .padding(.horizontal, 8.5)
+                    .padding(.vertical, 5)
+                    .background(
+                        MobileTheme.surfaceElevated(for: colorScheme),
+                        in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .strokeBorder(MobileTheme.hairline(for: colorScheme), lineWidth: 0.5)
+                    )
                 }
-            } label: {
-                HStack(spacing: 4) {
-                    Text("新版 \(targetVer)")
-                        .font(.system(size: 12, weight: .semibold).monospacedDigit())
-                        .lineLimit(1)
-                    Image(systemName: "chevron.down")
-                        .font(.system(size: 9, weight: .bold))
-                }
-                .foregroundStyle(.primary)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .background(MobileTheme.surfaceElevated(for: colorScheme), in: Capsule())
-                .overlay(Capsule().strokeBorder(MobileTheme.hairline(for: colorScheme), lineWidth: 0.75))
             }
 
             Spacer(minLength: 4)
 
-            if canLaunchTwoWayMerge {
-                Button {
-                    MobileHaptics.medium()
-                    isMergeSheetPresented = true
-                } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "arrow.triangle.merge")
-                            .font(.system(size: 11.5, weight: .bold))
-                        Text("按差异合成新版本")
-                            .font(.system(size: 12, weight: .semibold))
+            // Layout Switcher (`审阅 | 双栏` on iPad text/Word, or `文本 | 叠层 | 卷帘` on PDF/visual)
+            if isVisualOrPDFDiffTarget {
+                HStack(spacing: 2) {
+                    ForEach(PDFDiffSubMode.allCases, id: \.self) { sub in
+                        let active = pdfDiffSubMode == sub
+                        Button {
+                            MobileHaptics.selection()
+                            withAnimation(MobileMotion.accessible(MobileMotion.settleStrong, reduced: reduceMotion)) {
+                                pdfDiffSubMode = sub
+                            }
+                        } label: {
+                            Text(sub.rawValue)
+                                .font(.system(size: 11.5, weight: active ? .semibold : .medium))
+                                .foregroundStyle(active ? .primary : MobileTheme.secondaryInk(for: colorScheme))
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(
+                                    active ? MobileTheme.surfaceElevated(for: colorScheme) : .clear,
+                                    in: RoundedRectangle(cornerRadius: 5.5, style: .continuous)
+                                )
+                        }
+                        .buttonStyle(.plain)
                     }
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 11)
-                    .padding(.vertical, 6.5)
-                    .background(MobileTheme.accentButtonFill(for: colorScheme), in: Capsule())
                 }
-                .buttonStyle(MobileTactileButtonStyle())
+                .padding(2)
+                .background(MobileTheme.surfaceSubtle(for: colorScheme), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+            } else if horizontalSizeClass == .regular && isTextPaperDiffTarget {
+                HStack(spacing: 2) {
+                    ForEach(TextDiffLayoutMode.allCases, id: \.self) { layout in
+                        let active = textDiffLayout == layout
+                        Button {
+                            MobileHaptics.selection()
+                            withAnimation(MobileMotion.accessible(MobileMotion.settleStrong, reduced: reduceMotion)) {
+                                textDiffLayout = layout
+                            }
+                        } label: {
+                            Text(layout.rawValue)
+                                .font(.system(size: 11.5, weight: active ? .semibold : .medium))
+                                .foregroundStyle(active ? .primary : MobileTheme.secondaryInk(for: colorScheme))
+                                .padding(.horizontal, 8.5)
+                                .padding(.vertical, 4)
+                                .background(
+                                    active ? MobileTheme.surfaceElevated(for: colorScheme) : .clear,
+                                    in: RoundedRectangle(cornerRadius: 5.5, style: .continuous)
+                                )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(2)
+                .background(MobileTheme.surfaceSubtle(for: colorScheme), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+            }
+
+            // Only-Changed Toggle Chip
+            if !(isVisualOrPDFDiffTarget && pdfDiffSubMode != .textOrOCR) {
+                Button {
+                    MobileHaptics.light()
+                    withAnimation(MobileMotion.accessible(MobileMotion.settleStrong, reduced: reduceMotion)) {
+                        onlyChangedBlocks.toggle()
+                    }
+                } label: {
+                    Text("仅看改动")
+                        .font(.system(size: 11.5, weight: onlyChangedBlocks ? .semibold : .medium))
+                        .foregroundStyle(onlyChangedBlocks ? accent : MobileTheme.secondaryInk(for: colorScheme))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 5)
+                        .background(
+                            onlyChangedBlocks ? MobileTheme.accentSoft(for: colorScheme) : MobileTheme.surfaceSubtle(for: colorScheme),
+                            in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        )
+                }
+                .buttonStyle(.plain)
+
+                if hunks.count > 1 {
+                    HStack(spacing: 2) {
+                        Button {
+                            guard !hunks.isEmpty else { return }
+                            focusedHunkCursor = max(0, focusedHunkCursor - 1)
+                            withAnimation(MobileMotion.settleStrong) {
+                                scrollProxy.scrollTo(hunks[focusedHunkCursor].id, anchor: .center)
+                            }
+                        } label: {
+                            Image(systemName: "chevron.up")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
+                                .frame(width: 24, height: 24)
+                                .background(MobileTheme.surfaceSubtle(for: colorScheme), in: Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("上一处差异")
+
+                        Button {
+                            guard !hunks.isEmpty else { return }
+                            focusedHunkCursor = min(hunks.count - 1, focusedHunkCursor + 1)
+                            withAnimation(MobileMotion.settleStrong) {
+                                scrollProxy.scrollTo(hunks[focusedHunkCursor].id, anchor: .center)
+                            }
+                        } label: {
+                            Image(systemName: "chevron.down")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
+                                .frame(width: 24, height: 24)
+                                .background(MobileTheme.surfaceSubtle(for: colorScheme), in: Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("下一处差异")
+                    }
+                }
             }
         }
     }
 
-    private var highRiskRadarFilterBar: some View {
+    private var compactFilterChipBar: some View {
         let accent = MobileTheme.accent(for: colorScheme)
-        let danger = MobileTheme.destructive(for: colorScheme)
+        let visibleFilters = MobileRadarFilter.allCases.filter { filter in
+            filter == .all || radarFilter == filter || radarCount(for: filter) > 0
+        }
 
-        return VStack(spacing: 6) {
+        return HStack(spacing: 6) {
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 6) {
-                    ForEach(MobileRadarFilter.allCases) { filter in
+                HStack(spacing: 5) {
+                    ForEach(visibleFilters) { filter in
                         let count = radarCount(for: filter)
                         let selected = radarFilter == filter
-                        let isHighRisk = (filter == .numberOrCurrency || filter == .dateOrDeadline) && count > 0
 
                         Button {
                             MobileHaptics.selection()
@@ -1318,41 +1408,19 @@ struct MobileDocumentStageView: View {
                                 focusedHunkCursor = 0
                             }
                         } label: {
-                            HStack(spacing: 4.5) {
-                                Image(systemName: filter.symbol)
-                                    .font(.system(size: 11, weight: .semibold))
+                            HStack(spacing: 4) {
                                 Text(filter.rawValue)
-                                    .font(.system(size: 12, weight: selected ? .semibold : .medium))
-                                if count > 0 || filter == .all {
-                                    Text("\(count)")
-                                        .font(.system(size: 10.5, weight: .bold).monospacedDigit())
-                                        .foregroundStyle(
-                                            selected ? .white : (isHighRisk ? danger : MobileTheme.secondaryInk(for: colorScheme))
-                                        )
-                                        .padding(.horizontal, 5)
-                                        .padding(.vertical, 1)
-                                        .background(
-                                            selected
-                                                ? Color.white.opacity(0.22)
-                                                : (isHighRisk ? danger.opacity(0.14) : MobileTheme.surfaceSubtle(for: colorScheme)),
-                                            in: Capsule()
-                                        )
-                                }
+                                    .font(.system(size: 11.5, weight: selected ? .semibold : .medium))
+                                Text("\(count)")
+                                    .font(.system(size: 10.5, weight: .semibold).monospacedDigit())
+                                    .foregroundStyle(selected ? accent : MobileTheme.tertiaryInk(for: colorScheme))
                             }
-                            .foregroundStyle(selected ? .white : (isHighRisk ? danger : .primary))
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 5.5)
+                            .foregroundStyle(selected ? accent : MobileTheme.secondaryInk(for: colorScheme))
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 4)
                             .background(
-                                selected
-                                    ? (isHighRisk ? danger : accent)
-                                    : MobileTheme.surfaceElevated(for: colorScheme),
+                                selected ? MobileTheme.accentSoft(for: colorScheme) : MobileTheme.surfaceSubtle(for: colorScheme).opacity(0.65),
                                 in: Capsule()
-                            )
-                            .overlay(
-                                Capsule().strokeBorder(
-                                    selected ? .clear : (isHighRisk ? danger.opacity(0.35) : MobileTheme.hairline(for: colorScheme)),
-                                    lineWidth: 0.75
-                                )
                             )
                         }
                         .buttonStyle(.plain)
@@ -1360,91 +1428,14 @@ struct MobileDocumentStageView: View {
                 }
             }
 
-            HStack(spacing: 8) {
-                Button {
-                    MobileHaptics.light()
-                    withAnimation(MobileMotion.accessible(MobileMotion.settleStrong, reduced: reduceMotion)) {
-                        onlyChangedBlocks.toggle()
-                    }
-                } label: {
-                    HStack(spacing: 5) {
-                        Image(systemName: onlyChangedBlocks ? "checkmark.circle.fill" : "circle")
-                            .font(.system(size: 12.5, weight: .semibold))
-                            .foregroundStyle(onlyChangedBlocks ? accent : MobileTheme.tertiaryInk(for: colorScheme))
-                        Text("仅看改动段落")
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundStyle(.primary)
-                    }
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 4.5)
-                    .background(MobileTheme.surfaceElevated(for: colorScheme), in: Capsule())
-                    .overlay(Capsule().strokeBorder(MobileTheme.hairline(for: colorScheme), lineWidth: 0.75))
-                }
-                .buttonStyle(.plain)
-
-                if let sum = diffReport?.summary {
-                    Text("+\(sum.addedBlocks) 新增 · -\(sum.removedBlocks) 删除 · ~\(sum.modifiedBlocks) 修改")
-                        .font(.system(size: 11.5).monospacedDigit())
-                        .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
-                        .lineLimit(1)
-                }
-
-                Spacer(minLength: 4)
-
-                if diffReport?.usedOCR == true {
-                    Text("Vision 离线 OCR")
-                        .font(.system(size: 10.5, weight: .semibold))
-                        .foregroundStyle(MobileTheme.warning(for: colorScheme))
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 3)
-                        .background(MobileTheme.warning(for: colorScheme).opacity(0.14), in: Capsule())
-                }
-            }
-        }
-    }
-
-    private var pdfVisualModeSelectorBar: some View {
-        HStack(spacing: 6) {
-            ForEach(PDFDiffSubMode.allCases, id: \.self) { sub in
-                let active = pdfDiffSubMode == sub
-                Button {
-                    MobileHaptics.selection()
-                    withAnimation(MobileMotion.accessible(MobileMotion.settleStrong, reduced: reduceMotion)) {
-                        pdfDiffSubMode = sub
-                    }
-                } label: {
-                    HStack(spacing: 4) {
-                        Image(
-                            systemName: sub == .textOrOCR
-                                ? "doc.text.magnifyingglass"
-                                : (sub == .redCyan ? "circle.lefthalf.filled" : "square.split.2x1")
-                        )
-                        .font(.system(size: 11, weight: .semibold))
-                        Text(sub.rawValue)
-                            .font(.system(size: 12, weight: active ? .semibold : .medium))
-                    }
-                    .foregroundStyle(active ? .white : .primary)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 5.5)
-                    .background(
-                        active ? MobileTheme.accentButtonFill(for: colorScheme) : MobileTheme.surfaceElevated(for: colorScheme),
-                        in: Capsule()
-                    )
-                    .overlay(
-                        Capsule().strokeBorder(active ? .clear : MobileTheme.hairline(for: colorScheme), lineWidth: 0.75)
-                    )
-                }
-                .buttonStyle(.plain)
-            }
-
-            Spacer()
+            Spacer(minLength: 4)
 
             if pdfDiffSubMode == .textOrOCR && formatFamily == .pdf {
                 Button {
                     useOCRIfScanned.toggle()
                     Task { await reloadDiffReport() }
                 } label: {
-                    Text(useOCRIfScanned ? "扫描 OCR: 开" : "扫描 OCR: 关")
+                    Text(useOCRIfScanned ? "OCR 开" : "OCR 关")
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(MobileTheme.accent(for: colorScheme))
                 }
@@ -1453,318 +1444,989 @@ struct MobileDocumentStageView: View {
         }
     }
 
-    // MARK: - Word / Text Inline Diff Stage (Move Badges + High-Risk Callouts)
+    // MARK: - Continuous Paper Sheet (`审阅` — 3pt Left Margin Status Bar + Inline Fold Dividers)
 
-    private func wordAndTextDiffStage(report: DocumentComparisonReport) -> some View {
+    private func continuousPaperDiffSheet(report: DocumentComparisonReport) -> some View {
         let hunks = filteredDiffHunks
-        return ScrollViewReader { scrollProxy in
-            VStack(spacing: 0) {
-                if hunks.count > 1 {
-                    HStack {
-                        Text("匹配 \(hunks.count) 处段落")
-                            .font(.system(size: 11.5, weight: .medium).monospacedDigit())
-                            .foregroundStyle(MobileTheme.tertiaryInk(for: colorScheme))
-                        Spacer()
-                        HStack(spacing: 6) {
-                            Button {
-                                guard !hunks.isEmpty else { return }
-                                focusedHunkCursor = max(0, focusedHunkCursor - 1)
-                                withAnimation(MobileMotion.settleStrong) {
-                                    scrollProxy.scrollTo(hunks[focusedHunkCursor].id, anchor: .top)
-                                }
-                            } label: {
-                                Label("上一处", systemImage: "chevron.up")
-                                    .font(.system(size: 11.5, weight: .semibold))
-                            }
-                            .buttonStyle(.plain)
+        let paperShape = RoundedRectangle(cornerRadius: 12, style: .continuous)
 
-                            Button {
-                                guard !hunks.isEmpty else { return }
-                                focusedHunkCursor = min(hunks.count - 1, focusedHunkCursor + 1)
-                                withAnimation(MobileMotion.settleStrong) {
-                                    scrollProxy.scrollTo(hunks[focusedHunkCursor].id, anchor: .top)
-                                }
-                            } label: {
-                                Label("下一处", systemImage: "chevron.down")
-                                    .font(.system(size: 11.5, weight: .semibold))
-                            }
-                            .buttonStyle(.plain)
-                        }
-                        .foregroundStyle(MobileTheme.accent(for: colorScheme))
+        return ScrollView {
+            VStack(alignment: .center, spacing: 14) {
+                if hunks.isEmpty && (radarFilter != .nativeRevisionOrComment || report.commentDiffs.isEmpty) {
+                    VStack(spacing: 8) {
+                        Image(systemName: "checkmark.seal")
+                            .font(.system(size: 22))
+                            .foregroundStyle(MobileTheme.positive(for: colorScheme))
+                        Text(radarFilter == .all ? "两版正文一致" : "当前筛选下无差异")
+                            .font(.system(size: 13.5, weight: .medium))
+                            .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
                     }
-                    .padding(.horizontal, 14)
-                    .padding(.bottom, 6)
-                }
+                    .frame(maxWidth: 780)
+                    .padding(.vertical, 48)
+                    .background(MobileTheme.surfaceElevated(for: colorScheme), in: paperShape)
+                    .overlay(paperShape.strokeBorder(MobileTheme.hairline(for: colorScheme), lineWidth: 0.5))
+                } else {
+                    VStack(alignment: .leading, spacing: 0) {
+                        ForEach(Array(hunks.enumerated()), id: \.element.id) { idx, hunk in
+                            let skippedBefore: Bool = {
+                                guard onlyChangedBlocks else { return false }
+                                if idx == 0 {
+                                    return hunk.hunkIndex > 0
+                                }
+                                return hunk.hunkIndex > hunks[idx - 1].hunkIndex + 1
+                            }()
 
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 10) {
-                        if hunks.isEmpty && (radarFilter != .nativeRevisionOrComment || report.commentDiffs.isEmpty) {
-                            VStack(spacing: 8) {
-                                Image(systemName: "checkmark.seal")
-                                    .font(.system(size: 24))
-                                    .foregroundStyle(MobileTheme.positive(for: colorScheme))
-                                Text(radarFilter == .all ? "这两版正文内容完全一致" : "当前「\(radarFilter.rawValue)」筛选下无变动")
-                                    .font(.system(size: 13.5, weight: .medium))
-                                    .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
+                            if skippedBefore {
+                                paperFoldDivider
+                            } else if idx > 0 {
+                                Rectangle()
+                                    .fill(MobileTheme.hairline(for: colorScheme).opacity(0.65))
+                                    .frame(height: 0.5)
                             }
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 48)
-                        }
 
-                        ForEach(hunks) { hunk in
-                            diffHunkCard(hunk)
+                            let isFocused = idx == focusedHunkCursor && hunks.count > 1
+                            continuousPaperHunkRow(hunk: hunk, isFocused: isFocused)
                                 .id(hunk.id)
                         }
 
-                        if !report.commentDiffs.isEmpty && (radarFilter == .all || radarFilter == .nativeRevisionOrComment) {
-                            VStack(alignment: .leading, spacing: 8) {
-                                Text("原生批注变动（\(report.commentDiffs.count)）")
-                                    .font(.system(size: 12.5, weight: .semibold).monospacedDigit())
-                                    .foregroundStyle(MobileTheme.warning(for: colorScheme))
-                                ForEach(report.commentDiffs) { cDiff in
-                                    HStack(alignment: .top, spacing: 8) {
-                                        Text(cDiff.changeKind.localizedLabel)
-                                            .font(.system(size: 10.5, weight: .bold))
-                                            .foregroundStyle(changeKindColor(cDiff.changeKind))
-                                            .padding(.horizontal, 6)
-                                            .padding(.vertical, 2)
-                                            .background(changeKindColor(cDiff.changeKind).opacity(0.14), in: Capsule())
-                                        VStack(alignment: .leading, spacing: 2) {
-                                            Text(cDiff.comment.author)
-                                                .font(.system(size: 12, weight: .semibold))
-                                            Text(cDiff.comment.text)
-                                                .font(.system(size: 12.5))
-                                                .textSelection(.enabled)
-                                        }
-                                    }
-                                    .padding(10)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .background(MobileTheme.surfaceElevated(for: colorScheme), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                                }
-                            }
+                        if onlyChangedBlocks,
+                           let lastShown = hunks.last,
+                           let lastTotal = report.hunks.last,
+                           lastShown.hunkIndex < lastTotal.hunkIndex {
+                            paperFoldDivider
                         }
                     }
-                    .padding(.horizontal, 12)
-                    .padding(.bottom, 20)
+                    .padding(.horizontal, horizontalSizeClass == .regular ? 28 : 16)
+                    .padding(.vertical, horizontalSizeClass == .regular ? 20 : 14)
+                    .frame(maxWidth: 780, alignment: .leading)
+                    .background(MobileTheme.surfaceElevated(for: colorScheme), in: paperShape)
+                    .overlay(paperShape.strokeBorder(MobileTheme.hairline(for: colorScheme), lineWidth: 0.5))
+                    .shadow(color: .black.opacity(colorScheme == .dark ? 0.22 : 0.035), radius: 8, y: 2)
+                }
+
+                if !report.commentDiffs.isEmpty && (radarFilter == .all || radarFilter == .nativeRevisionOrComment) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("批注变动 \(report.commentDiffs.count)")
+                            .font(.system(size: 12, weight: .semibold).monospacedDigit())
+                            .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
+                        ForEach(report.commentDiffs) { cDiff in
+                            HStack(alignment: .top, spacing: 8) {
+                                Text(cDiff.changeKind.localizedLabel)
+                                    .font(.system(size: 10.5, weight: .semibold))
+                                    .foregroundStyle(changeKindColor(cDiff.changeKind))
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 1.5)
+                                    .background(changeKindColor(cDiff.changeKind).opacity(0.13), in: Capsule())
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(cDiff.comment.author)
+                                        .font(.system(size: 12, weight: .semibold))
+                                    Text(cDiff.comment.text)
+                                        .font(.system(size: 12.5))
+                                        .textSelection(.enabled)
+                                }
+                            }
+                            .padding(10)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(MobileTheme.surfaceElevated(for: colorScheme), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                    .strokeBorder(MobileTheme.hairline(for: colorScheme), lineWidth: 0.5)
+                            )
+                        }
+                    }
+                    .frame(maxWidth: 780, alignment: .leading)
                 }
             }
+            .frame(maxWidth: .infinity)
+            .padding(.horizontal, 12)
+            .padding(.top, 4)
+            .padding(.bottom, 22)
         }
+        .background(MobileTheme.galleryGround(for: colorScheme))
     }
 
-    private func diffHunkCard(_ hunk: DocumentDiffHunk) -> some View {
-        let kindColor = changeKindColor(hunk.changeKind)
+    private var paperFoldDivider: some View {
+        HStack(spacing: 8) {
+            Rectangle()
+                .fill(MobileTheme.hairline(for: colorScheme))
+                .frame(height: 0.5)
+            Text("⋯ 省略未改动段落")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(MobileTheme.tertiaryInk(for: colorScheme))
+                .fixedSize()
+            Rectangle()
+                .fill(MobileTheme.hairline(for: colorScheme))
+                .frame(height: 0.5)
+        }
+        .padding(.vertical, 9)
+    }
+
+    private func continuousPaperHunkRow(hunk: DocumentDiffHunk, isFocused: Bool) -> some View {
+        let accent = MobileTheme.accent(for: colorScheme)
+        let pos = MobileTheme.positive(for: colorScheme)
         let danger = MobileTheme.destructive(for: colorScheme)
         let warn = MobileTheme.warning(for: colorScheme)
 
-        return VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 6) {
-                Text(hunk.changeKind.localizedLabel)
-                    .font(.system(size: 10.5, weight: .bold))
-                    .foregroundStyle(kindColor)
-                    .padding(.horizontal, 6.5)
-                    .padding(.vertical, 2)
-                    .background(kindColor.opacity(0.14), in: Capsule())
+        let barColor: Color = switch hunk.changeKind {
+        case .added: pos
+        case .removed: danger
+        case .modified, .moved: accent
+        case .unchanged: .clear
+        }
 
-                if let sec = hunk.sectionTitle, !sec.isEmpty {
-                    Text(sec)
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(.primary)
-                        .lineLimit(1)
-                } else if let p = hunk.pageNumber {
-                    Text("第 \(p) 页")
-                        .font(.system(size: 11.5, weight: .medium).monospacedDigit())
-                        .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
-                }
+        return HStack(alignment: .top, spacing: 12) {
+            // 3pt Left Margin Status Bar
+            Capsule(style: .continuous)
+                .fill(barColor)
+                .frame(width: 3)
+                .padding(.vertical, 2)
 
-                // Move Badge (prevents false-positive full red/green rewrite!)
-                if let from = hunk.movedFromIndex {
-                    let to = hunk.movedToIndex ?? hunk.targetBlockIndex ?? hunk.hunkIndex
-                    HStack(spacing: 3) {
-                        Image(systemName: "arrow.up.arrow.down")
-                            .font(.system(size: 9.5, weight: .bold))
-                        Text("自第 \(from + 1) 段移至第 \(to + 1) 段")
-                            .font(.system(size: 10.5, weight: .semibold).monospacedDigit())
-                    }
-                    .foregroundStyle(MobileTheme.accent(for: colorScheme))
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 2)
-                    .background(MobileTheme.accentSoft(for: colorScheme), in: Capsule())
-                }
-
-                if hunk.isProtectedComplex {
-                    HStack(spacing: 3) {
-                        Image(systemName: "lock.fill")
-                            .font(.system(size: 9.5))
-                        Text("受保护结构")
-                            .font(.system(size: 10.5, weight: .medium))
-                    }
-                    .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(MobileTheme.surfaceSubtle(for: colorScheme), in: Capsule())
-                }
-
-                Spacer()
-
-                if let copyText = hunk.targetText ?? hunk.baseText, !copyText.isEmpty {
-                    Button {
-                        UIPasteboard.general.string = copyText
-                        MobileHaptics.light()
-                        store.showToast("已复制该段内容", tone: .info)
-                    } label: {
-                        Image(systemName: "doc.on.doc")
-                            .font(.system(size: 12))
-                            .foregroundStyle(MobileTheme.tertiaryInk(for: colorScheme))
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-
-            // High-Risk Value Pairs Radar Callouts
-            if !hunk.highRiskPairs.isEmpty {
-                ScrollView(.horizontal, showsIndicators: false) {
+            VStack(alignment: .leading, spacing: 6) {
+                if hunk.changeKind.isChanged {
                     HStack(spacing: 6) {
-                        ForEach(hunk.highRiskPairs) { pair in
+                        Text("#\(hunk.hunkIndex + 1)")
+                            .font(.system(size: 11, weight: .medium, design: .monospaced).monospacedDigit())
+                            .foregroundStyle(MobileTheme.tertiaryInk(for: colorScheme))
+
+                        if let sec = hunk.sectionTitle, !sec.isEmpty {
+                            Text(sec)
+                                .font(.system(size: 11.5, weight: .medium))
+                                .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
+                                .lineLimit(1)
+                        } else if let p = hunk.pageNumber {
+                            Text("第 \(p) 页")
+                                .font(.system(size: 11, weight: .medium).monospacedDigit())
+                                .foregroundStyle(MobileTheme.tertiaryInk(for: colorScheme))
+                        }
+
+                        if let from = hunk.movedFromIndex {
+                            let to = hunk.movedToIndex ?? hunk.targetBlockIndex ?? hunk.hunkIndex
+                            Text("↕ 第\(from + 1)→\(to + 1)段")
+                                .font(.system(size: 10.5, weight: .semibold).monospacedDigit())
+                                .foregroundStyle(accent)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 1.5)
+                                .background(MobileTheme.accentSoft(for: colorScheme), in: Capsule())
+                        }
+
+                        ForEach(hunk.highRiskPairs.prefix(2)) { pair in
                             let isNum = pair.flag == .numberOrCurrency
-                            let badgeTint = isNum ? danger : warn
-                            HStack(spacing: 4) {
-                                Image(systemName: isNum ? "number.circle.fill" : "calendar")
-                                    .font(.system(size: 11, weight: .semibold))
-                                if let oldVal = pair.oldValue, !oldVal.isEmpty {
-                                    Text(oldVal)
-                                        .strikethrough()
-                                        .opacity(0.80)
-                                }
-                                if pair.oldValue != nil && pair.newValue != nil {
-                                    Text("→")
-                                }
-                                if let newVal = pair.newValue, !newVal.isEmpty {
-                                    Text(newVal)
-                                        .fontWeight(.bold)
-                                }
+                            let tint = isNum ? danger : warn
+                            Text(isNum ? "数字" : "时间")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(tint)
+                                .padding(.horizontal, 5.5)
+                                .padding(.vertical, 1)
+                                .background(tint.opacity(0.12), in: Capsule())
+                        }
+
+                        if hunk.isProtectedComplex {
+                            HStack(spacing: 2.5) {
+                                Image(systemName: "lock.fill")
+                                    .font(.system(size: 9))
+                                Text("受保护")
+                                    .font(.system(size: 10, weight: .medium))
                             }
-                            .font(.system(size: 11.5).monospacedDigit())
-                            .foregroundStyle(badgeTint)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 3.5)
-                            .background(badgeTint.opacity(0.13), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                            .foregroundStyle(MobileTheme.tertiaryInk(for: colorScheme))
+                        }
+
+                        Spacer(minLength: 4)
+
+                        if let copyText = hunk.targetText ?? hunk.baseText, !copyText.isEmpty {
+                            Button {
+                                UIPasteboard.general.string = copyText
+                                MobileHaptics.light()
+                                store.showToast("已复制段落", tone: .info)
+                            } label: {
+                                Image(systemName: "doc.on.doc")
+                                    .font(.system(size: 11.5))
+                                    .foregroundStyle(MobileTheme.tertiaryInk(for: colorScheme))
+                            }
+                            .buttonStyle(.plain)
                         }
                     }
                 }
-            }
 
-            // Inline Token Diff Text
-            if !hunk.inlineTokens.isEmpty {
-                Text(buildInlineDiffAttributedString(tokens: hunk.inlineTokens))
-                    .font(.system(size: 14.5))
-                    .lineSpacing(4)
-                    .textSelection(.enabled)
-            } else if hunk.changeKind == .unchanged {
-                if let sameText = hunk.targetText ?? hunk.baseText, !sameText.isEmpty {
-                    Text(sameText)
+                // Paragraph Body Directly on Paper
+                if !hunk.inlineTokens.isEmpty {
+                    Text(buildInlineDiffAttributedString(tokens: hunk.inlineTokens))
                         .font(.system(size: 14.5))
-                        .foregroundStyle(.primary)
-                        .lineSpacing(4)
+                        .lineSpacing(5)
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                }
-            } else {
-                let pos = MobileTheme.positive(for: colorScheme)
-                VStack(alignment: .leading, spacing: 6) {
-                    if let oldText = hunk.baseText, !oldText.isEmpty {
-                        HStack(alignment: .top, spacing: 8) {
-                            Image(systemName: "minus.circle.fill")
-                                .font(.system(size: 14, weight: .semibold))
-                                .foregroundStyle(danger)
-                                .padding(.top, 2)
-                                .accessibilityLabel("修改前")
-                            Text(
-                                MobileDiffTokenHighlighter.selectiveSideAttributedString(
-                                    hunk: hunk,
-                                    side: .base,
-                                    isEmphasized: true,
-                                    colorScheme: colorScheme
-                                )
-                            )
-                            .font(.system(size: 14))
-                            .lineSpacing(4)
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 8)
-                        .background(danger.opacity(0.05), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-                    }
-                    if let newText = hunk.targetText, !newText.isEmpty {
-                        HStack(alignment: .top, spacing: 8) {
-                            Image(systemName: "plus.circle.fill")
-                                .font(.system(size: 14, weight: .semibold))
-                                .foregroundStyle(pos)
-                                .padding(.top, 2)
-                                .accessibilityLabel("修改后")
-                            Text(
-                                MobileDiffTokenHighlighter.selectiveSideAttributedString(
-                                    hunk: hunk,
-                                    side: .target,
-                                    isEmphasized: true,
-                                    colorScheme: colorScheme
-                                )
-                            )
+                } else if hunk.changeKind == .unchanged {
+                    if let sameText = hunk.targetText ?? hunk.baseText, !sameText.isEmpty {
+                        Text(sameText)
                             .font(.system(size: 14.5))
-                            .lineSpacing(4)
+                            .foregroundStyle(.primary)
+                            .lineSpacing(5)
                             .textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                } else {
+                    VStack(alignment: .leading, spacing: 6) {
+                        if let oldText = hunk.baseText, !oldText.isEmpty {
+                            HStack(alignment: .top, spacing: 8) {
+                                Image(systemName: "minus.circle.fill")
+                                    .font(.system(size: 13.5, weight: .semibold))
+                                    .foregroundStyle(danger)
+                                    .padding(.top, 2)
+                                    .accessibilityLabel("修改前")
+                                Text(
+                                    MobileDiffTokenHighlighter.selectiveSideAttributedString(
+                                        hunk: hunk,
+                                        side: .base,
+                                        isEmphasized: true,
+                                        colorScheme: colorScheme
+                                    )
+                                )
+                                .font(.system(size: 14))
+                                .lineSpacing(4.5)
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            }
                         }
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 8)
-                        .background(pos.opacity(0.05), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+
+                        if let newText = hunk.targetText, !newText.isEmpty {
+                            HStack(alignment: .top, spacing: 8) {
+                                Image(systemName: "plus.circle.fill")
+                                    .font(.system(size: 13.5, weight: .semibold))
+                                    .foregroundStyle(pos)
+                                    .padding(.top, 2)
+                                    .accessibilityLabel("修改后")
+                                Text(
+                                    MobileDiffTokenHighlighter.selectiveSideAttributedString(
+                                        hunk: hunk,
+                                        side: .target,
+                                        isEmphasized: true,
+                                        colorScheme: colorScheme
+                                    )
+                                )
+                                .font(.system(size: 14.5))
+                                .lineSpacing(4.5)
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                        }
                     }
                 }
-            }
 
-            // Embedded Word Table Cell Diffs
-            if !hunk.tableCellDiffs.isEmpty {
-                VStack(alignment: .leading, spacing: 4) {
-                    ForEach(hunk.tableCellDiffs) { cell in
-                        HStack(spacing: 6) {
-                            Text(cell.columnHeader ?? "第 \(cell.rowIndex + 1) 行 · 第 \(cell.colIndex + 1) 列")
-                                .font(.system(size: 11.5, weight: .semibold))
-                                .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
-                            Spacer()
-                            if let oldV = cell.oldValue, !oldV.isEmpty {
-                                Text(oldV)
-                                    .font(.system(size: 12).monospacedDigit())
-                                    .strikethrough()
-                                    .foregroundStyle(danger)
+                if !hunk.tableCellDiffs.isEmpty {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(hunk.tableCellDiffs) { cell in
+                            HStack(spacing: 6) {
+                                Text(cell.columnHeader ?? "第 \(cell.rowIndex + 1) 行 · 第 \(cell.colIndex + 1) 列")
+                                    .font(.system(size: 11.5, weight: .medium))
+                                    .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
+                                Spacer()
+                                if let oldV = cell.oldValue, !oldV.isEmpty {
+                                    Text(oldV)
+                                        .font(.system(size: 12).monospacedDigit())
+                                        .strikethrough()
+                                        .foregroundStyle(danger)
+                                }
+                                Text("→")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(MobileTheme.tertiaryInk(for: colorScheme))
+                                Text(cell.newValue ?? "（空）")
+                                    .font(.system(size: 12, weight: .semibold).monospacedDigit())
+                                    .foregroundStyle(pos)
                             }
-                            Text("→")
-                                .font(.system(size: 11))
-                                .foregroundStyle(MobileTheme.tertiaryInk(for: colorScheme))
-                            Text(cell.newValue ?? "（空）")
-                                .font(.system(size: 12, weight: .semibold).monospacedDigit())
-                                .foregroundStyle(MobileTheme.positive(for: colorScheme))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 5)
+                            .background(MobileTheme.inspectorFieldSurface(for: colorScheme), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
                         }
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 5)
-                        .background(MobileTheme.inspectorFieldSurface(for: colorScheme), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
                     }
                 }
             }
         }
-        .padding(12)
-        .frame(maxWidth: 780, alignment: .leading)
+        .padding(.vertical, 11)
+        .padding(.horizontal, 6)
         .background(
-            MobileTheme.surfaceElevated(for: colorScheme),
-            in: RoundedRectangle(cornerRadius: MobileTheme.Radius.cardOuter, style: .continuous)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: MobileTheme.Radius.cardOuter, style: .continuous)
-                .strokeBorder(
-                    !hunk.highRiskPairs.isEmpty ? danger.opacity(0.40) : MobileTheme.hairline(for: colorScheme),
-                    lineWidth: !hunk.highRiskPairs.isEmpty ? 1.1 : 0.75
-                )
+            isFocused ? MobileTheme.accentSoft(for: colorScheme).opacity(0.45) : .clear,
+            in: RoundedRectangle(cornerRadius: 8, style: .continuous)
         )
     }
+
+    // MARK: - Synchronized 2-Column Split Paper on iPad (`双栏`)
+
+    private func synchronizedTwoColumnSplitSheet(report: DocumentComparisonReport) -> some View {
+        let hunks = filteredDiffHunks
+        let splitShape = RoundedRectangle(cornerRadius: 12, style: .continuous)
+        let pos = MobileTheme.positive(for: colorScheme)
+        let danger = MobileTheme.destructive(for: colorScheme)
+        let baseTag = shortVersionTag(id: baseVersionID)
+        let targetTag = shortVersionTag(id: targetVersionID)
+
+        return ScrollView {
+            VStack(spacing: 0) {
+                // Column Header Row (`− vBase | + vTarget`)
+                HStack(spacing: 0) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "minus.circle.fill")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(danger)
+                        Text(baseTag)
+                            .font(.system(size: 12, weight: .semibold).monospacedDigit())
+                            .foregroundStyle(.primary)
+                        Spacer()
+                    }
+                    .padding(.horizontal, 16)
+                    .frame(maxWidth: .infinity, minHeight: 34)
+
+                    Rectangle()
+                        .fill(MobileTheme.hairline(for: colorScheme))
+                        .frame(width: 0.5, height: 34)
+
+                    HStack(spacing: 6) {
+                        Image(systemName: "plus.circle.fill")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(pos)
+                        Text(targetTag)
+                            .font(.system(size: 12, weight: .semibold).monospacedDigit())
+                            .foregroundStyle(.primary)
+                        Spacer()
+                    }
+                    .padding(.horizontal, 16)
+                    .frame(maxWidth: .infinity, minHeight: 34)
+                }
+                .background(MobileTheme.surfaceSubtle(for: colorScheme).opacity(0.55))
+
+                Rectangle()
+                    .fill(MobileTheme.hairline(for: colorScheme))
+                    .frame(height: 0.5)
+
+                if hunks.isEmpty {
+                    Text("当前筛选下无差异")
+                        .font(.system(size: 13))
+                        .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 44)
+                } else {
+                    ForEach(Array(hunks.enumerated()), id: \.element.id) { idx, hunk in
+                        let skippedBefore: Bool = {
+                            guard onlyChangedBlocks else { return false }
+                            if idx == 0 { return hunk.hunkIndex > 0 }
+                            return hunk.hunkIndex > hunks[idx - 1].hunkIndex + 1
+                        }()
+
+                        if skippedBefore {
+                            paperFoldDivider
+                                .padding(.horizontal, 16)
+                                .overlay(alignment: .bottom) {
+                                    Rectangle()
+                                        .fill(MobileTheme.hairline(for: colorScheme))
+                                        .frame(height: 0.5)
+                                }
+                        }
+
+                        HStack(alignment: .top, spacing: 0) {
+                            // Left Base Cell
+                            Group {
+                                if let baseT = hunk.baseText, !baseT.isEmpty {
+                                    Text(
+                                        MobileDiffTokenHighlighter.selectiveSideAttributedString(
+                                            hunk: hunk,
+                                            side: .base,
+                                            isEmphasized: true,
+                                            colorScheme: colorScheme
+                                        )
+                                    )
+                                    .font(.system(size: 13.5))
+                                    .lineSpacing(4.5)
+                                    .textSelection(.enabled)
+                                } else {
+                                    Text("—")
+                                        .font(.system(size: 12))
+                                        .foregroundStyle(MobileTheme.tertiaryInk(for: colorScheme))
+                                }
+                            }
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 12)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                            .background(hunk.changeKind.isChanged ? danger.opacity(0.04) : .clear)
+
+                            Rectangle()
+                                .fill(MobileTheme.hairline(for: colorScheme))
+                                .frame(width: 0.5)
+
+                            // Right Target Cell
+                            Group {
+                                if let targetT = hunk.targetText, !targetT.isEmpty {
+                                    Text(
+                                        MobileDiffTokenHighlighter.selectiveSideAttributedString(
+                                            hunk: hunk,
+                                            side: .target,
+                                            isEmphasized: true,
+                                            colorScheme: colorScheme
+                                        )
+                                    )
+                                    .font(.system(size: 13.5))
+                                    .lineSpacing(4.5)
+                                    .textSelection(.enabled)
+                                } else {
+                                    Text("—")
+                                        .font(.system(size: 12))
+                                        .foregroundStyle(MobileTheme.tertiaryInk(for: colorScheme))
+                                }
+                            }
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 12)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                            .background(hunk.changeKind.isChanged ? pos.opacity(0.04) : .clear)
+                        }
+                        .id(hunk.id)
+                        .overlay(alignment: .bottom) {
+                            if idx < hunks.count - 1 {
+                                Rectangle()
+                                    .fill(MobileTheme.hairline(for: colorScheme))
+                                    .frame(height: 0.5)
+                            }
+                        }
+                    }
+                }
+            }
+            .frame(maxWidth: 980)
+            .background(MobileTheme.surfaceElevated(for: colorScheme), in: splitShape)
+            .clipShape(splitShape)
+            .overlay(splitShape.strokeBorder(MobileTheme.hairline(for: colorScheme), lineWidth: 0.5))
+            .frame(maxWidth: .infinity)
+            .padding(.horizontal, 12)
+            .padding(.top, 4)
+            .padding(.bottom, 22)
+        }
+        .background(MobileTheme.galleryGround(for: colorScheme))
+    }
+
+    // MARK: - Mode 3: Interactive Continuous Paper Merge (`合成`)
+
+    private var changedHunksForMerge: [DocumentDiffHunk] {
+        diffReport?.hunks.filter { $0.changeKind.isChanged } ?? []
+    }
+
+    private var compiledInlineMergeDecisions: [DocumentMergeDecision] {
+        let fallbackChoice: DocumentMergeDecision.Choice = preferTargetAsTemplate ? .acceptTarget : .keepBase
+        return changedHunksForMerge.compactMap { hunk in
+            guard !hunk.isProtectedComplex else { return nil }
+            let choice = mergeChoiceByHunkID[hunk.id] ?? fallbackChoice
+            let custom = choice == .customText
+                ? (mergeCustomTextByHunkID[hunk.id] ?? hunk.targetText ?? hunk.baseText ?? "")
+                : nil
+            return DocumentMergeDecision(hunkID: hunk.id, choice: choice, customText: custom)
+        }
+    }
+
+    private var nextMergeVersionNumber: Int {
+        (stackSiblings.compactMap { $0.richMetadata?.versionStack?.versionNumber }.max() ?? stackSiblings.count) + 1
+    }
+
+    private var mergeWorkspace: some View {
+        let accent = MobileTheme.accent(for: colorScheme)
+        let pos = MobileTheme.positive(for: colorScheme)
+        let danger = MobileTheme.destructive(for: colorScheme)
+        let warn = MobileTheme.warning(for: colorScheme)
+        let baseTag = shortVersionTag(id: baseVersionID)
+        let targetTag = shortVersionTag(id: targetVersionID)
+        let paperShape = RoundedRectangle(cornerRadius: 12, style: .continuous)
+
+        return VStack(spacing: 0) {
+            if isLoadingDiff && diffReport == nil {
+                ProgressView()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if let report = diffReport, !canSynthesizeTwoWay {
+                VStack(spacing: 12) {
+                    Image(systemName: "lock.fill")
+                        .font(.system(size: 22))
+                        .foregroundStyle(MobileTheme.tertiaryInk(for: colorScheme))
+                    Text(report.synthesisUnavailableReason ?? "当前格式仅支持只读对比")
+                        .font(.system(size: 13.5, weight: .medium))
+                        .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
+                        .multilineTextAlignment(.center)
+                    Button {
+                        Task {
+                            if let url = await store.shareableOriginalURL(for: asset, preferExactAsset: true) {
+                                onShareURL(url)
+                            }
+                        }
+                    } label: {
+                        Label("使用系统应用打开", systemImage: "square.and.arrow.up")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(accent)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 8)
+                            .background(MobileTheme.accentSoft(for: colorScheme), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(24)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(MobileTheme.galleryGround(for: colorScheme))
+            } else if let report = diffReport {
+                // Slim 38pt Merge Template Bar
+                HStack(spacing: 8) {
+                    Text("底稿")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
+
+                    HStack(spacing: 2) {
+                        Button {
+                            MobileHaptics.selection()
+                            preferTargetAsTemplate = true
+                        } label: {
+                            Text("以新版为准")
+                                .font(.system(size: 11.5, weight: preferTargetAsTemplate ? .semibold : .medium))
+                                .foregroundStyle(preferTargetAsTemplate ? .primary : MobileTheme.secondaryInk(for: colorScheme))
+                                .padding(.horizontal, 9)
+                                .padding(.vertical, 4)
+                                .background(
+                                    preferTargetAsTemplate ? MobileTheme.surfaceElevated(for: colorScheme) : .clear,
+                                    in: RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                )
+                        }
+                        .buttonStyle(.plain)
+
+                        Button {
+                            MobileHaptics.selection()
+                            preferTargetAsTemplate = false
+                        } label: {
+                            Text("以旧版为准")
+                                .font(.system(size: 11.5, weight: !preferTargetAsTemplate ? .semibold : .medium))
+                                .foregroundStyle(!preferTargetAsTemplate ? .primary : MobileTheme.secondaryInk(for: colorScheme))
+                                .padding(.horizontal, 9)
+                                .padding(.vertical, 4)
+                                .background(
+                                    !preferTargetAsTemplate ? MobileTheme.surfaceElevated(for: colorScheme) : .clear,
+                                    in: RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(2)
+                    .background(MobileTheme.surfaceSubtle(for: colorScheme), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+
+                    Spacer()
+
+                    Text("\(changedHunksForMerge.count) 处差异")
+                        .font(.system(size: 11.5, weight: .medium).monospacedDigit())
+                        .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
+                }
+                .padding(.horizontal, 12)
+                .padding(.bottom, 6)
+
+                // Continuous Paper Sheet Choice Flow
+                ScrollView {
+                    VStack(alignment: .center, spacing: 14) {
+                        VStack(alignment: .leading, spacing: 0) {
+                            if changedHunksForMerge.isEmpty {
+                                Text("两版无差异段落")
+                                    .font(.system(size: 13.5))
+                                    .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 36)
+                            } else {
+                                ForEach(Array(changedHunksForMerge.enumerated()), id: \.element.id) { idx, hunk in
+                                    let skippedBefore = idx == 0
+                                        ? hunk.hunkIndex > 0
+                                        : hunk.hunkIndex > changedHunksForMerge[idx - 1].hunkIndex + 1
+
+                                    if skippedBefore {
+                                        paperFoldDivider
+                                    } else if idx > 0 {
+                                        Rectangle()
+                                            .fill(MobileTheme.hairline(for: colorScheme))
+                                            .frame(height: 0.5)
+                                    }
+
+                                    let activeChoice = mergeChoiceByHunkID[hunk.id]
+                                        ?? (preferTargetAsTemplate ? .acceptTarget : .keepBase)
+
+                                    VStack(alignment: .leading, spacing: 8) {
+                                        HStack(spacing: 6) {
+                                            Text("#\(idx + 1)")
+                                                .font(.system(size: 11, weight: .medium, design: .monospaced).monospacedDigit())
+                                                .foregroundStyle(MobileTheme.tertiaryInk(for: colorScheme))
+
+                                            if let sec = hunk.sectionTitle, !sec.isEmpty {
+                                                Text(sec)
+                                                    .font(.system(size: 11.5, weight: .medium))
+                                                    .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
+                                                    .lineLimit(1)
+                                            }
+
+                                            ForEach(hunk.highRiskPairs.prefix(1)) { pair in
+                                                let isNum = pair.flag == .numberOrCurrency
+                                                Text(isNum ? "数字" : "时间")
+                                                    .font(.system(size: 10, weight: .semibold))
+                                                    .foregroundStyle(isNum ? danger : warn)
+                                                    .padding(.horizontal, 5)
+                                                    .padding(.vertical, 1)
+                                                    .background((isNum ? danger : warn).opacity(0.12), in: Capsule())
+                                            }
+
+                                            Spacer(minLength: 4)
+
+                                            if hunk.isProtectedComplex {
+                                                HStack(spacing: 6) {
+                                                    Label("受保护结构", systemImage: "lock.fill")
+                                                        .font(.system(size: 10.5, weight: .medium))
+                                                        .foregroundStyle(MobileTheme.tertiaryInk(for: colorScheme))
+                                                    Button("打开") {
+                                                        let ref = preferTargetAsTemplate
+                                                            ? (store.liveAsset(id: targetVersionID) ?? asset)
+                                                            : (store.liveAsset(id: baseVersionID) ?? asset)
+                                                        Task {
+                                                            if let url = await store.shareableOriginalURL(for: ref, preferExactAsset: true) {
+                                                                onShareURL(url)
+                                                            }
+                                                        }
+                                                    }
+                                                    .font(.system(size: 11, weight: .semibold))
+                                                    .foregroundStyle(accent)
+                                                    .buttonStyle(.plain)
+                                                }
+                                            } else {
+                                                HStack(spacing: 2) {
+                                                    mergeChoicePill(
+                                                        title: "保留 \(baseTag)",
+                                                        active: activeChoice == .keepBase
+                                                    ) {
+                                                        mergeChoiceByHunkID[hunk.id] = .keepBase
+                                                    }
+                                                    mergeChoicePill(
+                                                        title: "采纳 \(targetTag)",
+                                                        active: activeChoice == .acceptTarget
+                                                    ) {
+                                                        mergeChoiceByHunkID[hunk.id] = .acceptTarget
+                                                    }
+                                                    mergeChoicePill(
+                                                        title: "微调",
+                                                        active: activeChoice == .customText
+                                                    ) {
+                                                        mergeChoiceByHunkID[hunk.id] = .customText
+                                                        if mergeCustomTextByHunkID[hunk.id] == nil {
+                                                            mergeCustomTextByHunkID[hunk.id] = hunk.targetText ?? hunk.baseText ?? ""
+                                                        }
+                                                    }
+                                                }
+                                                .padding(2)
+                                                .background(
+                                                    MobileTheme.surfaceSubtle(for: colorScheme),
+                                                    in: RoundedRectangle(cornerRadius: 6.5, style: .continuous)
+                                                )
+                                            }
+                                        }
+
+                                        // Direct Tap-to-Pick Version Rows
+                                        if let oldT = hunk.baseText, !oldT.isEmpty {
+                                            let isChosen = !hunk.isProtectedComplex && activeChoice == .keepBase
+                                            Button {
+                                                guard !hunk.isProtectedComplex else { return }
+                                                MobileHaptics.selection()
+                                                mergeChoiceByHunkID[hunk.id] = .keepBase
+                                            } label: {
+                                                HStack(alignment: .top, spacing: 8) {
+                                                    Image(systemName: "minus.circle.fill")
+                                                        .font(.system(size: 13.5, weight: .semibold))
+                                                        .foregroundStyle(danger)
+                                                        .padding(.top, 2)
+                                                        .accessibilityLabel("修改前")
+                                                    Text(
+                                                        MobileDiffTokenHighlighter.selectiveSideAttributedString(
+                                                            hunk: hunk,
+                                                            side: .base,
+                                                            isEmphasized: isChosen,
+                                                            colorScheme: colorScheme
+                                                        )
+                                                    )
+                                                    .font(.system(size: 13.5))
+                                                    .lineSpacing(4)
+                                                    .multilineTextAlignment(.leading)
+                                                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                                                    if isChosen {
+                                                        Image(systemName: "checkmark.circle.fill")
+                                                            .font(.system(size: 14, weight: .semibold))
+                                                            .foregroundStyle(accent)
+                                                            .padding(.top, 2)
+                                                    }
+                                                }
+                                                .padding(.horizontal, 10)
+                                                .padding(.vertical, 8)
+                                                .background(
+                                                    isChosen ? MobileTheme.accentSoft(for: colorScheme) : .clear,
+                                                    in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                                )
+                                                .overlay(
+                                                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                                        .strokeBorder(
+                                                            isChosen ? accent.opacity(0.50) : MobileTheme.hairline(for: colorScheme),
+                                                            lineWidth: isChosen ? 1.0 : 0.5
+                                                        )
+                                                )
+                                                .opacity(hunk.isProtectedComplex ? 0.72 : (isChosen ? 1.0 : 0.48))
+                                            }
+                                            .buttonStyle(.plain)
+                                        }
+
+                                        if let newT = hunk.targetText, !newT.isEmpty {
+                                            let isChosen = !hunk.isProtectedComplex && activeChoice == .acceptTarget
+                                            Button {
+                                                guard !hunk.isProtectedComplex else { return }
+                                                MobileHaptics.selection()
+                                                mergeChoiceByHunkID[hunk.id] = .acceptTarget
+                                            } label: {
+                                                HStack(alignment: .top, spacing: 8) {
+                                                    Image(systemName: "plus.circle.fill")
+                                                        .font(.system(size: 13.5, weight: .semibold))
+                                                        .foregroundStyle(pos)
+                                                        .padding(.top, 2)
+                                                        .accessibilityLabel("修改后")
+                                                    Text(
+                                                        MobileDiffTokenHighlighter.selectiveSideAttributedString(
+                                                            hunk: hunk,
+                                                            side: .target,
+                                                            isEmphasized: isChosen,
+                                                            colorScheme: colorScheme
+                                                        )
+                                                    )
+                                                    .font(.system(size: 13.5))
+                                                    .lineSpacing(4)
+                                                    .multilineTextAlignment(.leading)
+                                                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                                                    if isChosen {
+                                                        Image(systemName: "checkmark.circle.fill")
+                                                            .font(.system(size: 14, weight: .semibold))
+                                                            .foregroundStyle(accent)
+                                                            .padding(.top, 2)
+                                                    }
+                                                }
+                                                .padding(.horizontal, 10)
+                                                .padding(.vertical, 8)
+                                                .background(
+                                                    isChosen ? MobileTheme.accentSoft(for: colorScheme) : .clear,
+                                                    in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                                )
+                                                .overlay(
+                                                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                                        .strokeBorder(
+                                                            isChosen ? accent.opacity(0.50) : MobileTheme.hairline(for: colorScheme),
+                                                            lineWidth: isChosen ? 1.0 : 0.5
+                                                        )
+                                                )
+                                                .opacity(hunk.isProtectedComplex ? 0.72 : (isChosen ? 1.0 : 0.48))
+                                            }
+                                            .buttonStyle(.plain)
+                                        }
+
+                                        if !hunk.isProtectedComplex && activeChoice == .customText {
+                                            TextField(
+                                                "输入微调后的段落正文…",
+                                                text: Binding(
+                                                    get: { mergeCustomTextByHunkID[hunk.id] ?? hunk.targetText ?? hunk.baseText ?? "" },
+                                                    set: { mergeCustomTextByHunkID[hunk.id] = $0 }
+                                                ),
+                                                axis: .vertical
+                                            )
+                                            .lineLimit(2...6)
+                                            .font(.system(size: 13.5))
+                                            .padding(9)
+                                            .background(
+                                                MobileTheme.inspectorFieldSurface(for: colorScheme),
+                                                in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                            )
+                                            .overlay(
+                                                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                                    .strokeBorder(accent.opacity(0.45), lineWidth: 1)
+                                            )
+                                        }
+                                    }
+                                    .padding(.vertical, 12)
+                                }
+                            }
+
+                            // Collapsible Clean Preview at Bottom of Paper Sheet
+                            Rectangle()
+                                .fill(MobileTheme.hairline(for: colorScheme))
+                                .frame(height: 0.5)
+                                .padding(.top, 4)
+
+                            Button {
+                                MobileHaptics.light()
+                                withAnimation(MobileMotion.accessible(MobileMotion.settleStrong, reduced: reduceMotion)) {
+                                    isMergePreviewExpanded.toggle()
+                                }
+                            } label: {
+                                HStack {
+                                    Text("合并预览")
+                                        .font(.system(size: 12.5, weight: .semibold))
+                                        .foregroundStyle(.primary)
+                                    Spacer()
+                                    Image(systemName: isMergePreviewExpanded ? "chevron.up" : "chevron.down")
+                                        .font(.system(size: 10.5, weight: .bold))
+                                        .foregroundStyle(MobileTheme.tertiaryInk(for: colorScheme))
+                                }
+                                .padding(.vertical, 11)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+
+                            if isMergePreviewExpanded {
+                                let mergedPreview = report.previewMergedText(
+                                    preferTargetAsTemplate: preferTargetAsTemplate,
+                                    decisions: compiledInlineMergeDecisions
+                                )
+                                Text(mergedPreview.isEmpty ? "（无正文内容）" : mergedPreview)
+                                    .font(.system(size: 14))
+                                    .lineSpacing(4.5)
+                                    .textSelection(.enabled)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(12)
+                                    .background(
+                                        MobileTheme.inspectorFieldSurface(for: colorScheme),
+                                        in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                    )
+                                    .padding(.bottom, 8)
+                            }
+                        }
+                        .padding(.horizontal, horizontalSizeClass == .regular ? 28 : 16)
+                        .padding(.vertical, 12)
+                        .frame(maxWidth: 780, alignment: .leading)
+                        .background(MobileTheme.surfaceElevated(for: colorScheme), in: paperShape)
+                        .overlay(paperShape.strokeBorder(MobileTheme.hairline(for: colorScheme), lineWidth: 0.5))
+                        .shadow(color: .black.opacity(colorScheme == .dark ? 0.22 : 0.035), radius: 8, y: 2)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.horizontal, 12)
+                    .padding(.top, 4)
+                    .padding(.bottom, 16)
+                }
+                .charkleDismissKeyboardOnScroll()
+                .background(MobileTheme.galleryGround(for: colorScheme))
+
+                // Clean Bottom Merge Footer (`修改人` + `备注（可选）` + `生成 vN`)
+                HStack(spacing: 8) {
+                    TextField("修改人", text: $mergeEditorDraft)
+                        .font(.system(size: 12.5))
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 7.5)
+                        .frame(maxWidth: 96)
+                        .background(
+                            MobileTheme.inspectorFieldSurface(for: colorScheme),
+                            in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .strokeBorder(MobileTheme.hairline(for: colorScheme), lineWidth: 0.5)
+                        )
+
+                    TextField("备注（可选）", text: $mergeNoteDraft)
+                        .font(.system(size: 12.5))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 7.5)
+                        .frame(maxWidth: 240)
+                        .background(
+                            MobileTheme.inspectorFieldSurface(for: colorScheme),
+                            in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .strokeBorder(MobileTheme.hairline(for: colorScheme), lineWidth: 0.5)
+                        )
+
+                    Spacer(minLength: 4)
+
+                    Button {
+                        synthesizeInlineMerge(report: report)
+                    } label: {
+                        HStack(spacing: 5) {
+                            if isSynthesizingMerge {
+                                ProgressView().controlSize(.mini).tint(.white)
+                            }
+                            Text("保存为新版本 (v\(nextMergeVersionNumber))")
+                                .font(.system(size: 13, weight: .semibold).monospacedDigit())
+                        }
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 8)
+                        .background(
+                            MobileTheme.accentButtonFill(for: colorScheme),
+                            in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        )
+                    }
+                    .buttonStyle(MobileTactileButtonStyle())
+                    .disabled(isSynthesizingMerge)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 9)
+                .background(MobileTheme.surfaceElevated(for: colorScheme))
+                .overlay(alignment: .top) {
+                    Rectangle()
+                        .fill(MobileTheme.hairline(for: colorScheme))
+                        .frame(height: 0.5)
+                }
+            }
+        }
+    }
+
+    private func mergeChoicePill(title: String, active: Bool, action: @escaping () -> Void) -> some View {
+        Button {
+            MobileHaptics.selection()
+            action()
+        } label: {
+            Text(title)
+                .font(.system(size: 11, weight: active ? .semibold : .medium).monospacedDigit())
+                .foregroundStyle(active ? .primary : MobileTheme.secondaryInk(for: colorScheme))
+                .padding(.horizontal, 7.5)
+                .padding(.vertical, 3.5)
+                .background(
+                    active ? MobileTheme.surfaceElevated(for: colorScheme) : .clear,
+                    in: RoundedRectangle(cornerRadius: 5, style: .continuous)
+                )
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func synthesizeInlineMerge(report: DocumentComparisonReport) {
+        guard !isSynthesizingMerge else { return }
+        isSynthesizingMerge = true
+        MobileKeyboard.dismiss()
+        let ed = mergeEditorDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let noteRaw = mergeNoteDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let decisions = compiledInlineMergeDecisions
+        let preferTarget = preferTargetAsTemplate
+        let createdVer = nextMergeVersionNumber
+
+        Task {
+            do {
+                let created = try await store.engine.synthesizeDocumentVersion(
+                    baseAssetID: report.baseAssetID,
+                    targetAssetID: report.targetAssetID,
+                    preferTargetAsTemplate: preferTarget,
+                    decisions: decisions,
+                    editorName: (ed.isEmpty || ed == "本机") ? nil : ed,
+                    changeNote: noteRaw.isEmpty ? nil : noteRaw
+                )
+                _ = try? await store.engine.manageVersionStack(.setPrimary(assetID: created.id))
+                await store.reloadAll()
+                MobileHaptics.success()
+                mergeNoteDraft = ""
+                let resolvedCreated = store.liveAsset(id: created.id) ?? created
+                store.showToast("已生成 v\(createdVer)", tone: .success)
+                if store.hasConnectedCloudBackend {
+                    Task { await store.syncNow(quiet: true) }
+                }
+                mode = .read
+                onSelectVersionAsset(resolvedCreated)
+            } catch {
+                MobileHaptics.error()
+                store.showToast("生成失败：\(error.localizedDescription)", tone: .error)
+            }
+            isSynthesizingMerge = false
+        }
+    }
+
+    // MARK: - Inline Token Highlighter & Excel Smart PK Diff Stage
 
     private func buildInlineDiffAttributedString(tokens: [DocumentInlineDiffToken]) -> AttributedString {
         var result = AttributedString()
@@ -1792,8 +2454,6 @@ struct MobileDocumentStageView: View {
         return result
     }
 
-    // MARK: - Excel Smart Primary-Key Aligned Diff Stage
-
     private func excelSmartPKDiffStage(report: DocumentComparisonReport) -> some View {
         let sheets = report.sheetDiffs
         let activeSheet: SpreadsheetSheetDiff? = {
@@ -1819,18 +2479,22 @@ struct MobileDocumentStageView: View {
                                     HStack(spacing: 4) {
                                         Text(sheet.sheetName)
                                             .font(.system(size: 12, weight: isOn ? .semibold : .medium))
-                                        Text("Δ\(totalRowDelta)")
-                                            .font(.system(size: 10.5, weight: .bold).monospacedDigit())
-                                            .padding(.horizontal, 5)
-                                            .padding(.vertical, 1)
-                                            .background(Color.white.opacity(isOn ? 0.22 : 0.0), in: Capsule())
+                                        if totalRowDelta > 0 {
+                                            Text("Δ\(totalRowDelta)")
+                                                .font(.system(size: 10.5, weight: .semibold).monospacedDigit())
+                                                .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
+                                        }
                                     }
-                                    .foregroundStyle(isOn ? .white : .primary)
+                                    .foregroundStyle(isOn ? .primary : MobileTheme.secondaryInk(for: colorScheme))
                                     .padding(.horizontal, 10)
-                                    .padding(.vertical, 5.5)
+                                    .padding(.vertical, 5)
                                     .background(
-                                        isOn ? Color(charkleHex: "#1D7A46") : MobileTheme.surfaceElevated(for: colorScheme),
-                                        in: Capsule()
+                                        isOn ? MobileTheme.surfaceElevated(for: colorScheme) : MobileTheme.surfaceSubtle(for: colorScheme),
+                                        in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                    )
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                            .strokeBorder(MobileTheme.hairline(for: colorScheme), lineWidth: 0.5)
                                     )
                                 }
                                 .buttonStyle(.plain)
@@ -1856,15 +2520,15 @@ struct MobileDocumentStageView: View {
                         } label: {
                             HStack(spacing: 4) {
                                 Image(systemName: "key.fill")
-                                    .font(.system(size: 10.5))
+                                    .font(.system(size: 10))
                                 Text("主键：\(activeSheet.primaryKeyHeader ?? "自动")")
                                     .font(.system(size: 11.5, weight: .semibold))
                                     .lineLimit(1)
                             }
-                            .foregroundStyle(Color(charkleHex: "#1D7A46"))
+                            .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
                             .padding(.horizontal, 9)
                             .padding(.vertical, 5)
-                            .background(Color(charkleHex: "#1D7A46").opacity(0.14), in: Capsule())
+                            .background(MobileTheme.surfaceSubtle(for: colorScheme), in: Capsule())
                         }
                     }
                 }
@@ -1882,123 +2546,118 @@ struct MobileDocumentStageView: View {
                         return true
                     }
 
-                    LazyVStack(alignment: .leading, spacing: 8) {
+                    let sheetShape = RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    VStack(alignment: .leading, spacing: 0) {
                         if rows.isEmpty {
-                            Text("该工作表在当前筛选条件下无单元格变动")
+                            Text("当前筛选下无单元格变动")
                                 .font(.system(size: 13))
                                 .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
                                 .frame(maxWidth: .infinity)
                                 .padding(.vertical, 44)
                         } else {
-                            ForEach(rows) { row in
-                                spreadsheetRowDiffCard(row, headers: activeSheet.headers)
+                            ForEach(Array(rows.enumerated()), id: \.element.id) { idx, row in
+                                spreadsheetRowDiffItem(row, headers: activeSheet.headers)
+                                if idx < rows.count - 1 {
+                                    Rectangle()
+                                        .fill(MobileTheme.hairline(for: colorScheme))
+                                        .frame(height: 0.5)
+                                }
                             }
                         }
                     }
+                    .frame(maxWidth: 820, alignment: .leading)
+                    .background(MobileTheme.surfaceElevated(for: colorScheme), in: sheetShape)
+                    .overlay(sheetShape.strokeBorder(MobileTheme.hairline(for: colorScheme), lineWidth: 0.5))
+                    .frame(maxWidth: .infinity)
                     .padding(.horizontal, 12)
                     .padding(.bottom, 20)
                 }
             }
+            .background(MobileTheme.galleryGround(for: colorScheme))
         }
     }
 
-    private func spreadsheetRowDiffCard(_ row: SpreadsheetRowDiff, headers: [String]) -> some View {
+    private func spreadsheetRowDiffItem(_ row: SpreadsheetRowDiff, headers: [String]) -> some View {
         let kindTint = changeKindColor(row.changeKind)
         let danger = MobileTheme.destructive(for: colorScheme)
         let pos = MobileTheme.positive(for: colorScheme)
 
-        return VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 6) {
-                Text(row.changeKind.localizedLabel)
-                    .font(.system(size: 10.5, weight: .bold))
-                    .foregroundStyle(kindTint)
-                    .padding(.horizontal, 6.5)
-                    .padding(.vertical, 2)
-                    .background(kindTint.opacity(0.14), in: Capsule())
+        return HStack(alignment: .top, spacing: 10) {
+            Capsule(style: .continuous)
+                .fill(kindTint)
+                .frame(width: 3)
+                .padding(.vertical, 2)
 
-                Text(row.primaryKeyValue.isEmpty ? "行记录" : row.primaryKeyValue)
-                    .font(.system(size: 13, weight: .semibold).monospacedDigit())
-                    .foregroundStyle(.primary)
-                    .lineLimit(1)
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 6) {
+                    Text(row.primaryKeyValue.isEmpty ? "行记录" : row.primaryKeyValue)
+                        .font(.system(size: 13, weight: .semibold).monospacedDigit())
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
 
-                Spacer()
+                    Spacer()
 
-                let rowLoc: String = {
-                    switch (row.baseRowNumber, row.targetRowNumber) {
-                    case let (b?, t?) where b != t: "旧#\(b) → 新#\(t)"
-                    case let (_, t?): "行 #\(t)"
-                    case let (b?, nil): "原行 #\(b)"
-                    default: ""
-                    }
-                }()
-                if !rowLoc.isEmpty {
-                    Text(rowLoc)
-                        .font(.system(size: 11, design: .monospaced).monospacedDigit())
-                        .foregroundStyle(MobileTheme.tertiaryInk(for: colorScheme))
-                }
-            }
-
-            if !row.cellDiffs.isEmpty {
-                ForEach(row.cellDiffs) { cell in
-                    VStack(alignment: .leading, spacing: 3) {
-                        HStack(spacing: 6) {
-                            let colName = cell.columnHeader ?? (cell.colIndex < headers.count ? headers[cell.colIndex] : Self.excelColumnName(cell.colIndex))
-                            Text(colName.isEmpty ? Self.excelColumnName(cell.colIndex) : colName)
-                                .font(.system(size: 11.5, weight: .semibold))
-                                .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
-
-                            Spacer()
-
-                            if let oldVal = cell.oldValue, !oldVal.isEmpty {
-                                Text(oldVal)
-                                    .font(.system(size: 12.5).monospacedDigit())
-                                    .strikethrough()
-                                    .foregroundStyle(danger)
-                            }
-                            if cell.oldValue != nil && cell.newValue != nil {
-                                Text("→")
-                                    .font(.system(size: 11))
-                                    .foregroundStyle(MobileTheme.tertiaryInk(for: colorScheme))
-                            }
-                            if let newVal = cell.newValue, !newVal.isEmpty {
-                                Text(newVal)
-                                    .font(.system(size: 12.5, weight: .bold).monospacedDigit())
-                                    .foregroundStyle(pos)
-                                    .padding(.horizontal, 6)
-                                    .padding(.vertical, 1.5)
-                                    .background(pos.opacity(0.13), in: RoundedRectangle(cornerRadius: 4, style: .continuous))
-                            }
+                    let rowLoc: String = {
+                        switch (row.baseRowNumber, row.targetRowNumber) {
+                        case let (b?, t?) where b != t: "#\(b) → #\(t)"
+                        case let (_, t?): "#\(t)"
+                        case let (b?, nil): "#\(b)"
+                        default: ""
                         }
+                    }()
+                    if !rowLoc.isEmpty {
+                        Text(rowLoc)
+                            .font(.system(size: 11, design: .monospaced).monospacedDigit())
+                            .foregroundStyle(MobileTheme.tertiaryInk(for: colorScheme))
+                    }
+                }
 
-                        if cell.oldFormula != cell.newFormula, (cell.oldFormula != nil || cell.newFormula != nil) {
-                            HStack(spacing: 4) {
-                                Text("fx 公式变更：")
-                                    .font(.system(size: 10.5, weight: .semibold))
-                                Text("=\(cell.oldFormula ?? "无") → =\(cell.newFormula ?? "无")")
+                if !row.cellDiffs.isEmpty {
+                    ForEach(row.cellDiffs) { cell in
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack(spacing: 6) {
+                                let colName = cell.columnHeader ?? (cell.colIndex < headers.count ? headers[cell.colIndex] : Self.excelColumnName(cell.colIndex))
+                                Text(colName.isEmpty ? Self.excelColumnName(cell.colIndex) : colName)
+                                    .font(.system(size: 11.5, weight: .medium))
+                                    .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
+
+                                Spacer()
+
+                                if let oldVal = cell.oldValue, !oldVal.isEmpty {
+                                    Text(oldVal)
+                                        .font(.system(size: 12.5).monospacedDigit())
+                                        .strikethrough()
+                                        .foregroundStyle(danger)
+                                }
+                                if cell.oldValue != nil && cell.newValue != nil {
+                                    Text("→")
+                                        .font(.system(size: 11))
+                                        .foregroundStyle(MobileTheme.tertiaryInk(for: colorScheme))
+                                }
+                                if let newVal = cell.newValue, !newVal.isEmpty {
+                                    Text(newVal)
+                                        .font(.system(size: 12.5, weight: .semibold).monospacedDigit())
+                                        .foregroundStyle(pos)
+                                }
+                            }
+
+                            if cell.oldFormula != cell.newFormula, (cell.oldFormula != nil || cell.newFormula != nil) {
+                                Text("fx =\(cell.oldFormula ?? "无") → =\(cell.newFormula ?? "无")")
                                     .font(.system(size: 10.5, design: .monospaced))
+                                    .foregroundStyle(MobileTheme.warning(for: colorScheme))
                             }
-                            .foregroundStyle(MobileTheme.warning(for: colorScheme))
                         }
                     }
-                    .padding(8)
-                    .background(MobileTheme.inspectorFieldSurface(for: colorScheme), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                } else {
+                    let values = !row.targetValues.isEmpty ? row.targetValues : row.baseValues
+                    Text(values.filter { !$0.isEmpty }.joined(separator: " · "))
+                        .font(.system(size: 12.5).monospacedDigit())
+                        .foregroundStyle(row.changeKind == .removed ? danger : .primary)
                 }
-            } else {
-                let values = !row.targetValues.isEmpty ? row.targetValues : row.baseValues
-                Text(values.filter { !$0.isEmpty }.joined(separator: " · "))
-                    .font(.system(size: 12.5).monospacedDigit())
-                    .foregroundStyle(row.changeKind == .removed ? danger : .primary)
             }
         }
-        .padding(12)
-        .background(
-            MobileTheme.surfaceElevated(for: colorScheme),
-            in: RoundedRectangle(cornerRadius: MobileTheme.Radius.cardOuter, style: .continuous)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: MobileTheme.Radius.cardOuter, style: .continuous)
-                .strokeBorder(MobileTheme.hairline(for: colorScheme), lineWidth: 0.75)
-        )
+        .padding(.horizontal, 14)
+        .padding(.vertical, 11)
     }
 
     // MARK: - Data Loading Helpers
@@ -2073,17 +2732,31 @@ struct MobileDocumentStageView: View {
         isLoadingDiff = false
     }
 
+    private func shortVersionTag(id: UUID) -> String {
+        guard let item = stackSiblings.first(where: { $0.id == id }) ?? store.liveAsset(id: id) else {
+            return "v1"
+        }
+        let v = item.richMetadata?.versionStack?.versionNumber
+            ?? ((stackSiblings.firstIndex(where: { $0.id == id }) ?? 0) + 1)
+        return "v\(v)"
+    }
+
     private func versionLabelForPicker(id: UUID) -> String {
         guard let item = stackSiblings.first(where: { $0.id == id }) ?? store.liveAsset(id: id) else {
             return "版本"
         }
-        let v = item.richMetadata?.versionStack?.versionNumber
+        let verMeta = item.richMetadata?.versionStack
+        let v = verMeta?.versionNumber
             ?? ((stackSiblings.firstIndex(where: { $0.id == id }) ?? 0) + 1)
         let isPrimary = item.id == primaryAsset.id
-        let who = item.richMetadata?.versionStack?.editorName
+        let desc = MobileVersionDisplayFormatting.cleanDescriptor(
+            changeNote: verMeta?.changeNote,
+            versionLabel: verMeta?.versionLabel,
+            editorName: verMeta?.editorName
+        ) ?? MobileVersionDisplayFormatting.cleanEditor(verMeta?.editorName)
         var label = "v\(v)"
-        if let who, !who.isEmpty { label += "·\(who)" }
-        if isPrimary { label += " [主版]" }
+        if let desc { label += " · \(desc)" }
+        if isPrimary { label += "（主版）" }
         return label
     }
 
@@ -2091,8 +2764,7 @@ struct MobileDocumentStageView: View {
         switch kind {
         case .added: MobileTheme.positive(for: colorScheme)
         case .removed: MobileTheme.destructive(for: colorScheme)
-        case .modified: MobileTheme.warning(for: colorScheme)
-        case .moved: MobileTheme.accent(for: colorScheme)
+        case .modified, .moved: MobileTheme.accent(for: colorScheme)
         case .unchanged: MobileTheme.secondaryInk(for: colorScheme)
         }
     }
@@ -2109,7 +2781,7 @@ struct MobileDocumentStageView: View {
     }
 }
 
-// MARK: - Scanned PDF & Visual Stack Overlay Diff (Red-Cyan Blend & Touch-Draggable Split Curtain Wipe)
+// MARK: - Scanned PDF & Visual Stack Overlay Diff (Zero Verbose Instructional Banners)
 
 struct PDFAndImageVisualOverlayDiffView: View {
     @Bindable var store: MobileAppStore
@@ -2134,8 +2806,7 @@ struct PDFAndImageVisualOverlayDiffView: View {
                     .fill(MobileTheme.surfaceElevated(for: colorScheme))
 
                 if isRendering {
-                    ProgressView("正在生成页面像素比对图层…")
-                        .font(.system(size: 13))
+                    ProgressView()
                 } else if isSplitCurtain, let baseImage, let targetImage {
                     GeometryReader { geo in
                         let w = max(1, geo.size.width)
@@ -2143,13 +2814,11 @@ struct PDFAndImageVisualOverlayDiffView: View {
                         let dividerX = w * curtainFraction
 
                         ZStack(alignment: .leading) {
-                            // Full-width New Version (Target) underneath
                             Image(uiImage: targetImage)
                                 .resizable()
                                 .scaledToFit()
                                 .frame(width: w, height: h)
 
-                            // Left-clipped Old Version (Base) on top
                             Image(uiImage: baseImage)
                                 .resizable()
                                 .scaledToFit()
@@ -2159,41 +2828,40 @@ struct PDFAndImageVisualOverlayDiffView: View {
                                         .frame(width: dividerX, height: h)
                                 }
 
-                            // Curtain Divider Line & Touch Thumb
                             ZStack {
                                 Rectangle()
                                     .fill(MobileTheme.accent(for: colorScheme))
                                     .frame(width: 2, height: h)
-                                    .shadow(color: .black.opacity(0.28), radius: 3)
+                                    .shadow(color: .black.opacity(0.24), radius: 2)
 
                                 Circle()
                                     .fill(MobileTheme.accentButtonFill(for: colorScheme))
-                                    .frame(width: 36, height: 36)
+                                    .frame(width: 32, height: 32)
                                     .overlay {
                                         Image(systemName: "arrow.left.and.right")
-                                            .font(.system(size: 13, weight: .bold))
+                                            .font(.system(size: 12, weight: .bold))
                                             .foregroundStyle(.white)
                                     }
-                                    .shadow(color: .black.opacity(0.25), radius: 6, y: 2)
+                                    .shadow(color: .black.opacity(0.22), radius: 5, y: 2)
                             }
                             .position(x: dividerX, y: h * 0.5)
 
-                            // Corner Version Labels
+                            // Compact Version Corner Badges (Zero Tutorial Prose)
                             VStack {
                                 HStack {
-                                    Text("◀ 旧版 \(baseAsset.richMetadata?.versionStack?.displayVersionTag ?? "基准")")
+                                    Text(baseAsset.richMetadata?.versionStack?.displayVersionTag ?? "v1")
                                         .font(.system(size: 11, weight: .semibold).monospacedDigit())
                                         .foregroundStyle(.white)
-                                        .padding(.horizontal, 8)
-                                        .padding(.vertical, 4)
-                                        .background(.black.opacity(0.62), in: Capsule())
+                                        .padding(.horizontal, 7.5)
+                                        .padding(.vertical, 3.5)
+                                        .background(.black.opacity(0.55), in: Capsule())
                                     Spacer()
-                                    Text("新版 \(targetAsset.richMetadata?.versionStack?.displayVersionTag ?? "当前") ▶")
+                                    Text(targetAsset.richMetadata?.versionStack?.displayVersionTag ?? "v2")
                                         .font(.system(size: 11, weight: .semibold).monospacedDigit())
                                         .foregroundStyle(.white)
-                                        .padding(.horizontal, 8)
-                                        .padding(.vertical, 4)
-                                        .background(MobileTheme.accentButtonFill(for: colorScheme).opacity(0.88), in: Capsule())
+                                        .padding(.horizontal, 7.5)
+                                        .padding(.vertical, 3.5)
+                                        .background(MobileTheme.accentButtonFill(for: colorScheme).opacity(0.85), in: Capsule())
                                 }
                                 .padding(10)
                                 Spacer()
@@ -2210,31 +2878,33 @@ struct PDFAndImageVisualOverlayDiffView: View {
                     }
                     .padding(8)
                 } else if let redCyanImage {
-                    ZStack(alignment: .top) {
+                    ZStack(alignment: .topTrailing) {
                         Image(uiImage: redCyanImage)
                             .resizable()
                             .scaledToFit()
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
                             .padding(8)
 
+                        // Minimal Legend Dots (`● 旧版  ● 新版`)
                         HStack(spacing: 10) {
                             HStack(spacing: 4) {
-                                Circle().fill(Color(charkleHex: "#D93B30")).frame(width: 8, height: 8)
-                                Text("红色：旧版独有笔迹/印章")
+                                Circle().fill(Color(charkleHex: "#D93B30")).frame(width: 6.5, height: 6.5)
+                                Text("旧版")
                             }
                             HStack(spacing: 4) {
-                                Circle().fill(Color(charkleHex: "#0891B2")).frame(width: 8, height: 8)
-                                Text("青色：新版新增批示/改动")
+                                Circle().fill(Color(charkleHex: "#0891B2")).frame(width: 6.5, height: 6.5)
+                                Text("新版")
                             }
                         }
-                        .font(.system(size: 11, weight: .semibold))
+                        .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(.white)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 5)
-                        .background(.black.opacity(0.68), in: Capsule())
-                        .padding(.top, 10)
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 4)
+                        .background(.black.opacity(0.60), in: Capsule())
+                        .padding(12)
                     }
                 } else {
-                    Text("无法渲染这两版的视觉叠层预览")
+                    Text("无法生成页面比对预览")
                         .font(.system(size: 13))
                         .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
                 }
@@ -2242,7 +2912,7 @@ struct PDFAndImageVisualOverlayDiffView: View {
             .clipShape(RoundedRectangle(cornerRadius: MobileTheme.Radius.cardOuter, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: MobileTheme.Radius.cardOuter, style: .continuous)
-                    .strokeBorder(MobileTheme.hairline(for: colorScheme), lineWidth: 0.75)
+                    .strokeBorder(MobileTheme.hairline(for: colorScheme), lineWidth: 0.5)
             )
 
             if pageCount > 1 {
@@ -2252,21 +2922,21 @@ struct PDFAndImageVisualOverlayDiffView: View {
                         pageIndex = max(0, pageIndex - 1)
                     } label: {
                         Image(systemName: "chevron.left")
-                            .font(.system(size: 13, weight: .bold))
-                            .frame(width: 30, height: 30)
+                            .font(.system(size: 12.5, weight: .bold))
+                            .frame(width: 28, height: 28)
                     }
                     .disabled(pageIndex <= 0)
 
-                    Text("第 \(pageIndex + 1) / \(pageCount) 页")
-                        .font(.system(size: 12.5, weight: .semibold).monospacedDigit())
+                    Text("\(pageIndex + 1) / \(pageCount)")
+                        .font(.system(size: 12, weight: .semibold).monospacedDigit())
 
                     Button {
                         MobileHaptics.light()
                         pageIndex = min(pageCount - 1, pageIndex + 1)
                     } label: {
                         Image(systemName: "chevron.right")
-                            .font(.system(size: 13, weight: .bold))
-                            .frame(width: 30, height: 30)
+                            .font(.system(size: 12.5, weight: .bold))
+                            .frame(width: 28, height: 28)
                     }
                     .disabled(pageIndex >= pageCount - 1)
                 }
@@ -2387,8 +3057,6 @@ struct PDFAndImageVisualOverlayDiffView: View {
         return UIImage(cgImage: cg)
     }
 
-    /// Combines Base luminance into Cyan-blocked channel (so Base ink renders Red) and Target luminance
-    /// into Red-blocked channel (so Target ink renders Cyan), while shared ink converges to neutral charcoal!
     private nonisolated static func buildRedCyanComposite(baseCG: CGImage, targetCG: CGImage) -> UIImage? {
         let width = min(1280, max(baseCG.width, targetCG.width))
         let aspect = Double(targetCG.height) / Double(max(1, targetCG.width))
@@ -2438,7 +3106,6 @@ struct PDFAndImageVisualOverlayDiffView: View {
         while i < byteCount {
             let bLuma = (Int(baseBuf[i]) * 77 + Int(baseBuf[i + 1]) * 150 + Int(baseBuf[i + 2]) * 29) >> 8
             let tLuma = (Int(targetBuf[i]) * 77 + Int(targetBuf[i + 1]) * 150 + Int(targetBuf[i + 2]) * 29) >> 8
-            // Red channel comes from Target lightness (dark Base drops G & B -> appears Red; dark Target drops R -> appears Cyan)
             outBuf[i] = UInt8(clamping: tLuma)
             outBuf[i + 1] = UInt8(clamping: bLuma)
             outBuf[i + 2] = UInt8(clamping: bLuma)
@@ -2463,7 +3130,7 @@ struct PDFAndImageVisualOverlayDiffView: View {
     }
 }
 
-// MARK: - Scheme B Safe 2-Way Document Merge Sheet (`按差异合成新版本`)
+// MARK: - Standalone Two-Way Merge Sheet (Preserved for Sheet Callers, Continuous Paper Style)
 
 struct DocumentTwoWayMergeSheet: View {
     @Bindable var store: MobileAppStore
@@ -2476,11 +3143,12 @@ struct DocumentTwoWayMergeSheet: View {
     let onCancel: () -> Void
 
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @State private var preferTargetAsTemplate: Bool = true
     @State private var choiceByHunkID: [String: DocumentMergeDecision.Choice] = [:]
     @State private var customTextByHunkID: [String: String] = [:]
-    @State private var showCleanPreview: Bool = false
+    @State private var isPreviewExpanded: Bool = false
     @State private var editorNameDraft: String = ""
     @State private var changeNoteDraft: String = ""
     @State private var isSynthesizing: Bool = false
@@ -2495,47 +3163,28 @@ struct DocumentTwoWayMergeSheet: View {
         return changedHunks.compactMap { hunk in
             guard !hunk.isProtectedComplex else { return nil }
             let choice = choiceByHunkID[hunk.id] ?? fallbackChoice
-            let custom = choice == .customText ? (customTextByHunkID[hunk.id] ?? hunk.targetText ?? hunk.baseText ?? "") : nil
+            let custom = choice == .customText
+                ? (customTextByHunkID[hunk.id] ?? hunk.targetText ?? hunk.baseText ?? "")
+                : nil
             return DocumentMergeDecision(hunkID: hunk.id, choice: choice, customText: custom)
         }
-    }
-
-    private var revertedCount: Int {
-        compiledDecisions.filter {
-            $0.choice != (preferTargetAsTemplate ? .acceptTarget : .keepBase)
-        }.count
     }
 
     var body: some View {
         let accent = MobileTheme.accent(for: colorScheme)
         let pos = MobileTheme.positive(for: colorScheme)
-        let warn = MobileTheme.warning(for: colorScheme)
         let danger = MobileTheme.destructive(for: colorScheme)
+        let paperShape = RoundedRectangle(cornerRadius: 12, style: .continuous)
 
         VStack(spacing: 0) {
             if let createdAsset {
-                // Celebratory Ready-to-Send Card with 1-Tap WeChat Share
-                VStack(spacing: 18) {
+                VStack(spacing: 16) {
                     Spacer()
-
-                    ZStack {
-                        Circle()
-                            .fill(pos.opacity(0.15))
-                            .frame(width: 64, height: 64)
-                        Image(systemName: "checkmark.seal.fill")
-                            .font(.system(size: 30, weight: .bold))
-                            .foregroundStyle(pos)
-                    }
-
-                    VStack(spacing: 6) {
-                        Text("已生成净版 \(createdAsset.richMetadata?.versionStack?.displayVersionTag ?? "v\(nextVersionNumber)")")
-                            .font(.system(size: 20, weight: .bold).monospacedDigit())
-                        Text("原稿完整保留未覆盖，新版本已自动锁定为主版本，可直接发回微信。")
-                            .font(.system(size: 13.5))
-                            .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
-                            .multilineTextAlignment(.center)
-                            .padding(.horizontal, 24)
-                    }
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 36, weight: .semibold))
+                        .foregroundStyle(pos)
+                    Text("已生成 \(createdAsset.richMetadata?.versionStack?.displayVersionTag ?? "v\(nextVersionNumber)")")
+                        .font(.system(size: 18, weight: .bold).monospacedDigit())
 
                     VStack(spacing: 10) {
                         Button {
@@ -2546,132 +3195,98 @@ struct DocumentTwoWayMergeSheet: View {
                                 }
                             }
                         } label: {
-                            Label("一键分享定稿到微信 / 文件", systemImage: "square.and.arrow.up")
-                                .font(.system(size: 15, weight: .semibold))
+                            Label("分享文件", systemImage: "square.and.arrow.up")
+                                .font(.system(size: 14.5, weight: .semibold))
                                 .foregroundStyle(.white)
                                 .frame(maxWidth: .infinity)
-                                .padding(.vertical, 13)
-                                .background(MobileTheme.accentButtonFill(for: colorScheme), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                                .padding(.vertical, 12)
+                                .background(MobileTheme.accentButtonFill(for: colorScheme), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                         }
                         .buttonStyle(MobileTactileButtonStyle())
 
                         Button {
                             onOpenCreatedVersion(createdAsset)
                         } label: {
-                            Text("在阅读器中查看新版本")
+                            Text("打开新版本")
                                 .font(.system(size: 14, weight: .semibold))
                                 .foregroundStyle(accent)
                                 .frame(maxWidth: .infinity)
                                 .padding(.vertical, 11)
-                                .background(MobileTheme.accentSoft(for: colorScheme), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                                .background(MobileTheme.accentSoft(for: colorScheme), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                         }
                         .buttonStyle(MobileTactileButtonStyle())
                     }
                     .padding(.horizontal, 24)
-                    .frame(maxWidth: 440)
-
+                    .frame(maxWidth: 400)
                     Spacer()
                 }
                 .background(MobileTheme.galleryGround(for: colorScheme))
             } else {
+                HStack(spacing: 8) {
+                    Text("底稿")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
+                    Picker("底稿", selection: $preferTargetAsTemplate) {
+                        Text("以新版为准").tag(true)
+                        Text("以旧版为准").tag(false)
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(maxWidth: 210)
+                    Spacer()
+                    Text("\(changedHunks.count) 处差异")
+                        .font(.system(size: 11.5, weight: .medium).monospacedDigit())
+                        .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 14) {
-                        // 1. Base Template Picker + Zero-Corruption Notice
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("选择合成底稿（默认保留底稿完整红头、字体与样式外壳）")
-                                .font(.system(size: 12, weight: .semibold))
-                                .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
-
-                            Picker("底稿基准", selection: $preferTargetAsTemplate) {
-                                Text("以新版为底稿（推荐）").tag(true)
-                                Text("以旧版为底稿").tag(false)
+                    VStack(alignment: .leading, spacing: 0) {
+                        ForEach(Array(changedHunks.enumerated()), id: \.element.id) { idx, hunk in
+                            if idx > 0 {
+                                Rectangle()
+                                    .fill(MobileTheme.hairline(for: colorScheme))
+                                    .frame(height: 0.5)
                             }
-                            .pickerStyle(.segmented)
+                            let currentChoice = choiceByHunkID[hunk.id]
+                                ?? (preferTargetAsTemplate ? .acceptTarget : .keepBase)
 
-                            HStack(spacing: 6) {
-                                Image(systemName: "checkmark.shield.fill")
-                                    .font(.system(size: 12))
-                                    .foregroundStyle(pos)
-                                Text("仅对普通正文段落做节点级替换；复杂跨行表格与域代码自动只读保护，100% 零坏档。")
-                                    .font(.system(size: 11.5))
-                                    .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
-                            }
-                        }
-                        .padding(12)
-                        .background(MobileTheme.surfaceElevated(for: colorScheme), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-
-                        // 2. Hunk Picker <-> Clean Preview Switcher
-                        HStack {
-                            Picker("合成检视", selection: $showCleanPreview) {
-                                Text("逐处取舍 (\(changedHunks.count))").tag(false)
-                                Text("净版全文预览").tag(true)
-                            }
-                            .pickerStyle(.segmented)
-                            .frame(maxWidth: 260)
-
-                            Spacer()
-
-                            Text("已调整 \(revertedCount) 处")
-                                .font(.system(size: 12, weight: .semibold).monospacedDigit())
-                                .foregroundStyle(revertedCount > 0 ? warn : MobileTheme.tertiaryInk(for: colorScheme))
-                        }
-
-                        if showCleanPreview {
-                            let mergedPreview = report.previewMergedText(
-                                preferTargetAsTemplate: preferTargetAsTemplate,
-                                decisions: compiledDecisions
-                            )
                             VStack(alignment: .leading, spacing: 8) {
-                                Text("合成后净版正文预览")
-                                    .font(.system(size: 12, weight: .semibold))
-                                    .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
-                                Text(mergedPreview.isEmpty ? "（无正文内容）" : mergedPreview)
-                                    .font(.system(size: 14.5))
-                                    .lineSpacing(4.5)
-                                    .textSelection(.enabled)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                            }
-                            .padding(16)
-                            .background(MobileTheme.surfaceElevated(for: colorScheme), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                        } else {
-                            ForEach(changedHunks) { hunk in
-                                let currentChoice = choiceByHunkID[hunk.id] ?? (preferTargetAsTemplate ? .acceptTarget : .keepBase)
-
-                                VStack(alignment: .leading, spacing: 8) {
-                                    HStack {
-                                        Text(hunk.sectionTitle ?? "变动 #\(hunk.hunkIndex + 1)")
-                                            .font(.system(size: 12.5, weight: .semibold))
-                                        if !hunk.highRiskPairs.isEmpty {
-                                            Text("高危数值/日期")
-                                                .font(.system(size: 10.5, weight: .bold))
-                                                .foregroundStyle(danger)
-                                                .padding(.horizontal, 6)
-                                                .padding(.vertical, 1.5)
-                                                .background(danger.opacity(0.14), in: Capsule())
-                                        }
-                                        Spacer()
-                                        if hunk.isProtectedComplex {
-                                            HStack(spacing: 4) {
-                                                Image(systemName: "lock.fill")
-                                                    .font(.system(size: 10))
-                                                Text(hunk.protectionReason ?? "受保护复杂结构")
-                                                    .font(.system(size: 11, weight: .semibold))
+                                HStack {
+                                    Text("#\(idx + 1)")
+                                        .font(.system(size: 11, weight: .medium, design: .monospaced).monospacedDigit())
+                                        .foregroundStyle(MobileTheme.tertiaryInk(for: colorScheme))
+                                    Spacer()
+                                    if !hunk.isProtectedComplex {
+                                        Picker("取舍", selection: Binding(
+                                            get: { currentChoice },
+                                            set: { next in
+                                                choiceByHunkID[hunk.id] = next
+                                                if next == .customText && customTextByHunkID[hunk.id] == nil {
+                                                    customTextByHunkID[hunk.id] = hunk.targetText ?? hunk.baseText ?? ""
+                                                }
                                             }
-                                            .foregroundStyle(warn)
-                                            .padding(.horizontal, 8)
-                                            .padding(.vertical, 3)
-                                            .background(warn.opacity(0.14), in: Capsule())
+                                        )) {
+                                            Text("保留旧版").tag(DocumentMergeDecision.Choice.keepBase)
+                                            Text("采纳新版").tag(DocumentMergeDecision.Choice.acceptTarget)
+                                            Text("微调").tag(DocumentMergeDecision.Choice.customText)
                                         }
+                                        .pickerStyle(.segmented)
+                                        .frame(maxWidth: 210)
                                     }
+                                }
 
-                                    if let oldT = hunk.baseText, !oldT.isEmpty {
-                                        let isSelectedBase = currentChoice == .keepBase
+                                if let oldT = hunk.baseText, !oldT.isEmpty {
+                                    let isSelectedBase = !hunk.isProtectedComplex && currentChoice == .keepBase
+                                    Button {
+                                        guard !hunk.isProtectedComplex else { return }
+                                        choiceByHunkID[hunk.id] = .keepBase
+                                    } label: {
                                         HStack(alignment: .top, spacing: 8) {
                                             Image(systemName: "minus.circle.fill")
-                                                .font(.system(size: 14, weight: .semibold))
+                                                .font(.system(size: 13.5, weight: .semibold))
                                                 .foregroundStyle(danger)
                                                 .padding(.top, 2)
-                                                .accessibilityLabel("修改前")
                                             Text(
                                                 MobileDiffTokenHighlighter.selectiveSideAttributedString(
                                                     hunk: hunk,
@@ -2682,35 +3297,31 @@ struct DocumentTwoWayMergeSheet: View {
                                             )
                                             .font(.system(size: 13.5))
                                             .lineSpacing(3.5)
-                                            .textSelection(.enabled)
+                                            .multilineTextAlignment(.leading)
                                             .frame(maxWidth: .infinity, alignment: .leading)
                                         }
-                                        .padding(.horizontal, 10)
-                                        .padding(.vertical, 8)
-                                        .background(
-                                            isSelectedBase
-                                                ? danger.opacity(0.06)
-                                                : MobileTheme.surfaceSubtle(for: colorScheme).opacity(0.55),
-                                            in: RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                        )
+                                        .padding(9)
+                                        .background(isSelectedBase ? MobileTheme.accentSoft(for: colorScheme) : .clear, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                                         .overlay(
                                             RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                                .strokeBorder(
-                                                    isSelectedBase ? danger.opacity(0.32) : MobileTheme.hairline(for: colorScheme),
-                                                    lineWidth: isSelectedBase ? 1.0 : 0.6
-                                                )
+                                                .strokeBorder(isSelectedBase ? accent.opacity(0.50) : MobileTheme.hairline(for: colorScheme), lineWidth: isSelectedBase ? 1 : 0.5)
                                         )
-                                        .opacity(currentChoice == .customText ? 0.68 : (isSelectedBase ? 1.0 : 0.76))
+                                        .opacity(isSelectedBase ? 1.0 : 0.48)
                                     }
+                                    .buttonStyle(.plain)
+                                }
 
-                                    if let newT = hunk.targetText, !newT.isEmpty {
-                                        let isSelectedTarget = currentChoice == .acceptTarget
+                                if let newT = hunk.targetText, !newT.isEmpty {
+                                    let isSelectedTarget = !hunk.isProtectedComplex && currentChoice == .acceptTarget
+                                    Button {
+                                        guard !hunk.isProtectedComplex else { return }
+                                        choiceByHunkID[hunk.id] = .acceptTarget
+                                    } label: {
                                         HStack(alignment: .top, spacing: 8) {
                                             Image(systemName: "plus.circle.fill")
-                                                .font(.system(size: 14, weight: .semibold))
+                                                .font(.system(size: 13.5, weight: .semibold))
                                                 .foregroundStyle(pos)
                                                 .padding(.top, 2)
-                                                .accessibilityLabel("修改后")
                                             Text(
                                                 MobileDiffTokenHighlighter.selectiveSideAttributedString(
                                                     hunk: hunk,
@@ -2721,154 +3332,108 @@ struct DocumentTwoWayMergeSheet: View {
                                             )
                                             .font(.system(size: 13.5))
                                             .lineSpacing(3.5)
-                                            .textSelection(.enabled)
+                                            .multilineTextAlignment(.leading)
                                             .frame(maxWidth: .infinity, alignment: .leading)
                                         }
-                                        .padding(.horizontal, 10)
-                                        .padding(.vertical, 8)
-                                        .background(
-                                            isSelectedTarget
-                                                ? pos.opacity(0.06)
-                                                : MobileTheme.surfaceSubtle(for: colorScheme).opacity(0.55),
-                                            in: RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                        )
+                                        .padding(9)
+                                        .background(isSelectedTarget ? MobileTheme.accentSoft(for: colorScheme) : .clear, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                                         .overlay(
                                             RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                                .strokeBorder(
-                                                    isSelectedTarget ? pos.opacity(0.32) : MobileTheme.hairline(for: colorScheme),
-                                                    lineWidth: isSelectedTarget ? 1.0 : 0.6
-                                                )
+                                                .strokeBorder(isSelectedTarget ? accent.opacity(0.50) : MobileTheme.hairline(for: colorScheme), lineWidth: isSelectedTarget ? 1 : 0.5)
                                         )
-                                        .opacity(currentChoice == .customText ? 0.68 : (isSelectedTarget ? 1.0 : 0.76))
+                                        .opacity(isSelectedTarget ? 1.0 : 0.48)
                                     }
-
-                                    if hunk.isProtectedComplex {
-                                        HStack {
-                                            Text("此复杂块将原样保留底稿结构，如需修改可在生成后用 Word/WPS 打开。")
-                                                .font(.system(size: 11.5))
-                                                .foregroundStyle(MobileTheme.tertiaryInk(for: colorScheme))
-                                            Spacer()
-                                            Button("分享打开") {
-                                                let ref = preferTargetAsTemplate ? targetAsset : baseAsset
-                                                Task {
-                                                    if let url = await store.shareableOriginalURL(for: ref, preferExactAsset: true) {
-                                                        onShareCreated(url)
-                                                    }
-                                                }
-                                            }
-                                            .font(.system(size: 11.5, weight: .semibold))
-                                            .foregroundStyle(accent)
-                                        }
-                                    } else {
-                                        HStack(spacing: 6) {
-                                            ForEach(DocumentMergeDecision.Choice.allCases, id: \.self) { choice in
-                                                let active = currentChoice == choice
-                                                Button {
-                                                    MobileHaptics.selection()
-                                                    choiceByHunkID[hunk.id] = choice
-                                                    if choice == .customText && customTextByHunkID[hunk.id] == nil {
-                                                        customTextByHunkID[hunk.id] = hunk.targetText ?? hunk.baseText ?? ""
-                                                    }
-                                                } label: {
-                                                    Text(choice.localizedLabel)
-                                                        .font(.system(size: 12, weight: active ? .semibold : .medium))
-                                                        .foregroundStyle(active ? .white : .primary)
-                                                        .frame(maxWidth: .infinity)
-                                                        .padding(.vertical, 6.5)
-                                                        .background(
-                                                            active ? accent : MobileTheme.surfaceSubtle(for: colorScheme),
-                                                            in: RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                                        )
-                                                }
-                                                .buttonStyle(.plain)
-                                            }
-                                        }
-
-                                        if currentChoice == .customText {
-                                            TextField(
-                                                "直接微调该段定稿措辞…",
-                                                text: Binding(
-                                                    get: { customTextByHunkID[hunk.id] ?? hunk.targetText ?? hunk.baseText ?? "" },
-                                                    set: { customTextByHunkID[hunk.id] = $0 }
-                                                ),
-                                                axis: .vertical
-                                            )
-                                            .lineLimit(2...6)
-                                            .font(.system(size: 13.5))
-                                            .padding(9)
-                                            .background(MobileTheme.inspectorFieldSurface(for: colorScheme), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-                                            .overlay(
-                                                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                                    .strokeBorder(accent.opacity(0.45), lineWidth: 1)
-                                            )
-                                        }
-                                    }
+                                    .buttonStyle(.plain)
                                 }
-                                .padding(12)
-                                .background(MobileTheme.surfaceElevated(for: colorScheme), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                        .strokeBorder(MobileTheme.hairline(for: colorScheme), lineWidth: 0.75)
-                                )
+
+                                if currentChoice == .customText && !hunk.isProtectedComplex {
+                                    TextField(
+                                        "微调正文…",
+                                        text: Binding(
+                                            get: { customTextByHunkID[hunk.id] ?? hunk.targetText ?? hunk.baseText ?? "" },
+                                            set: { customTextByHunkID[hunk.id] = $0 }
+                                        ),
+                                        axis: .vertical
+                                    )
+                                    .lineLimit(2...6)
+                                    .font(.system(size: 13.5))
+                                    .padding(9)
+                                    .background(MobileTheme.inspectorFieldSurface(for: colorScheme), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                                }
                             }
+                            .padding(.vertical, 12)
                         }
 
-                        // 3. Version Attribution Fields
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("新版本信息（可选）")
-                                .font(.system(size: 12, weight: .semibold))
-                                .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
-                            HStack(spacing: 8) {
-                                TextField("定稿人（如：我）", text: $editorNameDraft)
-                                    .font(.system(size: 13))
-                                    .padding(9)
-                                    .frame(maxWidth: 140)
-                                    .background(MobileTheme.surfaceElevated(for: colorScheme), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-                                TextField("版本备注（默认：挑拣合成净版）", text: $changeNoteDraft)
-                                    .font(.system(size: 13))
-                                    .padding(9)
-                                    .background(MobileTheme.surfaceElevated(for: colorScheme), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        Rectangle()
+                            .fill(MobileTheme.hairline(for: colorScheme))
+                            .frame(height: 0.5)
+
+                        Button {
+                            withAnimation(MobileMotion.accessible(MobileMotion.settleStrong, reduced: reduceMotion)) {
+                                isPreviewExpanded.toggle()
                             }
+                        } label: {
+                            HStack {
+                                Text("合并预览")
+                                    .font(.system(size: 12.5, weight: .semibold))
+                                Spacer()
+                                Image(systemName: isPreviewExpanded ? "chevron.up" : "chevron.down")
+                                    .font(.system(size: 10.5, weight: .bold))
+                                    .foregroundStyle(MobileTheme.tertiaryInk(for: colorScheme))
+                            }
+                            .padding(.vertical, 11)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+
+                        if isPreviewExpanded {
+                            Text(
+                                report.previewMergedText(
+                                    preferTargetAsTemplate: preferTargetAsTemplate,
+                                    decisions: compiledDecisions
+                                )
+                            )
+                            .font(.system(size: 14))
+                            .lineSpacing(4)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(12)
+                            .background(MobileTheme.inspectorFieldSurface(for: colorScheme), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                            .padding(.bottom, 8)
                         }
                     }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+                    .background(MobileTheme.surfaceElevated(for: colorScheme), in: paperShape)
+                    .overlay(paperShape.strokeBorder(MobileTheme.hairline(for: colorScheme), lineWidth: 0.5))
                     .padding(16)
                 }
                 .charkleDismissKeyboardOnScroll()
                 .background(MobileTheme.galleryGround(for: colorScheme))
                 .safeAreaInset(edge: .bottom) {
-                    HStack(spacing: 12) {
-                        Button {
-                            showCleanPreview.toggle()
-                        } label: {
-                            Text(showCleanPreview ? "返回挑拣" : "净版预览")
-                                .font(.system(size: 14, weight: .semibold))
-                                .foregroundStyle(.primary)
-                                .padding(.horizontal, 16)
-                                .padding(.vertical, 12)
-                                .background(MobileTheme.surfaceElevated(for: colorScheme), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                        .strokeBorder(MobileTheme.borderStrong(for: colorScheme), lineWidth: 0.75)
-                                )
-                        }
-                        .buttonStyle(MobileTactileButtonStyle())
+                    HStack(spacing: 8) {
+                        TextField("修改人", text: $editorNameDraft)
+                            .font(.system(size: 12.5))
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 8)
+                            .frame(maxWidth: 96)
+                            .background(MobileTheme.surfaceElevated(for: colorScheme), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+
+                        TextField("备注（可选）", text: $changeNoteDraft)
+                            .font(.system(size: 12.5))
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 8)
+                            .background(MobileTheme.surfaceElevated(for: colorScheme), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
 
                         Button {
                             synthesizeNow()
                         } label: {
-                            HStack(spacing: 6) {
-                                if isSynthesizing {
-                                    ProgressView().controlSize(.small).tint(.white)
-                                } else {
-                                    Image(systemName: "sparkles")
-                                }
-                                Text(isSynthesizing ? "正在生成净版…" : "生成新版本 v\(nextVersionNumber)")
-                                    .font(.system(size: 14.5, weight: .semibold).monospacedDigit())
-                            }
-                            .foregroundStyle(.white)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 12)
-                            .background(MobileTheme.accentButtonFill(for: colorScheme), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                            Text(isSynthesizing ? "保存中…" : "保存为新版本")
+                                .font(.system(size: 13.5, weight: .semibold).monospacedDigit())
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 15)
+                                .padding(.vertical, 9)
+                                .background(MobileTheme.accentButtonFill(for: colorScheme), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                         }
                         .buttonStyle(MobileTactileButtonStyle())
                         .disabled(isSynthesizing)
@@ -2879,7 +3444,7 @@ struct DocumentTwoWayMergeSheet: View {
                 }
             }
         }
-        .navigationTitle("按差异合成新版本")
+        .navigationTitle("合并")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
@@ -2894,7 +3459,6 @@ struct DocumentTwoWayMergeSheet: View {
         MobileKeyboard.dismiss()
         let ed = editorNameDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         let noteRaw = changeNoteDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-        let defaultNote = revertedCount > 0 ? "挑拣合成(调整\(revertedCount)处)" : "确认合成定稿"
         let decisions = compiledDecisions
         let preferTarget = preferTargetAsTemplate
 
@@ -2905,20 +3469,20 @@ struct DocumentTwoWayMergeSheet: View {
                     targetAssetID: report.targetAssetID,
                     preferTargetAsTemplate: preferTarget,
                     decisions: decisions,
-                    editorName: ed.isEmpty ? nil : ed,
-                    changeNote: noteRaw.isEmpty ? defaultNote : noteRaw
+                    editorName: (ed.isEmpty || ed == "本机") ? nil : ed,
+                    changeNote: noteRaw.isEmpty ? nil : noteRaw
                 )
                 _ = try? await store.engine.manageVersionStack(.setPrimary(assetID: created.id))
                 await store.reloadAll()
                 MobileHaptics.success()
                 createdAsset = store.liveAsset(id: created.id) ?? created
-                store.showToast("已合成 v\(nextVersionNumber) 并自动设为主版本", tone: .success)
+                store.showToast("已生成 v\(nextVersionNumber)", tone: .success)
                 if store.hasConnectedCloudBackend {
                     Task { await store.syncNow(quiet: true) }
                 }
             } catch {
                 MobileHaptics.error()
-                store.showToast("合成新版本失败：\(error.localizedDescription)", tone: .error)
+                store.showToast("生成失败：\(error.localizedDescription)", tone: .error)
             }
             isSynthesizing = false
         }
@@ -3001,7 +3565,6 @@ enum MobileDiffTokenHighlighter {
         return result
     }
 
-    /// Slices shared prefix and suffix when `inlineTokens` is empty so fallback rows still highlight only the mutated span.
     private static func fallbackCommonBoundaryTokens(
         baseText: String,
         targetText: String
@@ -3165,8 +3728,7 @@ private struct MobileEnhancedPDFKitView: View {
             if let document {
                 EnhancedPDFViewRepresentable(document: document, continuous: continuous)
             } else if isLoading {
-                ProgressView("正在打开 PDF…")
-                    .font(.system(size: 13))
+                ProgressView()
             } else {
                 Text("无法解析此 PDF 文档")
                     .font(.system(size: 13))
