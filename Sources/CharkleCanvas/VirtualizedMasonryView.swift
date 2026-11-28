@@ -262,7 +262,7 @@ public nonisolated enum MasonryLayoutEngine {
         guard direction != 0 else { return max(minColumnWidth, min(maxColumnWidth, currentWidth)) }
         let zoomIn = direction > 0
         switch layoutMode {
-        case .verticalMasonry, .galleryFilmstrip, .ringGallery:
+        case .verticalMasonry, .galleryFilmstrip, .ringGallery, .compactList:
             let minCols = minReachableVerticalColumns(containerWidth: containerWidth, spacing: spacing, horizontalPadding: horizontalPadding)
             let maxCols = maxReachableVerticalColumns(containerWidth: containerWidth, spacing: spacing, horizontalPadding: horizontalPadding)
             let currentCols = verticalColumnCount(
@@ -468,7 +468,7 @@ public nonisolated enum MasonryLayoutEngine {
         bottomInset: CGFloat
     ) -> MasonryLayoutSnapshot {
         switch layoutMode {
-        case .verticalMasonry, .galleryFilmstrip, .ringGallery:
+        case .verticalMasonry, .galleryFilmstrip, .ringGallery, .compactList:
             return computeVertical(
                 assets: assets,
                 containerWidth: containerWidth,
@@ -685,6 +685,10 @@ public struct MasonryCallbacks {
     public var onPermanentlyDeleteAssets: ([UUID]) -> Void
     public var onResolveDragFileURL: (UUID) -> URL?
     public var onZoomColumnWidth: ((CGFloat) -> Void)?
+    public var onMergeIntoVersionStack: ([UUID], UUID?) -> Void
+    public var onSetPrimaryVersion: (UUID) -> Void
+    public var onUnstackVersion: (UUID) -> Void
+    public var onOpenVersionDiff: (AssetRecord) -> Void
 
     public init(
         onOpenQuickLook: @escaping (AssetRecord) -> Void = { _ in },
@@ -704,7 +708,11 @@ public struct MasonryCallbacks {
         onRestoreAssets: @escaping ([UUID]) -> Void = { _ in },
         onPermanentlyDeleteAssets: @escaping ([UUID]) -> Void = { _ in },
         onResolveDragFileURL: @escaping (UUID) -> URL? = { _ in nil },
-        onZoomColumnWidth: ((CGFloat) -> Void)? = nil
+        onZoomColumnWidth: ((CGFloat) -> Void)? = nil,
+        onMergeIntoVersionStack: @escaping ([UUID], UUID?) -> Void = { _, _ in },
+        onSetPrimaryVersion: @escaping (UUID) -> Void = { _ in },
+        onUnstackVersion: @escaping (UUID) -> Void = { _ in },
+        onOpenVersionDiff: @escaping (AssetRecord) -> Void = { _ in }
     ) {
         self.onOpenQuickLook = onOpenQuickLook
         self.onDropExternalInputs = onDropExternalInputs
@@ -724,6 +732,10 @@ public struct MasonryCallbacks {
         self.onPermanentlyDeleteAssets = onPermanentlyDeleteAssets
         self.onResolveDragFileURL = onResolveDragFileURL
         self.onZoomColumnWidth = onZoomColumnWidth
+        self.onMergeIntoVersionStack = onMergeIntoVersionStack
+        self.onSetPrimaryVersion = onSetPrimaryVersion
+        self.onUnstackVersion = onUnstackVersion
+        self.onOpenVersionDiff = onOpenVersionDiff
     }
 }
 
@@ -1155,7 +1167,7 @@ private final class MasonryCGImageBox {
     }
 }
 
-private enum MasonryStaticLayerAssets {
+internal enum MasonryStaticLayerAssets {
     static let cardSurfaceLightCG: CGColor = NSColor.white.cgColor
     static let cardSurfaceDarkCG: CGColor = NSColor.charkleHex("#1E2024").cgColor
     static let hairlineLightCG: CGColor = NSColor.black.withAlphaComponent(0.08).cgColor
@@ -1314,14 +1326,18 @@ private enum MasonryStaticLayerAssets {
     static func cachedProceduralCardImage(for asset: AssetRecord, size: CGSize, isDark: Bool, scale: CGFloat) -> CGImage? {
         let wBucket = max(40, Int((size.width / 8).rounded()) * 8)
         let hBucket = max(40, Int((size.height / 8).rounded()) * 8)
-        let key = "\(asset.id.uuidString)-\(asset.title.hashValue)-\(isDark ? 1 : 0)-\(wBucket)x\(hBucket)-\(Int(scale))" as NSString
+        let stackVer = asset.richMetadata?.versionStack?.versionNumber ?? 0
+        let stackPinned = (asset.richMetadata?.versionStack?.isPinnedPrimary == true) ? 1 : 0
+        let key = "\(asset.id.uuidString)-\(asset.title.hashValue)-\(stackVer)-\(stackPinned)-\(isDark ? 1 : 0)-\(wBucket)x\(hBucket)-\(Int(scale))" as NSString
         return proceduralCache.object(forKey: key)?.image
     }
 
     static func proceduralCardImage(for asset: AssetRecord, size: CGSize, isDark: Bool, scale: CGFloat) -> CGImage? {
         let wBucket = max(40, Int((size.width / 8).rounded()) * 8)
         let hBucket = max(40, Int((size.height / 8).rounded()) * 8)
-        let key = "\(asset.id.uuidString)-\(asset.title.hashValue)-\(isDark ? 1 : 0)-\(wBucket)x\(hBucket)-\(Int(scale))" as NSString
+        let stackVer = asset.richMetadata?.versionStack?.versionNumber ?? 0
+        let stackPinned = (asset.richMetadata?.versionStack?.isPinnedPrimary == true) ? 1 : 0
+        let key = "\(asset.id.uuidString)-\(asset.title.hashValue)-\(stackVer)-\(stackPinned)-\(isDark ? 1 : 0)-\(wBucket)x\(hBucket)-\(Int(scale))" as NSString
         if let hit = proceduralCache.object(forKey: key) { return hit.image }
 
         let targetSize = CGSize(width: CGFloat(wBucket), height: CGFloat(hBucket))
@@ -1376,7 +1392,127 @@ private enum MasonryStaticLayerAssets {
                         in: CGRect(x: 14, y: bounds.height - 28, width: bounds.width - 28, height: 18),
                         withAttributes: titleAttrs
                     )
-                case .webBookmark, .document, .designFile, .model3D:
+                case .document:
+                    let paperColor = isDark ? NSColor.charkleHex("#242730") : NSColor.charkleHex("#FAF9F6")
+                    let barHeight = min(68, max(52, bounds.height * 0.34))
+                    let previewRect = CGRect(x: 0, y: 0, width: bounds.width, height: max(24, bounds.height - barHeight))
+                    let infoRect = CGRect(x: 0, y: previewRect.maxY, width: bounds.width, height: barHeight)
+
+                    paperColor.setFill()
+                    ctx.fill(previewRect)
+                    elevatedColor.setFill()
+                    ctx.fill(infoRect)
+
+                    let ext = CanvasFormatters.fileExtensionBadge(for: asset.fileName)
+                    let family = asset.richMetadata?.document?.parsedFormatFamily ?? DocumentFormatFamily.detect(fileExtension: ext)
+                    let isRedHeader = family == .pdf || asset.title.contains("红头") || asset.title.contains("通知") || asset.title.contains("汇报") || asset.title.contains("纪要")
+                    let accentHex: String = switch family {
+                    case .xlsx: "#1D7A46"
+                    case .pdf: "#C83E37"
+                    case .pptx: "#C96A1B"
+                    case .docx, .legacyOffice: "#2A60E0"
+                    default: "#4B5563"
+                    }
+                    let docAccent = NSColor.charkleHex(accentHex)
+                    let headerBarColor = isRedHeader ? NSColor.charkleHex("#D93B30") : docAccent
+                    NSBezierPath(roundedRect: CGRect(x: 14, y: 14, width: min(64, bounds.width * 0.42), height: 4), xRadius: 2, yRadius: 2).fill()
+                    headerBarColor.setFill()
+                    NSBezierPath(roundedRect: CGRect(x: 14, y: 14, width: min(64, bounds.width * 0.42), height: 4), xRadius: 2, yRadius: 2).fill()
+
+                    if family == .xlsx {
+                        let gridTop: CGFloat = 28
+                        let cols = 3
+                        let rows = 3
+                        let cellGap: CGFloat = 4
+                        let availW = max(36, bounds.width - 28)
+                        let availH = max(24, min(64, previewRect.height - gridTop - 12))
+                        let cellW = (availW - cellGap * CGFloat(cols - 1)) / CGFloat(cols)
+                        let cellH = (availH - cellGap * CGFloat(rows - 1)) / CGFloat(rows)
+                        for r in 0..<rows {
+                            for c in 0..<cols {
+                                let cellRect = CGRect(
+                                    x: 14 + CGFloat(c) * (cellW + cellGap),
+                                    y: gridTop + CGFloat(r) * (cellH + cellGap),
+                                    width: cellW,
+                                    height: cellH
+                                )
+                                if r == 0 && c == 1 {
+                                    NSColor.charkleHex("#249A4B").withAlphaComponent(0.24).setFill()
+                                } else if r == 1 && c == 1 {
+                                    NSColor.charkleHex("#D93B30").withAlphaComponent(0.24).setFill()
+                                } else {
+                                    (isDark ? NSColor.white.withAlphaComponent(0.11) : NSColor.black.withAlphaComponent(0.075)).setFill()
+                                }
+                                NSBezierPath(roundedRect: cellRect, xRadius: 2, yRadius: 2).fill()
+                            }
+                        }
+                    } else {
+                        let snippet = (asset.richMetadata?.textExcerpt ?? asset.ocrText ?? asset.notes)
+                            .trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !snippet.isEmpty && previewRect.height >= 64 {
+                            let snPara = NSMutableParagraphStyle()
+                            snPara.lineSpacing = 2.5
+                            snPara.lineBreakMode = .byTruncatingTail
+                            let snAttrs: [NSAttributedString.Key: Any] = [
+                                .font: NSFont.systemFont(ofSize: 10.5, weight: .regular),
+                                .foregroundColor: secondaryTextColor,
+                                .paragraphStyle: snPara
+                            ]
+                            (snippet as NSString).draw(
+                                in: CGRect(x: 14, y: 26, width: max(24, bounds.width - 28), height: max(20, previewRect.height - 36)),
+                                withAttributes: snAttrs
+                            )
+                        } else {
+                            let widths: [CGFloat] = [0.84, 0.72, 0.80, 0.56]
+                            for (idx, frac) in widths.enumerated() {
+                                let lineY = CGFloat(28 + idx * 10)
+                                guard lineY + 4 < previewRect.maxY - 6 else { break }
+                                if idx == 2 {
+                                    docAccent.withAlphaComponent(0.30).setFill()
+                                } else {
+                                    (isDark ? NSColor.white.withAlphaComponent(0.13) : NSColor.black.withAlphaComponent(0.09)).setFill()
+                                }
+                                NSBezierPath(roundedRect: CGRect(x: 14, y: lineY, width: max(20, (bounds.width - 28) * frac), height: 3.5), xRadius: 1.75, yRadius: 1.75).fill()
+                            }
+                        }
+                    }
+
+                    (isDark ? NSColor.white.withAlphaComponent(0.08) : NSColor.black.withAlphaComponent(0.07)).setFill()
+                    ctx.fill(CGRect(x: 0, y: infoRect.minY, width: bounds.width, height: 0.75))
+
+                    let para = NSMutableParagraphStyle()
+                    para.lineBreakMode = .byTruncatingTail
+                    let titleAttrs: [NSAttributedString.Key: Any] = [
+                        .font: NSFont.systemFont(ofSize: 12, weight: .semibold),
+                        .foregroundColor: primaryTextColor,
+                        .paragraphStyle: para
+                    ]
+                    (asset.title as NSString).draw(
+                        in: CGRect(x: 12, y: infoRect.minY + 8, width: max(24, bounds.width - 24), height: 32),
+                        withAttributes: titleAttrs
+                    )
+
+                    let footerMeta: String = {
+                        if let stack = asset.richMetadata?.versionStack {
+                            let tag = stack.isPinnedPrimary ? "主版 \(stack.displayVersionTag)" : stack.displayVersionTag
+                            return "\(ext) / \(tag)"
+                        }
+                        if let doc = asset.richMetadata?.document {
+                            if !doc.sheetNames.isEmpty { return "\(ext) / \(doc.sheetNames.count) 工作表" }
+                            if doc.pageCount > 0 { return "\(ext) / \(doc.pageCount) 页" }
+                        }
+                        return ext
+                    }()
+                    let metaAttrs: [NSAttributedString.Key: Any] = [
+                        .font: NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .semibold),
+                        .foregroundColor: docAccent
+                    ]
+                    (footerMeta as NSString).draw(
+                        at: CGPoint(x: 12, y: infoRect.maxY - 19),
+                        withAttributes: metaAttrs
+                    )
+
+                case .webBookmark, .designFile, .model3D:
                     elevatedColor.setFill()
                     ctx.fill(bounds)
                     let accent = NSColor.charkleHex(primaryHex)
@@ -1927,7 +2063,9 @@ private final class MasonryTileLayer {
         // Thumbnail image (synchronous zero-bridging CGImage fast path -> async off-main-thread fallback)
         // Only compute proceduralKey String when displaying or falling back to a procedural card.
         func makeProceduralKey() -> String {
-            "\(asset.id.uuidString)-\(asset.title.hashValue)-\(asset.dominantColors.first?.hex ?? "")-\(isDark ? 1 : 0)-\(Int((scale * 10).rounded()))"
+            let stackVer = asset.richMetadata?.versionStack?.versionNumber ?? 0
+            let stackPinned = (asset.richMetadata?.versionStack?.isPinnedPrimary == true) ? 1 : 0
+            return "\(asset.id.uuidString)-\(asset.title.hashValue)-\(stackVer)-\(stackPinned)-\(asset.dominantColors.first?.hex ?? "")-\(isDark ? 1 : 0)-\(Int((scale * 10).rounded()))"
         }
 
         let proceduralNeedsRefresh: Bool
@@ -2102,25 +2240,31 @@ private final class MasonryTileLayer {
     }
 
     private static func mediaBadgeText(for asset: AssetRecord) -> String? {
+        let stackSuffix: String = if let stack = asset.richMetadata?.versionStack {
+            " / \(stack.displayVersionTag)"
+        } else {
+            ""
+        }
         switch asset.mediaKind {
         case .image:
-            return nil
+            return asset.richMetadata?.versionStack?.displayVersionTag
         case .animatedImage:
-            return "GIF"
+            return "GIF" + stackSuffix
         case .video:
-            return CanvasFormatters.durationString(asset.durationSeconds)
+            return CanvasFormatters.durationString(asset.durationSeconds) + stackSuffix
         case .audio:
-            return "AUDIO"
+            return "AUDIO" + stackSuffix
         case .webBookmark:
             if asset.isGitHubRepo { return "GITHUB" }
             if let post = asset.richMetadata?.socialPost { return post.platform.displayName.uppercased() }
             return "WEB"
         case .document:
-            return asset.fileName.lowercased().hasSuffix(".swatch") ? nil : CanvasFormatters.fileExtensionBadge(for: asset.fileName)
+            if asset.fileName.lowercased().hasSuffix(".swatch") { return nil }
+            return CanvasFormatters.fileExtensionBadge(for: asset.fileName) + stackSuffix
         case .designFile:
-            return CanvasFormatters.fileExtensionBadge(for: asset.fileName)
+            return CanvasFormatters.fileExtensionBadge(for: asset.fileName) + stackSuffix
         case .model3D:
-            return asset.richMetadata?.model3DFormat ?? "3D"
+            return (asset.richMetadata?.model3DFormat ?? "3D") + stackSuffix
         }
     }
 }
@@ -2232,6 +2376,7 @@ public final class MasonryCardGeometryRegistry {
     public static let shared = MasonryCardGeometryRegistry()
 
     private let mountedViews = NSHashTable<MasonryDocumentView>.weakObjects()
+    public var externalCardRectProvider: ((UUID) -> CGRect?)?
 
     private init() {}
 
@@ -2251,7 +2396,7 @@ public final class MasonryCardGeometryRegistry {
     /// the active gallery viewport; prefers the main non-panel workspace window over auxiliary panels.
     public func visibleCardRectInWindow(for assetID: UUID) -> CGRect? {
         let views = mountedViews.allObjects
-        guard !views.isEmpty else { return nil }
+        guard !views.isEmpty else { return externalCardRectProvider?(assetID) }
 
         // 1. Prefer the active main workspace window (never an NSPanel like Notch Shelf)
         if let mainWin = NSApp?.mainWindow, !(mainWin is NSPanel) {
@@ -2281,7 +2426,7 @@ public final class MasonryCardGeometryRegistry {
                 return rect
             }
         }
-        return nil
+        return externalCardRectProvider?(assetID)
     }
 }
 
@@ -2894,7 +3039,7 @@ internal final class MasonryDocumentView: NSView, NSDraggingSource {
             // actually changes — eliminates 120Hz slider-drag twitching and boundary oscillation.
             let width = activeContainerWidth()
             let densityChanged: Bool = switch layoutMode {
-            case .verticalMasonry, .galleryFilmstrip, .ringGallery:
+            case .verticalMasonry, .galleryFilmstrip, .ringGallery, .compactList:
                 MasonryLayoutEngine.verticalColumnCount(
                     containerWidth: width,
                     targetColumnWidth: targetColumnWidth,
@@ -3297,7 +3442,7 @@ internal final class MasonryDocumentView: NSView, NSDraggingSource {
         var atZoomOutLimit = false
 
         switch layoutMode {
-        case .verticalMasonry, .galleryFilmstrip, .ringGallery:
+        case .verticalMasonry, .galleryFilmstrip, .ringGallery, .compactList:
             let cols = layout.columnCount
             let minCols = MasonryLayoutEngine.minReachableVerticalColumns(
                 containerWidth: width,
@@ -4578,6 +4723,26 @@ internal final class MasonryDocumentView: NSView, NSDraggingSource {
             if let hex = asset.dominantColors.first?.hex.uppercased() {
                 menu.addItem(makeMenuItem(title: "复制主色 \(hex)", symbol: "paintpalette") { [weak self] in
                     self?.callbacks.onCopyColorHex(hex)
+                })
+            }
+
+            if targets.count >= 2 {
+                menu.addItem(.separator())
+                menu.addItem(makeMenuItem(title: "合并为版本叠（\(targets.count) 项）", symbol: "square.stack.3d.up") { [weak self] in
+                    self?.callbacks.onMergeIntoVersionStack(targets, asset.id)
+                })
+            } else if let stack = asset.richMetadata?.versionStack {
+                menu.addItem(.separator())
+                menu.addItem(makeMenuItem(title: "打开版本差异对比", symbol: "arrow.left.arrow.right") { [weak self] in
+                    self?.callbacks.onOpenVersionDiff(asset)
+                })
+                if !stack.isPinnedPrimary {
+                    menu.addItem(makeMenuItem(title: "设为主版本（锁定对外发送）", symbol: "pin.fill") { [weak self] in
+                        self?.callbacks.onSetPrimaryVersion(asset.id)
+                    })
+                }
+                menu.addItem(makeMenuItem(title: "拆出为独立素材", symbol: "rectangle.portrait.and.arrow.right") { [weak self] in
+                    self?.callbacks.onUnstackVersion(asset.id)
                 })
             }
 

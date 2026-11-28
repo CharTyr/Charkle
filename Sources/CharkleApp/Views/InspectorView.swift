@@ -53,6 +53,9 @@ public struct InspectorView: View {
     @State private var confirmSinglePermanentDelete: Bool = false
     @State private var draggingInspectorSection: InspectorInfoSection? = nil
     @State private var dropTargetInspectorSection: InspectorInfoSection? = nil
+    @State private var isVersionStackExpanded: Bool = true
+    @State private var versionEditorDraft: String = ""
+    @State private var versionNoteDraft: String = ""
 
     @FocusState private var isTitleFocused: Bool
     @FocusState private var isNotesFocused: Bool
@@ -234,6 +237,8 @@ public struct InspectorView: View {
         .onAppear {
             titleDraft = asset.title
             notesDraft = asset.notes
+            versionEditorDraft = asset.richMetadata?.versionStack?.editorName ?? ""
+            versionNoteDraft = asset.richMetadata?.versionStack?.changeNote ?? ""
             if isActive, isQuickLookHosted || coordinator.isInspectorVisible || coordinator.selectedDestination == .inbox {
                 library.refreshInspectorContext(for: asset.id)
             }
@@ -245,6 +250,8 @@ public struct InspectorView: View {
             flushPendingNotesSave()
             titleDraft = asset.title
             notesDraft = asset.notes
+            versionEditorDraft = asset.richMetadata?.versionStack?.editorName ?? ""
+            versionNoteDraft = asset.richMetadata?.versionStack?.changeNote ?? ""
             if isActive, isQuickLookHosted || coordinator.isInspectorVisible || coordinator.selectedDestination == .inbox {
                 library.refreshInspectorContext(for: newID)
             }
@@ -531,7 +538,13 @@ public struct InspectorView: View {
     ) -> some View {
         switch section {
         case .previewIdentity:
-            singleAssetPreviewIdentitySection(asset, visibleSections: visibleSections, showsTopDivider: showsTopDivider)
+            VStack(alignment: .leading, spacing: 0) {
+                singleAssetPreviewIdentitySection(asset, visibleSections: visibleSections, showsTopDivider: showsTopDivider)
+                let stackSiblings = library.versionStackSiblings(for: asset.id)
+                if !asset.isTrashed && (stackSiblings.count > 1 || asset.richMetadata?.versionStack != nil) {
+                    singleAssetVersionStackSection(asset, siblings: stackSiblings)
+                }
+            }
         case .quickActions:
             singleAssetQuickActionsSection(asset, visibleSections: visibleSections, showsTopDivider: showsTopDivider)
         case .colorsAndTags:
@@ -1694,17 +1707,32 @@ public struct InspectorView: View {
                             .buttonStyle(.charkle(.destructive, size: .sm, fullWidth: true))
                         }
                     } else {
-                        Button {
-                            Task {
-                                if let board = await moodboards.createBoardFromSelection(assetIDs: ids, title: "灵感合集 (\(ids.count))") {
-                                    coordinator.openMoodboard(board.id)
-                                    coordinator.showToast("已用 \(ids.count) 项素材生成情绪板", icon: "sparkles.rectangle.stack")
+                        VStack(spacing: 7) {
+                            Button {
+                                Task {
+                                    if let board = await moodboards.createBoardFromSelection(assetIDs: ids, title: "灵感合集 (\(ids.count))") {
+                                        coordinator.openMoodboard(board.id)
+                                        coordinator.showToast("已用 \(ids.count) 项素材生成情绪板", icon: "sparkles.rectangle.stack")
+                                    }
                                 }
+                            } label: {
+                                Label("从所选生成情绪板", systemImage: "sparkles.rectangle.stack")
                             }
-                        } label: {
-                            Label("从所选生成情绪板", systemImage: "sparkles.rectangle.stack")
+                            .buttonStyle(.charkle(.accent, size: .sm, fullWidth: true))
+
+                            Button {
+                                let anchorID = selectedAssets.last?.id
+                                Task {
+                                    let merged = await library.mergeAssetsIntoVersionStack(ids, targetAssetID: anchorID)
+                                    if !merged.isEmpty {
+                                        coordinator.showToast("已将 \(ids.count) 项合并为版本叠", icon: "square.stack.3d.up.fill", tone: .success)
+                                    }
+                                }
+                            } label: {
+                                Label("合并为版本叠（\(ids.count) 项）", systemImage: "square.stack.3d.up")
+                            }
+                            .buttonStyle(.charkle(.standard, size: .sm, fullWidth: true))
                         }
-                        .buttonStyle(.charkle(.accent, size: .sm, fullWidth: true))
                     }
                 }
                 .padding(.horizontal, 14)
@@ -2700,6 +2728,254 @@ public struct InspectorView: View {
             if results.count >= 9 { break }
         }
         return results
+    }
+
+    // MARK: - Universal Version Stack Section (Shared 1:1 Between Main Workspace & Quick Look)
+
+    private func singleAssetVersionStackSection(_ asset: AssetRecord, siblings: [AssetRecord]) -> some View {
+        let resolvedPrimary = library.primaryVersionAsset(for: asset.id) ?? asset
+        let primaryVer = resolvedPrimary.richMetadata?.versionStack?.versionNumber ?? 1
+        let newerCount = library.newerThanPrimaryCount(for: asset.id)
+        let warnInk = colorScheme == .dark ? Color(charkleHex: "#FBBF24") : Color(charkleHex: "#B45309")
+        let warnBg = colorScheme == .dark ? Color(charkleHex: "#F2B23E").opacity(0.18) : Color(charkleHex: "#C98212").opacity(0.14)
+        let positiveInk = CharkleTheme.positive(for: colorScheme)
+
+        return CharkleInspectorSection("版本叠", systemImage: "square.stack.3d.up", showsTopDivider: true) {
+            CharkleDisclosureGroup(isExpanded: $isVersionStackExpanded, accentChevronWhenExpanded: true) {
+                VStack(alignment: .leading, spacing: 9) {
+                    if siblings.count >= 2 {
+                        HStack(spacing: 6) {
+                            Button {
+                                let baseID: UUID?
+                                let targetID: UUID?
+                                if asset.id != resolvedPrimary.id {
+                                    baseID = resolvedPrimary.id
+                                    targetID = asset.id
+                                } else {
+                                    baseID = siblings[siblings.count - 2].id
+                                    targetID = siblings[siblings.count - 1].id
+                                }
+                                let playlist = coordinator.quickLookPlaylist.isEmpty ? library.assets.map(\.id) : coordinator.quickLookPlaylist
+                                coordinator.openQuickLookInDiff(
+                                    assetID: targetID ?? asset.id,
+                                    baseAssetID: baseID,
+                                    targetAssetID: targetID,
+                                    playlist: playlist
+                                )
+                            } label: {
+                                Label("对比版本差异", systemImage: "arrow.left.arrow.right")
+                            }
+                            .buttonStyle(.charkle(.accent, size: .xs, fullWidth: true))
+
+                            if asset.id != resolvedPrimary.id {
+                                Button {
+                                    Task {
+                                        _ = await library.setPrimaryVersion(asset.id)
+                                        let vNum = asset.richMetadata?.versionStack?.versionNumber ?? 1
+                                        coordinator.showToast("已将 v\(vNum) 锁定为主版本", icon: "pin.fill", tone: .success)
+                                    }
+                                } label: {
+                                    Label("设为主版", systemImage: "pin.fill")
+                                }
+                                .buttonStyle(.charkle(.standard, size: .xs))
+                                .fixedSize()
+                            }
+                        }
+                    }
+
+                    VStack(spacing: 5) {
+                        ForEach(Array(siblings.enumerated()), id: \.element.id) { idx, ver in
+                            let vMeta = ver.richMetadata?.versionStack
+                            let vNum = vMeta?.versionNumber ?? (idx + 1)
+                            let isPrimary = ver.id == resolvedPrimary.id
+                            let isCurrent = ver.id == asset.id
+                            let editor = (vMeta?.editorName?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 }
+                            let note = (vMeta?.changeNote?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 }
+
+                            HStack(spacing: 8) {
+                                Button {
+                                    if isQuickLookHosted {
+                                        var playlist = coordinator.quickLookPlaylist
+                                        if !playlist.contains(ver.id) {
+                                            playlist.append(ver.id)
+                                        }
+                                        coordinator.openQuickLook(assetID: ver.id, playlist: playlist)
+                                    } else {
+                                        onOpenQuickLook(ver)
+                                    }
+                                } label: {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        HStack(spacing: 5) {
+                                            Text("v\(vNum)")
+                                                .font(CharkleTheme.text(.caption, weight: .bold))
+                                                .monospacedDigit()
+                                                .foregroundStyle(isCurrent ? accentColor : .primary)
+
+                                            Text(note ?? vMeta?.versionLabel ?? ver.title)
+                                                .font(CharkleTheme.text(.caption, weight: isCurrent ? .semibold : .medium))
+                                                .foregroundStyle(.primary)
+                                                .lineLimit(1)
+
+                                            if isPrimary {
+                                                Text("主版")
+                                                    .font(CharkleTheme.text(.caption, weight: .bold))
+                                                    .foregroundStyle(positiveInk)
+                                                    .padding(.horizontal, 4.5)
+                                                    .padding(.vertical, 1)
+                                                    .background(positiveInk.opacity(0.14), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.xs, style: .continuous))
+                                            }
+                                        }
+
+                                        HStack(spacing: 4) {
+                                            if let editor {
+                                                Text(editor)
+                                            }
+                                            Text(Self.mediaTimestampFormatter.string(from: ver.updatedAt))
+                                                .monospacedDigit()
+                                            if let diff = ver.richMetadata?.document?.diffSummary, diff.totalChangedBlocks > 0 {
+                                                Text(diff.compactBridgeLabel)
+                                                    .monospacedDigit()
+                                                    .foregroundStyle(warnInk)
+                                            }
+                                        }
+                                        .font(CharkleTheme.text(.caption))
+                                        .foregroundStyle(.tertiary)
+                                        .lineLimit(1)
+                                    }
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+
+                                if !isPrimary {
+                                    Button {
+                                        Task {
+                                            _ = await library.setPrimaryVersion(ver.id)
+                                            coordinator.showToast("已将 v\(vNum) 锁定为主版本", icon: "pin.fill", tone: .success)
+                                        }
+                                    } label: {
+                                        Image(systemName: "pin")
+                                            .font(.system(size: 10.5, weight: .medium))
+                                            .foregroundStyle(.secondary)
+                                            .frame(width: 22, height: 22)
+                                            .background(Color.primary.opacity(0.06), in: Circle())
+                                    }
+                                    .buttonStyle(.plain)
+                                    .help("将 v\(vNum) 锁定为对外发送主版本")
+                                }
+                            }
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 6)
+                            .background(
+                                isCurrent
+                                    ? accentSoft
+                                    : CharkleTheme.inspectorFieldSurface(for: colorScheme),
+                                in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous)
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous)
+                                    .strokeBorder(
+                                        isCurrent ? accentBorder : CharkleTheme.hairline(for: colorScheme),
+                                        lineWidth: CharkleTheme.hairlineWidth
+                                    )
+                            )
+                        }
+                    }
+
+                    // Current version editor & note quick fields
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text("当前版本修订备注")
+                            .font(CharkleTheme.text(.caption, weight: .medium))
+                            .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
+
+                        HStack(spacing: 6) {
+                            TextField("修改人", text: $versionEditorDraft)
+                                .textFieldStyle(.plain)
+                                .font(CharkleTheme.text(.caption))
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 5)
+                                .frame(width: 82)
+                                .background(
+                                    CharkleTheme.inspectorFieldSurface(for: colorScheme),
+                                    in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.sm, style: .continuous)
+                                )
+                                .onSubmit { commitVersionMeta(for: asset) }
+
+                            TextField("版本备注（回车保存）", text: $versionNoteDraft)
+                                .textFieldStyle(.plain)
+                                .font(CharkleTheme.text(.caption))
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 5)
+                                .background(
+                                    CharkleTheme.inspectorFieldSurface(for: colorScheme),
+                                    in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.sm, style: .continuous)
+                                )
+                                .onSubmit { commitVersionMeta(for: asset) }
+
+                            Button {
+                                commitVersionMeta(for: asset)
+                            } label: {
+                                Image(systemName: "checkmark")
+                                    .font(.system(size: 10.5, weight: .bold))
+                                    .frame(width: 24, height: 24)
+                            }
+                            .buttonStyle(.charkle(.standard, size: .icon, iconDimension: 24))
+                            .help("保存修改人与备注")
+                        }
+                    }
+
+                    if siblings.count > 1 {
+                        Button {
+                            Task {
+                                _ = await library.unstackVersion(asset.id)
+                                coordinator.showToast("已将当前版本拆出为独立素材", icon: "rectangle.portrait.and.arrow.right")
+                            }
+                        } label: {
+                            Label("拆出为独立素材", systemImage: "rectangle.portrait.and.arrow.right")
+                        }
+                        .buttonStyle(.charkle(.subtle, size: .xs))
+                    }
+                }
+                .padding(.top, 6)
+            } label: {
+                HStack(spacing: 6) {
+                    Text("共 \(siblings.count) 版 / 主版 v\(primaryVer)")
+                        .font(CharkleTheme.text(.caption, weight: .semibold))
+                        .monospacedDigit()
+                        .foregroundStyle(.primary)
+
+                    if newerCount > 0 {
+                        Text("+\(newerCount) 新版")
+                            .font(CharkleTheme.text(.caption, weight: .semibold))
+                            .monospacedDigit()
+                            .foregroundStyle(warnInk)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(warnBg, in: Capsule(style: .continuous))
+                    }
+                    Spacer(minLength: 0)
+                }
+            }
+        }
+    }
+
+    private func commitVersionMeta(for asset: AssetRecord) {
+        let editor = versionEditorDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let note = versionNoteDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let label: String? = {
+            let vNum = asset.richMetadata?.versionStack?.versionNumber ?? 1
+            if !editor.isEmpty { return "v\(vNum) (\(editor))" }
+            return nil
+        }()
+        Task {
+            _ = await library.updateVersionMetadata(
+                assetID: asset.id,
+                versionLabel: label,
+                editorName: editor.isEmpty ? nil : editor,
+                changeNote: note.isEmpty ? nil : note
+            )
+            coordinator.showToast("已更新版本修订记录", icon: "checkmark.circle.fill", tone: .success)
+        }
     }
 }
 

@@ -775,7 +775,9 @@ public struct NotchShelfView: View {
                     )
                 )
 
-            if let processing = shelfState.processingMessage {
+            if let prompt = coordinator.pendingVersionStackPrompt, prompt.source == .notchShelf {
+                notchVersionStackPromptBar(prompt)
+            } else if let processing = shelfState.processingMessage {
                 HStack(spacing: 10) {
                     ProgressView().controlSize(.small).tint(.white)
                     Text(processing)
@@ -847,6 +849,81 @@ public struct NotchShelfView: View {
                 .buttonStyle(.plain)
             }
         }
+    }
+
+    private func notchVersionStackPromptBar(_ prompt: AppCoordinatorStore.PendingVersionStackPrompt) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "square.stack.3d.up.fill")
+                .font(.system(size: 13.5, weight: .semibold))
+                .foregroundStyle(activeBlue)
+
+            Text("叠入《\(prompt.candidate.targetTitle)》v\(prompt.candidate.nextVersionNumber)？")
+                .font(CharkleTheme.text(.caption, weight: .semibold))
+                .monospacedDigit()
+                .foregroundStyle(.white)
+                .lineLimit(1)
+
+            TextField(
+                "修改人",
+                text: Binding(
+                    get: { coordinator.pendingVersionStackPrompt?.editorNameDraft ?? "" },
+                    set: { coordinator.pendingVersionStackPrompt?.editorNameDraft = $0 }
+                )
+            )
+            .textFieldStyle(.plain)
+            .font(CharkleTheme.text(.caption))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 4)
+            .frame(width: 72)
+            .background(Color.white.opacity(0.10), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.xs, style: .continuous))
+            .onSubmit {
+                Task { _ = await library.confirmPendingVersionStackPrompt(coordinator: coordinator) }
+            }
+
+            TextField(
+                "备注（回车秒叠入）",
+                text: Binding(
+                    get: { coordinator.pendingVersionStackPrompt?.changeNoteDraft ?? "" },
+                    set: { coordinator.pendingVersionStackPrompt?.changeNoteDraft = $0 }
+                )
+            )
+            .textFieldStyle(.plain)
+            .font(CharkleTheme.text(.caption))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .frame(maxWidth: .infinity)
+            .background(Color.white.opacity(0.10), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.xs, style: .continuous))
+            .onSubmit {
+                Task { _ = await library.confirmPendingVersionStackPrompt(coordinator: coordinator) }
+            }
+
+            Button {
+                Task { _ = await library.confirmPendingVersionStackPrompt(coordinator: coordinator) }
+            } label: {
+                Text("叠入 ↵")
+                    .font(CharkleTheme.text(.caption, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 4)
+                    .background(activeBlue, in: Capsule(style: .continuous))
+            }
+            .buttonStyle(.plain)
+
+            Button {
+                library.dismissPendingVersionStackPrompt(coordinator: coordinator, announce: true)
+            } label: {
+                Text("独立")
+                    .font(CharkleTheme.text(.caption, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.75))
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 4)
+                    .background(Color.white.opacity(0.10), in: Capsule(style: .continuous))
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 12)
     }
 
     private func makeDragItemProvider(for ids: [UUID]) -> NSItemProvider {

@@ -168,10 +168,87 @@ public final class AppCoordinatorStore {
         }
     }
 
-    /// Gallery layout mode: vertical masonry vs. horizontal justified rows.
+    /// Gallery layout mode: vertical masonry, justified rows, filmstrip, ring, or compact index view.
     public var galleryLayoutMode: GalleryLayoutMode {
         didSet { UserDefaults.standard.set(galleryLayoutMode.rawValue, forKey: Keys.galleryLayoutMode) }
     }
+
+    /// Global default gallery layout mode used for destinations without a saved per-destination override.
+    public var defaultGalleryLayoutMode: GalleryLayoutMode {
+        didSet { UserDefaults.standard.set(defaultGalleryLayoutMode.rawValue, forKey: Keys.defaultGalleryLayoutMode) }
+    }
+
+    /// Per-destination layout mode preferences (`folder:<UUID>`, `inbox`, `untagged`, etc. -> `GalleryLayoutMode.rawValue`).
+    public var destinationLayoutOverrides: [String: String] {
+        didSet { UserDefaults.standard.set(destinationLayoutOverrides, forKey: Keys.destinationLayoutOverrides) }
+    }
+
+    /// Sub-mode for `GalleryLayoutMode.compactList`: `2` = 2-Column Tactile Index Grid (default), `1` = 1-Column Folio Strip.
+    public var compactViewColumnMode: Int {
+        didSet {
+            let clamped = compactViewColumnMode == 1 ? 1 : 2
+            if compactViewColumnMode != clamped {
+                compactViewColumnMode = clamped
+                return
+            }
+            UserDefaults.standard.set(clamped, forKey: Keys.compactViewColumnMode)
+        }
+    }
+
+    /// Deep-link launch request when opening Quick Look directly into Version Diff or Scheme B 2-Way Merge.
+    public struct QuickLookDiffLaunchRequest: Equatable, Sendable {
+        public let nonce: UUID
+        public let baseAssetID: UUID?
+        public let targetAssetID: UUID?
+        public let openMergePanel: Bool
+
+        public init(
+            nonce: UUID = UUID(),
+            baseAssetID: UUID? = nil,
+            targetAssetID: UUID? = nil,
+            openMergePanel: Bool = false
+        ) {
+            self.nonce = nonce
+            self.baseAssetID = baseAssetID
+            self.targetAssetID = targetAssetID
+            self.openMergePanel = openMergePanel
+        }
+    }
+
+    public var quickLookDiffRequest: QuickLookDiffLaunchRequest? = nil
+
+    /// Lightweight non-blocking prompt presented when dropping a file matches an existing asset / Version Stack.
+    public struct PendingVersionStackPrompt: Identifiable, Equatable, Sendable {
+        public enum SourceSurface: String, Equatable, Sendable {
+            case mainWorkspace
+            case notchShelf
+        }
+
+        public let id: UUID
+        public let ingestedAssetID: UUID
+        public let candidate: VersionStackCandidate
+        public var editorNameDraft: String
+        public var changeNoteDraft: String
+        public let source: SourceSurface
+
+        public init(
+            id: UUID = UUID(),
+            ingestedAssetID: UUID,
+            candidate: VersionStackCandidate,
+            editorNameDraft: String? = nil,
+            changeNoteDraft: String = "",
+            source: SourceSurface = .mainWorkspace
+        ) {
+            self.id = id
+            self.ingestedAssetID = ingestedAssetID
+            self.candidate = candidate
+            self.editorNameDraft = editorNameDraft ?? candidate.suggestedEditorName ?? ""
+            self.changeNoteDraft = changeNoteDraft
+            self.source = source
+        }
+    }
+
+    public var pendingVersionStackPrompt: PendingVersionStackPrompt? = nil
 
     /// Dual accent source preference: studio cobalt (default) or live macOS system accent.
     public var accentSource: CharkleAccentSource {
@@ -256,13 +333,15 @@ public final class AppCoordinatorStore {
         static let sidebarWidth = "charkle.sidebarWidth"
         static let inspectorWidth = "charkle.inspectorWidth"
         static let galleryLayoutMode = "charkle.galleryLayoutMode"
+        static let defaultGalleryLayoutMode = "charkle.defaultGalleryLayoutMode"
+        static let destinationLayoutOverrides = "charkle.destinationLayoutOverrides"
+        static let compactViewColumnMode = "charkle.compactViewColumnMode"
         static let accentSource = "charkle.accentSource"
         static let hasCompletedOnboarding = "charkle.hasCompletedOnboarding"
         static let inspectorInfoSectionOrder = "charkle.inspectorInfoSectionOrder"
     }
 
-    public init() {
-        let defaults = UserDefaults.standard
+    public init(defaults: UserDefaults = .standard) {
         self.notchShelfEnabled = defaults.object(forKey: Keys.notchShelfEnabled) as? Bool ?? true
         self.notchHoverTriggerEnabled = defaults.object(forKey: Keys.notchHoverTriggerEnabled) as? Bool ?? true
         self.notchPresentationMode = defaults.string(forKey: Keys.notchPresentationMode)
@@ -279,13 +358,88 @@ public final class AppCoordinatorStore {
         self.sidebarWidth = storedSidebarWidth.map { Self.clampedSidebarWidth(CGFloat($0)) } ?? Self.defaultSidebarWidth
         let storedInspectorWidth = defaults.object(forKey: Keys.inspectorWidth) as? Double
         self.inspectorWidth = storedInspectorWidth.map { Self.clampedInspectorWidth(CGFloat($0)) } ?? Self.defaultInspectorWidth
-        self.galleryLayoutMode = defaults.string(forKey: Keys.galleryLayoutMode)
+        let initialLayout = defaults.string(forKey: Keys.galleryLayoutMode)
             .flatMap(GalleryLayoutMode.init(rawValue:)) ?? .verticalMasonry
+        self.galleryLayoutMode = initialLayout
+        self.defaultGalleryLayoutMode = defaults.string(forKey: Keys.defaultGalleryLayoutMode)
+            .flatMap(GalleryLayoutMode.init(rawValue:)) ?? initialLayout
+        self.destinationLayoutOverrides = (defaults.dictionary(forKey: Keys.destinationLayoutOverrides) as? [String: String]) ?? [:]
+        let storedCompactCols = defaults.object(forKey: Keys.compactViewColumnMode) as? Int
+        self.compactViewColumnMode = (storedCompactCols == 1) ? 1 : 2
         self.accentSource = defaults.string(forKey: Keys.accentSource)
             .flatMap(CharkleAccentSource.init(rawValue:)) ?? .studio
         self.hasCompletedOnboarding = defaults.object(forKey: Keys.hasCompletedOnboarding) as? Bool ?? false
         let storedOrder = defaults.stringArray(forKey: Keys.inspectorInfoSectionOrder) ?? []
         self.inspectorInfoSectionOrder = InspectorInfoSection.normalizedOrder(from: storedOrder)
+    }
+
+    public static func layoutDestinationKey(for destination: SidebarDestination) -> String? {
+        switch destination {
+        case .allItems:
+            "allItems"
+        case .inbox:
+            "inbox"
+        case .untagged:
+            "untagged"
+        case .recent:
+            "recent"
+        case .trash:
+            "trash"
+        case .folder(let id):
+            "folder:\(id.uuidString)"
+        case .smartFolder(let id):
+            "smartFolder:\(id.uuidString)"
+        case .tag(let name):
+            "tag:\(name.lowercased())"
+        case .moodboardsHome, .moodboard, .pinterest:
+            nil
+        }
+    }
+
+    /// Updates the layout mode for the active destination and remembers that destination's preference locally.
+    public func selectGalleryLayoutModeForCurrentDestination(_ mode: GalleryLayoutMode) {
+        if galleryLayoutMode != mode {
+            galleryLayoutMode = mode
+        }
+        if let key = Self.layoutDestinationKey(for: selectedDestination) {
+            if destinationLayoutOverrides[key] != mode.rawValue {
+                var next = destinationLayoutOverrides
+                next[key] = mode.rawValue
+                destinationLayoutOverrides = next
+            }
+        }
+    }
+
+    /// Restores the saved layout mode for `destination`, falling back to `defaultGalleryLayoutMode`.
+    public func applySavedLayoutMode(for destination: SidebarDestination) {
+        guard let key = Self.layoutDestinationKey(for: destination) else { return }
+        let resolved: GalleryLayoutMode
+        if let raw = destinationLayoutOverrides[key], let saved = GalleryLayoutMode(rawValue: raw) {
+            resolved = saved
+        } else {
+            resolved = defaultGalleryLayoutMode
+        }
+        if galleryLayoutMode != resolved {
+            galleryLayoutMode = resolved
+        }
+    }
+
+    /// Updates the global default gallery layout mode (from Settings / Onboarding) and applies it immediately
+    /// when the current destination has no custom override or is `.allItems`.
+    public func setDefaultGalleryLayoutMode(_ mode: GalleryLayoutMode) {
+        defaultGalleryLayoutMode = mode
+        var nextOverrides = destinationLayoutOverrides
+        nextOverrides.removeValue(forKey: "allItems")
+        destinationLayoutOverrides = nextOverrides
+        if let key = Self.layoutDestinationKey(for: selectedDestination),
+           let raw = destinationLayoutOverrides[key],
+           let saved = GalleryLayoutMode(rawValue: raw) {
+            if galleryLayoutMode != saved {
+                galleryLayoutMode = saved
+            }
+        } else if galleryLayoutMode != mode {
+            galleryLayoutMode = mode
+        }
     }
 
     public func moveInspectorSection(_ dragged: InspectorInfoSection, toTarget target: InspectorInfoSection) {
@@ -402,6 +556,21 @@ public final class AppCoordinatorStore {
         quickLookAssetID = assetID
     }
 
+    public func openQuickLookInDiff(
+        assetID: UUID,
+        baseAssetID: UUID? = nil,
+        targetAssetID: UUID? = nil,
+        openMergePanel: Bool = false,
+        playlist: [UUID]
+    ) {
+        quickLookDiffRequest = QuickLookDiffLaunchRequest(
+            baseAssetID: baseAssetID,
+            targetAssetID: targetAssetID,
+            openMergePanel: openMergePanel
+        )
+        openQuickLook(assetID: assetID, playlist: playlist.isEmpty ? [assetID] : playlist)
+    }
+
     public func requestQuickLookDismiss() {
         guard quickLookAssetID != nil else { return }
         quickLookDismissRequestToken &+= 1
@@ -414,6 +583,7 @@ public final class AppCoordinatorStore {
         if !quickLookPlaylist.isEmpty {
             quickLookPlaylist.removeAll()
         }
+        quickLookDiffRequest = nil
     }
 
     public func requestRevealAssetInGallery(_ assetID: UUID) {

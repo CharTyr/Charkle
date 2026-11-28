@@ -621,8 +621,10 @@ public struct MainWindowView: View {
         let activeFolderID: UUID? = if case .folder(let fid) = coordinator.selectedDestination { fid } else { nil }
         let activeFolderChildren: [FolderRecord] = activeFolderID.map { library.childFolders(of: $0) } ?? []
         let showFolderSubbar = activeFolderID != nil && (!activeFolderChildren.isEmpty || galleryViewportWidth < 680)
+        let hasWorkspaceStackPrompt = coordinator.pendingVersionStackPrompt?.source == .mainWorkspace
         let topInset: CGFloat = {
             var base: CGFloat = 62
+            if hasWorkspaceStackPrompt { base += 52 }
             if isInbox && !library.assets.isEmpty { base += 50 }
             if isTrash && !library.assets.isEmpty { base += 50 }
             if showFolderSubbar { base += 50 }
@@ -856,6 +858,67 @@ public struct MainWindowView: View {
                         coordinator.focusedStageAssetID = focusedID
                     }
                 )
+            } else if coordinator.galleryLayoutMode == .compactList {
+                CompactIndexGalleryView(
+                    assets: library.assets,
+                    coordinator: coordinator,
+                    library: library,
+                    moodboards: moodboards,
+                    topContentInset: topInset,
+                    bottomContentInset: library.selectedAssetIDs.count >= 2 ? 104 : 44,
+                    viewportWidth: galleryViewportWidth,
+                    isOverlayPresented: coordinator.isModalOverlayPresented || showInboxBatchTriageSheet,
+                    onOpenQuickLook: { asset in
+                        openQuickLook(asset)
+                    },
+                    onOpenDiff: { representative, baseID, targetID in
+                        let playlist = library.assets.map(\.id)
+                        withAnimation(CharkleMotion.accessible(CharkleMotion.enterMd, reduced: reduceMotion)) {
+                            coordinator.openQuickLookInDiff(
+                                assetID: targetID ?? representative.id,
+                                baseAssetID: baseID,
+                                targetAssetID: targetID,
+                                playlist: playlist.isEmpty ? [representative.id] : playlist
+                            )
+                        }
+                    },
+                    onDropExternalInputs: { inputs in
+                        let folderID: UUID? = if case .folder(let id) = coordinator.selectedDestination { id } else { nil }
+                        handleExternalDrop(inputs, targetFolderID: folderID)
+                    },
+                    onDropFilesOntoAsset: { urls, targetAsset in
+                        handleDropFilesOntoAssetForStack(urls: urls, targetAsset: targetAsset)
+                    },
+                    onMergeIntoVersionStack: { ids, anchorID in
+                        mergeSelectedAssetsIntoStack(ids, anchorID: anchorID)
+                    },
+                    onSetPrimaryVersion: { assetID in
+                        Task {
+                            _ = await library.setPrimaryVersion(assetID)
+                            let vNum = library.allAssetsByID[assetID]?.richMetadata?.versionStack?.versionNumber ?? 1
+                            coordinator.showToast(
+                                "已将 v\(vNum) 锁定为主版本，直接拖拽/拷贝均指向此版",
+                                icon: "pin.fill",
+                                tone: .success
+                            )
+                        }
+                    },
+                    onUnstackVersion: { assetID in
+                        Task {
+                            _ = await library.unstackVersion(assetID)
+                            coordinator.showToast("已拆出为独立素材", icon: "rectangle.portrait.and.arrow.right")
+                        }
+                    },
+                    onRetagAssets: { ids in
+                        triggerAIRetagging(for: ids)
+                    },
+                    onRequestPermanentDelete: { ids in
+                        pendingPermanentDeleteIDs = ids
+                    },
+                    onPasteIntoCurrentFolder: {
+                        pasteIntoCurrentGalleryFolder()
+                    }
+                )
             } else {
                 let sideChromeWidth: CGFloat =
                     (isSidebarVisible ? (effectiveSidebarTargetWidth + 1) : 0)
@@ -973,17 +1036,49 @@ public struct MainWindowView: View {
                             pendingPermanentDeleteIDs = ids
                         },
                         onResolveDragFileURL: { assetID in
+                            if let primaryURL = library.cachedPrimaryDragFileURL(for: assetID) {
+                                return primaryURL
+                            }
                             if let asset = library.allAssetsByID[assetID],
                                let original = library.engine.cachedOriginalURL(for: asset) {
                                 return original
                             }
-                            return library.engine.cachedThumbnailURL(for: assetID, tier: .preview1400)
-                                ?? library.engine.cachedThumbnailURL(for: assetID, tier: .grid520)
+                            return nil
                         },
                         onZoomColumnWidth: { newWidth in
                             let clamped = Double(max(130, min(420, newWidth)))
                             if abs(coordinator.targetColumnWidth - clamped) >= 0.5 {
                                 coordinator.targetColumnWidth = clamped
+                            }
+                        },
+                        onMergeIntoVersionStack: { ids, anchorID in
+                            mergeSelectedAssetsIntoStack(ids, anchorID: anchorID)
+                        },
+                        onSetPrimaryVersion: { assetID in
+                            Task {
+                                _ = await library.setPrimaryVersion(assetID)
+                                let vNum = library.allAssetsByID[assetID]?.richMetadata?.versionStack?.versionNumber ?? 1
+                                coordinator.showToast("已将 v\(vNum) 锁定为主版本", icon: "pin.fill", tone: .success)
+                            }
+                        },
+                        onUnstackVersion: { assetID in
+                            Task {
+                                _ = await library.unstackVersion(assetID)
+                                coordinator.showToast("已拆出为独立素材", icon: "rectangle.portrait.and.arrow.right")
+                            }
+                        },
+                        onOpenVersionDiff: { asset in
+                            let siblings = library.versionStackSiblings(for: asset.id)
+                            let baseID = siblings.count >= 2 ? siblings[siblings.count - 2].id : siblings.first?.id
+                            let targetID = siblings.last?.id ?? asset.id
+                            let playlist = library.assets.map(\.id)
+                            withAnimation(CharkleMotion.accessible(CharkleMotion.enterMd, reduced: reduceMotion)) {
+                                coordinator.openQuickLookInDiff(
+                                    assetID: targetID,
+                                    baseAssetID: baseID,
+                                    targetAssetID: targetID,
+                                    playlist: playlist
+                                )
                             }
                         }
                     )
@@ -998,6 +1093,11 @@ public struct MainWindowView: View {
                             .padding(.top, -10)
                             .padding(.horizontal, -18)
                     }
+
+                if let stackPrompt = coordinator.pendingVersionStackPrompt, stackPrompt.source == .mainWorkspace {
+                    versionStackDropPromptBanner(stackPrompt)
+                        .transition(CharkleMotion.originTransition(anchor: .top, scale: 0.98, reduced: reduceMotion))
+                }
 
                 if isInbox && !library.assets.isEmpty {
                     inboxTriageBar
@@ -1481,7 +1581,7 @@ public struct MainWindowView: View {
                     ForEach(GalleryLayoutMode.allCases, id: \.self) { mode in
                         Button {
                             withAnimation(CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion)) {
-                                coordinator.galleryLayoutMode = mode
+                                coordinator.selectGalleryLayoutModeForCurrentDestination(mode)
                             }
                         } label: {
                             if coordinator.galleryLayoutMode == mode {
@@ -1520,7 +1620,7 @@ public struct MainWindowView: View {
                 CharkleSegmentedControl(
                     selection: Binding(
                         get: { coordinator.galleryLayoutMode },
-                        set: { coordinator.galleryLayoutMode = $0 }
+                        set: { coordinator.selectGalleryLayoutModeForCurrentDestination($0) }
                     ),
                     options: GalleryLayoutMode.allCases,
                     size: .compact,
@@ -1928,15 +2028,17 @@ public struct MainWindowView: View {
         case .horizontalJustified: "rectangle.split.1x2"
         case .galleryFilmstrip: "film"
         case .ringGallery: "square.stack.3d.forward.dottedline"
+        case .compactList: "list.bullet"
         }
     }
 
     private static func layoutModeHelpText(for mode: GalleryLayoutMode) -> String {
         switch mode {
-        case .verticalMasonry: "纵向瀑布流"
-        case .horizontalJustified: "横向等高瀑布流（竖图自动对齐）"
-        case .galleryFilmstrip: "画廊视图（底部胶片挑图）"
-        case .ringGallery: "环形画廊（3D 外圈景深浏览）"
+        case .verticalMasonry: "纵向瀑布流 (1)"
+        case .horizontalJustified: "横向等高瀑布流（竖图自动对齐，2）"
+        case .galleryFilmstrip: "画廊视图（底部胶片挑图，3）"
+        case .ringGallery: "环形画廊（3D 外圈景深浏览，4）"
+        case .compactList: "紧凑视图（双列索引卡 / 单列折页条，5）"
         }
     }
 
@@ -2627,6 +2729,23 @@ public struct MainWindowView: View {
                         }
                     }
                     .buttonStyle(CharkleButtonStyle(.accent, size: .xs, cornerRadius: 999))
+
+                    Button {
+                        mergeSelectedAssetsIntoStack(ids, anchorID: selectedAssets.last?.id)
+                    } label: {
+                        if isCompactPill {
+                            Image(systemName: "square.stack.3d.up")
+                                .font(.system(size: 12.5, weight: .medium))
+                                .frame(width: 26, height: 26)
+                        } else {
+                            Label("合并版本叠", systemImage: "square.stack.3d.up")
+                                .font(CharkleTheme.text(.caption, weight: .medium))
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 5)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .help("将所选素材合并为一个版本叠")
 
                     Menu {
                         CharkleHierarchicalFolderMenuContent(
@@ -3383,6 +3502,7 @@ public struct MainWindowView: View {
         case .pinterest:
             Task { await pinterestController.bootstrap(engine: library.engine) }
         default:
+            coordinator.applySavedLayoutMode(for: destination)
             searchDebounceTask?.cancel()
             if !library.filter.searchQuery.isEmpty {
                 library.filter.searchQuery = ""
@@ -3424,11 +3544,13 @@ public struct MainWindowView: View {
         }
 
         coordinator.selectedDestination = targetDestination
+        coordinator.applySavedLayoutMode(for: targetDestination)
 
         Task {
             await library.applyDestination(targetDestination)
+            let visibleID = asset.isTrashed ? assetID : library.primaryVersionAssetID(for: assetID)
 
-            if !library.assets.contains(where: { $0.id == assetID }) {
+            if !library.assets.contains(where: { $0.id == visibleID }) {
                 searchDraft = ""
                 library.filter.searchQuery = ""
                 library.filter.kinds.removeAll()
@@ -3442,14 +3564,15 @@ public struct MainWindowView: View {
                 await library.applyDestination(targetDestination)
             }
 
-            if !library.assets.contains(where: { $0.id == assetID }), targetDestination != .allItems {
+            if !library.assets.contains(where: { $0.id == visibleID }), targetDestination != .allItems {
                 coordinator.selectedDestination = .allItems
+                coordinator.applySavedLayoutMode(for: .allItems)
                 resolvedLabel = "全部素材"
                 await library.applyDestination(.allItems)
             }
 
-            library.selectedAssetIDs = [assetID]
-            coordinator.requestRevealAssetInGallery(assetID)
+            library.selectedAssetIDs = [visibleID]
+            coordinator.requestRevealAssetInGallery(visibleID)
 
             if let sourceBoardID {
                 coordinator.showToast(
@@ -3553,6 +3676,33 @@ public struct MainWindowView: View {
            (1...9).contains(digit),
            !isComposingIME(in: hostWindow) {
             if !event.isARepeat, triggerInboxQuickTriage(digit: digit, in: hostWindow) {
+                return nil
+            }
+        }
+
+        // Gallery layout shortcuts 1-5 (unmodified when not in Inbox triage / text editing, or ⌘1-⌘5 anywhere in gallery)
+        if (primaryModifiers.isEmpty || primaryModifiers == [.command]),
+           event.window === hostWindow,
+           isInGalleryStage,
+           !coordinator.isModalOverlayPresented,
+           !showInboxBatchTriageSheet,
+           !isEditingText(in: hostWindow),
+           !isComposingIME(in: hostWindow),
+           let chars = event.charactersIgnoringModifiers,
+           chars.count == 1,
+           let digit = Int(chars),
+           (1...GalleryLayoutMode.allCases.count).contains(digit) {
+            // In Inbox, unmodified 1-9 belong to folder triage when folders exist; ⌘1-⌘5 always switches layout
+            let yieldsToInboxTriage = primaryModifiers.isEmpty
+                && coordinator.selectedDestination == .inbox
+                && !library.folders.isEmpty
+            if !yieldsToInboxTriage {
+                if !event.isARepeat {
+                    let targetMode = GalleryLayoutMode.allCases[digit - 1]
+                    withAnimation(CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion)) {
+                        coordinator.selectGalleryLayoutModeForCurrentDestination(targetMode)
+                    }
+                }
                 return nil
             }
         }
@@ -3681,7 +3831,13 @@ public struct MainWindowView: View {
                 coordinator.showToast("正在解析网页缩略图…", icon: "safari")
             }
             Task {
-                let created = await library.ingest(inputs, targetFolderID: targetFolderID, targetBoardID: nil)
+                let created = await library.ingestAndDetectStackPrompt(
+                    inputs,
+                    targetFolderID: targetFolderID,
+                    targetBoardID: nil,
+                    source: .mainWorkspace,
+                    coordinator: coordinator
+                )
                 guard !created.isEmpty else {
                     coordinator.showToast(library.lastError ?? "粘贴导入失败或素材已存在", icon: "exclamationmark.triangle", tone: .warning)
                     return
@@ -3902,13 +4058,139 @@ public struct MainWindowView: View {
             coordinator.showToast("正在解析网页缩略图…", icon: "safari")
         }
         Task {
-            let created = await library.ingest(regularInputs, targetFolderID: targetFolderID, targetBoardID: nil)
+            let created = await library.ingestAndDetectStackPrompt(
+                regularInputs,
+                targetFolderID: targetFolderID,
+                targetBoardID: nil,
+                source: .mainWorkspace,
+                coordinator: coordinator
+            )
             if created.isEmpty {
                 coordinator.showToast(library.lastError ?? "导入失败或素材已存在", icon: "exclamationmark.triangle", tone: .warning)
-            } else {
+            } else if coordinator.pendingVersionStackPrompt == nil {
                 coordinator.showToast("已导入 \(created.count) 项素材", icon: "arrow.down.circle.fill", tone: .success)
             }
         }
+    }
+
+    private func mergeSelectedAssetsIntoStack(_ ids: [UUID], anchorID: UUID?) {
+        guard ids.count >= 2 else { return }
+        Task {
+            let merged = await library.mergeAssetsIntoVersionStack(ids, targetAssetID: anchorID)
+            if !merged.isEmpty {
+                coordinator.showToast("已将 \(ids.count) 项合并为版本叠", icon: "square.stack.3d.up.fill", tone: .success)
+            }
+        }
+    }
+
+    private func handleDropFilesOntoAssetForStack(urls: [URL], targetAsset: AssetRecord) {
+        guard !urls.isEmpty else { return }
+        let destFolderID = targetAsset.folderID
+        Task {
+            let created = await library.ingest(
+                urls.map { .fileURL($0) },
+                targetFolderID: destFolderID,
+                targetBoardID: nil
+            )
+            guard !created.isEmpty else {
+                coordinator.showToast(library.lastError ?? "导入失败", icon: "exclamationmark.triangle", tone: .warning)
+                return
+            }
+            var idsToMerge = created.map(\.id)
+            idsToMerge.append(targetAsset.id)
+            _ = await library.mergeAssetsIntoVersionStack(idsToMerge, targetAssetID: targetAsset.id)
+            let nextCount = library.versionStackSiblings(for: targetAsset.id).count
+            coordinator.showToast(
+                "已叠入《\(targetAsset.title)》（共 \(nextCount) 版）",
+                icon: "square.stack.3d.up.fill",
+                tone: .success
+            )
+        }
+    }
+
+    private func versionStackDropPromptBanner(_ prompt: AppCoordinatorStore.PendingVersionStackPrompt) -> some View {
+        let folderHint: String? = prompt.candidate.targetFolderID.flatMap { fid in
+            library.folder(byID: fid).map { "自动归入「\($0.name)」" }
+        }
+        return HStack(spacing: 9) {
+            Image(systemName: "square.stack.3d.up.fill")
+                .font(.system(size: 13.5, weight: .semibold))
+                .foregroundStyle(activeAccent)
+
+            VStack(alignment: .leading, spacing: 1) {
+                HStack(spacing: 5) {
+                    Text("叠入《\(prompt.candidate.targetTitle)》作为 v\(prompt.candidate.nextVersionNumber)？")
+                        .font(CharkleTheme.text(.caption, weight: .semibold))
+                        .monospacedDigit()
+                        .lineLimit(1)
+                    Text(prompt.candidate.matchReason.localizedLabel)
+                        .font(CharkleTheme.text(.caption, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 5.5)
+                        .padding(.vertical, 1)
+                        .background(Color.primary.opacity(0.06), in: Capsule(style: .continuous))
+                }
+                if let folderHint {
+                    Text(folderHint)
+                        .font(CharkleTheme.text(.caption))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            }
+
+            TextField(
+                "修改人",
+                text: Binding(
+                    get: { coordinator.pendingVersionStackPrompt?.editorNameDraft ?? "" },
+                    set: { coordinator.pendingVersionStackPrompt?.editorNameDraft = $0 }
+                )
+            )
+            .textFieldStyle(.plain)
+            .font(CharkleTheme.text(.caption))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4.5)
+            .frame(width: 88)
+            .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.sm, style: .continuous))
+            .onSubmit {
+                Task { _ = await library.confirmPendingVersionStackPrompt(coordinator: coordinator) }
+            }
+
+            TextField(
+                "1 行可选备注（回车秒确认）",
+                text: Binding(
+                    get: { coordinator.pendingVersionStackPrompt?.changeNoteDraft ?? "" },
+                    set: { coordinator.pendingVersionStackPrompt?.changeNoteDraft = $0 }
+                )
+            )
+            .textFieldStyle(.plain)
+            .font(CharkleTheme.text(.caption))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4.5)
+            .frame(minWidth: 120, maxWidth: 220)
+            .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.sm, style: .continuous))
+            .onSubmit {
+                Task { _ = await library.confirmPendingVersionStackPrompt(coordinator: coordinator) }
+            }
+
+            Spacer(minLength: 4)
+
+            Button {
+                Task { _ = await library.confirmPendingVersionStackPrompt(coordinator: coordinator) }
+            } label: {
+                Text("确认叠入 ↵")
+            }
+            .buttonStyle(CharkleButtonStyle(.accent, size: .xs, cornerRadius: 999))
+
+            Button {
+                library.dismissPendingVersionStackPrompt(coordinator: coordinator, announce: true)
+            } label: {
+                Text("作为独立文件保留")
+            }
+            .buttonStyle(CharkleButtonStyle(.standard, size: .xs, cornerRadius: 999))
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6.5)
+        .charkleLiquidGlass(.regular, in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.cardOuter, style: .continuous))
     }
 
     private func exportFolderToPureRef(_ folder: FolderRecord, openInPureRef: Bool) {
@@ -4058,11 +4340,13 @@ public struct MainWindowView: View {
         case .asset:
             if let id = match.targetUUID {
                 coordinator.selectedDestination = .allItems
+                coordinator.applySavedLayoutMode(for: .allItems)
                 Task {
                     await library.applyDestination(.allItems)
-                    library.selectedAssetIDs = [id]
-                    coordinator.requestRevealAssetInGallery(id)
-                    if let asset = library.allAssetsByID[id] ?? library.assets.first(where: { $0.id == id }) {
+                    let visibleID = library.primaryVersionAssetID(for: id)
+                    library.selectedAssetIDs = [visibleID]
+                    coordinator.requestRevealAssetInGallery(visibleID)
+                    if let asset = library.allAssetsByID[id] ?? library.assets.first(where: { $0.id == visibleID }) {
                         openQuickLook(asset)
                     }
                 }

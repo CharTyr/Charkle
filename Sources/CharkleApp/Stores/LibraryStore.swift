@@ -73,6 +73,8 @@ public final class LibraryStore {
     private var cachedFolderDisplayPaths: [UUID: String] = [:]
     private var cachedTopTenSidebarTags: [TagCount] = []
     private var cachedRecentFrequentSidebarTags: [TagCount] = []
+    private var cachedStackSiblingsByGroupID: [UUID: [AssetRecord]] = [:]
+    private var cachedPrimaryAssetByGroupID: [UUID: AssetRecord] = [:]
 
     public var filter: FilterCriteria = FilterCriteria()
     public var selectedAssetIDs: Set<UUID> = []
@@ -294,9 +296,34 @@ public final class LibraryStore {
     }
 
     /// Selects the top `limit` non-trashed assets ordered by `recentActivityDate` in O(N × limit)
-    /// without allocating or sorting a full copy of the library.
+    /// while collapsing Version Stacks onto their Primary Version representative.
     private static func selectTopRecentAssets(_ source: [AssetRecord], limit: Int) -> [AssetRecord] {
         guard limit > 0 else { return [] }
+        let active = source.filter { !$0.isTrashed }
+        var byGroup: [UUID: [AssetRecord]] = [:]
+        for asset in active {
+            if let gid = asset.richMetadata?.versionStack?.groupID {
+                byGroup[gid, default: []].append(asset)
+            }
+        }
+        var primaryByGroup: [UUID: AssetRecord] = Dictionary(minimumCapacity: byGroup.count)
+        for (gid, members) in byGroup {
+            if let primary = AssetVersionStackMetadata.resolvePrimaryAsset(in: members) {
+                primaryByGroup[gid] = primary
+            }
+        }
+        var seenGroups = Set<UUID>()
+        var folded: [AssetRecord] = []
+        folded.reserveCapacity(active.count)
+        for asset in active {
+            if let gid = asset.richMetadata?.versionStack?.groupID {
+                guard seenGroups.insert(gid).inserted else { continue }
+                folded.append(primaryByGroup[gid] ?? asset)
+            } else {
+                folded.append(asset)
+            }
+        }
+
         var top: [AssetRecord] = []
         top.reserveCapacity(limit + 1)
         func comesBefore(_ lhs: AssetRecord, _ rhs: AssetRecord) -> Bool {
@@ -305,7 +332,7 @@ public final class LibraryStore {
             if ld != rd { return ld > rd }
             return lhs.id.uuidString < rhs.id.uuidString
         }
-        for asset in source where !asset.isTrashed {
+        for asset in folded where !asset.isTrashed {
             if top.count == limit, let last = top.last, !comesBefore(asset, last) {
                 continue
             }
@@ -558,7 +585,8 @@ public final class LibraryStore {
                    self.filter == requestedFilter,
                    self.activeSmartFolderID == requestedSmartID {
                     let filtered = self.applyActiveSmartFolderIfNeeded(visible)
-                    let canonical = self.canonicalizeAssetsAgainstCache(filtered)
+                    let folded = self.foldVersionStacks(filtered, onlyTrashed: requestedFilter.onlyTrashed)
+                    let canonical = self.canonicalizeAssetsAgainstCache(folded)
                     self.assets = canonical
                     let trimmedQuery = requestedFilter.searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
                     if !trimmedQuery.isEmpty {
@@ -613,21 +641,20 @@ public final class LibraryStore {
                 let filtered = self.applyActiveSmartFolderIfNeeded(fetched)
                 var nextByID = self.allAssetsByID
                 var changedAny = false
-                var canonical: [AssetRecord] = []
-                canonical.reserveCapacity(filtered.count)
                 for asset in filtered {
                     if let existing = nextByID[asset.id], existing == asset {
-                        canonical.append(existing)
+                        continue
                     } else {
                         nextByID[asset.id] = asset
-                        canonical.append(asset)
                         changedAny = true
                     }
                 }
-                self.assets = canonical
                 if changedAny {
                     self.allAssetsByID = nextByID
                 }
+                let folded = self.foldVersionStacks(filtered, onlyTrashed: requestedFilter.onlyTrashed)
+                let canonical = self.canonicalizeAssetsAgainstCache(folded)
+                self.assets = canonical
 
                 let trimmedQuery = requestedFilter.searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
                 if !trimmedQuery.isEmpty, let delayMs = semanticEnhancementDelayMs {
@@ -692,7 +719,7 @@ public final class LibraryStore {
 
     /// Rebuilds the cached recent-activity list (called on data mutations, never inside SwiftUI view body).
     private func rebuildRecentActivityCache() {
-        cachedRecentActivityAssets = allAssetsByID.values
+        let sortedActive = allAssetsByID.values
             .filter { !$0.isTrashed }
             .sorted { lhs, rhs in
                 let ld = lhs.recentActivityDate
@@ -700,17 +727,22 @@ public final class LibraryStore {
                 if ld != rd { return ld > rd }
                 return lhs.id.uuidString < rhs.id.uuidString
             }
+        cachedRecentActivityAssets = foldVersionStacks(sortedActive, onlyTrashed: false)
     }
 
-    /// Recent assets ranked by most recent save or open activity (for the Notch Shelf filmstrip & waterfall).
+    /// Recent assets ranked by most recent save or open activity (for the Notch Shelf filmstrip & waterfall),
+    /// collapsing Version Stacks onto their Primary Version representative.
     public func recentActivityAssets(limit: Int? = nil) -> [AssetRecord] {
         let source = cachedRecentActivityAssets.isEmpty && !allAssetsByID.isEmpty
-            ? allAssetsByID.values.filter { !$0.isTrashed }.sorted {
-                let ld = $0.recentActivityDate
-                let rd = $1.recentActivityDate
-                if ld != rd { return ld > rd }
-                return $0.id.uuidString < $1.id.uuidString
-            }
+            ? foldVersionStacks(
+                allAssetsByID.values.filter { !$0.isTrashed }.sorted {
+                    let ld = $0.recentActivityDate
+                    let rd = $1.recentActivityDate
+                    if ld != rd { return ld > rd }
+                    return $0.id.uuidString < $1.id.uuidString
+                },
+                onlyTrashed: false
+            )
             : cachedRecentActivityAssets
         if let limit {
             return Array(source.prefix(max(0, limit)))
@@ -1337,15 +1369,41 @@ public final class LibraryStore {
     }
 
     @discardableResult
-    public func copyAssetsToPasteboard(_ ids: [UUID]) async -> Int {
+    public func copyAssetsToPasteboard(_ ids: [UUID], preferStackPrimary: Bool = true) async -> Int {
         guard !ids.isEmpty else { return 0 }
-        let urls = await resolveURLs(for: ids)
+        let resolvedIDs = preferStackPrimary ? deduplicatedPrimaryAssetIDs(for: ids) : ids
+        let urls = await resolveURLs(for: resolvedIDs)
         guard !urls.isEmpty else { return 0 }
         await writeFilesToGeneralPasteboard(urls)
-        copiedAssetIDs = ids
+        copiedAssetIDs = resolvedIDs
         cutAssetIDs.removeAll()
         lastInternalPasteboardChangeCount = NSPasteboard.general.changeCount
         return urls.count
+    }
+
+    /// Synchronously resolves the local file URL for drag-out from Gallery, Compact View, or Notch Shelf,
+    /// strictly enforcing the Version Stack's `isPinnedPrimary` (or latest) file so unreviewed drafts are never mis-sent.
+    public func cachedPrimaryDragFileURL(for assetID: UUID) -> URL? {
+        let effectiveID = primaryVersionAssetID(for: assetID)
+        if let asset = allAssetsByID[effectiveID],
+           let origURL = engine.cachedOriginalURL(for: asset) {
+            return origURL
+        }
+        return engine.cachedThumbnailURL(for: effectiveID, tier: .preview1400)
+            ?? engine.cachedThumbnailURL(for: effectiveID, tier: .grid520)
+    }
+
+    private func deduplicatedPrimaryAssetIDs(for ids: [UUID]) -> [UUID] {
+        var seen = Set<UUID>()
+        var result: [UUID] = []
+        result.reserveCapacity(ids.count)
+        for id in ids {
+            let primaryID = primaryVersionAssetID(for: id)
+            if seen.insert(primaryID).inserted {
+                result.append(primaryID)
+            }
+        }
+        return result
     }
 
     @discardableResult
@@ -1559,6 +1617,24 @@ public final class LibraryStore {
     }
 
     private func rebuildAssetDerivedCaches() {
+        var rawGroups: [UUID: [AssetRecord]] = [:]
+        for asset in allAssetsByID.values where !asset.isTrashed {
+            if let gid = asset.richMetadata?.versionStack?.groupID {
+                rawGroups[gid, default: []].append(asset)
+            }
+        }
+        var sortedByGroup: [UUID: [AssetRecord]] = Dictionary(minimumCapacity: rawGroups.count)
+        var primaryByGroup: [UUID: AssetRecord] = Dictionary(minimumCapacity: rawGroups.count)
+        for (gid, members) in rawGroups {
+            let ordered = AssetVersionStackMetadata.sortedVersions(members)
+            sortedByGroup[gid] = ordered
+            if let primary = AssetVersionStackMetadata.resolvePrimaryAsset(in: ordered) {
+                primaryByGroup[gid] = primary
+            }
+        }
+        if cachedStackSiblingsByGroupID != sortedByGroup { cachedStackSiblingsByGroupID = sortedByGroup }
+        if cachedPrimaryAssetByGroupID != primaryByGroup { cachedPrimaryAssetByGroupID = primaryByGroup }
+
         var nextActive = 0
         var nextUntagged = 0
         var directActive: [UUID: Int] = [:]
@@ -1573,6 +1649,13 @@ public final class LibraryStore {
 
         for asset in allAssetsByID.values {
             if !asset.isTrashed {
+                // Count each Version Stack once via its Primary Version representative so Sidebar & Header counts
+                // match the collapsed Gallery / Compact View card count 1:1.
+                if let gid = asset.richMetadata?.versionStack?.groupID,
+                   let primary = primaryByGroup[gid],
+                   primary.id != asset.id {
+                    continue
+                }
                 nextActive += 1
                 if asset.tags.isEmpty {
                     nextUntagged += 1
@@ -1599,6 +1682,81 @@ public final class LibraryStore {
         if untaggedAssetCount != nextUntagged { untaggedAssetCount = nextUntagged }
         if cachedSmartFolderCounts != smartCounts { cachedSmartFolderCounts = smartCounts }
         rebuildFolderAssetRollupCaches()
+    }
+
+    /// Collapses non-trashed assets sharing `versionStack.groupID` into a single displayed representative
+    /// (always preferring `isPinnedPrimary == true`, or highest `versionNumber` if none is pinned).
+    public func foldVersionStacks(_ list: [AssetRecord], onlyTrashed: Bool = false) -> [AssetRecord] {
+        guard !onlyTrashed, !list.isEmpty else { return list }
+        var localGroups: [UUID: [AssetRecord]]? = nil
+        var seenGroups = Set<UUID>()
+        var result: [AssetRecord] = []
+        result.reserveCapacity(list.count)
+
+        for asset in list {
+            if asset.isTrashed {
+                result.append(asset)
+                continue
+            }
+            guard let gid = asset.richMetadata?.versionStack?.groupID else {
+                result.append(asset)
+                continue
+            }
+            guard seenGroups.insert(gid).inserted else {
+                continue
+            }
+            if let cachedPrimary = cachedPrimaryAssetByGroupID[gid] {
+                result.append(cachedPrimary)
+            } else {
+                if localGroups == nil {
+                    var built: [UUID: [AssetRecord]] = [:]
+                    for item in list where !item.isTrashed {
+                        if let g = item.richMetadata?.versionStack?.groupID {
+                            built[g, default: []].append(item)
+                        }
+                    }
+                    localGroups = built
+                }
+                let primary = localGroups?[gid].flatMap { AssetVersionStackMetadata.resolvePrimaryAsset(in: $0) } ?? asset
+                result.append(primary)
+            }
+        }
+        return result
+    }
+
+    /// Ordered non-trashed siblings belonging to the same Version Stack as `assetID` (or `[asset]` if standalone).
+    public func versionStackSiblings(for assetID: UUID) -> [AssetRecord] {
+        guard let asset = allAssetsByID[assetID] else { return [] }
+        guard !asset.isTrashed, let gid = asset.richMetadata?.versionStack?.groupID else {
+            return [asset]
+        }
+        if let cached = cachedStackSiblingsByGroupID[gid], !cached.isEmpty {
+            return cached
+        }
+        let matching = allAssetsByID.values.filter { !$0.isTrashed && $0.richMetadata?.versionStack?.groupID == gid }
+        return matching.isEmpty ? [asset] : AssetVersionStackMetadata.sortedVersions(matching)
+    }
+
+    /// Resolves the canonical Primary Version `AssetRecord` for `assetID` (itself if unstacked).
+    public func primaryVersionAsset(for assetID: UUID) -> AssetRecord? {
+        guard let asset = allAssetsByID[assetID] else { return nil }
+        guard !asset.isTrashed, let gid = asset.richMetadata?.versionStack?.groupID else {
+            return asset
+        }
+        if let primary = cachedPrimaryAssetByGroupID[gid] {
+            return primary
+        }
+        return AssetVersionStackMetadata.resolvePrimaryAsset(in: versionStackSiblings(for: assetID)) ?? asset
+    }
+
+    public func primaryVersionAssetID(for assetID: UUID) -> UUID {
+        primaryVersionAsset(for: assetID)?.id ?? assetID
+    }
+
+    public func newerThanPrimaryCount(for assetID: UUID) -> Int {
+        let siblings = versionStackSiblings(for: assetID)
+        guard siblings.count > 1 else { return 0 }
+        return AssetVersionStackMetadata.newerThanPrimaryCount(in: siblings)
     }
 
     private func rebuildFolderAssetRollupCaches() {
@@ -2491,22 +2649,21 @@ public final class LibraryStore {
     private func applyCanonicalAssetsIfChanged(_ list: [AssetRecord]) {
         var nextByID = allAssetsByID
         var changedAny = false
-        var canonical: [AssetRecord] = []
-        canonical.reserveCapacity(list.count)
         for asset in list {
             if let existing = nextByID[asset.id], existing == asset {
-                canonical.append(existing)
+                continue
             } else {
                 nextByID[asset.id] = asset
-                canonical.append(asset)
                 changedAny = true
             }
         }
-        if assets != canonical {
-            assets = canonical
-        }
         if changedAny {
             allAssetsByID = nextByID
+        }
+        let folded = foldVersionStacks(list, onlyTrashed: filter.onlyTrashed)
+        let canonical = canonicalizeAssetsAgainstCache(folded)
+        if assets != canonical {
+            assets = canonical
         }
     }
 
@@ -2685,5 +2842,245 @@ public final class LibraryStore {
             libraryStoreLogger.error("Smart deduplication cleanup failed: \(error.localizedDescription, privacy: .public)")
             return nil
         }
+    }
+
+    // MARK: - Documents & Version Stack Operations
+
+    /// Ingests external inputs while running `<150ms` Version Stack candidate detection on file drops;
+    /// when matched, populates `coordinator.pendingVersionStackPrompt` without blocking ingestion.
+    @discardableResult
+    public func ingestAndDetectStackPrompt(
+        _ inputs: [CaptureInput],
+        targetFolderID: UUID?,
+        targetBoardID: UUID? = nil,
+        source: AppCoordinatorStore.PendingVersionStackPrompt.SourceSurface,
+        coordinator: AppCoordinatorStore
+    ) async -> [AssetRecord] {
+        var preDetectedCandidate: VersionStackCandidate? = nil
+        for input in inputs.reversed() {
+            if case .fileURL(let url) = input,
+               let cand = await detectVersionStackCandidate(for: url, targetFolderID: targetFolderID) {
+                preDetectedCandidate = cand
+                break
+            }
+        }
+
+        let created = await ingest(inputs, targetFolderID: targetFolderID, targetBoardID: targetBoardID)
+        guard let latestAsset = created.last else { return created }
+
+        let postCandidate = await detectVersionStackCandidate(forAssetID: latestAsset.id)
+        if let candidate = postCandidate ?? preDetectedCandidate,
+           candidate.targetAssetID != latestAsset.id {
+            coordinator.pendingVersionStackPrompt = AppCoordinatorStore.PendingVersionStackPrompt(
+                ingestedAssetID: latestAsset.id,
+                candidate: candidate,
+                source: source
+            )
+        }
+        return created
+    }
+
+    @discardableResult
+    public func confirmPendingVersionStackPrompt(coordinator: AppCoordinatorStore) async -> Bool {
+        guard let prompt = coordinator.pendingVersionStackPrompt else { return false }
+        coordinator.pendingVersionStackPrompt = nil
+
+        let editor = prompt.editorNameDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let note = prompt.changeNoteDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let targetRef = prompt.candidate.existingStackExists
+            ? prompt.candidate.targetGroupID
+            : prompt.candidate.targetAssetID
+
+        let updated = await manageVersionStack(
+            .join(
+                assetID: prompt.ingestedAssetID,
+                targetAssetOrGroupID: targetRef,
+                editorName: editor.isEmpty ? nil : editor,
+                changeNote: note.isEmpty ? nil : note,
+                versionLabel: prompt.candidate.suggestedVersionLabel,
+                pinAsPrimary: false,
+                adoptTargetFolder: true
+            )
+        )
+
+        if let destFolderID = prompt.candidate.targetFolderID,
+           allAssetsByID[prompt.ingestedAssetID]?.folderID != destFolderID {
+            _ = await moveAssets([prompt.ingestedAssetID], toFolderID: destFolderID)
+        }
+
+        let folderSuffix: String = {
+            if let fid = prompt.candidate.targetFolderID, let f = folder(byID: fid) {
+                return "，已归入「\(f.name)」"
+            }
+            return ""
+        }()
+        coordinator.showToast(
+            "已叠入《\(prompt.candidate.targetTitle)》作为 v\(prompt.candidate.nextVersionNumber)\(folderSuffix)",
+            icon: "square.stack.3d.up.fill",
+            tone: .success
+        )
+        return !updated.isEmpty || allAssetsByID[prompt.ingestedAssetID] != nil
+    }
+
+    public func dismissPendingVersionStackPrompt(coordinator: AppCoordinatorStore, announce: Bool = false) {
+        guard coordinator.pendingVersionStackPrompt != nil else { return }
+        coordinator.pendingVersionStackPrompt = nil
+        if announce {
+            coordinator.showToast("已作为独立素材保留", icon: "doc.badge.plus")
+        }
+    }
+
+    public func detectVersionStackCandidate(for fileURL: URL, targetFolderID: UUID?) async -> VersionStackCandidate? {
+        try? await engine.detectVersionStackCandidate(for: fileURL, targetFolderID: targetFolderID)
+    }
+
+    public func detectVersionStackCandidate(forAssetID assetID: UUID) async -> VersionStackCandidate? {
+        try? await engine.detectVersionStackCandidate(forAssetID: assetID)
+    }
+
+    @discardableResult
+    public func manageVersionStack(_ mutation: VersionStackMutation) async -> [AssetRecord] {
+        lastError = nil
+        do {
+            let updated = try await engine.manageVersionStack(mutation)
+            if !updated.isEmpty {
+                suppressDerivedAssetRebuild = true
+                for item in updated {
+                    allAssetsByID[item.id] = item
+                }
+                suppressDerivedAssetRebuild = false
+            }
+            await refreshAll()
+            return updated
+        } catch {
+            lastError = error.localizedDescription
+            libraryStoreLogger.error("manageVersionStack failed: \(error.localizedDescription, privacy: .public)")
+            return []
+        }
+    }
+
+    @discardableResult
+    public func mergeAssetsIntoVersionStack(
+        _ ids: [UUID],
+        targetAssetID: UUID? = nil,
+        editorName: String? = nil,
+        changeNote: String? = nil
+    ) async -> [AssetRecord] {
+        var uniqueIDs: [UUID] = []
+        var seen = Set<UUID>()
+        for id in ids where seen.insert(id).inserted {
+            uniqueIDs.append(id)
+        }
+        guard uniqueIDs.count >= 2 else { return [] }
+
+        if let targetID = targetAssetID,
+           let existingGroupID = allAssetsByID[targetID]?.richMetadata?.versionStack?.groupID {
+            var latestUpdated: [AssetRecord] = []
+            for id in uniqueIDs where id != targetID {
+                let res = await manageVersionStack(
+                    .join(
+                        assetID: id,
+                        targetAssetOrGroupID: existingGroupID,
+                        editorName: editorName,
+                        changeNote: changeNote,
+                        adoptTargetFolder: true
+                    )
+                )
+                if !res.isEmpty { latestUpdated = res }
+            }
+            if let newPrimaryID = primaryVersionAsset(for: targetID)?.id {
+                selectedAssetIDs = [newPrimaryID]
+            }
+            return latestUpdated
+        }
+
+        let res = await manageVersionStack(
+            .create(
+                assetIDs: uniqueIDs,
+                primaryAssetID: targetAssetID,
+                editorName: editorName,
+                changeNote: changeNote
+            )
+        )
+        if let anchorID = targetAssetID ?? uniqueIDs.last {
+            let primaryID = primaryVersionAssetID(for: anchorID)
+            selectedAssetIDs = [primaryID]
+        }
+        return res
+    }
+
+    @discardableResult
+    public func setPrimaryVersion(_ assetID: UUID) async -> [AssetRecord] {
+        let oldSiblings = Set(versionStackSiblings(for: assetID).map(\.id))
+        let wasStackSelected = !selectedAssetIDs.isDisjoint(with: oldSiblings)
+        let updated = await manageVersionStack(.setPrimary(assetID: assetID))
+        if wasStackSelected {
+            selectedAssetIDs.subtract(oldSiblings)
+            selectedAssetIDs.insert(assetID)
+        }
+        return updated
+    }
+
+    @discardableResult
+    public func unstackVersion(_ assetID: UUID) async -> [AssetRecord] {
+        await manageVersionStack(.unstack(assetID: assetID))
+    }
+
+    @discardableResult
+    public func updateVersionMetadata(
+        assetID: UUID,
+        versionLabel: String? = nil,
+        editorName: String? = nil,
+        changeNote: String? = nil
+    ) async -> [AssetRecord] {
+        await manageVersionStack(
+            .updateMeta(
+                assetID: assetID,
+                versionLabel: versionLabel,
+                editorName: editorName,
+                changeNote: changeNote
+            )
+        )
+    }
+
+    public func readStructuredDocument(assetID: UUID) async throws -> StructuredDocumentPayload {
+        try await engine.readStructuredDocument(assetID: assetID)
+    }
+
+    public func compareDocumentVersions(
+        baseAssetID: UUID,
+        targetAssetID: UUID,
+        sheetName: String? = nil,
+        primaryKeyCol: Int? = nil,
+        useOCRIfScanned: Bool = false
+    ) async throws -> DocumentComparisonReport {
+        try await engine.compareDocumentVersions(
+            baseAssetID: baseAssetID,
+            targetAssetID: targetAssetID,
+            sheetName: sheetName,
+            primaryKeyCol: primaryKeyCol,
+            useOCRIfScanned: useOCRIfScanned
+        )
+    }
+
+    public func synthesizeDocumentVersion(
+        baseAssetID: UUID,
+        targetAssetID: UUID,
+        preferTargetAsTemplate: Bool = true,
+        decisions: [DocumentMergeDecision],
+        editorName: String? = nil,
+        changeNote: String? = nil
+    ) async throws -> AssetRecord {
+        let created = try await engine.synthesizeDocumentVersion(
+            baseAssetID: baseAssetID,
+            targetAssetID: targetAssetID,
+            preferTargetAsTemplate: preferTargetAsTemplate,
+            decisions: decisions,
+            editorName: editorName,
+            changeNote: changeNote
+        )
+        allAssetsByID[created.id] = created
+        await refreshAll()
+        return allAssetsByID[created.id] ?? created
     }
 }

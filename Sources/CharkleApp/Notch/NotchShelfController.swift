@@ -714,12 +714,7 @@ public final class NotchShelfController {
             },
             onResolveDragFileURL: { [weak self] assetID in
                 guard let self else { return nil }
-                if let asset = self.library.allAssetsByID[assetID],
-                   let origURL = self.library.engine.cachedOriginalURL(for: asset) {
-                    return origURL
-                }
-                return self.library.engine.cachedThumbnailURL(for: assetID, tier: .preview1400)
-                    ?? self.library.engine.cachedThumbnailURL(for: assetID, tier: .grid520)
+                return self.library.cachedPrimaryDragFileURL(for: assetID)
             },
             onClose: { [weak self] in
                 self?.collapse(force: true)
@@ -1409,7 +1404,12 @@ public final class NotchShelfController {
             }
         }
 
-        if shelfState.statusBanner != nil || shelfState.processingMessage != nil || isSensorDragging || shelfState.isPinnedOpen || isMenuTracking {
+        if shelfState.statusBanner != nil
+            || shelfState.processingMessage != nil
+            || coordinator.pendingVersionStackPrompt?.source == .notchShelf
+            || isSensorDragging
+            || shelfState.isPinnedOpen
+            || isMenuTracking {
             cancelAutoCollapse()
             return
         }
@@ -1490,10 +1490,12 @@ public final class NotchShelfController {
                 showProcessing("正在解析网页缩略图…")
             }
             Task { @MainActor in
-                let created = await library.ingest(
+                let created = await library.ingestAndDetectStackPrompt(
                     directInputs,
                     targetFolderID: targetFolderID,
-                    targetBoardID: targetBoardID
+                    targetBoardID: targetBoardID,
+                    source: .notchShelf,
+                    coordinator: coordinator
                 )
                 if let boardID = targetBoardID, !created.isEmpty {
                     await moodboards.reloadActiveBoardIfNeeded(id: boardID)
@@ -1501,6 +1503,11 @@ public final class NotchShelfController {
                 }
                 guard !created.isEmpty else {
                     flashConfirmation(library.lastError ?? "未能收入内容或素材已存在")
+                    return
+                }
+                if coordinator.pendingVersionStackPrompt?.source == .notchShelf {
+                    expand(trigger: .statusBanner, pinOpen: true)
+                    panel?.makeKey()
                     return
                 }
                 let count = created.count

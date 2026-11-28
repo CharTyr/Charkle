@@ -156,16 +156,16 @@ public struct GeneralSettingsPane: View {
 
                 SettingsRow(
                     title: "画廊默认排布",
-                    subtitle: "打开全部素材或文件夹时默认采用的浏览视图"
+                    subtitle: "打开全部素材或未单独记忆偏好的目录时默认采用的浏览视图"
                 ) {
                     Picker("", selection: Binding(
-                        get: { coordinator.galleryLayoutMode },
+                        get: { coordinator.defaultGalleryLayoutMode },
                         set: { newMode in
-                            guard coordinator.galleryLayoutMode != newMode else { return }
-                            coordinator.galleryLayoutMode = newMode
+                            guard coordinator.defaultGalleryLayoutMode != newMode || coordinator.galleryLayoutMode != newMode else { return }
+                            coordinator.setDefaultGalleryLayoutMode(newMode)
                             coordinator.showToast(
                                 "画廊默认排布已切换为「\(newMode.localizedLabel)」",
-                                icon: "square.grid.2x2.fill",
+                                icon: newMode == .compactList ? "list.bullet" : "square.grid.2x2.fill",
                                 tone: .success
                             )
                         }
@@ -176,7 +176,7 @@ public struct GeneralSettingsPane: View {
                     }
                     .labelsHidden()
                     .pickerStyle(.segmented)
-                    .frame(width: 312)
+                    .frame(width: 396)
                 }
             }
 

@@ -1,3 +1,4 @@
+import AppKit
 import CharkleCanvas
 import CharkleCore
 import SwiftUI
@@ -165,6 +166,29 @@ public struct JumpAnywhereView: View {
                                                 .lineLimit(1)
                                         }
                                         Spacer()
+                                        if match.kind == .asset, let assetID = match.targetUUID {
+                                            Button {
+                                                copyMatchedAssetAndClose(assetID: assetID, fallbackTitle: match.title)
+                                            } label: {
+                                                HStack(spacing: 3) {
+                                                    Image(systemName: "doc.on.doc")
+                                                        .font(.system(size: 10, weight: .semibold))
+                                                    Text(selectedIndex == idx ? "拷贝文件 ⌘C" : "⌘C")
+                                                        .font(CharkleTheme.text(.caption, weight: .medium))
+                                                }
+                                                .foregroundStyle(selectedIndex == idx ? Color.accentColor : .secondary)
+                                                .padding(.horizontal, 7)
+                                                .padding(.vertical, 2.5)
+                                                .background(
+                                                    selectedIndex == idx
+                                                        ? Color.accentColor.opacity(0.14)
+                                                        : Color.primary.opacity(0.05),
+                                                    in: Capsule(style: .continuous)
+                                                )
+                                            }
+                                            .buttonStyle(.plain)
+                                            .help("直接将原文件（版本叠取主版本）拷入剪贴板，切微信直接 ⌘V 发送")
+                                        }
                                         Text(kindLabel(for: match.kind))
                                             .font(CharkleTheme.text(.caption, weight: .medium))
                                             .foregroundStyle(.secondary)
@@ -198,6 +222,28 @@ public struct JumpAnywhereView: View {
             .padding(.top, 92)
         }
         .ignoresSafeArea(.all)
+        .background {
+            WindowKeyEventBridge { event, hostWindow in
+                let flags = event.modifierFlags.intersection([.command, .option, .control, .shift])
+                guard flags == [.command],
+                      event.charactersIgnoringModifiers?.lowercased() == "c",
+                      !showingQuickCommands,
+                      selectedIndex < matches.count,
+                      matches[selectedIndex].kind == .asset,
+                      let assetID = matches[selectedIndex].targetUUID else {
+                    return event
+                }
+                if let textView = hostWindow.firstResponder as? NSTextView,
+                   textView.selectedRange().length > 0 {
+                    return event
+                }
+                if !event.isARepeat {
+                    copyMatchedAssetAndClose(assetID: assetID, fallbackTitle: matches[selectedIndex].title)
+                }
+                return nil
+            }
+            .allowsHitTesting(false)
+        }
         .onAppear {
             didExecuteSelection = false
             DispatchQueue.main.async {
@@ -292,6 +338,52 @@ public struct JumpAnywhereView: View {
             didExecuteSelection = true
             onSelectMatch(matches[selectedIndex])
             onClose()
+        }
+    }
+
+    /// Copies a matched asset's original file URL (always resolving a Version Stack to its `isPinnedPrimary` file)
+    /// directly onto `NSPasteboard.general` with toast confirmation for instant `⌘V` paste into chat/external apps.
+    @discardableResult
+    public static func copyAssetMatchToPasteboard(
+        assetID: UUID,
+        fallbackTitle: String,
+        library: LibraryStore,
+        coordinator: AppCoordinatorStore
+    ) async -> Int {
+        let count = await library.copyAssetsToPasteboard([assetID], preferStackPrimary: true)
+        guard count > 0 else {
+            coordinator.showToast("尚未找到「\(fallbackTitle)」的本地原文件", icon: "exclamationmark.triangle", tone: .warning)
+            return 0
+        }
+        let siblings = library.versionStackSiblings(for: assetID)
+        let primary = library.primaryVersionAsset(for: assetID)
+        let displayTitle = primary?.title ?? fallbackTitle
+        let suffix: String = {
+            guard siblings.count > 1 else { return "" }
+            let vNum = primary?.richMetadata?.versionStack?.versionNumber ?? 1
+            return " (主版 v\(vNum))"
+        }()
+        coordinator.showToast(
+            "已拷贝「\(displayTitle)\(suffix)」原文件实体，切微信直接 ⌘V 发送",
+            icon: "doc.on.doc.fill",
+            tone: .success
+        )
+        return count
+    }
+
+    private func copyMatchedAssetAndClose(assetID: UUID, fallbackTitle: String) {
+        guard !didExecuteSelection else { return }
+        didExecuteSelection = true
+        let lib = library
+        let coord = coordinator
+        onClose()
+        Task { @MainActor in
+            _ = await Self.copyAssetMatchToPasteboard(
+                assetID: assetID,
+                fallbackTitle: fallbackTitle,
+                library: lib,
+                coordinator: coord
+            )
         }
     }
 

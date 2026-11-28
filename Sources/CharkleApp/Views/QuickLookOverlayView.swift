@@ -214,7 +214,10 @@ public struct QuickLookOverlayView: View {
     private func estimatedFittedStageSize() -> CGSize {
         let availW = max(160, stageViewportSize.width - (coordinator.isInspectorVisible ? 56 : 96))
         let availH = max(160, stageViewportSize.height)
-        if asset.isGitHubRepo || asset.isSocialPost || asset.mediaKind == .document {
+        if asset.mediaKind == .document && !asset.fileName.lowercased().hasSuffix(".swatch") {
+            return CGSize(width: min(1020, availW), height: min(740, availH))
+        }
+        if asset.isGitHubRepo || asset.isSocialPost {
             return CGSize(width: min(740, availW), height: min(640, availH))
         }
         let ratio = CGFloat(max(0.25, min(4.0, asset.aspectRatio)))
@@ -665,20 +668,19 @@ public struct QuickLookOverlayView: View {
                 QuickLookModel3DViewer(asset: asset, originalURL: originalURL)
                     .id(asset.id)
             case .document:
-                if let url = originalURL, url.pathExtension.lowercased() == "pdf" {
-                    QuickLookPDFView(url: url)
-                        .id(asset.id)
-                        .frame(maxWidth: 860, maxHeight: 680)
-                        .clipShape(RoundedRectangle(cornerRadius: CharkleTheme.Radius.popoverOuter, style: .continuous))
-                        .shadow(color: .black.opacity(0.40), radius: 24, y: 10)
-                } else if asset.fileName.lowercased().hasSuffix(".swatch") {
+                if asset.fileName.lowercased().hasSuffix(".swatch") {
                     ProceduralMediaFallbackCard(asset: asset)
                         .frame(width: 420, height: 420)
                         .clipShape(RoundedRectangle(cornerRadius: CharkleTheme.Radius.dockOuter, style: .continuous))
                         .shadow(color: .black.opacity(0.40), radius: 28, y: 12)
                 } else {
-                    QuickLookMarkdownReaderCard(asset: asset, originalURL: originalURL)
-                        .id(asset.id)
+                    QuickLookDocumentStudioView(
+                        asset: asset,
+                        originalURL: originalURL,
+                        library: library,
+                        coordinator: coordinator
+                    )
+                    .id(asset.richMetadata?.versionStack?.groupID ?? asset.id)
                 }
             case .webBookmark:
                 webBookmarkDetailCard

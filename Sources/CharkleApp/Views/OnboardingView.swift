@@ -1424,24 +1424,30 @@ public struct OnboardingView: View {
                         .font(CharkleTheme.text(.caption, weight: .medium))
                         .foregroundStyle(SettingsPalette.sectionLabel(for: colorScheme))
 
-                    HStack(spacing: 10) {
+                    HStack(spacing: 8) {
                         galleryModeCard(
                             mode: .verticalMasonry,
                             title: "纵向瀑布流",
-                            subtitle: "保留原比例，高密度扫图",
+                            subtitle: "保留比例高密扫图",
                             iconName: "masonry-vertical"
                         )
                         galleryModeCard(
                             mode: .horizontalJustified,
                             title: "横向等高行",
-                            subtitle: "行高齐平，节奏工整",
+                            subtitle: "行高齐平节奏工整",
                             iconName: "masonry-horizontal"
                         )
                         galleryModeCard(
                             mode: .galleryFilmstrip,
                             title: "画廊视图",
-                            subtitle: "大图直览 + 翻转缩放",
+                            subtitle: "大图直览底部胶片",
                             iconName: "quicklook"
+                        )
+                        galleryModeCard(
+                            mode: .compactList,
+                            title: "紧凑视图",
+                            subtitle: "双列索引与版本叠",
+                            iconName: "compact-list"
                         )
                     }
                 }
@@ -1481,10 +1487,10 @@ public struct OnboardingView: View {
         subtitle: String,
         iconName: String
     ) -> some View {
-        let selected = coordinator.galleryLayoutMode == mode
+        let selected = coordinator.defaultGalleryLayoutMode == mode
         return Button {
             withAnimation(CharkleMotion.accessible(CharkleMotion.moveOnScreen, reduced: reduceMotion)) {
-                coordinator.galleryLayoutMode = mode
+                coordinator.setDefaultGalleryLayoutMode(mode)
             }
         } label: {
             VStack(alignment: .leading, spacing: 8) {
@@ -1588,6 +1594,27 @@ public struct OnboardingView: View {
                             .frame(width: 26, height: 50)
                     }
                     .frame(maxWidth: .infinity)
+                case .compactList:
+                    VStack(spacing: 6) {
+                        ForEach(0..<2, id: \.self) { row in
+                            HStack(spacing: 6) {
+                                ForEach(0..<2, id: \.self) { col in
+                                    HStack(spacing: 6) {
+                                        RoundedRectangle(cornerRadius: 3, style: .continuous)
+                                            .fill(row == 0 && col == 0 ? accent.opacity(0.45) : tile)
+                                            .frame(width: 18, height: 24)
+                                        VStack(alignment: .leading, spacing: 3) {
+                                            Capsule().fill(tile).frame(height: 5)
+                                            Capsule().fill(tile.opacity(0.65)).frame(width: 36, height: 4)
+                                        }
+                                        Spacer(minLength: 0)
+                                    }
+                                    .padding(6)
+                                    .background(tile.opacity(0.32), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.xs, style: .continuous))
+                                }
+                            }
+                        }
+                    }
                 }
             }
             .frame(height: 82)

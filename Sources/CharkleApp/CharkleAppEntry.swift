@@ -1147,6 +1147,21 @@ struct CharkleApp: App {
                 }
                 .keyboardShortcut("\\", modifiers: .command)
 
+                Menu("画廊视图排布") {
+                    ForEach(Array(GalleryLayoutMode.allCases.enumerated()), id: \.element) { idx, mode in
+                        Button {
+                            runtime.activateMainWindow()
+                            runtime.coordinator.selectGalleryLayoutModeForCurrentDestination(mode)
+                        } label: {
+                            if runtime.coordinator.galleryLayoutMode == mode {
+                                Label("\(mode.localizedLabel) (\(idx + 1))", systemImage: "checkmark")
+                            } else {
+                                Text("\(mode.localizedLabel) (\(idx + 1))")
+                            }
+                        }
+                    }
+                }
+
                 Divider()
 
                 // Global capture shortcuts are handled exclusively by `GlobalHotkeyManager` (`KeyboardShortcuts`)

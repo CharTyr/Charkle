@@ -1206,41 +1206,120 @@ public struct ProceduralMediaFallbackCard: View {
 
     private var documentCard: some View {
         let ext = CanvasFormatters.fileExtensionBadge(for: asset.fileName)
-        return VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text(ext)
-                    .font(CanvasSurface.text(.caption, weight: .bold))
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 3)
-                    .background(Color.primary.opacity(0.08), in: RoundedRectangle(cornerRadius: CanvasSurface.Radius.sm, style: .continuous))
-                Spacer()
-                Image(systemName: "doc.richtext")
-                    .font(.system(size: 13))
-                    .foregroundStyle(.secondary)
-            }
-
-            Text(asset.title)
-                .font(CanvasSurface.text(.body, weight: .semibold))
-                .foregroundStyle(.primary)
-                .lineLimit(2)
-
-            if !asset.notes.isEmpty {
-                Text(asset.notes)
-                    .font(CanvasSurface.text(.caption))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(4)
-            } else {
-                VStack(alignment: .leading, spacing: 5) {
-                    RoundedRectangle(cornerRadius: 2, style: .continuous).fill(Color.primary.opacity(0.10)).frame(height: 5)
-                    RoundedRectangle(cornerRadius: 2, style: .continuous).fill(Color.primary.opacity(0.08)).frame(width: 96, height: 5)
-                    RoundedRectangle(cornerRadius: 2, style: .continuous).fill(Color.primary.opacity(0.06)).frame(width: 72, height: 5)
-                }
-                .padding(.top, 4)
-            }
-
-            Spacer(minLength: 0)
+        let family = asset.richMetadata?.document?.parsedFormatFamily ?? DocumentFormatFamily.detect(fileExtension: ext)
+        let isSheet = family == .xlsx
+        let isRedHeader = family == .pdf || asset.title.contains("红头") || asset.title.contains("通知") || asset.title.contains("汇报") || asset.title.contains("纪要")
+        let formatAccent: Color = switch family {
+        case .xlsx: Color(charkleHex: "#1D7A46")
+        case .pdf: Color(charkleHex: "#C83E37")
+        case .pptx: Color(charkleHex: "#C96A1B")
+        case .docx, .legacyOffice: Color(charkleHex: "#2A60E0")
+        default: Color(charkleHex: "#4B5563")
         }
-        .padding(14)
+        let paperTop = colorScheme == .dark ? Color(charkleHex: "#242730") : Color(charkleHex: "#FAF9F6")
+        let snippet = (asset.richMetadata?.textExcerpt ?? asset.ocrText ?? asset.notes)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        return VStack(spacing: 0) {
+            // Upper crisp document page / spreadsheet preview
+            VStack(alignment: .leading, spacing: 7) {
+                HStack(spacing: 6) {
+                    RoundedRectangle(cornerRadius: 1.5, style: .continuous)
+                        .fill(isRedHeader ? Color(charkleHex: "#D93B30") : formatAccent)
+                        .frame(width: isRedHeader ? 42 : 28, height: 3.5)
+                    Spacer()
+                    if let docMeta = asset.richMetadata?.document {
+                        let metric = !docMeta.sheetNames.isEmpty
+                            ? "\(docMeta.sheetNames.count) 表"
+                            : (docMeta.pageCount > 0 ? "\(docMeta.pageCount) 页" : "")
+                        if !metric.isEmpty {
+                            Text(metric)
+                                .font(CanvasSurface.text(.caption, weight: .medium))
+                                .monospacedDigit()
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+
+                if isSheet {
+                    VStack(spacing: 3) {
+                        ForEach(0..<3, id: \.self) { row in
+                            HStack(spacing: 3) {
+                                ForEach(0..<3, id: \.self) { col in
+                                    let cellTint: Color = (row == 0 && col == 1)
+                                        ? Color(charkleHex: "#249A4B").opacity(0.24)
+                                        : ((row == 1 && col == 1)
+                                            ? Color(charkleHex: "#D93B30").opacity(0.24)
+                                            : Color.primary.opacity(colorScheme == .dark ? 0.12 : 0.08))
+                                    RoundedRectangle(cornerRadius: 2, style: .continuous)
+                                        .fill(cellTint)
+                                        .frame(height: 11)
+                                }
+                            }
+                        }
+                    }
+                    .padding(.top, 2)
+                } else if !snippet.isEmpty {
+                    Text(snippet)
+                        .font(CanvasSurface.text(.caption))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(3)
+                        .lineSpacing(2)
+                } else {
+                    VStack(alignment: .leading, spacing: 5) {
+                        RoundedRectangle(cornerRadius: 2, style: .continuous).fill(Color.primary.opacity(0.12)).frame(height: 4.5)
+                        RoundedRectangle(cornerRadius: 2, style: .continuous).fill(Color.primary.opacity(0.10)).frame(width: 108, height: 4.5)
+                        RoundedRectangle(cornerRadius: 2, style: .continuous).fill(formatAccent.opacity(0.28)).frame(width: 88, height: 4.5)
+                        RoundedRectangle(cornerRadius: 2, style: .continuous).fill(Color.primary.opacity(0.08)).frame(width: 72, height: 4.5)
+                    }
+                    .padding(.top, 2)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .background(paperTop)
+
+            Rectangle()
+                .fill(CanvasSurface.hairline(for: colorScheme))
+                .frame(height: CanvasSurface.hairlineWidth)
+
+            // Bottom clean info bar: format badge + clean 2-line title + Version Stack badge
+            VStack(alignment: .leading, spacing: 5) {
+                Text(asset.title)
+                    .font(CanvasSurface.text(.caption, weight: .semibold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.leading)
+
+                HStack(spacing: 5) {
+                    Text(ext)
+                        .font(CanvasSurface.text(.caption, weight: .bold))
+                        .foregroundStyle(formatAccent)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1.5)
+                        .background(formatAccent.opacity(0.12), in: RoundedRectangle(cornerRadius: CanvasSurface.Radius.xs, style: .continuous))
+
+                    if let stack = asset.richMetadata?.versionStack {
+                        Text(stack.isPinnedPrimary ? "主版 \(stack.displayVersionTag)" : stack.displayVersionTag)
+                            .font(CanvasSurface.text(.caption, weight: .semibold))
+                            .monospacedDigit()
+                            .foregroundStyle(Color(charkleHex: colorScheme == .dark ? "#5B8DEF" : "#2A60E0"))
+                            .padding(.horizontal, 5.5)
+                            .padding(.vertical, 1.5)
+                            .background(
+                                Color(charkleHex: "#2A60E0").opacity(colorScheme == .dark ? 0.18 : 0.10),
+                                in: Capsule(style: .continuous)
+                            )
+                    }
+                    Spacer(minLength: 0)
+                }
+            }
+            .padding(.horizontal, 11)
+            .padding(.vertical, 9)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(CanvasSurface.elevated(for: colorScheme))
+        }
         .background(CanvasSurface.elevated(for: colorScheme))
         .overlay(
             RoundedRectangle(cornerRadius: CanvasSurface.Radius.cardOuter, style: .continuous)
