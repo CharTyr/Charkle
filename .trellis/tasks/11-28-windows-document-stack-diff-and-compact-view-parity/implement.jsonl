@@ -1,0 +1,7 @@
+{"file": "docs/WINDOWS_DOCUMENT_SYNC_SPEC.md", "reason": "Complete 1:1 Windows wire, SQLite DDL, Rust parser/diff/merge, Tauri IPC, and Fluent 2 React UI specification aligned with macOS CharkleCore"}
+{"file": ".trellis/spec/cross-platform/index.md", "reason": "Canonical /.charkle/ sync wire contract for versionStack, document, compactList, MediaKind extensions, and interaction parity"}
+{"file": ".trellis/spec/windows/index.md", "reason": "Windows crate architecture, zero-Base64 charkle-media:// streaming, DPAPI vault, and release verification gates"}
+{"file": ".trellis/spec/windows/fluent2-design-system.md", "reason": "Windows 11 Fluent 2 tokens, @base-ui/react + motion/react primitives, Reduced Transparency/Motion, and zero transition:all"}
+{"file": "windows/AGENTS.md", "reason": "Win32 OLE DropTarget process boundary, outbound DoDragDrop handoff, WebView2 UI thread non-blocking, and React.memo gallery rules"}
+{"file": "DESIGN.md", "reason": "Cross-platform neutral canvas, Studio Cobalt accent, zero-violet rule, concentric radii, and CJK typography"}
+{"file": "AGENTS.md", "reason": "Platform workspace isolation (strictly windows/), Android UniFFI charkle-core compatibility, and repository purity"}

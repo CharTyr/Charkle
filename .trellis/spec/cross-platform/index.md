@@ -29,9 +29,49 @@
      - `ops/ops-<deviceId>-<seq>.jsonl` (newline-delimited `SyncOperation` JSON objects)
      - `boards/<UUID>.json` (per-board `MoodboardDocument`)
      - `vectors/` (binary vector shards)
-4. **Swift Keyed-Enum Payloads**:
+4. **Swift Keyed-Enum & Rich Metadata Payloads**:
    - `BoardLayoutMode`: `{"autoEditorial":{"_0":{...}}}` or `{"freeform":{}}` (MUST remain decodable on all platforms even when default creation is `freeform`).
    - `BoardNodeKind`: `{"assetRef":{...}}`, `{"note":{...}}`, `{"groupFrame":{...}}`, `{"paletteStrip":{...}}`.
+   - `GalleryLayoutMode`: `"verticalMasonry" | "horizontalJustified" | "galleryFilmstrip" | "ringGallery" | "compactList"` (`"compactList"` = 5th universal Tactile Studio Compact View `"紧凑视图"`).
+   - `MediaKind.document` canonical extension & MIME detection: `"pdf" | "md" | "markdown" | "txt" | "rtf" | "doc" | "docx" | "wps" | "et" | "dps" | "xlsx" | "xls" | "pptx" | "ppt" | "odt" | "ods" | "odp" | "epub" | "ofd" | "key" | "pages" | "numbers" | "json" | "yaml" | "yml" | "toml" | "csv"` (plus MIME fallbacks matching `application/pdf`, `text/*`, `*officedocument*`, `*msword*`, `*ms-excel*`, `*ms-powerpoint*`, `*opendocument*`, and `application/epub+zip`).
+   - `AssetRichMetadata.versionStack` (`AssetVersionStackMetadata`, optional, media-agnostic across documents, images, design files, etc.):
+     ```json
+     {
+       "groupID": "UPPERCASE-RFC4122-UUID",
+       "versionNumber": 4,
+       "parentAssetID": "UPPERCASE-RFC4122-UUID",
+       "versionLabel": "v4 · 张主任改",
+       "editorName": "张主任",
+       "changeNote": "核定第三部分预算数字",
+       "isPinnedPrimary": true
+     }
+     ```
+     - `groupID` (required `UUID`, uppercase RFC-4122), `versionNumber` (`Int >= 1`, default `1`), `parentAssetID` (`UUID?`, uppercase RFC-4122), `versionLabel` (`String?`), `editorName` (`String?`), `changeNote` (`String?`), `isPinnedPrimary` (`Bool`, default `false`).
+     - Canonical sibling ordering: ascending by `(versionNumber, createdAt, id)`. Canonical Primary Version (`resolvePrimaryAsset`): last sibling in sorted order with `isPinnedPrimary == true`, falling back to the highest `versionNumber` sibling when none is pinned.
+   - `AssetRichMetadata.document` (`DocumentRichMetadata` + optional `DocumentDiffSummary`):
+     ```json
+     {
+       "formatFamily": "docx",
+       "wordCount": 3420,
+       "pageCount": 6,
+       "sheetNames": ["2026预算汇总", "部门明细"],
+       "hasNativeRevisions": true,
+       "hasTextLayer": true,
+       "diffSummary": {
+         "comparedToAssetID": "UPPERCASE-RFC4122-UUID",
+         "addedBlocks": 2,
+         "removedBlocks": 1,
+         "modifiedBlocks": 5,
+         "movedBlocks": 1,
+         "highRiskNumberChanges": 2,
+         "highRiskDateChanges": 1,
+         "minimapBuckets": [0, 0, 1, 0, 0, 2, 2, 0, 1, 0, 2, 0]
+       }
+     }
+     ```
+     - `formatFamily` (`String`, known values: `"docx" | "xlsx" | "pptx" | "pdf" | "markdown" | "plainText" | "legacyOffice" | "epub" | "ofd" | "other"`, open-string tolerant so future tokens map safely to `"other"` without failing sync decode), `wordCount` (`Int >= 0`, default `0`), `pageCount` (`Int >= 0`, default `0`), `sheetNames` (`[String]`, default `[]`), `hasNativeRevisions` (`Bool`, default `false`), `hasTextLayer` (`Bool`, default `true`), `diffSummary` (`DocumentDiffSummary?`).
+     - `DocumentDiffSummary`: `comparedToAssetID` (required `UUID`, uppercase RFC-4122), `addedBlocks` / `removedBlocks` / `modifiedBlocks` / `movedBlocks` / `highRiskNumberChanges` / `highRiskDateChanges` (`Int >= 0`, default `0`), and `minimapBuckets` (`[Int]` normalized to `12` buckets clamped to `0 | 1 | 2`, where `0` = unchanged, `1` = normal add/modify/move, `2` = high-risk number/currency/percentage/date mutation).
+     - **Sync Log Hygiene Invariant**: Full extracted document plain text and structured block/sheet payloads MUST stay in a strictly local SQLite derived table (`document_content_cache` keyed by `(asset_id, content_hash)` feeding `assets_fts` + Pinyin/initials) and MUST NEVER be written into `AssetRecord` wire payloads or `/.charkle/ops/*.jsonl`.
    - `SyncOperation`: `{ "stamp": { "time": Int64, "device": String }, "change": { "<case>": { ... } }, "projectLocation"?: false }`.
    - `AssetChanges.fields` & `BoardChanges.fields`: map of `{ [fieldName]: "<base64-encoded-json-fragment>" }`, excluding `ASSET_SYNC_EXCLUDED_FIELDS` (`id`, `tags`, `isLocalOriginalCached`, `updatedAt`, `updatedHLC`) and `BOARD_SYNC_EXCLUDED_FIELDS` (`id`, `nodes`, `connectors`, `inkStrokes`, `updatedAt`, `updatedHLC`).
 5. **Conflict Resolution & Deletion Invariants**:
@@ -50,9 +90,9 @@
 - **Bad (Prevented)**: Encoding Unix milliseconds instead of Cocoa seconds shifts every synced asset date by 31+ years on macOS; decoding `SocialPlatform` as a closed enum aborts and rolls back an entire 40-shard sync transaction on the first unknown platform string.
 
 ### 6. Tests Required
-- macOS: `Tests/CharkleTests/DriveSyncTests.swift`
+- macOS: `Tests/CharkleTests/DriveSyncTests.swift`, `Tests/CharkleTests/DocumentCoreAndVersionStackTests.swift`, `Tests/CharkleTests/CompactGalleryAndDocumentUITests.swift`
 - Web: `web/packages/shared/tests/swift-codec.test.ts` (`swift-codec` round-trip verification)
-- Windows: `windows/crates/charkle-core/tests/wire_codec_tests.rs`, `windows/crates/charkle-core/tests/sync_engine_tests.rs`, and `windows/crates/charkle-core/tests/douyin_sync_tests.rs` (including `SocialPlatform::Unknown(String)` round-trip through `SyncFields::merge` and `apply_op_shard`)
+- Windows: `windows/crates/charkle-core/tests/wire_codec_tests.rs`, `windows/crates/charkle-core/tests/sync_engine_tests.rs`, `windows/crates/charkle-core/tests/douyin_sync_tests.rs`, and `windows/crates/charkle-core/tests/document_and_version_stack_tests.rs` (including `SocialPlatform::Unknown(String)`, `AssetRichMetadata.versionStack`, and `AssetRichMetadata.document` round-trip through `SyncFields::merge` and `apply_op_shard`)
 
 ### 7. Wrong vs Correct
 ```ts
@@ -152,6 +192,24 @@
       - Both desktop Rust (`windows/crates/charkle-core/src/media/douyin.rs::douyin_classification_tag`, `pipeline.rs`, `bridge.rs`) and the extension (`content.js` / `background.js`) automatically append deduplicated **`抖音视频`** (`hasVideo === true`) or **`抖音图文`** (`hasVideo === false`) tags across batch, picker, author-media, single-page, and desktop-paste ingest. When `douyinAutoClassify === true`, `background.js` lazily creates/reuses (`POST /api/v1/folders` with `reuseExisting: true`, cached per parent) `视频` / `图文` subfolders ONLY when items of that type are actually ingested — never creating empty folders and preventing `视频/视频` re-nesting (batch/picker Inbox targets lazily create `<suggestedFolderName>` first; single-page Inbox captures stay in Inbox with tags only).
       - The `批量` tab provides built-in multi-select **「挑选导入」** (`SCAN_DOUYIN_PICKER_ITEMS` supporting `{ scrollMore: true }` on `.route-scroll-container`, `FETCH_EXISTING_SOURCES` `alreadyImported` status, `全选未导入` / `清空` / `加载更多` / `导入所选`), and the `抓图` tab displays a neutral top hint (`#images-social-hint` + `去挑选导入`) on Douyin/Xiaohongshu collection pages so users do not mistakenly clip bare cover images.
     - **Cross-platform extension mirror invariant**: Keep `Resources/BrowserExtension/lib/url-detect.js` self-contained (for Safari's classic Service Worker bundler), mirror every non-test runtime file in `Resources/BrowserExtension/` byte-identically to `windows/src-tauri/resources/BrowserExtension/`, and register all files 1:1 in `windows/src-tauri/tauri.conf.json` (`bundle.resources`).
+11. **5th Gallery View Mode (`compactList`), Media-Agnostic Version Stack & Scheme B Document Diff / 2-Way Synthesis**:
+    - **Tactile Studio Compact View (`GalleryLayoutMode.compactList`, desktop shortcut `5` / `Ctrl+5`)**:
+      - Universal across all 8 `MediaKind`s with local **per-destination layout mode memory** (per folder / Inbox, falling back to global default layout).
+      - Desktop views offer a toggleable **2-Column Tactile Index Grid (`双列索引卡`, responsive to 1-col on narrow widths) ⇄ 1-Column Folio Strip (`单列折页条`)** (iPad regular width uses 2-col Bento; iPhone compact width uses 1-col Folio).
+      - Left artifact renders a **3D Micro-Folio Stack** for `versionCount > 1` that subtly fans open on fine-pointer hover (`@media (hover: hover) and (pointer: fine)`, pure transform, disabled under Reduced Motion), miniature red-header/sheet/page skeletons for single documents, crisp thumbnail + bottom palette bar for images/designs, and miniature waveform for audio.
+      - Right edge displays a **12-Segment Diff Minimap** (`minimapBuckets` of `0` neutral, `1` green add/mod/move, `2` crimson high-risk number/date) + `tabular-nums` timestamp.
+      - Clicking/tapping a stack pill (`主版 v4 · +1 新版` or `主版 v4 · 共N版`) unfolds an **Inline Expandable Revision Rail** (`v3` ── `Δ 6处 · ¥1` ── `v4 主版` ── `Δ 3处 · ¥2` ── `v5`), supporting 1-click **`设为主版`** (`isPinnedPrimary`) and 1-click **`Δ`** bridge pills to open Quick Look directly in Diff mode.
+      - Preserves 100% gallery parity: single/`Shift`/`⌘`/`Ctrl` multi-selection, `↑/↓` `0ms` keyboard navigation, unmodified `Space` Quick Look toggle, drag-out of the **Primary Version** original file, and drag-drop onto a card to merge into a Version Stack.
+    - **Media-Agnostic Version Stack & Anti-Mis-Send Primary Lock (`isPinnedPrimary`)**:
+      - Gallery views collapse assets sharing `versionStack.groupID` into a single visible representative resolved via `AssetVersionStackMetadata.resolvePrimaryAsset` (`isPinnedPrimary == true` preferred; otherwise highest `versionNumber`).
+      - Appending a newer `vN+1` onto a stack with a pinned primary `vK` MUST NEVER silently override `vK`; outbound drag (`NSPasteboard` / Win32 OLE `DoDragDrop`), clipboard file copy (`⌘C` / `Ctrl+C` `CF_HDROP`), Notch/Top-Edge Shelf drag-out, and iOS Share sheets MUST ALWAYS export the Primary Version's original file.
+      - Dropping/importing files into Top Shelf or Folder runs `< 150ms` offline candidate detection (Chinese office filename stem normalizer + 64-bit paragraph SimHash similarity `>= 0.45`) and presents a non-blocking banner pre-filling `editorName` + 1-line `changeNote` while keeping flat independent files on disk (zero wrapper folders).
+    - **Universal Quick Jump File Copy (`⌘J / Ctrl+J` -> `⌘C / Ctrl+C`) & Local FTS5 Document Cache**:
+      - Pressing `⌘C` / `Ctrl+C` on an asset row in Jump Anywhere copies the Primary Version's original file entity directly to the OS clipboard (`NSPasteboard` file URL / Win32 `CF_HDROP`) for instant paste into WeChat.
+      - Native offline parsers extract `.docx / .xlsx / .pptx / .pdf / .md / .txt(UTF-8/UTF-16/GB18030)` (plus OS-native plain-text fallback for legacy `.doc/.wps/.xls/.et` via `NSAttributedString`/`textutil` on macOS and Win32 `IFilter` on Windows), caching structured blocks and full text in local `document_content_cache` to feed `assets_fts` + Pinyin without polluting `/.charkle/ops/*.jsonl`.
+    - **Quick Look Document Readers, High-Risk Radar, Visual PDF Diff & Scheme B 2-Way Synthesis**:
+      - Quick Look (`300pt/300px` synchronized Inspector 1:1 preserved) renders clean `.docx`, `.xlsx` (sheet tabs), `.pdf`, and `.md/.txt` readers, plus Version Stack diff mode with **High-Risk Radar filters** (`全部改动`, `数字与金额`, `日期与时限`, `表格变动`, `原生修订/批注`), **`仅看改动段落`** collapse, `J/K` jump, Word Inline/Side-by-Side/Move/Table/Comment diff, Excel Primary-Key row-aligned cell & formula diff, and scanned PDF offline OCR (Apple Vision / WinRT `OcrEngine`) + **Red-Cyan blend & interactive Split Curtain Wipe** visual diff.
+      - **Scheme B 2-Way Synthesis (`按差异合成新版本`)** produces a new `vN+1` stack sibling (never overwriting originals) via lossless `.md/.txt` merge and **ZIP-preserving `.docx` plain-paragraph `<w:p>` surgical replacement** (preserving `styles.xml`, red headers, headers/footers, numbering, and media byte-for-byte, with XML integrity validation), while marking complex merged tables (`vMerge`/`gridSpan`), `fldComplex`, SmartArt, OLE, `.xlsx`, and `.pdf` as **`受保护结构（只读对比）`** with a 1-click open-in-default-app action.
 
 ---
 

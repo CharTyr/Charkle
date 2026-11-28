@@ -1,0 +1,6 @@
+{"file": "docs/WINDOWS_DOCUMENT_SYNC_SPEC.md", "reason": "Verify 100% field-for-field and behavioral parity against macOS CharkleCore contracts, regexes, SimHash thresholds, and IPC shapes"}
+{"file": ".trellis/spec/cross-platform/index.md", "reason": "Verify /.charkle/ wire compatibility, uppercase UUIDs, Cocoa epoch timestamps, and local-only document_content_cache"}
+{"file": ".trellis/spec/windows/index.md", "reason": "Verify zero-Base64 IPC media streaming, Android charkle-core compatibility, and mandatory Windows test gates"}
+{"file": ".trellis/spec/windows/fluent2-design-system.md", "reason": "Verify Fluent 2 Light/Dark/SolidFallback/ReducedMotion compliance, tabular-nums, and zero violet/transition:all"}
+{"file": "windows/AGENTS.md", "reason": "Verify Win32 OLE safety, non-blocking spawn_blocking workers, and CF_HDROP primary version copy/drag"}
+{"file": "AGENTS.md", "reason": "Verify strict windows/ edit scope, zero external competitor/author mentions, and zero personal paths"}

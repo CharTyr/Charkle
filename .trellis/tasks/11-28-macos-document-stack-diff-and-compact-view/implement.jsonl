@@ -1,0 +1,7 @@
+{"file": ".trellis/spec/cross-platform/index.md", "reason": "Cross-platform /.charkle/ sync wire contract, Gallery & Quick Look interaction invariants, and repository purity"}
+{"file": ".trellis/spec/backend/index.md", "reason": "Sources/CharkleCore actor concurrency, SQLite WAL + FTS5 conventions, and iOS compatibility"}
+{"file": ".trellis/spec/frontend/index.md", "reason": "macOS SwiftUI + AppKit state coordination and virtualized gallery invariants"}
+{"file": ".trellis/spec/macos/native-design-system.md", "reason": "macOS native Liquid Glass chrome, CharkleControls, Hairline Inspector, and Menu sizing rules"}
+{"file": "ios/README.md", "reason": "iOS/iPadOS universal adaptive shell and Sources/CharkleCore direct SwiftPM sharing"}
+{"file": "DESIGN.md", "reason": "Canonical cross-platform color tokens, zero-violet rule, typography, and motion physics"}
+{"file": "AGENTS.md", "reason": "Platform scope guardrails, macOS keyboard/Quick Look/DisclosureGroup invariants, and purity rules"}
