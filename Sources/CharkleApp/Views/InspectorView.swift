@@ -837,6 +837,59 @@ public struct InspectorView: View {
                                 .lineLimit(1)
                         }
                         .buttonStyle(.charkle(.subtle, size: .xs, fullWidth: true))
+
+                        Button(role: .destructive) {
+                            let id = asset.id
+                            let nextGalleryFocusID = MasonryLayoutEngine.nextFocusAssetIDAfterDeleting(
+                                deletedIDs: [id],
+                                in: library.assets.map(\.id)
+                            )
+                            if isQuickLookHosted && coordinator.quickLookAssetID == id {
+                                let playlist = coordinator.quickLookPlaylist
+                                let remaining = playlist.filter { $0 != id }
+                                if playlist.count > 1,
+                                   let nextQLID = MasonryLayoutEngine.nextFocusAssetIDAfterDeleting(deletedIDs: [id], in: playlist),
+                                   !remaining.isEmpty {
+                                    coordinator.openQuickLook(assetID: nextQLID, playlist: remaining)
+                                    library.selectedAssetIDs = [nextQLID]
+                                    coordinator.focusedStageAssetID = nextQLID
+                                } else if let onRequestCloseQuickLook {
+                                    onRequestCloseQuickLook()
+                                } else {
+                                    coordinator.closeQuickLook()
+                                }
+                            }
+                            Task {
+                                await library.trashAssets([id])
+                                if coordinator.quickLookAssetID == nil,
+                                   library.selectedAssetIDs.isEmpty,
+                                   let nextFocusID = nextGalleryFocusID,
+                                   library.assets.contains(where: { $0.id == nextFocusID }) {
+                                    var transaction = Transaction(animation: nil)
+                                    transaction.disablesAnimations = true
+                                    withTransaction(transaction) {
+                                        library.selectedAssetIDs = [nextFocusID]
+                                        coordinator.focusedStageAssetID = nextFocusID
+                                    }
+                                }
+                                coordinator.showToast(
+                                    "已移至废纸篓",
+                                    icon: "trash",
+                                    actionTitle: "撤销",
+                                    onAction: {
+                                        Task {
+                                            await library.restoreAssets([id])
+                                            coordinator.showToast("已放回原处", icon: "arrow.uturn.backward", tone: .success)
+                                        }
+                                    }
+                                )
+                            }
+                        } label: {
+                            Label("删除", systemImage: "trash")
+                                .lineLimit(1)
+                        }
+                        .buttonStyle(.charkle(.subtle, size: .xs, fullWidth: true))
+                        .help("移至废纸篓 (Delete)")
                     }
                     .padding(2)
                     .background(CharkleTheme.inspectorFieldSurface(for: colorScheme), in: row2ContainerShape)

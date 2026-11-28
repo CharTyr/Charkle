@@ -249,6 +249,35 @@ public nonisolated enum MasonryLayoutEngine {
         return best
     }
 
+    /// Resolves the next adjacent asset ID to keep selected/focused after deleting `deletedIDs` from `orderedAssetIDs`:
+    /// - Prefers the first remaining item after the first deleted item (middle/first item -> next item).
+    /// - Falls back to the nearest remaining item before the deleted item (last item -> previous item).
+    /// - Returns `nil` when no remaining items exist or none of `deletedIDs` appear in `orderedAssetIDs`.
+    public static func nextFocusAssetIDAfterDeleting(
+        deletedIDs: Set<UUID>,
+        in orderedAssetIDs: [UUID]
+    ) -> UUID? {
+        guard !deletedIDs.isEmpty, !orderedAssetIDs.isEmpty else { return nil }
+        guard let firstDeletedIndex = orderedAssetIDs.firstIndex(where: { deletedIDs.contains($0) }) else {
+            return nil
+        }
+        for idx in (firstDeletedIndex + 1)..<orderedAssetIDs.count {
+            let candidate = orderedAssetIDs[idx]
+            if !deletedIDs.contains(candidate) {
+                return candidate
+            }
+        }
+        if firstDeletedIndex > 0 {
+            for idx in stride(from: firstDeletedIndex - 1, through: 0, by: -1) {
+                let candidate = orderedAssetIDs[idx]
+                if !deletedIDs.contains(candidate) {
+                    return candidate
+                }
+            }
+        }
+        return nil
+    }
+
     /// Steps density cleanly by exactly 1 column (Vertical Masonry) or 1 logarithmic stop (Horizontal Justified).
     /// `direction > 0` zooms IN (larger cards, fewer columns); `direction < 0` zooms OUT (smaller cards, more columns).
     public static func steppedColumnWidth(
@@ -4804,28 +4833,53 @@ internal final class MasonryDocumentView: NSView, NSDraggingSource {
 
     // MARK: - Keyboard Shortcuts (When Masonry Is Focused)
 
+    private func triggerKeyboardDeleteSelection() -> Bool {
+        guard activeQuickLookID == nil, !isOverlayPresented, !selectedAssetIDs.isEmpty else {
+            return false
+        }
+        let orderedTargets = assets.compactMap { selectedAssetIDs.contains($0.id) ? $0.id : nil }
+        let targets = orderedTargets.isEmpty ? Array(selectedAssetIDs) : orderedTargets
+        guard !targets.isEmpty else { return false }
+
+        let targetSet = Set(targets)
+        let matchingAssets = assets.filter { targetSet.contains($0.id) }
+        if !matchingAssets.isEmpty && matchingAssets.allSatisfy(\.isTrashed) {
+            callbacks.onPermanentlyDeleteAssets(targets)
+        } else {
+            callbacks.onTrashAssets(targets)
+        }
+        return true
+    }
+
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         guard !isOverlayPresented, window?.firstResponder === self else { return super.performKeyEquivalent(with: event) }
-        // Ignore Caps Lock / NumPad / Function flags so ⌘A/⌘C/⌘X/⌘V work reliably with Chinese IME switch
+        // Ignore Caps Lock / NumPad / Function flags so ⌘A/⌘C/⌘X/⌘V/⌘⌫ work reliably with Chinese IME switch
         let flags = event.modifierFlags.intersection([.command, .option, .control, .shift])
-        if flags == .command, let chars = event.charactersIgnoringModifiers?.lowercased() {
-            switch chars {
-            case "a":
-                commitSelection(Set(assets.map(\.id)))
-                return true
-            case "c":
+        if flags == .command {
+            if event.keyCode == 51 || event.keyCode == 117 {
                 guard !selectedAssetIDs.isEmpty else { return false }
-                callbacks.onCopyAssets(Array(selectedAssetIDs))
-                return true
-            case "x":
-                guard !selectedAssetIDs.isEmpty else { return false }
-                callbacks.onCutAssets(Array(selectedAssetIDs))
-                return true
-            case "v":
-                callbacks.onPasteIntoCurrentFolder()
-                return true
-            default:
-                break
+                if event.isARepeat { return true }
+                return triggerKeyboardDeleteSelection()
+            }
+            if let chars = event.charactersIgnoringModifiers?.lowercased() {
+                switch chars {
+                case "a":
+                    commitSelection(Set(assets.map(\.id)))
+                    return true
+                case "c":
+                    guard !selectedAssetIDs.isEmpty else { return false }
+                    callbacks.onCopyAssets(Array(selectedAssetIDs))
+                    return true
+                case "x":
+                    guard !selectedAssetIDs.isEmpty else { return false }
+                    callbacks.onCutAssets(Array(selectedAssetIDs))
+                    return true
+                case "v":
+                    callbacks.onPasteIntoCurrentFolder()
+                    return true
+                default:
+                    break
+                }
             }
         }
         return super.performKeyEquivalent(with: event)
@@ -4849,6 +4903,18 @@ internal final class MasonryDocumentView: NSView, NSDraggingSource {
         if let navDirection, (primaryModifiers.isEmpty || primaryModifiers == [.shift]), !assets.isEmpty {
             navigateSelection(direction: navDirection, extendSelection: primaryModifiers.contains(.shift))
             return
+        }
+
+        if (primaryModifiers.isEmpty || primaryModifiers == [.command]),
+           (event.keyCode == 51 || event.keyCode == 117) {
+            guard activeQuickLookID == nil, !isOverlayPresented, !selectedAssetIDs.isEmpty else {
+                super.keyDown(with: event)
+                return
+            }
+            if event.isARepeat { return }
+            if triggerKeyboardDeleteSelection() {
+                return
+            }
         }
 
         guard primaryModifiers.isEmpty else {
