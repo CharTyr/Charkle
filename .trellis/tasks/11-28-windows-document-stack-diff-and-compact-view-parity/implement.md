@@ -72,16 +72,16 @@ cd windows && cargo fmt --all -- --check && cargo clippy --workspace --all-targe
   - Add per-destination layout memory in `coordinatorStore.ts` and `versionStack.groupID` Primary-Version folding (`resolvePrimaryAsset`) in `libraryStore.ts`.
 - [ ] **3.2 Tactile Studio Compact View (`GalleryCompactView.tsx`, `TopFilterCapsule.tsx`, `GalleryView.tsx`, `App.tsx`)**:
   - Wire `'compactList'` switcher (`紧凑视图`, shortcut `5` / `Ctrl+5`), Settings default layout option, and Onboarding layout option.
-  - Build virtualized `GalleryCompactView.tsx` with 2-col Tactile Index Grid ⇄ 1-col Folio Strip, hover 3D micro-folio fan-out (fine-pointer + reduced-motion guarded), 12-segment Diff Minimap, inline expandable Revision Rail (`设为主版` & `Δ` diff bridges), `Shift`/`Ctrl` multi-select, `↑/↓` `0ms` nav, `Space` Quick Look, and Primary Version drag-out / drop-to-stack.
+  - Build virtualized `GalleryCompactView.tsx` with 2-col Tactile Index Grid ⇄ 1-col Folio Strip, hover 3D micro-folio fan-out (fine-pointer + reduced-motion guarded), 12-segment Diff Minimap, inline expandable Revision Rail (`设为主版` & `Δ` diff bridges with `数字`/`时间` bridge labels and deduplicated `v1` tags), `Shift`/`Ctrl` + rubber-band marquee box multi-selection (dragging from open strip whitespace, gaps, or stage margins with auto-scroll), `↑/↓` `0ms` nav, `Space` Quick Look, and Primary Version drag-out / drop-to-stack.
 - [ ] **3.3 Active Drop Banner, Inspector Section & `Ctrl+J -> Ctrl+C` (`TopEdgeDropShelf.tsx`, `InspectorView.tsx`, `JumpAnywhereModal.tsx`)**:
   - Surface `< 150ms` non-blocking `.win-acrylic` version-stacking prompt on drops into `TopEdgeDropShelf` (updating `setShelfHitRect` cleanly) and `GalleryView`/Folder; add context-menu stack actions (`合并为版本叠`, `设为主版本`, `拆出为独立素材`).
   - Add `CharkleDisclosureGroup` `版本叠` card in `InspectorView.tsx` (1:1 shared with Quick Look).
   - Add `Ctrl+C` Primary Version `CF_HDROP` file copy in `JumpAnywhereModal.tsx`.
-- [ ] **3.4 Quick Look Document Studio & Visual PDF Diff (`DocumentStudioViewer.tsx`, `PdfDocumentViewer.tsx`, `QuickLookOverlay.tsx`)**:
-  - Build `.docx` and `.xlsx` native Fluent 2 readers alongside `.pdf` and `.md/.txt`.
-  - Build Version Stack Diff stage: High-Risk Radar filter pills, `仅看改动段落` toggle, `J/K` jump, Word Inline & Side-by-Side sync-scroll diff, Excel PK selector & cell/formula diff, `pdfjs-dist` dual-canvas **Red-Cyan blend & Split Curtain Wipe** + WinRT OCR trigger, and Scheme B 2-Way merge (`按差异合成新版本` -> `净版预览` -> `生成净版 vN+1`).
+- [ ] **3.4 Quick Look Document Studio, True-Layout `docx-preview` & Visual PDF Diff (`DocumentStudioViewer.tsx`, `PdfDocumentViewer.tsx`, `QuickLookOverlay.tsx`)**:
+  - Build `.docx` dual-mode reader (`原版版式` via offline client-side `docx-preview` over `http://charkle-media.localhost/original/<uuid>` rendering real A4 margins, CJK 2-char indents, fonts, red headers, `word/media/*` images, and merged tables ⇄ `结构与批注` structured blocks & comment cards) and `.xlsx` native Fluent 2 reader alongside `.pdf` and `.md/.txt`.
+  - Build Version Stack Diff stage: High-Risk Radar filter pills, `仅看改动段落` toggle, `J/K` jump, Word Inline & Side-by-Side sync-scroll diff, Excel PK selector & cell/formula diff, `pdfjs-dist` dual-canvas **Red-Cyan blend & Split Curtain Wipe** + WinRT OCR trigger, and Scheme B 2-Way merge (`按差异合成新版本` -> `净版预览` -> `生成净版 vN+1`) using hanging-indent `−` (`DismissCircle`) / `+` (`AddCircle`) icon-gutter badges and selective `inlineTokens` span highlighting (no `"旧版："`/`"新版："` text prefixes or full-paragraph solid green/strikethrough).
 - [ ] **3.5 Vitest Regression Suite (`windows/ui/src/__tests__/document-stack-compact-view.test.tsx`)**:
-  - Test Compact View 2-col/1-col & Revision Rail, per-destination layout memory, `isPinnedPrimary` anti-override, `Ctrl+J -> Ctrl+C` primary file copy, Quick Look readers, High-Risk Radar, Excel PK diff, PDF visual diff modes, and 2-Way synthesis.
+  - Test Compact View 2-col/1-col & Revision Rail, per-destination layout memory, `isPinnedPrimary` anti-override, `Ctrl+J -> Ctrl+C` primary file copy, Quick Look `.docx` (`原版版式` ⇄ `结构与批注`) / `.xlsx` readers, icon-gutter selective `inlineTokens` diff/merge rows, High-Risk Radar, Excel PK diff, PDF visual diff modes, and 2-Way synthesis.
 
 ### Wave 3 & Final Pre-Commit Gate
 ```powershell

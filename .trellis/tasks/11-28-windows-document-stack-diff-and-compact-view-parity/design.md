@@ -33,7 +33,7 @@ flowchart TB
         Stores["coordinatorStore.ts & libraryStore.ts\nPer-Destination Layout · groupID Primary Folding"]
         Compact["GalleryCompactView.tsx\n2-Col Bento ⇄ 1-Col Folio · 3D Micro-Folio\n12-Bucket Minimap · Inline Revision Rail"]
         CaptureUI["TopEdgeDropShelf.tsx · GalleryView.tsx · JumpAnywhereModal.tsx\n<150ms Stack Prompt · Ctrl+J -> Ctrl+C CF_HDROP"]
-        QL["DocumentStudioViewer.tsx · PdfDocumentViewer.tsx · InspectorView.tsx\nReaders · High-Risk Radar · Red-Cyan/Curtain · 2-Way Merge"]
+        QL["DocumentStudioViewer.tsx · PdfDocumentViewer.tsx · InspectorView.tsx\ndocx-preview 原版版式 ⇄ 结构与批注 · High-Risk Radar\n−/+ Icon-Gutter Selective Diff · Red-Cyan/Curtain · 2-Way Merge"]
     end
 
     WinPlatform -->|Trait Seams| Core
@@ -64,7 +64,8 @@ flowchart TB
 - **Hard Rule**: Never re-serialize an entire `.docx` document from an AST (which would destroy custom Chinese government red-header layouts, `styles.xml`, headers/footers, numbering, or embedded seals).
 - Instead, copy every non-`word/document.xml` ZIP entry verbatim from the chosen template `.docx`, splice ONLY plain `<w:body>/<w:p>` byte ranges (`!is_protected_complex`) while retaining `<w:pPr>` and primary `<w:rPr>` formatting tags, validate the resulting `word/document.xml` via `quick_xml::Reader` to `Event::Eof`, and re-verify the output `.docx` via `ZipArchive` before inserting `vN+1` into the library.
 
-### 2.5 High-Frame-Rate Fluent 2 UI & `pdfjs-dist` Visual Diff
+### 2.5 High-Frame-Rate Fluent 2 UI, True-Layout `docx-preview` & `pdfjs-dist` Visual Diff
 - Wrap `CompactAssetRow` / `CompactIndexCard` in `React.memo` with primitive store selectors (`selected: boolean`, `expanded: boolean`) per `windows/AGENTS.md`.
 - Guard 3D micro-folio hover transforms behind `@media (hover: hover) and (pointer: fine)` and disable rotation under `prefers-reduced-motion: reduce` or `:root[data-animations="disabled"]`.
+- Render `.docx` `原版版式` via pure client-side offline `docx-preview` streaming raw `.docx` bytes from `http://charkle-media.localhost/original/<uuid>` (preserving real A4 margins, CJK 2-char indents, fonts, red headers, `word/media/*` images, and merged tables) paired with a 1-click `原版版式` ⇄ `结构与批注` toggle, and render all separate base/target diff & 2-Way Merge rows with hanging-indent `−` (`DismissCircle`) / `+` (`AddCircle`) icon-gutter badges and selective `inlineTokens` span highlighting (zero `"旧版："`/`"新版："` text prefixes, zero full-paragraph solid green/strikethrough blocks).
 - Implement PDF Red-Cyan blend & Split Curtain Wipe directly in `PdfDocumentViewer.tsx` / `PdfVisualDiffStage.tsx` using two offscreen `pdfjs-dist` canvases streaming from `http://charkle-media.localhost/original/<uuid>` (HTTP 206 Range, zero Base64 IPC), driving the Split Curtain divider via direct DOM `style.clipPath` updates during pointer capture for `0ms` 120Hz tracking.

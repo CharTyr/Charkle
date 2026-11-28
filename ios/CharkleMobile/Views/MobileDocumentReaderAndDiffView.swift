@@ -1,6 +1,7 @@
 import CharkleCore
 import CoreGraphics
 import PDFKit
+import QuickLook
 import SwiftUI
 import UIKit
 
@@ -13,8 +14,8 @@ enum MobileDocumentStageMode: String, CaseIterable {
 
 enum MobileRadarFilter: String, CaseIterable, Identifiable {
     case all = "全部改动"
-    case numberOrCurrency = "数字与金额"
-    case dateOrDeadline = "日期与时限"
+    case numberOrCurrency = "数字变动"
+    case dateOrDeadline = "日期时间"
     case tableMutation = "表格变动"
     case nativeRevisionOrComment = "原生修订/批注"
 
@@ -23,7 +24,7 @@ enum MobileRadarFilter: String, CaseIterable, Identifiable {
     var symbol: String {
         switch self {
         case .all: "line.3.horizontal.decrease.circle"
-        case .numberOrCurrency: "yensign.circle"
+        case .numberOrCurrency: "number.circle"
         case .dateOrDeadline: "calendar"
         case .tableMutation: "tablecells"
         case .nativeRevisionOrComment: "text.bubble"
@@ -65,11 +66,24 @@ struct MobileDocumentStageView: View {
     @State private var localOriginalURL: URL?
 
     // Reader sub-states
+    @State private var officeReaderMode: OfficeReaderDisplayMode = .trueLayout
     @State private var selectedSheetIndex: Int = 0
     @State private var selectedFormulaDetail: String?
     @State private var showRawTextMode: Bool = false
     @State private var areCommentsExpanded: Bool = true
     @State private var pdfContinuousMode: Bool = true
+
+    private enum OfficeReaderDisplayMode: String, CaseIterable {
+        case trueLayout = "原版版式"
+        case structured = "结构与批注"
+
+        var symbol: String {
+            switch self {
+            case .trueLayout: "doc.richtext"
+            case .structured: "text.bubble"
+            }
+        }
+    }
 
     // Diff states
     @State private var baseVersionID: UUID
@@ -138,6 +152,10 @@ struct MobileDocumentStageView: View {
         store.primaryVersionAsset(for: asset)
     }
 
+    private var fileExtensionLower: String {
+        (asset.fileName as NSString).pathExtension.lowercased()
+    }
+
     private var formatFamily: DocumentFormatFamily {
         if let raw = payload?.formatFamily, let parsed = DocumentFormatFamily(rawValue: raw) {
             return parsed
@@ -145,7 +163,32 @@ struct MobileDocumentStageView: View {
         if let doc = asset.richMetadata?.document {
             return doc.parsedFormatFamily
         }
-        return DocumentFormatFamily.detect(fileExtension: (asset.fileName as NSString).pathExtension)
+        return DocumentFormatFamily.detect(fileExtension: fileExtensionLower)
+    }
+
+    private var supportsTrueLayoutOfficePreview: Bool {
+        let ext = fileExtensionLower
+        if [
+            "docx", "doc", "wps", "pptx", "ppt", "dps",
+            "rtf", "pages", "key", "numbers",
+            "odt", "odp", "ods", "xlsx", "xls", "et",
+        ].contains(ext) {
+            return true
+        }
+        switch formatFamily {
+        case .docx, .pptx, .legacyOffice:
+            return true
+        case .xlsx:
+            return ext != "csv"
+        default:
+            return false
+        }
+    }
+
+    private var isInteractiveSpreadsheetGridActive: Bool {
+        mode == .read
+            && formatFamily == .xlsx
+            && (fileExtensionLower == "csv" || officeReaderMode == .structured || localOriginalURL == nil)
     }
 
     var body: some View {
@@ -167,11 +210,17 @@ struct MobileDocumentStageView: View {
         .onChange(of: mode) { _, nextMode in
             onBlockPagingChanged(
                 (nextMode == .diff && (pdfDiffSubMode == .splitCurtain || formatFamily == .xlsx))
-                    || (nextMode == .read && formatFamily == .xlsx)
+                    || isInteractiveSpreadsheetGridActive
             )
             if nextMode == .diff {
                 Task { await reloadDiffReport() }
             }
+        }
+        .onChange(of: officeReaderMode) { _, _ in
+            onBlockPagingChanged(
+                (mode == .diff && (pdfDiffSubMode == .splitCurtain || formatFamily == .xlsx))
+                    || isInteractiveSpreadsheetGridActive
+            )
         }
         .onChange(of: pdfDiffSubMode) { _, sub in
             onBlockPagingChanged(mode == .diff && sub == .splitCurtain)
@@ -190,7 +239,7 @@ struct MobileDocumentStageView: View {
             await loadReaderData(for: asset)
             onBlockPagingChanged(
                 (mode == .diff && (pdfDiffSubMode == .splitCurtain || formatFamily == .xlsx))
-                    || (mode == .read && formatFamily == .xlsx)
+                    || isInteractiveSpreadsheetGridActive
             )
             if hasStack, initialComparePair == nil, externalDiffTrigger == nil {
                 alignDefaultComparePair(around: asset)
@@ -345,15 +394,110 @@ struct MobileDocumentStageView: View {
 
     @ViewBuilder
     private var readerWorkspace: some View {
-        switch formatFamily {
-        case .pdf:
+        if formatFamily == .pdf {
             pdfReaderStage
-        case .xlsx:
+        } else if formatFamily == .xlsx && fileExtensionLower != "csv" {
             spreadsheetReaderStage
-        case .markdown, .plainText:
+        } else if supportsTrueLayoutOfficePreview {
+            officeReaderStage
+        } else if formatFamily == .xlsx {
+            spreadsheetReaderStage
+        } else if formatFamily == .markdown || formatFamily == .plainText {
             markdownOrTextReaderStage
-        default:
+        } else {
             richBlocksReaderStage
+        }
+    }
+
+    private var officeLayoutToggleCapsule: some View {
+        let accent = MobileTheme.accent(for: colorScheme)
+        let commentCount = payload?.comments.count ?? 0
+
+        return HStack(spacing: 2) {
+            ForEach(OfficeReaderDisplayMode.allCases, id: \.self) { sub in
+                let selected = officeReaderMode == sub
+                Button {
+                    MobileHaptics.selection()
+                    withAnimation(MobileMotion.accessible(MobileMotion.settleStrong, reduced: reduceMotion)) {
+                        officeReaderMode = sub
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: sub.symbol)
+                            .font(.system(size: 11, weight: .semibold))
+                        Text(sub.rawValue)
+                            .font(.system(size: 12, weight: selected ? .semibold : .medium))
+                        if sub == .structured && commentCount > 0 {
+                            Text("\(commentCount)")
+                                .font(.system(size: 10, weight: .bold).monospacedDigit())
+                                .foregroundStyle(selected ? .white : MobileTheme.warning(for: colorScheme))
+                                .padding(.horizontal, 4.5)
+                                .padding(.vertical, 0.5)
+                                .background(
+                                    selected
+                                        ? Color.white.opacity(0.22)
+                                        : MobileTheme.warning(for: colorScheme).opacity(0.15),
+                                    in: Capsule()
+                                )
+                        }
+                    }
+                    .foregroundStyle(selected ? .white : .primary)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(selected ? accent : .clear, in: Capsule())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(2.5)
+        .background(MobileTheme.surfaceSubtle(for: colorScheme), in: Capsule())
+        .overlay(
+            Capsule().strokeBorder(MobileTheme.hairline(for: colorScheme), lineWidth: 0.75)
+        )
+    }
+
+    private var officeReaderStage: some View {
+        VStack(spacing: 8) {
+            if localOriginalURL != nil {
+                HStack(spacing: 8) {
+                    officeLayoutToggleCapsule
+
+                    Spacer(minLength: 4)
+
+                    if let payload {
+                        HStack(spacing: 6) {
+                            if payload.pageCount > 0 {
+                                Text("\(payload.pageCount) 页")
+                                    .font(.system(size: 11.5, weight: .medium).monospacedDigit())
+                                    .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
+                            }
+                            if payload.hasNativeRevisions {
+                                Label("含修订", systemImage: "pencil.line")
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundStyle(MobileTheme.warning(for: colorScheme))
+                            }
+                        }
+                    }
+                }
+                .padding(.horizontal, 12)
+            }
+
+            if officeReaderMode == .trueLayout, let localOriginalURL {
+                MobileOfficeQLPreviewView(url: localOriginalURL)
+                    .clipShape(RoundedRectangle(cornerRadius: MobileTheme.Radius.cardOuter, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: MobileTheme.Radius.cardOuter, style: .continuous)
+                            .strokeBorder(MobileTheme.hairline(for: colorScheme), lineWidth: 0.75)
+                    )
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 10)
+            } else if officeReaderMode == .trueLayout && isLoadingPayload {
+                ProgressView("正在加载原版文档版式…")
+                    .font(.system(size: 13))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                richBlocksReaderStage
+            }
         }
     }
 
@@ -409,7 +553,24 @@ struct MobileDocumentStageView: View {
 
     private var spreadsheetReaderStage: some View {
         VStack(spacing: 8) {
-            if isLoadingPayload {
+            if localOriginalURL != nil && supportsTrueLayoutOfficePreview {
+                HStack(spacing: 8) {
+                    officeLayoutToggleCapsule
+                    Spacer(minLength: 4)
+                }
+                .padding(.horizontal, 12)
+            }
+
+            if officeReaderMode == .trueLayout, let localOriginalURL, supportsTrueLayoutOfficePreview {
+                MobileOfficeQLPreviewView(url: localOriginalURL)
+                    .clipShape(RoundedRectangle(cornerRadius: MobileTheme.Radius.cardOuter, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: MobileTheme.Radius.cardOuter, style: .continuous)
+                            .strokeBorder(MobileTheme.hairline(for: colorScheme), lineWidth: 0.75)
+                    )
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 10)
+            } else if isLoadingPayload {
                 ProgressView("正在解析电子表格…")
                     .font(.system(size: 13))
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -1467,7 +1628,7 @@ struct MobileDocumentStageView: View {
                             let isNum = pair.flag == .numberOrCurrency
                             let badgeTint = isNum ? danger : warn
                             HStack(spacing: 4) {
-                                Image(systemName: isNum ? "yensign.circle.fill" : "calendar")
+                                Image(systemName: isNum ? "number.circle.fill" : "calendar")
                                     .font(.system(size: 11, weight: .semibold))
                                 if let oldVal = pair.oldValue, !oldVal.isEmpty {
                                     Text(oldVal)
@@ -1498,26 +1659,66 @@ struct MobileDocumentStageView: View {
                     .font(.system(size: 14.5))
                     .lineSpacing(4)
                     .textSelection(.enabled)
-            } else {
-                if let oldText = hunk.baseText, !oldText.isEmpty, hunk.changeKind != .unchanged {
-                    Text(oldText)
-                        .font(.system(size: 14))
-                        .strikethrough()
-                        .foregroundStyle(danger)
-                        .padding(8)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(danger.opacity(0.09), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
-                }
-                if let newText = hunk.targetText, !newText.isEmpty {
-                    Text(newText)
+            } else if hunk.changeKind == .unchanged {
+                if let sameText = hunk.targetText ?? hunk.baseText, !sameText.isEmpty {
+                    Text(sameText)
                         .font(.system(size: 14.5))
-                        .foregroundStyle(hunk.changeKind == .unchanged ? .primary : MobileTheme.positive(for: colorScheme))
-                        .padding(hunk.changeKind == .unchanged ? 0 : 8)
+                        .foregroundStyle(.primary)
+                        .lineSpacing(4)
+                        .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(
-                            hunk.changeKind == .unchanged ? .clear : MobileTheme.positive(for: colorScheme).opacity(0.09),
-                            in: RoundedRectangle(cornerRadius: 7, style: .continuous)
-                        )
+                }
+            } else {
+                let pos = MobileTheme.positive(for: colorScheme)
+                VStack(alignment: .leading, spacing: 6) {
+                    if let oldText = hunk.baseText, !oldText.isEmpty {
+                        HStack(alignment: .top, spacing: 8) {
+                            Image(systemName: "minus.circle.fill")
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundStyle(danger)
+                                .padding(.top, 2)
+                                .accessibilityLabel("修改前")
+                            Text(
+                                MobileDiffTokenHighlighter.selectiveSideAttributedString(
+                                    hunk: hunk,
+                                    side: .base,
+                                    isEmphasized: true,
+                                    colorScheme: colorScheme
+                                )
+                            )
+                            .font(.system(size: 14))
+                            .lineSpacing(4)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                        .background(danger.opacity(0.05), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    }
+                    if let newText = hunk.targetText, !newText.isEmpty {
+                        HStack(alignment: .top, spacing: 8) {
+                            Image(systemName: "plus.circle.fill")
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundStyle(pos)
+                                .padding(.top, 2)
+                                .accessibilityLabel("修改后")
+                            Text(
+                                MobileDiffTokenHighlighter.selectiveSideAttributedString(
+                                    hunk: hunk,
+                                    side: .target,
+                                    isEmphasized: true,
+                                    colorScheme: colorScheme
+                                )
+                            )
+                            .font(.system(size: 14.5))
+                            .lineSpacing(4)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                        .background(pos.opacity(0.05), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    }
                 }
             }
 
@@ -1807,6 +2008,10 @@ struct MobileDocumentStageView: View {
         payloadError = nil
         selectedSheetIndex = 0
         selectedFormulaDetail = nil
+        let targetExt = (target.fileName as NSString).pathExtension.lowercased()
+        let detectedFamily = target.richMetadata?.document?.parsedFormatFamily
+            ?? DocumentFormatFamily.detect(fileExtension: targetExt)
+        officeReaderMode = (detectedFamily == .xlsx && targetExt != "csv") ? .structured : .trueLayout
 
         async let fetchedURL = try? store.engine.originalURL(for: target.id)
         async let structuredResult: Result<StructuredDocumentPayload, Error> = {
@@ -2460,28 +2665,81 @@ struct DocumentTwoWayMergeSheet: View {
                                     }
 
                                     if let oldT = hunk.baseText, !oldT.isEmpty {
-                                        HStack(alignment: .top, spacing: 6) {
-                                            Text("旧版")
-                                                .font(.system(size: 10.5, weight: .bold))
+                                        let isSelectedBase = currentChoice == .keepBase
+                                        HStack(alignment: .top, spacing: 8) {
+                                            Image(systemName: "minus.circle.fill")
+                                                .font(.system(size: 14, weight: .semibold))
                                                 .foregroundStyle(danger)
                                                 .padding(.top, 2)
-                                            Text(oldT)
-                                                .font(.system(size: 13))
-                                                .foregroundStyle(currentChoice == .keepBase ? .primary : MobileTheme.secondaryInk(for: colorScheme))
-                                                .strikethrough(currentChoice != .keepBase)
+                                                .accessibilityLabel("修改前")
+                                            Text(
+                                                MobileDiffTokenHighlighter.selectiveSideAttributedString(
+                                                    hunk: hunk,
+                                                    side: .base,
+                                                    isEmphasized: isSelectedBase,
+                                                    colorScheme: colorScheme
+                                                )
+                                            )
+                                            .font(.system(size: 13.5))
+                                            .lineSpacing(3.5)
+                                            .textSelection(.enabled)
+                                            .frame(maxWidth: .infinity, alignment: .leading)
                                         }
+                                        .padding(.horizontal, 10)
+                                        .padding(.vertical, 8)
+                                        .background(
+                                            isSelectedBase
+                                                ? danger.opacity(0.06)
+                                                : MobileTheme.surfaceSubtle(for: colorScheme).opacity(0.55),
+                                            in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                        )
+                                        .overlay(
+                                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                                .strokeBorder(
+                                                    isSelectedBase ? danger.opacity(0.32) : MobileTheme.hairline(for: colorScheme),
+                                                    lineWidth: isSelectedBase ? 1.0 : 0.6
+                                                )
+                                        )
+                                        .opacity(currentChoice == .customText ? 0.68 : (isSelectedBase ? 1.0 : 0.76))
                                     }
 
                                     if let newT = hunk.targetText, !newT.isEmpty {
-                                        HStack(alignment: .top, spacing: 6) {
-                                            Text("新版")
-                                                .font(.system(size: 10.5, weight: .bold))
+                                        let isSelectedTarget = currentChoice == .acceptTarget
+                                        HStack(alignment: .top, spacing: 8) {
+                                            Image(systemName: "plus.circle.fill")
+                                                .font(.system(size: 14, weight: .semibold))
                                                 .foregroundStyle(pos)
                                                 .padding(.top, 2)
-                                            Text(newT)
-                                                .font(.system(size: 13, weight: currentChoice == .acceptTarget ? .medium : .regular))
-                                                .foregroundStyle(currentChoice == .acceptTarget ? .primary : MobileTheme.secondaryInk(for: colorScheme))
+                                                .accessibilityLabel("修改后")
+                                            Text(
+                                                MobileDiffTokenHighlighter.selectiveSideAttributedString(
+                                                    hunk: hunk,
+                                                    side: .target,
+                                                    isEmphasized: isSelectedTarget,
+                                                    colorScheme: colorScheme
+                                                )
+                                            )
+                                            .font(.system(size: 13.5))
+                                            .lineSpacing(3.5)
+                                            .textSelection(.enabled)
+                                            .frame(maxWidth: .infinity, alignment: .leading)
                                         }
+                                        .padding(.horizontal, 10)
+                                        .padding(.vertical, 8)
+                                        .background(
+                                            isSelectedTarget
+                                                ? pos.opacity(0.06)
+                                                : MobileTheme.surfaceSubtle(for: colorScheme).opacity(0.55),
+                                            in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                        )
+                                        .overlay(
+                                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                                .strokeBorder(
+                                                    isSelectedTarget ? pos.opacity(0.32) : MobileTheme.hairline(for: colorScheme),
+                                                    lineWidth: isSelectedTarget ? 1.0 : 0.6
+                                                )
+                                        )
+                                        .opacity(currentChoice == .customText ? 0.68 : (isSelectedTarget ? 1.0 : 0.76))
                                     }
 
                                     if hunk.isProtectedComplex {
@@ -2664,6 +2922,228 @@ struct DocumentTwoWayMergeSheet: View {
             }
             isSynthesizing = false
         }
+    }
+}
+
+// MARK: - Selective Side Token Highlighter (Base `−` / Target `+` Without Full-Paragraph Paint)
+
+enum MobileDiffRowSide {
+    case base
+    case target
+}
+
+enum MobileDiffTokenHighlighter {
+    static func selectiveSideAttributedString(
+        hunk: DocumentDiffHunk,
+        side: MobileDiffRowSide,
+        isEmphasized: Bool,
+        colorScheme: ColorScheme
+    ) -> AttributedString {
+        let calmColor = isEmphasized
+            ? UIColor.label
+            : UIColor(MobileTheme.secondaryInk(for: colorScheme))
+        let posUIColor = UIColor(MobileTheme.positive(for: colorScheme))
+        let delUIColor = UIColor(MobileTheme.destructive(for: colorScheme))
+
+        let resolvedTokens: [DocumentInlineDiffToken]
+        if !hunk.inlineTokens.isEmpty {
+            resolvedTokens = hunk.inlineTokens
+        } else {
+            resolvedTokens = fallbackCommonBoundaryTokens(
+                baseText: hunk.baseText ?? "",
+                targetText: hunk.targetText ?? ""
+            )
+        }
+
+        var result = AttributedString()
+        var appendedAny = false
+
+        for token in resolvedTokens {
+            switch (side, token.kind) {
+            case (_, .equal):
+                var seg = AttributedString(token.text)
+                seg.foregroundColor = calmColor
+                result.append(seg)
+                appendedAny = true
+
+            case (.base, .deleted):
+                var seg = AttributedString(token.text)
+                seg.foregroundColor = delUIColor
+                seg.backgroundColor = delUIColor.withAlphaComponent(0.13)
+                seg.strikethroughStyle = .single
+                seg.strikethroughColor = delUIColor
+                if token.isHighRiskNumber || token.isHighRiskDate {
+                    seg.inlinePresentationIntent = .stronglyEmphasized
+                }
+                result.append(seg)
+                appendedAny = true
+
+            case (.target, .inserted):
+                var seg = AttributedString(token.text)
+                seg.foregroundColor = posUIColor
+                seg.backgroundColor = posUIColor.withAlphaComponent(0.14)
+                seg.inlinePresentationIntent = .stronglyEmphasized
+                result.append(seg)
+                appendedAny = true
+
+            case (.base, .inserted), (.target, .deleted):
+                continue
+            }
+        }
+
+        if !appendedAny {
+            let fallback = (side == .base ? hunk.baseText : hunk.targetText) ?? ""
+            var seg = AttributedString(fallback)
+            seg.foregroundColor = calmColor
+            return seg
+        }
+
+        return result
+    }
+
+    /// Slices shared prefix and suffix when `inlineTokens` is empty so fallback rows still highlight only the mutated span.
+    private static func fallbackCommonBoundaryTokens(
+        baseText: String,
+        targetText: String
+    ) -> [DocumentInlineDiffToken] {
+        if baseText == targetText {
+            return baseText.isEmpty
+                ? []
+                : [DocumentInlineDiffToken(id: "fb-eq", kind: .equal, text: baseText)]
+        }
+        let bChars = Array(baseText)
+        let tChars = Array(targetText)
+        var prefixLen = 0
+        let minLen = min(bChars.count, tChars.count)
+        while prefixLen < minLen && bChars[prefixLen] == tChars[prefixLen] {
+            prefixLen += 1
+        }
+        var suffixLen = 0
+        while suffixLen < (minLen - prefixLen)
+            && bChars[bChars.count - 1 - suffixLen] == tChars[tChars.count - 1 - suffixLen] {
+            suffixLen += 1
+        }
+
+        var out: [DocumentInlineDiffToken] = []
+        if prefixLen > 0 {
+            out.append(DocumentInlineDiffToken(id: "fb-pre", kind: .equal, text: String(bChars[0..<prefixLen])))
+        }
+        let bMidEnd = bChars.count - suffixLen
+        if prefixLen < bMidEnd {
+            out.append(DocumentInlineDiffToken(id: "fb-del", kind: .deleted, text: String(bChars[prefixLen..<bMidEnd])))
+        }
+        let tMidEnd = tChars.count - suffixLen
+        if prefixLen < tMidEnd {
+            out.append(DocumentInlineDiffToken(id: "fb-ins", kind: .inserted, text: String(tChars[prefixLen..<tMidEnd])))
+        }
+        if suffixLen > 0 {
+            out.append(DocumentInlineDiffToken(id: "fb-suf", kind: .equal, text: String(bChars[(bChars.count - suffixLen)..<bChars.count])))
+        }
+        return out
+    }
+}
+
+// MARK: - Inline True-Layout Office QuickLook Preview (`OfficeImport` Native Paper Layout)
+
+struct MobileOfficeQLPreviewView: UIViewControllerRepresentable {
+    let url: URL
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(url: url)
+    }
+
+    func makeUIViewController(context: Context) -> OfficeQLContainerViewController {
+        let controller = OfficeQLContainerViewController()
+        controller.configure(with: context.coordinator)
+        return controller
+    }
+
+    func updateUIViewController(_ uiViewController: OfficeQLContainerViewController, context: Context) {
+        if context.coordinator.updateURL(url) {
+            uiViewController.reloadPreview()
+        }
+    }
+
+    static func dismantleUIViewController(
+        _ uiViewController: OfficeQLContainerViewController,
+        coordinator: Coordinator
+    ) {
+        coordinator.clearURL()
+        uiViewController.teardown()
+    }
+
+    nonisolated final class Coordinator: NSObject, QLPreviewControllerDataSource {
+        private let lock = NSLock()
+        private var currentURL: URL?
+
+        init(url: URL) {
+            self.currentURL = url
+            super.init()
+        }
+
+        func updateURL(_ nextURL: URL) -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            guard currentURL != nextURL else { return false }
+            currentURL = nextURL
+            return true
+        }
+
+        func clearURL() {
+            lock.lock()
+            currentURL = nil
+            lock.unlock()
+        }
+
+        func numberOfPreviewItems(in controller: QLPreviewController) -> Int {
+            lock.lock()
+            defer { lock.unlock() }
+            return currentURL == nil ? 0 : 1
+        }
+
+        func previewController(_ controller: QLPreviewController, previewItemAt index: Int) -> any QLPreviewItem {
+            lock.lock()
+            let resolved = currentURL
+            lock.unlock()
+            return (resolved ?? URL(fileURLWithPath: "/")) as NSURL
+        }
+    }
+}
+
+final class OfficeQLContainerViewController: UIViewController {
+    private var previewController: QLPreviewController?
+
+    func configure(with dataSource: QLPreviewControllerDataSource) {
+        guard previewController == nil else { return }
+        let ql = QLPreviewController()
+        ql.dataSource = dataSource
+        addChild(ql)
+        ql.view.translatesAutoresizingMaskIntoConstraints = false
+        view.backgroundColor = .clear
+        view.clipsToBounds = true
+        view.addSubview(ql.view)
+        NSLayoutConstraint.activate([
+            ql.view.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            ql.view.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            ql.view.topAnchor.constraint(equalTo: view.topAnchor),
+            ql.view.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+        ])
+        ql.didMove(toParent: self)
+        previewController = ql
+    }
+
+    func reloadPreview() {
+        previewController?.reloadData()
+        previewController?.refreshCurrentPreviewItem()
+    }
+
+    func teardown() {
+        guard let ql = previewController else { return }
+        ql.dataSource = nil
+        ql.willMove(toParent: nil)
+        ql.view.removeFromSuperview()
+        ql.removeFromParent()
+        previewController = nil
     }
 }
 
