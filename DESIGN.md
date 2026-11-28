@@ -10,7 +10,7 @@
 Charkle 是面向视觉创作者的**灵感收集库与 10 秒情绪板工作台**。界面的最高境界不是「展示自己有多炫」，而是让用户的每一张摄影作品、设计稿、配色卡与情绪板成为绝对主角。
 
 1. **90–95% 中性画布，作品绝对主角**
-   - 界面主背景与容器保持低饱和中性色（亮色暖纸灰 `#F6F6F5`，暗色深曜石 `#141517`），色彩只来源于用户的素材作品、真实色板、文件夹标记与唯一强调色。
+   - 界面主背景与容器保持高纯度中性灰（亮色高纯度中性灰 `#F5F5F6`，暗色深曜石 `#141518`，零泛黄米色偏色、零紫罗兰偏色），色彩只来源于用户的素材作品、真实色板、文件夹标记与唯一强调色。
    - **严禁紫罗兰 / 霓虹 AI 渐变**：任何界面 chrome、按钮、强调色、背景光晕均不得落在紫罗兰色相区（`OKLCH 270°–330°`）；需要高亮时使用工作室钴蓝（`#2A60E0` / `#5B8DEF`）或高对比度中性墨色。
    - **默认无图下杂乱文字**：画廊素材卡片默认纯图展现，不强行在每张图下面堆砌标题、说明或标签墙；次要信息通过悬停微控件、检查器或 Quick Look 按需呈现。
 2. **一套语言贯穿三端，拒绝局部漂移（同魂不同壳）**
@@ -38,13 +38,13 @@ Charkle 是面向视觉创作者的**灵感收集库与 10 秒情绪板工作台
 
 | 语义角色 | CSS Token | Swift / Native 映射 | Light Mode | Dark Mode | 职责说明 |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| 画廊与画布底面 | `--bg-gallery` | `CharkleTheme.galleryGround` | `#F6F6F5` | `#141517` | 主画廊、情绪板画布底色，严禁染色污染素材 |
-| 浮起卡片 / 面板 | `--bg-elevated` | `CharkleTheme.surfaceElevated` | `#FFFFFF` | `#1E2025` | 弹窗、菜单、卡片、控件激活底面 |
-| 弱对比底面 | `--bg-subtle` | `CharkleTheme.surfaceSubtle` | `#EDEDE9` | `#24272C` | 占位框、次要按钮、悬停底、徽章 |
-| 左侧边栏底面 | `--bg-sidebar` | 系统侧栏 / Mica / `#F2F1EE` | `#F2F1EE` | `#17191D` | 导航轨底面 |
-| 右侧检查器底面 | `--bg-inspector` | `CharkleTheme.inspectorBackground` | `#F1F0EC` | `#131519` | 右侧信息与候选池轨道 |
-| 检查器输入区 | `--bg-inspector-field` | `CharkleTheme.inspectorFieldSurface` | `#F6F5F1` | `#16181D` | 检查器内嵌文本框与只读元信息块 |
-| 细分隔线 | `--border-hairline` | `CharkleTheme.hairline` | `rgba(0,0,0,0.08)` | `rgba(255,255,255,0.09)` | 1px / 0.5pt 结构边界 |
+| 画廊与画布底面 | `--bg-gallery` | `CharkleTheme.galleryGround` | `#F5F5F6` | `#141518` | 主画廊、情绪板画布底色（高纯度中性灰，零泛黄或染色） |
+| 浮起卡片 / 面板 | `--bg-elevated` | `CharkleTheme.surfaceElevated` | `#FFFFFF` | `#1C1D20` | 弹窗、表格白底页、菜单、卡片、控件激活底面 |
+| 弱对比底面 | `--bg-subtle` | `CharkleTheme.surfaceSubtle` | `#F4F4F5` | `#25262B` | 占位框、次要按钮、分段槽、悬停底（Hover `#EAEBEC` / `#2E3036`） |
+| 左侧边栏底面 | `--bg-sidebar` | 系统侧栏 / Mica / `#F2F2F3` | `#F2F2F3` | `#16171A` | 导航轨实色降级底面 |
+| 右侧检查器底面 | `--bg-inspector` | `CharkleTheme.inspectorBackground` | `#FFFFFF` | `#1C1D20` | 右侧纯白检查器轨道（与 `#F5F5F6` 主画廊清晰分层） |
+| 检查器输入区 | `--bg-inspector-field` | `CharkleTheme.inspectorFieldSurface` | `#F4F4F5` | `#25262B` | 纯白检查器内嵌无描边轻量输入框与选择槽 |
+| 细分隔线 | `--border-hairline` | `CharkleTheme.hairline` | `rgba(0,0,0,0.065)` | `rgba(255,255,255,0.075)` | 1px / 0.5pt Retina 结构边界 |
 | 强调边界 | `--border-strong` | — | `rgba(0,0,0,0.14)` | `rgba(255,255,255,0.16)` | 悬停边框、降级实色边界 |
 | 主文字 | `--text-primary` | `.primary` | `#18191C` | `#F2F3F5` | 标题、正文、主数值（≥ 7:1 对比度） |
 | 次文字 | `--text-secondary` | `CharkleTheme.secondaryInk` | `#5C6069` | `#A1A6B0` | 副标题、标签、次级操作（≥ 4.5:1） |
@@ -52,13 +52,13 @@ Charkle 是面向视觉创作者的**灵感收集库与 10 秒情绪板工作台
 
 ### 2.2 设置与引导专属中性色板
 
-设置浮层与首次引导采用更沉静、低干扰的暖灰分层，不与主画廊抢视觉层级：
+设置浮层与首次引导采用更沉静、低干扰的高纯度中性灰分层（零泛黄米色偏色），不与主画廊抢视觉层级：
 
 | 角色 | CSS Token | Light Mode | Dark Mode |
 | :--- | :--- | :--- | :--- |
-| 左侧导轨 | `--settings-rail` | `#F0EFEA` | `#17181B` |
-| 右侧内容区 | `--settings-content` | `#F6F6F4` | `#121316` |
-| 分组卡片 | `--settings-card` | `#FFFFFF` | `#1B1C20` |
+| 左侧导轨 | `--settings-rail` | `#F2F2F3` | `#16171A` |
+| 右侧内容区 | `--settings-content` | `#F5F5F6` | `#121316` |
+| 分组卡片 | `--settings-card` | `#FFFFFF` | `#1C1D20` |
 | 轻底填充 | `--settings-subtle` | `rgba(0,0,0,0.04)` | `rgba(255,255,255,0.05)` |
 | 区块标题文字 | `--settings-label` | `rgba(0,0,0,0.48)` | `rgba(255,255,255,0.46)` |
 | 行分隔线 | `--settings-divider` | `rgba(0,0,0,0.065)` | `rgba(255,255,255,0.065)` |
@@ -338,7 +338,7 @@ Charkle 是面向视觉创作者的**灵感收集库与 10 秒情绪板工作台
 
 每次对 macOS、Web 或 Windows 界面进行视觉与动效调整后，必须过完以下 6 项门禁：
 
-1. **双主题校验**：Light（`#F6F6F5`）与 Dark（`#141517`）下对比度、描边、阴影与玻璃边缘均清晰通透，无亮色发灰、无暗色糊成一团。
+1. **双主题校验**：Light（`#F5F5F6`）与 Dark（`#141518`）下对比度、描边、阴影与玻璃边缘均清晰通透，无亮色发灰泛黄、无暗色糊成一团。
 2. **无障碍降级校验**：开启系统 `Reduce Motion` 后无位移/弹簧/光环残留但状态切换清晰；开启 `Reduce Transparency` 后悬浮层退回清晰高对比实色表面。
 3. **Token 与色域纯净度**：零新增紫罗兰色值、零 `transition: all`、零 `ease-in` UI 退场、零 `scale(0)`、零业务层硬编码颜色/圆角漂移。
 4. **高频零延迟与帧率检查**：`⌘J`/`Ctrl+J` 跳转瞬开；画廊快速滚动无掉帧；macOS 静置空闲 CPU `< 1%`；切换素材时 Inspector 零闪烁。

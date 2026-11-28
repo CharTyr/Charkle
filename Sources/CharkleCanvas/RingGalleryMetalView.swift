@@ -568,9 +568,9 @@ private final class RingTexturePool {
             defer { NSGraphicsContext.current = prev }
 
             let bounds = CGRect(origin: .zero, size: size)
-            let primaryHex = asset.dominantColors.first?.hex ?? (isDark ? "#2B2F36" : "#DCDAD4")
+            let primaryHex = asset.dominantColors.first?.hex ?? (isDark ? "#2B2F36" : "#DCE0E6")
             let isSwatch = asset.fileName.lowercased().hasSuffix(".swatch")
-            let elevated = isDark ? NSColor.charkleHex("#1E2024") : NSColor.white
+            let elevated = isDark ? NSColor.charkleHex("#1C1D20") : NSColor.white
             let primaryText: NSColor = isDark ? NSColor.white.withAlphaComponent(0.92) : NSColor.black.withAlphaComponent(0.86)
             let secondaryText: NSColor = isDark ? NSColor.white.withAlphaComponent(0.56) : NSColor.black.withAlphaComponent(0.54)
 
@@ -1596,10 +1596,10 @@ public final class RingGalleryMTKView: MTKView, MTKViewDelegate {
             return
         }
 
-        // Exact CharkleTheme.galleryGround clear color (Light #F6F6F5 / Dark #141517)
+        // Exact CharkleTheme.galleryGround clear color (Light #F5F5F6 / Dark #141518)
         let bgRGB: SIMD4<Float> = isDarkMode
-            ? SIMD4<Float>(0x14 / 255.0, 0x15 / 255.0, 0x17 / 255.0, 1.0)
-            : SIMD4<Float>(0xF6 / 255.0, 0xF6 / 255.0, 0xF5 / 255.0, 1.0)
+            ? SIMD4<Float>(0x14 / 255.0, 0x15 / 255.0, 0x18 / 255.0, 1.0)
+            : SIMD4<Float>(0xF5 / 255.0, 0xF5 / 255.0, 0xF6 / 255.0, 1.0)
 
         passDesc.colorAttachments[0].clearColor = MTLClearColor(
             red: Double(bgRGB.x),

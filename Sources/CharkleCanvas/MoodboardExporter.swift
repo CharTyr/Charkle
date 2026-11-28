@@ -259,7 +259,7 @@ public enum MoodboardExporter {
         }
 
         // Neutral gallery ground
-        let bgColor = options.darkAppearance ? NSColor.charkleHex("#141517") : NSColor.charkleHex("#F6F6F5")
+        let bgColor = options.darkAppearance ? NSColor.charkleHex("#141518") : NSColor.charkleHex("#F5F5F6")
         ctx.setFillColor(bgColor.cgColor)
         ctx.fill(CGRect(x: 0, y: 0, width: canvasW, height: canvasH))
 
@@ -539,7 +539,7 @@ public enum MoodboardExporter {
                 ctx.restoreGState()
             } else {
                 let asset = assetsByID[assetID]
-                let hex = asset?.dominantColors.first?.hex ?? (darkAppearance ? "#2B2F36" : "#DFDDD7")
+                let hex = asset?.dominantColors.first?.hex ?? (darkAppearance ? "#2B2F36" : "#DCE0E6")
                 ctx.setFillColor(NSColor.charkleHex(hex).cgColor)
                 ctx.fill(rect)
                 if let title = asset?.title {

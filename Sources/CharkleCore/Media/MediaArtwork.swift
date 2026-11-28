@@ -47,13 +47,16 @@ nonisolated enum MediaArtwork {
 
     static func card(title: String, label: String, text: String, waveform: [Float] = []) -> CGImage? {
         guard let ctx = context(width: 800, height: 600) else { return nil }
-        ctx.setFillColor(color(0xF6F4EF))
+        ctx.setFillColor(color(0xFFFFFF))
         ctx.fill(CGRect(x: 0, y: 0, width: 800, height: 600))
+        ctx.setStrokeColor(color(0xE5E7EB))
+        ctx.setLineWidth(2)
+        ctx.stroke(CGRect(x: 1, y: 1, width: 798, height: 598))
         ctx.setFillColor(color(0x2563EB))
         fillRoundedRect(CGRect(x: 46, y: 526, width: 24, height: 6), radius: 3, in: ctx)
         draw(label.uppercased(), in: ctx, at: CGPoint(x: 82, y: 520), size: 17, ink: 0x6B7280, width: 650, bold: true)
         draw(title, in: ctx, at: CGPoint(x: 46, y: 454), size: 36, ink: 0x18181B, width: 708, bold: true)
-        ctx.setFillColor(color(0xE4E2DC))
+        ctx.setFillColor(color(0xE5E7EB))
         ctx.fill(CGRect(x: 46, y: 422, width: 708, height: 2))
         if waveform.isEmpty {
             let wrapped = wrapText(text, maxCharsPerLine: 42, maxLines: 10)
@@ -156,8 +159,8 @@ nonisolated enum MediaArtwork {
 
         let accentHex = resolveWebCardAccentHex(themeColorHex: themeColorHex, domain: domain)
 
-        // Subtle warm paper-studio backdrop matching Charkle gallery light surface
-        ctx.setFillColor(color(0xF5F5F3))
+        // Crisp pure-neutral studio backdrop matching Charkle gallery light surface
+        ctx.setFillColor(color(0xF5F5F6))
         ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
 
         // Main elevated browser card
@@ -286,7 +289,7 @@ nonisolated enum MediaArtwork {
         let height = hasMedia ? 920 : 620
         guard let ctx = context(width: width, height: height) else { return nil }
 
-        // Crisp paper-white social card matching reference Img 7 & light gallery feel
+        // Crisp pure-white social card matching Charkle neutral light gallery surface
         ctx.setFillColor(color(0xFFFFFF))
         ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
 
@@ -532,7 +535,7 @@ nonisolated enum MediaArtwork {
             let coverRect = CGRect(x: 0, y: footerHeight, width: width, height: coverHeight)
             ctx.saveGState()
             ctx.clip(to: coverRect)
-            ctx.setFillColor(color(0xF5F5F3))
+            ctx.setFillColor(color(0xF4F4F5))
             ctx.fill(coverRect)
             drawAspectFill(media, in: coverRect, ctx: ctx)
             ctx.restoreGState()
@@ -756,16 +759,16 @@ nonisolated enum MediaArtwork {
         guard let ctx = context(width: 720, height: 620) else { return nil }
         ctx.setFillColor(color(UInt32(swatch.hex.dropFirst(), radix: 16) ?? 0x808080))
         ctx.fill(CGRect(x: 0, y: 0, width: 720, height: 620))
-        ctx.setFillColor(color(0xF7F3E9))
+        ctx.setFillColor(color(0xFFFFFF))
         ctx.fill(CGRect(x: 0, y: 0, width: 720, height: 110))
-        draw(swatch.hex, in: ctx, at: CGPoint(x: 42, y: 42), size: 31, ink: 0x25231F, width: 600, bold: true)
+        draw(swatch.hex, in: ctx, at: CGPoint(x: 42, y: 42), size: 31, ink: 0x18191C, width: 600, bold: true)
         return ctx.makeImage()
     }
 
     /// High-readability editorial card (`900x1240`) for `.document` assets in Masonry / Justified / Filmstrip galleries:
-    /// - Top (`900x980`): warm studio paper stage rendering a crisp first-page PDF/QuickLook snapshot, spreadsheet grid,
+    /// - Top (`900x980`): crisp neutral studio stage rendering a first-page PDF/QuickLook snapshot, spreadsheet grid,
     ///   official red-header layout, or structured document page preview.
-    /// - Bottom (`260px`): crisp paper-white footer strip displaying clean 2-line title, colored format badge,
+    /// - Bottom (`260px`): crisp pure-white footer strip displaying clean 2-line title, colored format badge,
     ///   page/sheet metrics, and optional Version Stack badge (`v4` / `主版 v4`).
     static func documentCard(
         title: String,
@@ -790,23 +793,23 @@ nonisolated enum MediaArtwork {
         ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
 
         let stageRect = CGRect(x: 0, y: footerHeight, width: width, height: stageHeight)
-        ctx.setFillColor(color(0xF3F2EE))
+        ctx.setFillColor(color(0xF4F4F5))
         ctx.fill(stageRect)
 
         let sheetRect = CGRect(x: 56, y: Double(footerHeight + 44), width: 788, height: 896)
         if let stack = versionStack, stack.versionNumber > 1 {
             let back2 = sheetRect.offsetBy(dx: 12, dy: 12)
-            ctx.setFillColor(color(0xE4E2DC))
+            ctx.setFillColor(color(0xEAEBEC))
             fillRoundedRect(back2, radius: 18, in: ctx)
-            ctx.setStrokeColor(color(0xD3D0C8))
+            ctx.setStrokeColor(color(0xD4D6DC))
             ctx.setLineWidth(1.5)
             addRoundedRectPath(back2, radius: 18, in: ctx)
             ctx.strokePath()
 
             let back1 = sheetRect.offsetBy(dx: 6, dy: 6)
-            ctx.setFillColor(color(0xECEBE6))
+            ctx.setFillColor(color(0xF4F4F5))
             fillRoundedRect(back1, radius: 18, in: ctx)
-            ctx.setStrokeColor(color(0xDBD8D0))
+            ctx.setStrokeColor(color(0xDFE1E6))
             ctx.setLineWidth(1.5)
             addRoundedRectPath(back1, radius: 18, in: ctx)
             ctx.strokePath()
@@ -830,12 +833,12 @@ nonisolated enum MediaArtwork {
         }
         ctx.restoreGState()
 
-        ctx.setStrokeColor(color(0xDFDDD6))
+        ctx.setStrokeColor(color(0xE2E5EC))
         ctx.setLineWidth(2)
         addRoundedRectPath(sheetRect, radius: 18, in: ctx)
         ctx.strokePath()
 
-        ctx.setFillColor(color(0xE7E6E1))
+        ctx.setFillColor(color(0xE5E7EB))
         ctx.fill(CGRect(x: 0, y: Double(footerHeight) - 2, width: Double(width), height: 2))
 
         let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "未命名文档" : title
@@ -857,7 +860,7 @@ nonisolated enum MediaArtwork {
             let vLabel = stack.isPinnedPrimary ? "主版 \(stack.displayVersionTag)" : stack.displayVersionTag
             let vPillW = max(92.0, Double(vLabel.count) * 16.0 + 32.0)
             let vPillRect = CGRect(x: Double(width - 36) - vPillW, y: 34, width: vPillW, height: 42)
-            let vBgHex: UInt32 = stack.isPinnedPrimary ? 0x2A60E0 : 0xECEBE6
+            let vBgHex: UInt32 = stack.isPinnedPrimary ? 0x2A60E0 : 0xF4F4F5
             let vBgAlpha: Double = stack.isPinnedPrimary ? 0.13 : 1.0
             let vInk: UInt32 = stack.isPinnedPrimary ? 0x2A60E0 : 0x3F434A
             ctx.setFillColor(color(vBgHex, alpha: vBgAlpha))
@@ -968,7 +971,7 @@ nonisolated enum MediaArtwork {
         var rowTop = tabBarRect.minY - 22
 
         let headerRect = CGRect(x: gridX, y: rowTop - rowH, width: gridW, height: rowH)
-        ctx.setFillColor(color(0xF4F6F5))
+        ctx.setFillColor(color(0xF4F4F5))
         ctx.fill(headerRect)
         for c in 0..<colCount {
             let hText = (c < sheet.headers.count && !sheet.headers[c].isEmpty) ? sheet.headers[c] : "列 \(c + 1)"
@@ -980,7 +983,7 @@ nonisolated enum MediaArtwork {
             if rowTop - rowH < rect.minY + 24 { break }
             let rRect = CGRect(x: gridX, y: rowTop - rowH, width: gridW, height: rowH)
             if rIdx % 2 == 1 {
-                ctx.setFillColor(color(0xFAF9F7))
+                ctx.setFillColor(color(0xF8F9FB))
                 ctx.fill(rRect)
             }
             for c in 0..<colCount {
@@ -1030,7 +1033,7 @@ nonisolated enum MediaArtwork {
             y -= 20
             for idx in 0..<8 {
                 let lineW = idx % 3 == 2 ? innerW * 0.68 : innerW
-                ctx.setFillColor(color(0xEAE9E4))
+                ctx.setFillColor(color(0xEAEBEC))
                 fillRoundedRect(CGRect(x: padX, y: y, width: lineW, height: 14), radius: 7, in: ctx)
                 y -= 36
             }

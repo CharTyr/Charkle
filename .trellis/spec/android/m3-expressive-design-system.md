@@ -11,7 +11,7 @@ Charkle 在 macOS（Liquid Glass）、Windows（Fluent 2）、iOS（Liquid Glass
 
 ### 1.1 跨端不可妥协的「同魂」铁律（继承 `DESIGN.md`）
 
-1. **主画廊与情绪板画布 90–95% 中性，作品绝对主角**：主画廊与情绪板工作面始终保持低饱和中性底色（Light `#F6F6F5` / Dark `#141517`），卡片默认纯图展现，不在图下堆砌标题与标签墙。
+1. **主画廊与情绪板画布 90–95% 中性，作品绝对主角**：主画廊与情绪板工作面始终保持高纯度中性灰底色（Light `#F5F5F6` / Dark `#141518`，零泛黄偏色、零紫罗兰偏色），卡片默认纯图展现，不在图下堆砌标题与标签墙。
 2. **默认零紫罗兰 / 霓虹渐变**：所有默认界面 chrome、按钮、强调色、加载指示器均不得落入紫罗兰色相区（`OKLCH 270°–330°`）；默认 Brand Seed 锁定为工作室钴蓝（`#2A60E0` / `#5B8DEF`）。
 3. **与 iOS v1.5.0 功能与交互 1:1 对齐**：全量覆盖纯图虚拟化瀑布流（锚定双指缩放 + 滑动多选）、4 模随手搜图与 CIELAB 主色容差筛盘、收件箱逐张归档/瀑布流双模、全屏沉浸 Quick Look + 检查器 + 相似检索、自由/自动排版情绪板工作室、Pinterest 无限空间探索、多源采集与系统分享接收、多后端无损 `/.charkle/` 同步。
 4. **高频操作零卡顿，动效服务空间理解**：快速滚动瀑布流、键盘/手指连续切项禁止阻塞动画；支持系统 `Reduce Motion`（`AnimatorDurationScale == 0`）无障碍降级。
@@ -23,7 +23,7 @@ Charkle 在 macOS（Liquid Glass）、Windows（Fluent 2）、iOS（Liquid Glass
 
 | 区域 | 色彩策略 | 材质与容器 | 说明 |
 | :--- | :--- | :--- | :--- |
-| **Zone A — 中性工作区**<br>（主素材库瀑布流、文件夹视图、情绪板画布、Pinterest 无限空间、全局目录、设置页） | **绝对中性画布 + 工作室钴蓝强调色**<br>• `background` / `surface` 严格锁死 `#F6F6F5`（Light）与 `#141517`（Dark）<br>• Surface Container 阶梯使用纯中性暖灰/曜石灰，绝不因壁纸 Monet 染色而让画布泛粉/泛紫<br>• 「设置 → 外观」提供可选开关：**跟随系统动态取色（仅作用于控件强调色与激活胶囊，画廊底面始终保持纯中性）** | M3 Expressive 形态语言拉满：`HorizontalFloatingToolbar`、独立形变 FAB、`ButtonGroup` 连接按钮组、分段圆角设置卡片、`LoadingIndicator` 与 `WavyProgressIndicator` | 保证设计师浏览几十上百张不同色相参考图时，视觉基准绝对客观、画面通透干净 |
+| **Zone A — 中性工作区**<br>（主素材库瀑布流、文件夹视图、情绪板画布、Pinterest 无限空间、全局目录、设置页） | **绝对中性画布 + 工作室钴蓝强调色**<br>• `background` / `surface` 严格锁死 `#F5F5F6`（Light）与 `#141518`（Dark）<br>• Surface Container 阶梯使用高纯度中性灰 / 曜石灰（零泛黄米色偏色、零紫罗兰偏色），绝不因壁纸 Monet 染色而让画布泛黄/泛粉/泛紫<br>• 「设置 → 外观」提供可选开关：**跟随系统动态取色（仅作用于控件强调色与激活胶囊，画廊底面始终保持纯中性）** | M3 Expressive 形态语言拉满：`HorizontalFloatingToolbar`、独立形变 FAB、`ButtonGroup` 连接按钮组、分段圆角设置卡片、`LoadingIndicator` 与 `WavyProgressIndicator` | 保证设计师浏览几十上百张不同色相参考图时，视觉基准绝对客观、画面通透干净 |
 | **Zone B — 作品沉浸色区**<br>（单图全屏预览 Quick Look、收件箱「逐张归档」聚焦台、情绪板封面卡片底栏） | **作品主色实时驱动 Expressive `ColorScheme`**<br>• 读取素材已提取的 `dominantColors.first`（无提取值时通过量化器离线取样）作为 Seed，生成 `PaletteStyle.Expressive` / `PaletteStyle.Content` 主题色板<br>• 顶部返回钮、右上角连接按钮组、底部操作坞、氛围渐变背景、音频波浪进度条随切图以弹簧动效丝滑过渡<br>• **一键「原色校对模式」**：单图预览工具条内置护色开关，点按瞬切纯黑/纯中性无染色背景，支持在设置中设为默认 | 全出血作品舞台 + 无遮挡垂直分区（顶栏 → 纯净画面 → 胶片缩略条 → 底部 Expressive 操作坞），作品主色仅渲染氛围层与操作控件，绝不叠加滤镜污染原图本身 | 每次翻看单张灵感图或清理收件箱时，整个界面都会像为这幅作品量身定制的画册展台一样呼吸变化 |
 
 ---
@@ -34,14 +34,16 @@ Charkle 在 macOS（Liquid Glass）、Windows（Fluent 2）、iOS（Liquid Glass
 
 所有 Compose 业务组件必须通过 `MaterialTheme.colorScheme` 与 `CharkleColors.current` 消费语义 Token，禁止硬编码裸 `Color(0xFF...)`。
 
-| Material 3 Role | Light (`#F6F6F5` 体系) | Dark (`#141517` 体系) | 对应 `DESIGN.md` 语义与职责 |
+| Material 3 / 跨端语义角色 | Light (`#F5F5F6` 体系) | Dark (`#141518` 体系) | 对应 `DESIGN.md` 语义与职责 |
 | :--- | :--- | :--- | :--- |
-| `background` / `surface` | `#F6F6F5` | `#141517` | 主画廊、情绪板、Pinterest 无限画布底面（绝对中性） |
-| `surfaceContainerLowest` | `#FFFFFF` | `#0F1012` | 最高对比卡片底、输入框内底 |
-| `surfaceContainerLow` | `#F2F1EE` | `#17191D` | 平板侧边导航轨、检查器底面、筛选面板底 |
-| `surfaceContainer` | `#EDEDE9` | `#1E2025` | 浮起卡片、分段列表组、骨架占位框、次要芯片 |
-| `surfaceContainerHigh` | `#E6E5E0` | `#24272C` | 底部 `HorizontalFloatingToolbar`、Popover、次级按钮悬停/按压态 |
-| `surfaceContainerHighest` | `#DFDED8` | `#2C3037` | 强调胶囊、滑动轨道底槽、选中未激活芯片 |
+| `background` / `surface` (`--bg-gallery`) | `#F5F5F6` | `#141518` | 主画廊、情绪板、Pinterest 无限画布底面（高纯度中性灰） |
+| `surfaceElevated` (`--bg-elevated`) | `#FFFFFF` | `#1C1D20` | 浮起卡片、表格白底页、弹窗、实色降级浮层 |
+| `surfaceSubtle` (`--bg-subtle` / `surfaceContainer`) | `#F4F4F5` | `#25262B` | 占位框、骨架屏、次要芯片、分段槽（Hover `#EAEBEC` / `#2E3036`） |
+| `sidebar` (`--bg-sidebar` / `surfaceContainerLow`) | `#F2F2F3` | `#16171A` | 平板侧边导航轨、目录抽屉底面 |
+| `inspectorBackground` (`--bg-inspector`) | `#FFFFFF` | `#1C1D20` | 右侧/底部纯白检查器轨道底面 |
+| `inspectorFieldSurface` (`--bg-inspector-field` / `surfaceContainerLowest`) | `#F4F4F5` | `#25262B` | 检查器内嵌无描边输入框与选择槽 |
+| `surfaceContainerHigh` | `#EAEBEC` | `#2E3036` | 底部 `HorizontalFloatingToolbar`、Popover、次级按钮悬停/按压态 |
+| `surfaceContainerHighest` | `#DFE0E3` | `#34373E` | 强调胶囊、滑动轨道底槽、选中未激活芯片 |
 | `primary` | `#2A60E0` | `#5B8DEF` | 工作室钴蓝主强调色（选中环、主操作、焦点指示） |
 | `onPrimary` | `#FFFFFF` | `#0A1A3A` | 主按钮文字与图标 |
 | `primaryContainer` | `#DDE7FF` | `#1E3566` | 激活导航胶囊、主 FAB 容器、激活连接按钮 |
@@ -143,7 +145,7 @@ Charkle 在 macOS（Liquid Glass）、Windows（Fluent 2）、iOS（Liquid Glass
 │   ┌──────────┐  ┌──────────┐  ┌──────────┐     │
 │   │          │  │          │  │          │     │
 │   │   作品   │  │   作品   │  │   作品   │     │  <- 纯图高密度瀑布流
-│   │          │  │          │  │          │     │     （绝对中性底色 #F6F6F5 / #141517）
+│   │          │  │          │  │          │     │     （高纯度中性底色 #F5F5F6 / #141518）
 │   └──────────┘  │          │  └──────────┘     │
 │   ┌──────────┐  └──────────┘  ┌──────────┐     │
 │   │   作品   │  ┌──────────┐  │   作品   │     │
@@ -179,7 +181,7 @@ Charkle 在 macOS（Liquid Glass）、Windows（Fluent 2）、iOS（Liquid Glass
 ## 8. Android 端交付门禁
 
 每次视觉或核心页面提交必须通过以下 6 项验收：
-1. **双区色彩审计**：主画廊 / 情绪板在 Light (`#F6F6F5`) 与 Dark (`#141517`) 下保持绝对中性；单图预览 / 收件箱随不同色相作品平滑变色，且「原色校对模式」一键生效、零紫罗兰误染。
+1. **双区色彩审计**：主画廊 / 情绪板在 Light (`#F5F5F6`) 与 Dark (`#141518`) 下保持高纯度中性灰；单图预览 / 收件箱随不同色相作品平滑变色，且「原色校对模式」一键生效、零紫罗兰误染。
 2. **动态对比度与大字号**：在系统字体缩放 `1.3×` 与暗色模式下，所有 Connected Button、Floating Toolbar、分段列表卡片与作品染色态按钮均无截断重叠且满足 AA 对比度。
 3. **流畅度与零闪烁**：1,500+ 项瀑布流滚动与双指锚定缩放稳定流畅；切图进入检查器时 EXIF / AI Prompt / 色板零闪现旧图。
 4. **边缘到边缘与手势**：透明状态栏/导航栏无内容遮挡；支持原生 Predictive Back 共享元素缩放返回；折叠屏横竖屏旋转不丢失状态与滚动位置。

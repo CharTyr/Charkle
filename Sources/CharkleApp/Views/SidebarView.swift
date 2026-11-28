@@ -1971,7 +1971,7 @@ public struct CharkleSidebarMaterialBackground: View {
 
     public var body: some View {
         if reduceTransparency {
-            colorScheme == .dark ? Color(charkleHex: "#17191D") : Color(charkleHex: "#F2F1EE")
+            colorScheme == .dark ? Color(charkleHex: "#16171A") : Color(charkleHex: "#F2F2F3")
         } else {
             SidebarVisualEffectView()
         }

@@ -708,19 +708,19 @@ public enum CanvasSurface {
     }
 
     public static func ground(for scheme: ColorScheme) -> Color {
-        scheme == .dark ? Color(charkleHex: "#141517") : Color(charkleHex: "#F6F6F5")
+        scheme == .dark ? Color(charkleHex: "#141518") : Color(charkleHex: "#F5F5F6")
     }
 
     public static func elevated(for scheme: ColorScheme) -> Color {
-        scheme == .dark ? Color(charkleHex: "#1E2024") : Color(charkleHex: "#FFFFFF")
+        scheme == .dark ? Color(charkleHex: "#1C1D20") : Color(charkleHex: "#FFFFFF")
     }
 
     public static func subtleCard(for scheme: ColorScheme) -> Color {
-        scheme == .dark ? Color(charkleHex: "#202227") : Color(charkleHex: "#ECECE9")
+        scheme == .dark ? Color(charkleHex: "#25262B") : Color(charkleHex: "#F4F4F5")
     }
 
     public static func hairline(for scheme: ColorScheme) -> Color {
-        scheme == .dark ? Color.white.opacity(0.09) : Color.black.opacity(0.08)
+        scheme == .dark ? Color.white.opacity(0.075) : Color.black.opacity(0.065)
     }
 }
 

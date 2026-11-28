@@ -1169,11 +1169,11 @@ private final class MasonryCGImageBox {
 
 internal enum MasonryStaticLayerAssets {
     static let cardSurfaceLightCG: CGColor = NSColor.white.cgColor
-    static let cardSurfaceDarkCG: CGColor = NSColor.charkleHex("#1E2024").cgColor
-    static let hairlineLightCG: CGColor = NSColor.black.withAlphaComponent(0.08).cgColor
-    static let hairlineDarkCG: CGColor = NSColor.white.withAlphaComponent(0.09).cgColor
-    static let defaultTintLightCG: CGColor = NSColor.charkleHex("#EAE9E5").withAlphaComponent(0.35).cgColor
-    static let defaultTintDarkCG: CGColor = NSColor.charkleHex("#262930").withAlphaComponent(0.35).cgColor
+    static let cardSurfaceDarkCG: CGColor = NSColor.charkleHex("#1C1D20").cgColor
+    static let hairlineLightCG: CGColor = NSColor.black.withAlphaComponent(0.065).cgColor
+    static let hairlineDarkCG: CGColor = NSColor.white.withAlphaComponent(0.075).cgColor
+    static let defaultTintLightCG: CGColor = NSColor.charkleHex("#EAEBEC").withAlphaComponent(0.35).cgColor
+    static let defaultTintDarkCG: CGColor = NSColor.charkleHex("#25262B").withAlphaComponent(0.35).cgColor
 
     private static let badgeCache: NSCache<NSString, MasonryCGImageBox> = {
         let c = NSCache<NSString, MasonryCGImageBox>()
@@ -1341,10 +1341,10 @@ internal enum MasonryStaticLayerAssets {
         if let hit = proceduralCache.object(forKey: key) { return hit.image }
 
         let targetSize = CGSize(width: CGFloat(wBucket), height: CGFloat(hBucket))
-        let primaryHex = asset.dominantColors.first?.hex ?? (isDark ? "#2B2F36" : "#DCDAD4")
-        let secondaryHex = asset.dominantColors.count > 1 ? asset.dominantColors[1].hex : (isDark ? "#1E2126" : "#EAE8E2")
+        let primaryHex = asset.dominantColors.first?.hex ?? (isDark ? "#25262B" : "#DFE0E3")
+        let secondaryHex = asset.dominantColors.count > 1 ? asset.dominantColors[1].hex : (isDark ? "#1C1D20" : "#EAEBEC")
         let isSwatch = asset.fileName.lowercased().hasSuffix(".swatch")
-        let elevatedColor = isDark ? NSColor.charkleHex("#1E2024") : NSColor.white
+        let elevatedColor = isDark ? NSColor.charkleHex("#1C1D20") : NSColor.white
         let primaryTextColor: NSColor = isDark ? NSColor.white.withAlphaComponent(0.92) : NSColor.black.withAlphaComponent(0.86)
         let secondaryTextColor: NSColor = isDark ? NSColor.white.withAlphaComponent(0.58) : NSColor.black.withAlphaComponent(0.55)
 
@@ -1393,7 +1393,7 @@ internal enum MasonryStaticLayerAssets {
                         withAttributes: titleAttrs
                     )
                 case .document:
-                    let paperColor = isDark ? NSColor.charkleHex("#242730") : NSColor.charkleHex("#FAF9F6")
+                    let paperColor = isDark ? NSColor.charkleHex("#25262B") : NSColor.charkleHex("#FFFFFF")
                     let barHeight = min(68, max(52, bounds.height * 0.34))
                     let previewRect = CGRect(x: 0, y: 0, width: bounds.width, height: max(24, bounds.height - barHeight))
                     let infoRect = CGRect(x: 0, y: previewRect.maxY, width: bounds.width, height: barHeight)

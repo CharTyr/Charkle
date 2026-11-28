@@ -24,31 +24,31 @@ enum MobileTheme {
     ]
 
     static func galleryGround(for scheme: ColorScheme) -> Color {
-        scheme == .dark ? Color(charkleHex: "#141517") : Color(charkleHex: "#F6F6F5")
+        scheme == .dark ? Color(charkleHex: "#141518") : Color(charkleHex: "#F5F5F6")
     }
 
     static func surfaceElevated(for scheme: ColorScheme) -> Color {
-        scheme == .dark ? Color(charkleHex: "#1E2025") : Color(charkleHex: "#FFFFFF")
+        scheme == .dark ? Color(charkleHex: "#1C1D20") : Color(charkleHex: "#FFFFFF")
     }
 
     static func surfaceSubtle(for scheme: ColorScheme) -> Color {
-        scheme == .dark ? Color(charkleHex: "#24272C") : Color(charkleHex: "#EDEDE9")
+        scheme == .dark ? Color(charkleHex: "#25262B") : Color(charkleHex: "#F4F4F5")
     }
 
     static func sidebarBackground(for scheme: ColorScheme) -> Color {
-        scheme == .dark ? Color(charkleHex: "#17191D") : Color(charkleHex: "#F2F1EE")
+        scheme == .dark ? Color(charkleHex: "#16171A") : Color(charkleHex: "#F2F2F3")
     }
 
     static func inspectorBackground(for scheme: ColorScheme) -> Color {
-        scheme == .dark ? Color(charkleHex: "#131519") : Color(charkleHex: "#F1F0EC")
+        scheme == .dark ? Color(charkleHex: "#1C1D20") : Color(charkleHex: "#FFFFFF")
     }
 
     static func inspectorFieldSurface(for scheme: ColorScheme) -> Color {
-        scheme == .dark ? Color(charkleHex: "#16181D") : Color(charkleHex: "#F6F5F1")
+        scheme == .dark ? Color(charkleHex: "#25262B") : Color(charkleHex: "#F4F4F5")
     }
 
     static func hairline(for scheme: ColorScheme) -> Color {
-        scheme == .dark ? Color.white.opacity(0.09) : Color.black.opacity(0.08)
+        scheme == .dark ? Color.white.opacity(0.075) : Color.black.opacity(0.065)
     }
 
     static func borderStrong(for scheme: ColorScheme) -> Color {

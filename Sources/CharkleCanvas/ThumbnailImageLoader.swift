@@ -957,14 +957,14 @@ public struct ProceduralMediaFallbackCard: View {
     }
 
     private var primaryHex: String {
-        asset.dominantColors.first?.hex ?? (colorScheme == .dark ? "#2B2F36" : "#DCDAD4")
+        asset.dominantColors.first?.hex ?? (colorScheme == .dark ? "#25262B" : "#DFE0E3")
     }
 
     private var secondaryHex: String {
         if asset.dominantColors.count > 1 {
             return asset.dominantColors[1].hex
         }
-        return colorScheme == .dark ? "#1E2126" : "#EAE8E2"
+        return colorScheme == .dark ? "#1C1D20" : "#EAEBEC"
     }
 
     private var isColorSwatchAsset: Bool {
@@ -1216,7 +1216,7 @@ public struct ProceduralMediaFallbackCard: View {
         case .docx, .legacyOffice: Color(charkleHex: "#2A60E0")
         default: Color(charkleHex: "#4B5563")
         }
-        let paperTop = colorScheme == .dark ? Color(charkleHex: "#242730") : Color(charkleHex: "#FAF9F6")
+        let paperTop = colorScheme == .dark ? Color(charkleHex: "#25262B") : Color(charkleHex: "#FFFFFF")
         let snippet = (asset.richMetadata?.textExcerpt ?? asset.ocrText ?? asset.notes)
             .trimmingCharacters(in: .whitespacesAndNewlines)
 

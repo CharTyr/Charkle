@@ -1587,8 +1587,8 @@ private actor ChatGPTLoopbackServer {
         <!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>\(title)</title>
         <style>
         :root{color-scheme:light dark}
-        body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif;background:#F6F6F5;color:#1D1D1F}
-        @media(prefers-color-scheme:dark){body{background:#141517;color:#F5F5F7}.card{background:#1E2024;border-color:rgba(255,255,255,.1)}}
+        body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif;background:#F5F5F6;color:#1D1D1F}
+        @media(prefers-color-scheme:dark){body{background:#141518;color:#F5F5F7}.card{background:#1C1D20;border-color:rgba(255,255,255,.1)}}
         .card{max-width:390px;padding:32px 28px;border-radius:18px;background:#fff;border:1px solid rgba(0,0,0,.08);box-shadow:0 16px 40px rgba(0,0,0,.08);text-align:center}
         .badge{width:46px;height:46px;margin:0 auto 16px;border-radius:50%;background:\(accent);color:#fff;font-size:22px;font-weight:700;display:flex;align-items:center;justify-content:center}
         h1{margin:0 0 8px;font-size:18px;font-weight:600}

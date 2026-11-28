@@ -11,7 +11,7 @@ Charkle 在 macOS、Web、Windows 三端共享同一产品灵魂，但桌面外�
 
 ### 1.1 跨端不可妥协的「同魂」铁律（继承 `DESIGN.md`）
 
-1. **90–95% 中性画布，作品绝对主角**：画廊与情绪板主工作面保持低饱和中性色，绝不给作品底面染高饱和底色；画廊素材卡片默认纯图展现，不在图下堆砌文字与标签墙。
+1. **90–95% 中性画布，作品绝对主角**：画廊与情绪板主工作面保持高纯度中性灰（Light `#F5F5F6` / Dark `#141518`，零泛黄偏色、零紫罗兰偏色），绝不给作品底面染泛黄米色或高饱和底色；画廊素材卡片默认纯图展现，不在图下堆砌文字与标签墙。
 2. **严禁紫罗兰 / 霓虹渐变**：任何界面 chrome、按钮、强调色、光晕均不得落在 `OKLCH 270°–330°`；默认强调色为工作室钴蓝（`#2A60E0` / `#5B8DEF`）。
 3. **跨端功能与交互契约一致**：三/四模画廊（纵向瀑布流 / 横向等高 / 画廊胶片 / 3D 环形画廊）、确定性 `Space` Quick Look、300px 同步检查器零闪烁、自由情绪板、无损同步与外部 Agent 安全边界 100% 保持一致。
 4. **按频率克制动效与 `< 1%` 空闲 CPU 红线**：`Ctrl+J` 随处跳转、方向键切图、单选切换与实时滚动保持 `0ms` 瞬时响应；空闲态禁止挂持续循环动画。
@@ -102,7 +102,7 @@ Charkle 在 macOS、Web、Windows 三端共享同一产品灵魂，但桌面外�
      - 右端紧贴 `46 × 40px` × 3 个标准 Win11 窗口控制键（最小化 / 最大化含 `HTMAXBUTTON` Snap Layouts 同步 / 关闭悬停 `#C42B1C` 白字），使用精雕细线几何图标对齐 Windows 11 原生比例。
 
 3. **圆角抬升主内容画布（Elevated Layer Surface）**
-   - 紧贴融合顶条下方、导航轨右侧：设置 `border-top-left-radius: 8px`、`border-top: 1px solid var(--win-stroke-surface-card)`、`border-left: 1px solid var(--win-stroke-surface-card)`，背景采用高纯度中性层次面（Light `#F6F6F5` / Dark `#191A1E` 或在画廊底层保持与 `DESIGN.md` 对齐的 `#F6F6F5` / `#141517`），确保作品色彩零偏移且与左侧 Mica 形成温润的前后景层次。
+   - 紧贴融合顶条下方、导航轨右侧：设置 `border-top-left-radius: 8px`、`border-top: 1px solid var(--win-stroke-surface-card)`、`border-left: 1px solid var(--win-stroke-surface-card)`，背景采用高纯度中性灰层次面（Light `#F5F5F6` / Dark `#141518`），确保作品色彩零偏移且与左侧 Mica 形成清晰克制的前后景层次。
    - **画廊可折叠吸顶头部（Collapsible Sticky Header）**：
      - **展开态（`scrollTop === 0`）**：左侧为分区大标题（`24px / 600`，`Segoe UI Variable Display`，如「全部素材」「收件箱」「建筑光影」）+ 紧凑数量副标；右侧为整齐对齐的单行 Fluent 工具条（`32px` 统一高度）：筛选开关按钮（带激活计数徽章）、排序 `Select`、4 模视图切换分段器（纵向瀑布流 / 横向等高 / 胶片 / 3D 环形）、密度缩放滑块（含 `−`/`+` 步进按钮）、快速生成情绪板次级按钮。
      - **吸顶态（`scrollTop >= 36px`）**：大标题平滑上移并淡出，标题文字微缩移入吸顶条左侧，工具条背景平滑显现 `Acrylic` 半透明毛玻璃 + 1px 底分隔线（高度收敛为 `48px`），卡片在吸顶条后顺滑穿行。
@@ -133,13 +133,14 @@ Charkle 在 macOS、Web、Windows 三端共享同一产品灵魂，但桌面外�
 
 | 语义角色 | CSS Token | Light Mode | Dark Mode | 职责与说明 |
 | :--- | :--- | :--- | :--- | :--- |
-| Mica 窗口底透层 | `--win-mica-tint` | `rgba(243, 243, 243, 0.16)` | `rgba(24, 25, 29, 0.24)` | Win11 Mica Alt 开启时侧栏与顶条的轻度校准层 |
-| Mica 实色降级底 | `--win-solid-base` | `#F3F3F3` | `#1C1D21` | Win10 / 关闭透明效果 / 窗口失焦时的外壳底色 |
-| 主画廊中性画布 | `--bg-gallery` | `#F6F6F5` | `#141517` | 主画廊与情绪板底色，与 `DESIGN.md` 严格一致 |
+| Mica 窗口底透层 | `--win-mica-tint` | `rgba(242, 242, 243, 0.16)` | `rgba(22, 23, 26, 0.24)` | Win11 Mica Alt 开启时侧栏与顶条的轻度校准层 |
+| Mica 侧栏实色降级 | `--bg-sidebar` / `--win-solid-base` | `#F2F2F3` | `#16171A` | Win10 / 关闭透明效果 / 窗口失焦时的侧栏与外壳底色 |
+| 主画廊中性画布 | `--bg-gallery` | `#F5F5F6` | `#141518` | 主画廊与情绪板底色，与 `DESIGN.md` 高纯度中性灰严格一致 |
 | 抬升内容面（Layer） | `--win-layer-default` | `rgba(255, 255, 255, 0.72)` | `rgba(42, 44, 50, 0.42)` | 叠加在 Mica/次底面上的卡片容器与内容区 |
-| 浮起实面 / 弹窗底 | `--bg-elevated` | `#FFFFFF` | `#24262C` | ContentDialog、设置浮窗内容区、实色降级浮层 |
-| 检查器次表面 | `--bg-inspector` | `#F3F3F1` | `#181A1E` | 右侧检查器底面，比主画廊微沉 1 阶 |
-| 检查器内嵌区块 | `--bg-inspector-field` | `#FFFFFF` | `#1F2127` | 检查器卡片与只读信息块 |
+| 浮起实面 / 弹窗底 | `--bg-elevated` | `#FFFFFF` | `#1C1D20` | ContentDialog、设置浮窗内容区、实色降级浮层 |
+| 弱对比底面 | `--bg-subtle` | `#F4F4F5` | `#25262B` | 占位框、次要芯片、分段槽与弱对比容器 |
+| 检查器次表面 | `--bg-inspector` | `#FFFFFF` | `#1C1D20` | 右侧纯白检查器轨道底面，与 `#F5F5F6` 主画廊清晰分层 |
+| 检查器内嵌区块 | `--bg-inspector-field` | `#F4F4F5` | `#25262B` | 纯白检查器内嵌输入框与轻量信息槽 |
 | 控件默认填充 | `--win-control-fill` | `rgba(255, 255, 255, 0.72)` | `rgba(255, 255, 255, 0.06)` | 标准按钮、输入框、Select 触发器常规态 |
 | 控件悬停填充 | `--win-control-fill-hover` | `rgba(249, 249, 249, 0.54)` | `rgba(255, 255, 255, 0.09)` | 按钮/下拉框 `:hover` 态 |
 | 控件按压填充 | `--win-control-fill-pressed` | `rgba(249, 249, 249, 0.32)` | `rgba(255, 255, 255, 0.04)` | 按钮 `:active` 态 |
@@ -172,7 +173,7 @@ Windows 11 控件精致感的核心来源是**顶部/底部微光差的 1px 立�
 | 浮层类型 | Light Mode | Dark Mode | Backdrop Filter | 投影 |
 | :--- | :--- | :--- | :--- | :--- |
 | 标准 Acrylic 浮层（`.win-acrylic`） | `rgba(252, 252, 252, 0.85)` | `rgba(36, 38, 44, 0.86)` | `blur(28px) saturate(140%)` | `0 8px 24px rgba(0,0,0,0.14), 0 0 0 1px var(--win-stroke-flyout)` |
-| 吸顶融合栏（`.win-acrylic-header`） | `rgba(246, 246, 245, 0.82)` | `rgba(20, 21, 23, 0.82)` | `blur(24px) saturate(135%)` | 底边 `1px solid var(--win-stroke-divider)` |
+| 吸顶融合栏（`.win-acrylic-header`） | `rgba(245, 245, 246, 0.82)` | `rgba(20, 21, 24, 0.82)` | `blur(24px) saturate(135%)` | 底边 `1px solid var(--win-stroke-divider)` |
 | Quick Look / 顶部收纳暗色浮层（`.win-acrylic-dark`） | `rgba(24, 25, 29, 0.88)` | `rgba(24, 25, 29, 0.88)` | `blur(28px) saturate(140%)` | `0 12px 32px rgba(0,0,0,0.44), 0 0 0 1px rgba(255,255,255,0.12)` |
 | 模态居中遮罩（`Smoke`） | `rgba(0, 0, 0, 0.24)` | `rgba(0, 0, 0, 0.48)` | 无全屏模糊（纯合成层） | — |
 

@@ -11,7 +11,7 @@ Charkle 在 macOS、Web、Windows 三端共享同一创作工具灵魂，但 mac
 
 ### 1.1 跨端不可妥协的「同魂」铁律（继承 `DESIGN.md`）
 
-1. **90–95% 中性画布，作品绝对主角**：画廊与情绪板底面严格保持低饱和中性色（Light `#F6F6F5` / Dark `#141517`），色彩仅来自素材本身、真实色板、自定义文件夹标记与克制使用的唯一强调色；画廊卡片默认纯图呈现，不在图下堆砌文字墙。
+1. **90–95% 中性画布，作品绝对主角**：画廊与情绪板底面严格保持高纯度中性灰（Light `#F5F5F6` / Dark `#141518`，零泛黄偏色、零紫罗兰偏色），色彩仅来自素材本身、真实色板、自定义文件夹标记与克制使用的唯一强调色；画廊卡片默认纯图呈现，不在图下堆砌文字墙。
 2. **严禁紫罗兰 / 霓虹渐变**：任何 chrome、按钮、强调色、背景光晕均不得落在 `OKLCH 270°–330°`；默认强调色为工作室钴蓝（`#2A60E0` / `#5B8DEF`）。
 3. **跨端功能与交互契约一致**：四模画廊（纵向瀑布流 / 横向等高 / 画廊胶片 / 3D 环形画廊）、确定性 `Space` Quick Look、300pt 同步检查器零闪烁、自由/自动双模情绪板、无损双向同步与外部 Agent 安全边界保持 100% 一致。
 4. **按频率克制动效与 `< 1%` 空闲 CPU 红线**：`⌘J` 随处跳转、方向键切图、单选切换与实时滚动保持 `0ms` 瞬时响应；静息态零持续动画或轮询，稳定空闲 CPU 严格 `< 1%`。
@@ -93,7 +93,7 @@ Charkle 在 macOS、Web、Windows 三端共享同一创作工具灵魂，但 mac
 
 1. **左侧全高原生侧栏（`SidebarView`）**
    - **宽度与固定内宽契约**：展开态固定 `232pt`，折叠图标窄轨固定 `76pt`（对称避开 macOS 交通灯）；`collapsedRailBody` 与 `expandedSidebarBody` 各自锁定 `76pt` / `232pt` 内部宽度，在统一 `CharkleMotion.drawerEase`（`0.30s`）动画槽内平滑裁切，彻底杜绝展开首帧文字挤压换行。
-   - **材质**：承载于 `NSVisualEffectView(.sidebar, blendingMode: .behindWindow)`，右缘以单一 `1pt` `CharkleTheme.hairline` 分隔；Reduce Transparency 下回退为纯中性实色 `#F2F1EE` / `#17191D`。
+   - **材质**：承载于 `NSVisualEffectView(.sidebar, blendingMode: .behindWindow)`，右缘以单一 `1pt` `CharkleTheme.hairline` 分隔；Reduce Transparency 下回退为高纯度中性灰实色 `#F2F2F3` / `#16171A`。
    - **导航行**：高度 `30pt`（左右内边距 `10pt`，连续圆角 `8pt`），选中项使用柔和中性高亮底 + 共享几何指示过渡 + 实心激活态图标；文件夹计数始终展示递归子树总数（`subtreeAssetCount`），标签区保持「Top 10 常用 + 最多 5 枚最近高频 + 可搜索全部标签 Popover」。
 
 2. **画廊顶部融合栏（收敛为最多 3 组液态玻璃岛）**
@@ -122,12 +122,13 @@ Charkle 在 macOS、Web、Windows 三端共享同一创作工具灵魂，但 mac
 
 | 语义角色 | Swift Token | Light Mode | Dark Mode | 职责与约束 |
 | :--- | :--- | :--- | :--- | :--- |
-| 画廊与画布底面 | `CharkleTheme.galleryGround` | `#F6F6F5` | `#141517` | 主画廊与情绪板底面，100% 中性无偏色 |
-| 浮起实面 | `CharkleTheme.surfaceElevated` | `#FFFFFF` | `#1E2025` | 设置分组、弹窗、实色降级浮层 |
-| 柔和弱底面 | `CharkleTheme.surfaceSubtle` | `#EDEDE9` | `#24272C` | 悬停底、次级输入区、紧凑徽章 |
-| 检查器轨道底面 | `CharkleTheme.inspectorBackground` | `#F1F0EC` | `#131519` | 比主画廊微沉 1 阶，无多余套壳 |
-| 检查器内嵌输入底 | `CharkleTheme.inspectorFieldSurface` | `#F6F5F1` | `#16181D` | 仅限可编辑文本与只读参数槽 |
-| Retina 细分隔线 | `CharkleTheme.hairline` | `black @ 8%` | `white @ 9%` | `0.5pt`（Retina 1px）分区线与面板边界 |
+| 画廊与画布底面 | `CharkleTheme.galleryGround` | `#F5F5F6` | `#141518` | 主画廊与情绪板底面，100% 高纯度中性灰无泛黄偏色 |
+| 浮起实面 | `CharkleTheme.surfaceElevated` | `#FFFFFF` | `#1C1D20` | 设置分组、表格页、弹窗、实色降级浮层 |
+| 柔和弱底面 | `CharkleTheme.surfaceSubtle` | `#F4F4F5` | `#25262B` | 悬停底（Hover `#EAEBEC` / `#2E3036`）、分段槽、紧凑徽章 |
+| 侧栏实色降级 | `CharkleSidebarMaterialBackground` | `#F2F2F3` | `#16171A` | Reduce Transparency 下左侧导航轨实色底面 |
+| 检查器轨道底面 | `CharkleTheme.inspectorBackground` | `#FFFFFF` | `#1C1D20` | 纯白检查器轨道（与 `#F5F5F6` 主画廊干净对比，无多余套壳） |
+| 检查器内嵌输入底 | `CharkleTheme.inspectorFieldSurface` | `#F4F4F5` | `#25262B` | 纯白检查器内嵌无描边输入框与选择槽 |
+| Retina 细分隔线 | `CharkleTheme.hairline` | `black @ 6.5%` | `white @ 7.5%` | `0.5pt`（Retina 1px）分区线与面板边界 |
 | 次要文字 | `CharkleTheme.secondaryInk` | `#3C3C43 @ 72%` | `white @ 64%` | 副标题、参数键名（对比度 `>= 4.5:1`） |
 | 主强调色（默认工作室） | `CharkleTheme.accent(for:source:)` | `#2A60E0` | `#5B8DEF` | `accentSource == .studio` 时生效；整屏占比 `< 3%` |
 | 主强调色（跟随系统） | `CharkleTheme.accent(for:source:)` | `Color.accentColor` | `Color.accentColor` | `accentSource == .system` 时实时读取 macOS 系统强调色 |
