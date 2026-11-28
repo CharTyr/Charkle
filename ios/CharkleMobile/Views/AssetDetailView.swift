@@ -97,8 +97,12 @@ struct AssetDetailView: View {
     @State private var isChromeVisible: Bool = true
     @State private var activeUtilityDrawer: ActiveUtilityDrawer? = nil
     @State private var confirmPermanentDelete: Bool = false
-    @State private var isCurrentAssetZoomed: Bool = false
+    @State private var isMediaStageZoomed: Bool = false
     @State private var isDocumentInteractionBlockingPaging: Bool = false
+
+    private var isCurrentAssetZoomed: Bool {
+        isMediaStageZoomed || isDocumentInteractionBlockingPaging
+    }
     @State private var documentStageMode: MobileDocumentStageMode
     @State private var externalDiffTrigger: MobileDiffLaunchRequest? = nil
     @State private var isMergeStackSheetPresented: Bool = false
@@ -263,8 +267,8 @@ struct AssetDetailView: View {
         }
         .background(keyboardShortcutsBridge)
         .statusBarHidden(!isChromeVisible)
-        .interactiveDismissDisabled(isCurrentAssetZoomed || isDocumentInteractionBlockingPaging)
-        .background(ZoomDismissCoordinatorBridge(isZoomedOrZooming: isCurrentAssetZoomed || isDocumentInteractionBlockingPaging))
+        .interactiveDismissDisabled(isCurrentAssetZoomed)
+        .background(ZoomDismissCoordinatorBridge(isZoomedOrZooming: isCurrentAssetZoomed))
         .sheet(isPresented: $isMergeStackSheetPresented) {
             NavigationStack {
                 MergeIntoVersionStackSheet(
@@ -376,8 +380,8 @@ struct AssetDetailView: View {
             if previewTransform.hasActiveTransform {
                 previewTransform.reset()
             }
-            if isCurrentAssetZoomed {
-                isCurrentAssetZoomed = false
+            if isMediaStageZoomed {
+                isMediaStageZoomed = false
             }
             if isDocumentInteractionBlockingPaging {
                 isDocumentInteractionBlockingPaging = false
@@ -1022,7 +1026,7 @@ struct AssetDetailView: View {
                         },
                         onZoomInteractionChanged: { zoomed in
                             if asset.id == currentAssetID {
-                                isCurrentAssetZoomed = zoomed
+                                isMediaStageZoomed = zoomed
                             }
                         },
                         onSingleTap: {
@@ -1041,7 +1045,7 @@ struct AssetDetailView: View {
             .scrollTargetLayout()
         }
         .scrollTargetBehavior(.paging)
-        .scrollDisabled(isCurrentAssetZoomed || isDocumentInteractionBlockingPaging)
+        .scrollDisabled(isCurrentAssetZoomed)
         .scrollPosition(id: $pagedAssetID)
     }
 
