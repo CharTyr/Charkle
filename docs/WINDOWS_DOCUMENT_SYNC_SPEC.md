@@ -216,14 +216,14 @@ impl DocumentDiffSummary {
         self.added_blocks + self.removed_blocks + self.modified_blocks + self.moved_blocks
     }
 
-    /// Matches Swift `DocumentDiffSummary.compactBridgeLabel` (`"Δ 6处 · ¥1 · 时限1"`).
+    /// Matches Swift `DocumentDiffSummary.compactBridgeLabel` (`"Δ 6处 · 数字1 · 时间1"`).
     pub fn compact_bridge_label(&self) -> String {
         let mut parts = vec![format!("Δ {}处", self.total_changed_blocks())];
         if self.high_risk_number_changes > 0 {
-            parts.push(format!("¥{}", self.high_risk_number_changes));
+            parts.push(format!("数字{}", self.high_risk_number_changes));
         }
         if self.high_risk_date_changes > 0 {
-            parts.push(format!("时限{}", self.high_risk_date_changes));
+            parts.push(format!("时间{}", self.high_risk_date_changes));
         }
         parts.join(" · ")
     }
@@ -437,10 +437,16 @@ All archive reads MUST enforce strict safety bounds (`MAX_ZIP_ENTRIES = 4_096`, 
      5. Fallback -> `encoding_rs::GB18030.decode_without_replacement_handling(bytes)` (losslessly covers ASCII, GB2312, GBK, and GB18030 Chinese government/enterprise `.txt` & `.csv` files!).
    - For `.md` / `.markdown`, parse with `pulldown_cmark::Parser::new_ext(text, Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH)` into `Heading`, `Paragraph`, `ListItem`, `Table`, `CodeBlock`, and `Quote` blocks.
 
-### 3.3 High-Readability Masonry Document Poster Card (`MediaArtwork::document_card` — Exact `900×1240` Parity)
+### 3.3 Real Office Page Thumbnails + Fallback Document Poster Card (`IShellItemImageFactory` & `MediaArtwork::document_card`)
 
-Match `Sources/CharkleCore/Media/MediaArtwork.swift` (`a33de79`) pixel-for-pixel in `windows/crates/charkle-core/src/media/artwork.rs` (`render_svg_with_fonts`):
-- **PDF Natural-Aspect Guardrail (`MediaPipeline.swift` Parity)**: Keep `ext == "pdf"` rendering its direct first-page raster (`IShellItemImageFactory` / PDF page dimensions) so native PDF `cropBox` `pixel_width` / `pixel_height` remain intact; apply `MediaArtwork::document_card` (`900 × 1240`) to non-PDF documents (`ext != "pdf"`, e.g. `.docx / .xlsx / .pptx / .md / .txt / .doc / .wps / .xls / .et`) and fallback unrendered PDFs.
+Match `Sources/CharkleCore/Media/MediaPipeline.swift`, `LiveCharkleEngine+Documents.swift`, and `MediaArtwork.swift` (`swarm/core-and-thumb-polish` parity) in `windows/crates/charkle-core/src/media/pipeline.rs` & `artwork.rs`:
+- **True Office & PDF Page Thumbnails First**:
+  - For `.pdf` and all rich-layout / Office document extensions (`docx, doc, wps, xlsx, xls, et, pptx, ppt, dps, rtf, pages, numbers, key, odt, epub, ofd`), ALWAYS invoke the OS shell thumbnail provider (`IShellItemImageFactory` with `SIIGBF_BIGGERSIZEOK` at `1400 × 1400` / PDF first-page raster) FIRST!
+  - Whenever it returns a valid page raster (`width >= 160 && height >= 160`), store that crisp true page image and natural `pixel_width × pixel_height` DIRECTLY as the asset's `grid520` / `preview1400` thumbnail (do NOT wrap or overwrite it with `MediaArtwork::document_card`!) so Inspector `素材预览`, Masonry Gallery, Filmstrip, and Compact View show the real document page appearance (red headers, fonts, margins, tables).
+  - Never overwrite real Office thumbnails during version-stack updates (`refresh_document_version_posters_if_needed`), and run a one-shot idempotent startup migration re-rendering any existing Office assets still carrying legacy procedural `900 × 1240` posters when a local original file exists.
+  - Also attach `diffSummary` (compared to the previous stack sibling) onto newly synthesized `vN+1` assets inside `synthesize_document_version` so the Revision Rail immediately displays `Δ X处`.
+- **Fallback Procedural Card (`MediaArtwork::document_card` — `900 × 1240`)**:
+  - Used ONLY for plain-text/code formats (`md, markdown, txt, json, yaml, yml, toml, csv`) or as a clean fallback when `IShellItemImageFactory` returns `None` on a headless/clean machine without Office shell handlers.
 - **Dimensions**: `900 × 1240` (`stageHeight = 980` warm studio paper `#F3F2EE` on top + `footerHeight = 260` crisp `#FFFFFF` strip on bottom, `2px #E7E6E1` divider, outer `2px #E5E7EB` frame).
 - **Format Accent Palette (`documentAccentHex`)**:
   - `is_red_header_style == true` or `pdf` / `ofd` -> `#C83E37`
@@ -516,10 +522,11 @@ Match `Sources/CharkleCore/Media/MediaArtwork.swift` (`a33de79`) pixel-for-pixel
    - **Cross-Gap Move Detection**: Match pure `Removed` and pure `Added` steps (`t_key.chars().count() >= 6`) when exact key matches or `block_similarity >= 0.88` -> convert to `DocumentDiffChangeKind::Moved` (`moved_from_index`, `moved_to_index`) and suppress the duplicate `Removed` hunk.
    - **Inline Atom Tokenizer**: `(?:[¥￥\$]?\d[\d,./:%‰\-年月日万亿元]*|\p{Han}|[A-Za-z]+|\s+|[^\s\p{Han}A-Za-z\d])`.
 
-2. **Exact High-Risk Date & Number/Currency/Percentage Regexes (`scan_high_risk_entities`)**:
-   Evaluate `date_risk_regex` FIRST, then skip any `number_risk_regex` match whose byte range intersects a matched date range; compare base vs target extracted token lists via ordered LCS multiset diff (`diff_ordered_multiset`) so unchanged numbers/dates in the same paragraph NEVER false-alarm:
+2. **Exact High-Risk Date/Time & Number Regexes (`scan_high_risk_entities`)**:
+   Evaluate `date_risk_regex` FIRST, then strip/mask any matched date/time byte ranges BEFORE running `number_risk_regex` or bare-digit changed-span scanning (so clock times like `14:30 -> 15:00`, years like `2026年`, and dotted dates like `11.28` classify strictly as `high_risk_date_changes` and NEVER leak into `high_risk_number_changes`!). Compare base vs target extracted token lists via ordered LCS multiset diff (`diff_ordered_multiset`) so unchanged numbers/dates in the same paragraph NEVER false-alarm:
    - **`date_risk_regex` (`(?i)`)**:
-     `(?:20\d{2}\s*[年\-/.]\s*\d{1,2}\s*[月\-/.]\s*\d{1,2}\s*日?(?:前|内|底|止)?|\d{4}\s*年\s*\d{1,2}\s*月(?:底|前|初|中旬|下旬)?|\d{1,2}\s*月\s*\d{1,2}\s*日(?:前|内|底|止)?|Q[1-4]|第[一二三四1-4]季度|\d{1,3}\s*(?:个?工作日|自然日|天|小时|个月|周)(?:内|前|以上|以内)?)`
+     `(?:20\d{2}\s*[年\-/.]\s*\d{1,2}\s*[月\-/.]\s*\d{1,2}\s*日?(?:前|内|底|止)?|(?:19|20)\d{2}\s*[—–\-~至]\s*(?:19|20)\d{2}\s*年?|\d{4}\s*年\s*\d{1,2}\s*月(?:底|前|初|中旬|下旬)?|(?:19|20)\d{2}\s*年|\d{1,2}\s*月\s*\d{1,2}\s*日(?:前|内|底|止)?|(?:[01]?\d|2[0-3])\s*[:：]\s*[0-5]\d(?:\s*[:：]\s*[0-5]\d)?|(?:上午|下午|中午|晚|凌晨)?\s*\d{1,2}\s*[点时](?:\s*\d{1,2}\s*分|半|整)?|Q[1-4]|第[一二三四1-4]季度|\d{1,3}\s*(?:个?工作日|自然日|天|小时|个月|周)(?:内|前|以上|以内)?)`
+     *(Plus dotted month-day `(?:1[0-2]|0?[1-9])\.(?:3[01]|[12]\d|0?[1-9])` when not preceded by a digit and followed by `日|的|舆情|会议|活动|通报|事故|专项` or word boundary.)*
    - **`number_risk_regex` (`(?i)`)**:
      `(?:(?:人民币|RMB|CNY|USD|HKD|EUR|¥|￥|\$)\s*[-+]?\d[\d,]*(?:\.\d+)?\s*(?:万亿元|亿元|万元|千元|百元|元|万|亿|美元)?|[-+]?\d[\d,]*(?:\.\d+)?\s*(?:%|‰|万亿元|亿元|万元|元|万|亿|人|名|户|家|处|项|台|套|件|个|批|次|吨|公斤|平方米|㎡|公顷|亩|公里|km|米|倍|分)|[-+]?\d{1,3}(?:,\d{3})+(?:\.\d+)?|[-+]?\d+\.\d+|(?<![A-Za-z0-9.])\d{2,}(?![A-Za-z0-9.]))`
    -*(Note for Rust `regex` crate, which omits look-around: implement the final `\d{2,}` branch by matching `\d{2,}` and checking the immediately preceding/following byte is not `[A-Za-z0-9.]`, plus the bare-digit changed-span fallback `\d+(?:\.\d+)?` when `datePairCount == 0 && numPairCount == 0`!)*
@@ -649,15 +656,16 @@ export interface DocumentRichMetadata {
      - **Surface Tokens**: `bg-[var(--bg-elevated)]` (`#FFFFFF` Light / `#24262C` Dark), `border border-[var(--win-stroke-card)]`, `.win-control-elevation`, `rounded-[var(--win-radius-card)]` (`8px`), selected ring `ring-[1.5px] ring-[var(--accent)]`. Zero violet hues, zero `transition: all`.
      - **3D Micro-Folio Left Artifact (`44 × 52px`, `perspective: 420px`)**:
        - When `stackSiblings.length > 1`, render 2 layered backing sheets (`--ck-paper-back2`, `--ck-paper-back1`) behind the cover sheet (`transform-origin: 0% 85%`). Under `@media (hover: hover) and (pointer: fine)` (and ONLY when `prefers-reduced-motion: no-preference` and `data-animations !== 'disabled'`), hovering the card fans the cover (`rotateY(-26deg) translateX(-1px)`), sheet-1 (`rotateY(-14deg) translateX(4px) translateY(-2px) rotate(4deg)`), and sheet-2 (`translateX(8px) translateY(-3.5px) rotate(8deg)`) using `cubic-bezier(0.22, 1.18, 0.36, 1)` (`280ms`), matching `CompactIndexLayoutMetrics.microFolioLayerPoses` 1:1.
-       - Cover content adapts by `MediaKind`: miniature red-header / green-grid / page skeleton + format label for `document`; crisp `grid520` thumbnail + 4-swatch bottom palette bar for `image / animatedImage / designFile`; 8-bar accent mini-waveform for `audio`; domain favicon/cover for `webBookmark`.
-     - **Center Identity & Stack Pill**:
+       - Cover content adapts by `MediaKind`: for `document`, render the real `grid520` page thumbnail inside the front folio sheet whenever available, falling back to miniature red-header / green-grid / page skeleton + non-truncating format badge (`whitespace-nowrap shrink-0` so `DOCX`/`XLSX` never clips to `"D..."`); crisp `grid520` thumbnail + 4-swatch bottom palette bar for `image / animatedImage / designFile`; 8-bar accent mini-waveform for `audio`; domain favicon/cover for `webBookmark`.
+     - **Center Identity, Stack Pill & Rubber-Band Marquee Multi-Selection**:
        - Truncated title (`min-w-0`, Tooltip when truncated) + interactive stack pill (`主版 v4 · +1 新版` in warm amber accent when `newerThanPrimaryCount > 0`, else `主版 v4 · 共N版`).
        - Adaptive metadata line (`charkle-tabular`): `6 页 · 张主任` / `3 工作表` for `document`, `4032 × 3024` for `image`, `18:42 · M4A` for `audio`, plus up to 2 tag chips (`+N` overflow).
+       - **Scoped Outbound Drag Hit Target + Rubber-Band Marquee Box Multi-Select**: Scope the outbound Win32 OLE drag trigger (`PointerDragContext` -> `startOutboundDrag`) strictly to the left `CompactMicroFolioArtifact` + intrinsic title/tags block (NOT stretching `flex-1` across the open middle expanse of 1-column Folio Strips, though single-clicking anywhere on the row still selects it). Dragging starting in stage margins, row/column gaps, open middle strip whitespace, or empty space below rows draws a live Explorer/Finder-style rubber-band marquee rectangle (`rounded-[4px]`, `color-mix(in srgb, var(--accent) 11%, transparent)` fill, `1px` `color-mix(in srgb, var(--accent) 68%, transparent)` border) in both `单列折页条` and `双列索引卡`, intersecting tracked card rects in real time to update `selectedAssetIds` (replacing selection on unmodified drag; toggling/unioning against `baseSelection` when `Ctrl` or `Shift` is held; smoothly auto-scrolling near top/bottom viewport edges).
      - **Right Action & 12-Segment Diff Minimap**:
        - Fine-pointer hover quick button **`拷贝文件`** (`copyAssetsToClipboard([primaryAsset.id])` -> toast `已拷贝「…」原文件实体，切微信直接 Ctrl+V 发送`).
        - 12 vertical `3px`-wide rounded bars (`h-2` neutral `--win-stroke-control-bevel` for `0`, `h-3` `--success` for `1`, `h-3.5` `--danger` for `2`) above `charkle-tabular` relative timestamp.
      - **Inline Expandable Revision Rail**:
-       - Clicking the stack pill toggles inline rail expansion (`CharkleDisclosureGroup` / smooth transform-opacity reveal) showing horizontal version nodes separated by clickable **`Δ 6处 · ¥1`** (`compactBridgeLabel`) pills:
+       - Clicking the stack pill toggles inline rail expansion (`CharkleDisclosureGroup` / smooth transform-opacity reveal) showing horizontal version nodes separated by clickable **`Δ 6处 · 数字1`** (`compactBridgeLabel`) pills (stripping any redundant leading `^v\d+\s*(?:[·•:：\-]\s*)?` prefix from `versionLabel` / `changeNote` in both Revision Rail cards and `InspectorView.tsx` so `"v1 v1"` never occurs):
          - Clicking any version card's **`设为主版`** (or clicking a version node action) invokes `manageVersionStack({ action: 'setPrimary', assetIDs: [ver.id], primaryAssetID: ver.id, pinAsPrimary: true })`.
          - Clicking any **`Δ`** bridge pill (or **`进入精细对比与取舍 →`**) opens `QuickLookOverlay` directly in Diff mode comparing `(prevVer.id, ver.id)`!
 
@@ -672,16 +680,21 @@ export interface DocumentRichMetadata {
 3. **Universal `Ctrl+J` -> `Ctrl+C` Primary File Copy (`JumpAnywhereModal.tsx`)**:
    - In `JumpAnywhereModal.tsx` keydown listener: when `activeRow.kind === 'match' && activeRow.match.kind === 'asset'` and the user presses `Ctrl+C` (while `inputRef.current` has `selectionStart === selectionEnd`, or `Ctrl+Shift+C` anytime), call `e.preventDefault()`, invoke `getTransport().copyAssetsToClipboard([targetUUID])`, close or keep palette responsive, and push toast `已拷贝原文件到剪贴板，可直接切微信 Ctrl+V 发送`. Also render a subtle `Ctrl+C 拷贝文件` hint badge on active asset rows.
 
-4. **Quick Look Document Studio & `pdfjs-dist` Visual Diff (`DocumentStudioViewer.tsx` & `PdfDocumentViewer.tsx`)**:
-   - **Clean Readers (Default Mode)**:
-     - `.docx`: Paper-proportioned reader sheet (`max-w-[780px]`) rendering headings, body paragraphs, clean bordered tables, native `<w:ins>`/`<w:del>` pills (toggleable), and right-margin comment cards.
+4. **Quick Look Document Studio, True-Layout `docx-preview` & `pdfjs-dist` Visual Diff (`DocumentStudioViewer.tsx` & `PdfDocumentViewer.tsx`)**:
+   - **Clean Readers (Default Mode — `原版版式` ⇄ `结构与批注` Toggle)**:
+     - **`.docx` True-Layout + Structured Dual Reader**:
+       - Add a compact top-right/floating Fluent capsule toggle **`原版版式` ⇄ `结构与批注`** (defaulting to **`原版版式`** whenever local original `.docx` bytes are cached, and falling back cleanly to **`结构与批注`** for `.odt`, legacy `.doc/.wps`, or uncached cloud items).
+       - **`原版版式` (True-Layout OOXML Page View)**: Render original `.docx` bytes streamed from `http://charkle-media.localhost/original/<uuid>` (zero Base64 IPC, 100% offline, zero external network calls) via client-side **`docx-preview`** (`renderAsync(arrayBuffer, containerEl, undefined, { inWrapper: true, ignoreWidth: false, ignoreHeight: false, breakPages: true, renderHeaders: true, renderFooters: true, renderFootnotes: true, renderEndnotes: true })`) inside a studio neutral scroll stage — faithfully reproducing real A4/Letter page margins, CJK 2-character first-line indents (`w:firstLineChars`), fonts (`仿宋_GB2312` / `方正小标宋` / `SimSun`), official red headers (`w:pBdr` & crimson runs), embedded `word/media/*` images/seals, and complex merged tables (`vMerge` / `gridSpan`). Tear down the rendered DOM container cleanly on unmount/asset switch.
+       - **`结构与批注` (Structured Blocks & Comments View)**: Paper-proportioned reader sheet (`max-w-[780px]`) rendering extracted headings, body paragraphs, clean bordered tables, toggleable native `<w:ins>`/`<w:del>` track-change pills, and right-margin / collapsible `word/comments.xml` comment cards (with comment count badge on the `结构与批注` pill).
      - `.xlsx`: Bottom/top sheet tab strip + sticky-header tabular grid (`font-variant-numeric: tabular-nums`), formula bar tooltip on cells with `formulasByCol`.
      - `.pdf`: Existing HiDPI `PdfDocumentViewer.tsx` (`http://charkle-media.localhost/original/<uuid>`) enhanced with scanned-PDF badge when `!hasTextLayer`.
      - `.md / .txt`: Existing `DocumentMarkdownViewer.tsx` (`marked` + `DOMPurify` rendered ⇄ raw source toggle).
    - **Multi-Modal Diff Stage (`对比差异` Toggle)**:
      - Top bar: Base version `CustomSelect` (`v3`) ⇄ Target version `CustomSelect` (`v4`) + **`对比差异`** toggle + **`按差异合成新版本`** button (enabled when `report.canSynthesizeTwoWay`).
-     - **High-Risk Radar Filter Strip**: Capsule buttons (`全部改动`, `数字与金额`, `日期与时限`, `表格变动`, `原生修订/批注`) with live counts + **`仅看改动段落`** `Switch` (default `true`) + `J` / `K` keyboard hunk stepping (guarded by `!isTypingInsideQuickLook`).
-     - **Word / Text View Modes**: **`行内审阅`** (red strikethrough deleted tokens, green highlighted inserted tokens, high-risk amber/crimson callout badges, `↕ 段落自第 N 节移入` Move badge) ⇄ **`左右分栏`** (synchronized scroll ratio between base & target panes).
+     - **High-Risk Radar Filter Strip**: Capsule buttons (`全部改动`, `数字变动`, `日期时间`, `表格变动`, `原生修订/批注`, using a pure number badge icon such as `NumberCircle` rather than `¥`) with live counts + **`仅看改动段落`** `Switch` (default `true`) + `J` / `K` keyboard hunk stepping (guarded by `!isTypingInsideQuickLook`).
+     - **Word / Text View Modes & Icon-Gutter Selective Highlighting**:
+       - **`行内审阅`** (inline unified diff with red strikethrough deleted tokens, green highlighted inserted tokens, high-risk amber/crimson callout badges, and `↕ 段落自第 N 节移入` Move badge) ⇄ **`左右分栏`** (synchronized scroll ratio between base & target panes using compact `− v{base}` / `+ v{target}` icon headers rather than bare `"旧版"` / `"新版"` text labels).
+       - **Icon-Gutter Diff Fallback Rows**: Whenever rendering separate base/target rows in diff cards, use `flex items-start gap-2` **hanging-indent icon-gutter rows** — leading `−` (`DismissCircle` / `SubtractCircle16Filled` badge in `--danger`, `aria-label="修改前"`) and `+` (`AddCircle` / `AddCircle16Filled` badge in `--success`, `aria-label="修改后"`) with selective `inlineTokens` span highlighting (`equal` tokens in calm normal `--text-primary` ink without strikethrough or background fill; ONLY `deleted` tokens in `--danger` + `line-through` + `13%` crimson tint; ONLY `inserted` tokens in `--success` + `font-semibold` + `14%` green tint). **Strictly forbid** `"旧版："` / `"新版："` leading text prefixes or painting entire multi-line paragraphs solid green / solid struck-through red.
      - **Excel Diff View**: Sheet tabs with changed-row count badges + **`主键列`** `CustomSelect` (pre-selecting `primaryKeyCol`, allowing manual override which re-invokes `compareDocumentVersions`) + row status (`新增行` / `删除行` / `修改`) + inline cell `旧值 → 新值` & `fx` formula diff badges.
      - **PDF Text/OCR + Dual-Canvas Visual Diff (`PdfVisualDiffStage.tsx`)**:
        - Mode switcher: **`文本对比`** (with **`离线 OCR 识别对比`** button passing `useOcrIfScanned: true` into `compareDocumentVersions` -> `WinRtOcrProvider`) ⇄ **`红青叠层 (Red-Cyan)`** ⇄ **`左右卷帘 (Split Curtain)`**.
@@ -693,7 +706,11 @@ export interface DocumentRichMetadata {
          - **Split Curtain Wipe**: Stack target `<canvas>` over base `<canvas>` with `clip-path: inset(0 0 0 ${curtainPercent}%)` driven by a pointer-captured vertical divider handle (`0%..100%`, zero React re-render during drag via ref/style update, keyboard `←/→` fine step).
    - **Scheme B 2-Way Synthesis Drawer/View (`按差异合成新版本`)**:
      - Template selector (`以新版 vN 为底稿（推荐）` vs `以旧版为底稿`).
-     - Per-hunk decision cards: **`保留旧版`** (`keepBase`) / **`采用新版`** (`acceptTarget`) / **`当场微调`** (`customText` inline `<textarea>`). Complex hunks (`isProtectedComplex === true`) display a neutral lock pill (`受保护结构 · 保持底稿原样`) + **`用默认应用打开`** (`openWithDefaultApp`).
+     - **Icon-Gutter Per-Hunk Decision Cards (Zero `"旧版："` / `"新版："` Prefixes)**:
+       - Render two clean `flex items-start gap-2` hanging-indent rows when `choice !== 'customText'` and `!hunk.isProtectedComplex`:
+         - **Base (`−`) row**: leading `18×18px` shrink-0 `DismissCircle` / minus circle gutter badge (`--danger`, never struck through) + selective `inlineTokens` span renderer filtering `'equal' | 'deleted'` (`equal` in calm normal ink without strikethrough; ONLY `deleted` spans in `--danger` with `line-through` & `13%` soft crimson background).
+         - **Target (`+`) row**: leading `18×18px` shrink-0 `AddCircle` / plus circle gutter badge (`--success`) + selective `inlineTokens` span renderer filtering `'equal' | 'inserted'` (`equal` in calm normal-weight ink; ONLY `inserted` spans in `--success` with `font-semibold` & `14%` soft green background).
+         - Highlight the currently chosen row (`keepBase` vs `acceptTarget`) with a subtle `1px` semantic border/tint while dimming the unchosen row (`opacity-75`), and provide **`保留旧版`** (`keepBase`) / **`采用新版`** (`acceptTarget`) / **`当场微调`** (`customText` inline `<textarea>`). Complex hunks (`isProtectedComplex === true`) display a neutral lock pill (`受保护结构 · 保持底稿原样`) + **`用默认应用打开`** (`openWithDefaultApp`).
      - **`净版预览`** modal/pane showing `previewMergedText` + **`生成净版 vN+1`** primary CTA invoking `synthesizeDocumentVersion`, automatically pinning `vN+1` as Primary Version and offering 1-click **`拷贝文件发微信`**.
 
 ---
@@ -733,5 +750,5 @@ node scripts/test-figma-plugin.cjs
    - `document_content_cache` `content_hash` invalidation, high-bit `u64` `simhash64` storage (`>= 0x8000_0000_0000_0000`), and `assets_fts` Chinese + Pinyin recall without polluting `sync_ops`.
    - Chinese office filename stem normalizer + SimHash64 candidate matching, `isPinnedPrimary` anti-override when `v5` joins after pinned `v4`, High-Risk Number/Currency & Date radar, Excel PK row-insertion alignment, and `.docx` Scheme B surgical 2-Way merge preserving non-document ZIP entries byte-for-byte with valid output XML.
 2. **`windows/ui/src/__tests__/document-stack-compact-view.test.tsx`**:
-   - `GalleryCompactView` 2-col Index Grid ⇄ 1-col Folio Strip toggle, per-destination layout memory, 12-segment Diff Minimap rendering, inline Revision Rail expand/collapse, `设为主版` (`isPinnedPrimary` lock), and `Δ` bridge opening Quick Look Diff.
-   - Active drop candidate stacking banner (`Enter` joins stack), `Ctrl+J` -> `Ctrl+C` invoking `copyAssetsToClipboard` with the Primary Version ID, Quick Look `.docx` / `.xlsx` readers, High-Risk Radar filtering, Excel PK selector, PDF Red-Cyan / Split Curtain mode switching, and Scheme B 2-Way synthesis creating `vN+1`.
+   - `GalleryCompactView` 2-col Index Grid ⇄ 1-col Folio Strip toggle, rubber-band marquee box multi-selection from open strip whitespace/margins, per-destination layout memory, 12-segment Diff Minimap rendering, inline Revision Rail expand/collapse (verifying `Δ X处 · 数字Y` bridge labels and deduplicated `v1` labels), `设为主版` (`isPinnedPrimary` lock), and `Δ` bridge opening Quick Look Diff.
+   - Active drop candidate stacking banner (`Enter` joins stack), `Ctrl+J` -> `Ctrl+C` invoking `copyAssetsToClipboard` with the Primary Version ID, Quick Look `.docx` (`原版版式` `docx-preview` ⇄ `结构与批注` toggle) / `.xlsx` readers, High-Risk Radar filtering, icon-gutter (`−` / `+`) selective `inlineTokens` diff & merge rows (verifying zero `"旧版："`/`"新版："` prefixes), Excel PK selector, PDF Red-Cyan / Split Curtain mode switching, and Scheme B 2-Way synthesis creating `vN+1`.
