@@ -762,6 +762,302 @@ nonisolated enum MediaArtwork {
         return ctx.makeImage()
     }
 
+    /// High-readability editorial card (`900x1240`) for `.document` assets in Masonry / Justified / Filmstrip galleries:
+    /// - Top (`900x980`): warm studio paper stage rendering a crisp first-page PDF/QuickLook snapshot, spreadsheet grid,
+    ///   official red-header layout, or structured document page preview.
+    /// - Bottom (`260px`): crisp paper-white footer strip displaying clean 2-line title, colored format badge,
+    ///   page/sheet metrics, and optional Version Stack badge (`v4` / `主版 v4`).
+    static func documentCard(
+        title: String,
+        fileExtension: String,
+        payload: StructuredDocumentPayload?,
+        firstPageImage: CGImage? = nil,
+        versionStack: AssetVersionStackMetadata? = nil
+    ) -> CGImage? {
+        let width = 900
+        let footerHeight = 260
+        let stageHeight = 980
+        let height = stageHeight + footerHeight
+        guard let ctx = context(width: width, height: height) else { return nil }
+
+        let family = payload.flatMap { DocumentFormatFamily(rawValue: $0.formatFamily) }
+            ?? DocumentFormatFamily.detect(fileExtension: fileExtension)
+        let extUpper = fileExtension.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        let badgeText = extUpper.isEmpty ? family.badgeLabel : String(extUpper.prefix(6))
+        let accentHex = documentAccentHex(for: family, ext: extUpper, isRedHeader: payload?.isRedHeaderStyle == true)
+
+        ctx.setFillColor(color(0xFFFFFF))
+        ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
+
+        let stageRect = CGRect(x: 0, y: footerHeight, width: width, height: stageHeight)
+        ctx.setFillColor(color(0xF3F2EE))
+        ctx.fill(stageRect)
+
+        let sheetRect = CGRect(x: 56, y: Double(footerHeight + 44), width: 788, height: 896)
+        if let stack = versionStack, stack.versionNumber > 1 {
+            let back2 = sheetRect.offsetBy(dx: 12, dy: 12)
+            ctx.setFillColor(color(0xE4E2DC))
+            fillRoundedRect(back2, radius: 18, in: ctx)
+            ctx.setStrokeColor(color(0xD3D0C8))
+            ctx.setLineWidth(1.5)
+            addRoundedRectPath(back2, radius: 18, in: ctx)
+            ctx.strokePath()
+
+            let back1 = sheetRect.offsetBy(dx: 6, dy: 6)
+            ctx.setFillColor(color(0xECEBE6))
+            fillRoundedRect(back1, radius: 18, in: ctx)
+            ctx.setStrokeColor(color(0xDBD8D0))
+            ctx.setLineWidth(1.5)
+            addRoundedRectPath(back1, radius: 18, in: ctx)
+            ctx.strokePath()
+        }
+
+        ctx.setFillColor(color(0xFFFFFF))
+        fillRoundedRect(sheetRect, radius: 18, in: ctx)
+
+        ctx.saveGState()
+        addRoundedRectPath(sheetRect, radius: 18, in: ctx)
+        ctx.clip()
+
+        if let pageImg = firstPageImage {
+            drawAspectFill(pageImg, in: sheetRect, ctx: ctx)
+        } else if let sheet = payload?.sheets.first, (!sheet.headers.isEmpty || !sheet.rows.isEmpty) {
+            drawSpreadsheetPreview(sheet: sheet, accentHex: accentHex, in: sheetRect, ctx: ctx)
+        } else if payload?.isRedHeaderStyle == true {
+            drawRedHeaderDocumentPreview(title: title, payload: payload, in: sheetRect, ctx: ctx)
+        } else {
+            drawStructuredPaperPreview(title: title, payload: payload, accentHex: accentHex, in: sheetRect, ctx: ctx)
+        }
+        ctx.restoreGState()
+
+        ctx.setStrokeColor(color(0xDFDDD6))
+        ctx.setLineWidth(2)
+        addRoundedRectPath(sheetRect, radius: 18, in: ctx)
+        ctx.strokePath()
+
+        ctx.setFillColor(color(0xE7E6E1))
+        ctx.fill(CGRect(x: 0, y: Double(footerHeight) - 2, width: Double(width), height: 2))
+
+        let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "未命名文档" : title
+        let titleLines = wrapText(cleanTitle, maxCharsPerLine: 25, maxLines: 2)
+        var titleY = titleLines.count > 1 ? 196.0 : 174.0
+        for line in titleLines {
+            draw(line, in: ctx, at: CGPoint(x: 36, y: titleY), size: 32, ink: 0x18191C, width: 828, bold: true)
+            titleY -= 46
+        }
+
+        let fmtPillWidth = max(84.0, Double(badgeText.count) * 14.5 + 30.0)
+        let fmtPillRect = CGRect(x: 36, y: 34, width: fmtPillWidth, height: 42)
+        ctx.setFillColor(color(accentHex, alpha: 0.13))
+        fillRoundedRect(fmtPillRect, radius: 11, in: ctx)
+        draw(badgeText, in: ctx, at: CGPoint(x: fmtPillRect.minX + 15, y: 46), size: 19, ink: accentHex, width: fmtPillWidth - 20, bold: true)
+
+        var reservedRightWidth = 0.0
+        if let stack = versionStack {
+            let vLabel = stack.isPinnedPrimary ? "主版 \(stack.displayVersionTag)" : stack.displayVersionTag
+            let vPillW = max(92.0, Double(vLabel.count) * 16.0 + 32.0)
+            let vPillRect = CGRect(x: Double(width - 36) - vPillW, y: 34, width: vPillW, height: 42)
+            let vBgHex: UInt32 = stack.isPinnedPrimary ? 0x2A60E0 : 0xECEBE6
+            let vBgAlpha: Double = stack.isPinnedPrimary ? 0.13 : 1.0
+            let vInk: UInt32 = stack.isPinnedPrimary ? 0x2A60E0 : 0x3F434A
+            ctx.setFillColor(color(vBgHex, alpha: vBgAlpha))
+            fillRoundedRect(vPillRect, radius: 21, in: ctx)
+            draw(vLabel, in: ctx, at: CGPoint(x: vPillRect.minX + 16, y: 46), size: 19, ink: vInk, width: vPillW - 24, bold: true)
+            reservedRightWidth = vPillW + 18
+        }
+
+        var metaParts: [String] = []
+        if let p = payload {
+            if !p.sheets.isEmpty {
+                metaParts.append("\(p.sheets.count) 工作表")
+            } else if p.pageCount > 0 {
+                metaParts.append("\(p.pageCount) 页")
+            }
+            if !p.hasTextLayer && family == .pdf {
+                metaParts.append("扫描件")
+            } else if p.wordCount > 0 {
+                metaParts.append("\(formatMetric(p.wordCount)) 字")
+            }
+            if let editor = versionStack?.editorName?.nonEmptyTrimmed ?? p.authorOrEditor?.nonEmptyTrimmed {
+                metaParts.append(editor)
+            }
+        }
+        let metaText = metaParts.isEmpty ? "办公文档" : metaParts.joined(separator: " · ")
+        let metaX = fmtPillRect.maxX + 16
+        let metaMaxW = max(160.0, Double(width - 36) - metaX - reservedRightWidth)
+        draw(metaText, in: ctx, at: CGPoint(x: metaX, y: 46), size: 21, ink: 0x5C6069, width: metaMaxW)
+
+        ctx.setStrokeColor(color(0xE5E7EB))
+        ctx.setLineWidth(2)
+        ctx.stroke(CGRect(x: 1, y: 1, width: width - 2, height: height - 2))
+
+        return ctx.makeImage()
+    }
+
+    private static func documentAccentHex(for family: DocumentFormatFamily, ext: String, isRedHeader: Bool) -> UInt32 {
+        if isRedHeader { return 0xC83E37 }
+        switch family {
+        case .docx: return 0x2A60E0
+        case .xlsx: return 0x1D7A46
+        case .pptx: return 0xC96A1B
+        case .pdf, .ofd: return 0xC83E37
+        case .markdown: return 0x3D5A80
+        case .plainText: return 0x475569
+        case .legacyOffice:
+            if ext == "XLS" || ext == "ET" { return 0x1D7A46 }
+            if ext == "DPS" || ext == "PPT" { return 0xC96A1B }
+            return 0x2A60E0
+        case .epub: return 0x0F766E
+        case .other: return 0x475569
+        }
+    }
+
+    private static func drawRedHeaderDocumentPreview(
+        title: String,
+        payload: StructuredDocumentPayload?,
+        in rect: CGRect,
+        ctx: CGContext
+    ) {
+        let padX = rect.minX + 52
+        let innerW = rect.width - 104
+        var y = rect.maxY - 76
+
+        draw("文件传阅与审签稿", in: ctx, at: CGPoint(x: padX, y: y), size: 26, ink: 0xC83E37, width: innerW, bold: true)
+        y -= 24
+        ctx.setFillColor(color(0xC83E37))
+        ctx.fill(CGRect(x: padX, y: y, width: innerW, height: 4))
+        ctx.fill(CGRect(x: padX, y: y - 7, width: innerW, height: 1.5))
+        y -= 58
+
+        let headLines = wrapText(title, maxCharsPerLine: 20, maxLines: 2)
+        for line in headLines {
+            draw(line, in: ctx, at: CGPoint(x: padX, y: y), size: 30, ink: 0x18191C, width: innerW, bold: true)
+            y -= 44
+        }
+        y -= 14
+
+        let bodyBlocks = payload?.blocks.prefix(10) ?? []
+        for block in bodyBlocks {
+            let lines = wrapText(block.text, maxCharsPerLine: 28, maxLines: 3)
+            let isHeading = block.kind == .heading
+            for line in lines {
+                if y < rect.minY + 48 { return }
+                draw(line, in: ctx, at: CGPoint(x: padX, y: y), size: isHeading ? 23 : 21, ink: isHeading ? 0x18191C : 0x3F434A, width: innerW, bold: isHeading)
+                y -= 35
+            }
+            y -= 8
+        }
+    }
+
+    private static func drawSpreadsheetPreview(
+        sheet: SpreadsheetSheet,
+        accentHex: UInt32,
+        in rect: CGRect,
+        ctx: CGContext
+    ) {
+        let tabBarRect = CGRect(x: rect.minX, y: rect.maxY - 64, width: rect.width, height: 64)
+        ctx.setFillColor(color(accentHex, alpha: 0.10))
+        ctx.fill(tabBarRect)
+        draw("工作表 · \(sheet.name)", in: ctx, at: CGPoint(x: rect.minX + 34, y: rect.maxY - 42), size: 22, ink: accentHex, width: rect.width - 68, bold: true)
+
+        let gridX = rect.minX + 28
+        let gridW = rect.width - 56
+        let colCount = max(2, min(4, max(sheet.headers.count, sheet.rows.first?.values.count ?? 3)))
+        let colW = gridW / Double(colCount)
+        let rowH = 58.0
+        var rowTop = tabBarRect.minY - 22
+
+        let headerRect = CGRect(x: gridX, y: rowTop - rowH, width: gridW, height: rowH)
+        ctx.setFillColor(color(0xF4F6F5))
+        ctx.fill(headerRect)
+        for c in 0..<colCount {
+            let hText = (c < sheet.headers.count && !sheet.headers[c].isEmpty) ? sheet.headers[c] : "列 \(c + 1)"
+            draw(hText, in: ctx, at: CGPoint(x: gridX + Double(c) * colW + 14, y: rowTop - 38), size: 19, ink: 0x18191C, width: colW - 24, bold: true)
+        }
+        rowTop -= rowH
+
+        for (rIdx, row) in sheet.rows.prefix(12).enumerated() {
+            if rowTop - rowH < rect.minY + 24 { break }
+            let rRect = CGRect(x: gridX, y: rowTop - rowH, width: gridW, height: rowH)
+            if rIdx % 2 == 1 {
+                ctx.setFillColor(color(0xFAF9F7))
+                ctx.fill(rRect)
+            }
+            for c in 0..<colCount {
+                let cellText = c < row.values.count ? row.values[c] : ""
+                draw(cellText, in: ctx, at: CGPoint(x: gridX + Double(c) * colW + 14, y: rowTop - 38), size: 18, ink: 0x374151, width: colW - 24)
+            }
+            ctx.setFillColor(color(0xE5E7EB))
+            ctx.fill(CGRect(x: gridX, y: rowTop - rowH, width: gridW, height: 1.2))
+            rowTop -= rowH
+        }
+
+        let totalGridH = (tabBarRect.minY - 22) - rowTop
+        let fullGridRect = CGRect(x: gridX, y: rowTop, width: gridW, height: totalGridH)
+        ctx.setStrokeColor(color(0xE2E4E8))
+        ctx.setLineWidth(1.5)
+        ctx.stroke(fullGridRect)
+        for c in 1..<colCount {
+            let x = gridX + Double(c) * colW
+            ctx.beginPath()
+            ctx.move(to: CGPoint(x: x, y: fullGridRect.minY))
+            ctx.addLine(to: CGPoint(x: x, y: fullGridRect.maxY))
+            ctx.strokePath()
+        }
+    }
+
+    private static func drawStructuredPaperPreview(
+        title: String,
+        payload: StructuredDocumentPayload?,
+        accentHex: UInt32,
+        in rect: CGRect,
+        ctx: CGContext
+    ) {
+        ctx.setFillColor(color(accentHex))
+        ctx.fill(CGRect(x: rect.minX, y: rect.maxY - 8, width: rect.width, height: 8))
+
+        let padX = rect.minX + 52
+        let innerW = rect.width - 104
+        var y = rect.maxY - 78
+
+        let blocks = payload?.blocks ?? []
+        if blocks.isEmpty {
+            let headLines = wrapText(title, maxCharsPerLine: 22, maxLines: 3)
+            for line in headLines {
+                draw(line, in: ctx, at: CGPoint(x: padX, y: y), size: 28, ink: 0x18191C, width: innerW, bold: true)
+                y -= 42
+            }
+            y -= 20
+            for idx in 0..<8 {
+                let lineW = idx % 3 == 2 ? innerW * 0.68 : innerW
+                ctx.setFillColor(color(0xEAE9E4))
+                fillRoundedRect(CGRect(x: padX, y: y, width: lineW, height: 14), radius: 7, in: ctx)
+                y -= 36
+            }
+            return
+        }
+
+        for block in blocks.prefix(14) {
+            let isHeading = block.kind == .heading
+            let clean = block.text.replacingOccurrences(of: #"^#{1,6}\s+"#, with: "", options: .regularExpression)
+            let lines = wrapText(clean, maxCharsPerLine: isHeading ? 24 : 30, maxLines: isHeading ? 2 : 4)
+            for line in lines {
+                if y < rect.minY + 44 { return }
+                draw(
+                    line,
+                    in: ctx,
+                    at: CGPoint(x: padX, y: y),
+                    size: isHeading ? 25 : 21,
+                    ink: isHeading ? 0x18191C : 0x3F434A,
+                    width: innerW,
+                    bold: isHeading
+                )
+                y -= isHeading ? 38 : 33
+            }
+            y -= 10
+        }
+    }
+
     static func draw(_ text: String, in ctx: CGContext, at position: CGPoint, size: Double, ink: UInt32, width: Double, bold: Bool = false) {
         let uiType: CTFontUIFontType = bold ? .emphasizedSystem : .system
         let font = CTFontCreateUIFontForLanguage(uiType, size, nil)
