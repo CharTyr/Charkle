@@ -1,9 +1,12 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import DOMPurify from 'dompurify';
-import { marked } from 'marked';
 import { Copy16Regular } from '@fluentui/react-icons';
 import { getTransport } from '../../api/transport';
-import { Button } from '../../design-system';
+import {
+  Button,
+  copyTextToClipboard,
+  openSafeExternalUrl,
+  sanitizeMarkdownHtml,
+} from '../../design-system';
 import { useCoordinatorStore } from '../../stores';
 import type { AssetRecord } from '../../types/domain';
 
@@ -51,11 +54,7 @@ export const DocumentMarkdownViewer: React.FC<DocumentMarkdownViewerProps> = ({ 
 
   const sanitizedHtml = useMemo(() => {
     if (!isMarkdown || !rawText) return '';
-    const html = marked.parse(rawText, { async: false, gfm: true }) as string;
-    return DOMPurify.sanitize(html, {
-      FORBID_TAGS: ['script', 'style', 'iframe', 'object', 'embed', 'form'],
-      FORBID_ATTR: ['onerror', 'onload', 'onclick', 'onmouseover'],
-    });
+    return sanitizeMarkdownHtml(rawText, { allowImages: true });
   }, [isMarkdown, rawText]);
 
   const handleLinkClick = (e: React.MouseEvent<HTMLElement>) => {
@@ -64,13 +63,11 @@ export const DocumentMarkdownViewer: React.FC<DocumentMarkdownViewerProps> = ({ 
     const href = anchor.getAttribute('href')?.trim();
     if (!href) return;
     e.preventDefault();
-    if (/^https?:\/\//i.test(href)) {
-      void getTransport()
-        .openExternalUrl(href)
-        .catch(() => {
-          pushToast({ message: '无法在默认浏览器中打开链接', tone: 'error' });
-        });
-    }
+    if (href.startsWith('#')) return;
+    void openSafeExternalUrl(href, {
+      allowMailto: true,
+      onError: () => pushToast({ message: '无法在默认浏览器中打开链接', tone: 'error' }),
+    });
   };
 
   return (
@@ -103,17 +100,15 @@ export const DocumentMarkdownViewer: React.FC<DocumentMarkdownViewerProps> = ({ 
             variant="standard"
             size="xs"
             onClick={() => {
-              if (!navigator.clipboard?.writeText) {
-                pushToast({ message: '当前环境不支持直接写入剪贴板', tone: 'error' });
-                return;
-              }
-              void navigator.clipboard
-                .writeText(rawText)
+              void copyTextToClipboard(rawText)
                 .then(() => {
                   pushToast({ message: '已复制文档全文', tone: 'success', durationMs: 2200 });
                 })
-                .catch(() => {
-                  pushToast({ message: '无法写入系统剪贴板', tone: 'error' });
+                .catch((err) => {
+                  pushToast({
+                    message: err instanceof Error ? err.message : '无法写入系统剪贴板',
+                    tone: 'error',
+                  });
                 });
             }}
           >
@@ -127,6 +122,7 @@ export const DocumentMarkdownViewer: React.FC<DocumentMarkdownViewerProps> = ({ 
         {isMarkdown && !showRawSource ? (
           <article
             onClick={handleLinkClick}
+            onAuxClick={handleLinkClick}
             className="text-[14px] leading-[1.7] text-[var(--text-primary)] select-text space-y-3 [&_h1]:text-[22px] [&_h1]:font-bold [&_h1]:pb-1.5 [&_h1]:border-b [&_h1]:border-[var(--border-hairline)] [&_h2]:text-[17.5px] [&_h2]:font-bold [&_h2]:pb-1 [&_h2]:border-b [&_h2]:border-[var(--border-hairline)] [&_h3]:text-[15px] [&_h3]:font-semibold [&_ul]:list-disc [&_ul]:pl-5 [&_ol]:list-decimal [&_ol]:pl-5 [&_blockquote]:border-l-[3px] [&_blockquote]:border-[var(--accent)]/60 [&_blockquote]:pl-3 [&_blockquote]:text-[var(--text-secondary)] [&_code]:px-1.5 [&_code]:py-0.5 [&_code]:rounded [&_code]:bg-[var(--bg-subtle)] [&_pre]:p-3.5 [&_pre]:rounded-[10px] [&_pre]:bg-[var(--bg-subtle)] [&_pre]:overflow-x-auto [&_pre_code]:bg-transparent [&_pre_code]:p-0 [&_table]:w-full [&_table]:border-collapse [&_th]:text-left [&_th]:px-2.5 [&_th]:py-1.5 [&_th]:bg-[var(--bg-subtle)] [&_th]:border [&_th]:border-[var(--border-hairline)] [&_td]:px-2.5 [&_td]:py-1.5 [&_td]:border [&_td]:border-[var(--border-hairline)] [&_a]:text-[var(--accent)] [&_a]:underline"
             dangerouslySetInnerHTML={{ __html: sanitizedHtml }}
           />

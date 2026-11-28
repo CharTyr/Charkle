@@ -787,6 +787,10 @@ export const useMoodboardStore = create<MoodboardState>((set, get) => ({
     if (get().activeBoard?.id === id || get().openBoardFailedId === id) {
       openBoardRequestSeq += 1;
     }
+    // Wait for any already-dispatched save RPC to settle so it cannot resurrect the deleted board
+    if (inFlightSavePromise) {
+      await inFlightSavePromise;
+    }
     try {
       await getTransport().deleteBoard(id);
       const boards = await get().fetchBoards();
@@ -1022,6 +1026,11 @@ export const useMoodboardStore = create<MoodboardState>((set, get) => ({
 
     try {
       const proposal = await getTransport().curateMoodboard(request);
+      // Guard against the user switching or closing the active board while AI refinement was in flight
+      if (get().activeBoard?.id !== currentBoard.id) {
+        set({ isRefiningActiveBoard: false, curating: false });
+        return null;
+      }
       const nextDraft = normalizeMoodboardDocument({
         ...proposal.draftDocument,
         id: currentBoard.id,
@@ -1058,11 +1067,18 @@ export const useMoodboardStore = create<MoodboardState>((set, get) => ({
       return proposal;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      set({ isRefiningActiveBoard: false, curating: false, lastError: msg });
-      useCoordinatorStore.getState().pushToast({
-        message: `策展调整未完成：${msg}`,
-        tone: 'error',
+      const stillOnBoard = get().activeBoard?.id === currentBoard.id;
+      set({
+        isRefiningActiveBoard: false,
+        curating: false,
+        ...(stillOnBoard ? { lastError: msg } : {}),
       });
+      if (stillOnBoard) {
+        useCoordinatorStore.getState().pushToast({
+          message: `策展调整未完成：${msg}`,
+          tone: 'error',
+        });
+      }
       return null;
     }
   },

@@ -19,6 +19,7 @@ import {
   CharkleIcon,
   CustomSelect,
   SegmentedControl,
+  isSystemMotionReduced,
   type ThemeMode,
 } from '../../design-system';
 import { useCoordinatorStore, useLibraryStore, useSyncAIStore } from '../../stores';
@@ -449,8 +450,17 @@ export const OnboardingStudio: React.FC = () => {
       setDirection('fwd');
       setActionHint(null);
       setShowOAuthModal(false);
+      setWebdavPasswordDraft('');
+      setAiKeyDraft('');
     }
   }, [onboardingRunId]);
+
+  useEffect(() => {
+    if (!open) {
+      setWebdavPasswordDraft('');
+      setAiKeyDraft('');
+    }
+  }, [open]);
 
   useEffect(() => {
     if (open) {
@@ -510,10 +520,7 @@ export const OnboardingStudio: React.FC = () => {
   // Auto-looping mini-notch animation on Step 2 (reduced-motion safe)
   useEffect(() => {
     if (!open || step !== 2) return;
-    const reduced =
-      typeof window !== 'undefined' &&
-      window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
-    if (reduced) {
+    if (isSystemMotionReduced()) {
       setDemoNotchExpanded(true);
       setDemoCardDropped(false);
       setDemoConfirmed(true);
@@ -702,10 +709,17 @@ export const OnboardingStudio: React.FC = () => {
   const isLocalAI = draftAI.provider === 'disabled';
   const isChatGPTAI = draftAI.provider === 'chatGPTSubscription';
   const isAPIAI = draftAI.provider === 'gemini' || draftAI.provider === 'openAICompatible';
-  const isLocalOllama =
-    draftAI.provider === 'openAICompatible' &&
-    (draftAI.baseURL.toLowerCase().includes('localhost') ||
-      draftAI.baseURL.includes('127.0.0.1'));
+  const isLocalOllama = (() => {
+    if (draftAI.provider !== 'openAICompatible') return false;
+    try {
+      const parsed = new URL(draftAI.baseURL.trim());
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+      const host = parsed.hostname.toLowerCase();
+      return host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '[::1]';
+    } catch {
+      return false;
+    }
+  })();
 
   const storageSummary =
     draftSync.mode === 'localOnly'

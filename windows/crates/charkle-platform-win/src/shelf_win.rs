@@ -2446,9 +2446,15 @@ mod drop_target {
         // own-thread `Chrome_WidgetWin_0` / `root_hwnd` target.
         let mut all_hwnds: Vec<HWND> = vec![root_hwnd];
         unsafe extern "system" fn collect_child(child: HWND, lparam: LPARAM) -> BOOL {
-            let list = unsafe { &mut *(lparam.0 as *mut Vec<HWND>) };
-            list.push(child);
-            BOOL::from(true)
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                if lparam.0 == 0 {
+                    return BOOL::from(false);
+                }
+                let list = unsafe { &mut *(lparam.0 as *mut Vec<HWND>) };
+                list.push(child);
+                BOOL::from(true)
+            }))
+            .unwrap_or(BOOL::from(false))
         }
         unsafe {
             let _ = EnumChildWindows(
@@ -2609,9 +2615,10 @@ pub fn install_shelf_drop_target(shelf_hwnd_raw: isize, callback: ShelfDropCallb
     }
 }
 
-/// Re-scans the Shelf HWND hierarchy and injects our native `IDropTarget` onto any newly spawned
-/// WebView2 child HWNDs (`Chrome_WidgetWin_1`, `Chrome_RenderWidgetHostHWND`) lacking
-/// `OleDropTargetInterface`. MUST be called on the Win32 STA UI thread.
+/// Re-scans the Shelf HWND hierarchy and installs our native `IDropTarget` strictly onto
+/// own-process, same-STA-thread HWNDs (`root_hwnd`, `WRY_WEBVIEW`, `Chrome_WidgetWin_0`) lacking
+/// `OleDropTargetInterface` (never cross-process `msedgewebview2.exe` child HWNDs).
+/// MUST be called on the Win32 STA UI thread.
 pub fn refresh_shelf_drop_targets(shelf_hwnd_raw: isize) -> usize {
     #[cfg(target_os = "windows")]
     {

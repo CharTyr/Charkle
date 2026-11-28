@@ -212,8 +212,44 @@ impl SecretVault for WinCredentialVault {
     }
 }
 
+#[cfg(any(target_os = "windows", test))]
+const MAX_CREDENTIAL_BLOB_BYTES: usize = 2560;
+#[cfg(any(target_os = "windows", test))]
+const CREDENTIAL_CHUNK_BYTES: usize = 2048;
+#[cfg(any(target_os = "windows", test))]
+const MAX_CREDENTIAL_CHUNKS: usize = 32;
+#[cfg(any(target_os = "windows", test))]
+const CHUNK_MANIFEST_PREFIX: &[u8] = b"CHARKLE_CRED_CHUNKED_V1:";
+
+#[cfg(any(target_os = "windows", test))]
+fn build_chunk_manifest(count: usize) -> Vec<u8> {
+    format!(
+        "{}{}",
+        std::str::from_utf8(CHUNK_MANIFEST_PREFIX).unwrap_or("CHARKLE_CRED_CHUNKED_V1:"),
+        count
+    )
+    .into_bytes()
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn parse_chunk_manifest(blob: &[u8]) -> Option<usize> {
+    let rest = blob.strip_prefix(CHUNK_MANIFEST_PREFIX)?;
+    let count_str = std::str::from_utf8(rest).ok()?;
+    let count = count_str.parse::<usize>().ok()?;
+    if (1..=MAX_CREDENTIAL_CHUNKS).contains(&count) {
+        Some(count)
+    } else {
+        None
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn chunk_target_name(target: &str, idx: usize) -> String {
+    format!("{target}#part:{idx}")
+}
+
 #[cfg(target_os = "windows")]
-fn read_credential(target: &str) -> Result<Option<String>, String> {
+fn read_raw_credential_blob(target: &str) -> Result<Option<Vec<u8>>, String> {
     let target_wide = to_wide_null(target);
     let mut cred_ptr: *mut CREDENTIALW = std::ptr::null_mut();
     // SAFETY: `target_wide` is NUL-terminated UTF-16; returned pointer is released by `CredGuard`.
@@ -239,34 +275,34 @@ fn read_credential(target: &str) -> Result<Option<String>, String> {
     let blob = unsafe {
         let cred = &*cred_ptr;
         if cred.CredentialBlob.is_null() || cred.CredentialBlobSize == 0 {
-            &[]
+            Vec::new()
         } else {
             std::slice::from_raw_parts(cred.CredentialBlob, cred.CredentialBlobSize as usize)
+                .to_vec()
         }
     };
-
-    // Decrypt DPAPI-protected payload (falling back to raw UTF-8 if externally written)
-    let plain = match dpapi_unprotect(blob) {
-        Ok(bytes) => bytes,
-        Err(_) => blob.to_vec(),
-    };
-    String::from_utf8(plain)
-        .map(Some)
-        .map_err(|e| format!("Credential UTF-8 decode failed: {e}"))
+    Ok(Some(blob))
 }
 
 #[cfg(target_os = "windows")]
-fn write_credential(target: &str, value: &str) -> Result<(), String> {
-    let mut encrypted = dpapi_protect(value.as_bytes())?;
+fn write_raw_credential_blob(target: &str, blob: &[u8]) -> Result<(), String> {
+    if blob.len() > MAX_CREDENTIAL_BLOB_BYTES {
+        return Err(format!(
+            "Credential blob ({} bytes) exceeds Windows CRED_MAX_CREDENTIAL_BLOB_SIZE ({})",
+            blob.len(),
+            MAX_CREDENTIAL_BLOB_BYTES
+        ));
+    }
+    let mut owned_blob = blob.to_vec();
     let mut target_wide = to_wide_null(target);
     let mut user_wide = to_wide_null("charkle");
 
     let cred = CREDENTIALW {
         Type: CRED_TYPE_GENERIC,
         TargetName: PWSTR(target_wide.as_mut_ptr()),
-        CredentialBlobSize: u32::try_from(encrypted.len())
+        CredentialBlobSize: u32::try_from(owned_blob.len())
             .map_err(|_| "Encrypted credential exceeds limit")?,
-        CredentialBlob: encrypted.as_mut_ptr(),
+        CredentialBlob: owned_blob.as_mut_ptr(),
         Persist: CRED_PERSIST_LOCAL_MACHINE,
         UserName: PWSTR(user_wide.as_mut_ptr()),
         ..Default::default()
@@ -278,7 +314,7 @@ fn write_credential(target: &str, value: &str) -> Result<(), String> {
 }
 
 #[cfg(target_os = "windows")]
-fn delete_credential(target: &str) -> Result<(), String> {
+fn delete_raw_credential_blob(target: &str) -> Result<(), String> {
     let target_wide = to_wide_null(target);
     // SAFETY: `target_wide` is a valid NUL-terminated UTF-16 string.
     let res = unsafe { CredDeleteW(PCWSTR(target_wide.as_ptr()), CRED_TYPE_GENERIC, 0) };
@@ -289,6 +325,83 @@ fn delete_credential(target: &str) -> Result<(), String> {
         return Err(format!("CredDeleteW failed: {err}"));
     }
     Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn read_credential(target: &str) -> Result<Option<String>, String> {
+    let Some(raw_blob) = read_raw_credential_blob(target)? else {
+        return Ok(None);
+    };
+    let ciphertext = if let Some(chunk_count) = parse_chunk_manifest(&raw_blob) {
+        let mut combined = Vec::with_capacity(chunk_count * CREDENTIAL_CHUNK_BYTES);
+        for idx in 0..chunk_count {
+            let part_target = chunk_target_name(target, idx);
+            let part = read_raw_credential_blob(&part_target)?.ok_or_else(|| {
+                format!("Incomplete chunked credential: missing part {idx} of {chunk_count}")
+            })?;
+            combined.extend_from_slice(&part);
+        }
+        combined
+    } else {
+        raw_blob
+    };
+
+    // Fail closed if DPAPI decryption fails rather than returning unverified/corrupted bytes.
+    let plain = dpapi_unprotect(&ciphertext)
+        .map_err(|e| format!("Credential DPAPI decryption failed: {e}"))?;
+    String::from_utf8(plain)
+        .map(Some)
+        .map_err(|e| format!("Credential UTF-8 decode failed: {e}"))
+}
+
+#[cfg(target_os = "windows")]
+fn write_credential(target: &str, value: &str) -> Result<(), String> {
+    let encrypted = dpapi_protect(value.as_bytes())?;
+    let old_chunk_count = read_raw_credential_blob(target)
+        .ok()
+        .flatten()
+        .and_then(|blob| parse_chunk_manifest(&blob))
+        .unwrap_or(0);
+
+    if encrypted.len() <= MAX_CREDENTIAL_BLOB_BYTES {
+        write_raw_credential_blob(target, &encrypted)?;
+        for idx in 0..old_chunk_count {
+            let _ = delete_raw_credential_blob(&chunk_target_name(target, idx));
+        }
+        return Ok(());
+    }
+
+    let chunks: Vec<&[u8]> = encrypted.chunks(CREDENTIAL_CHUNK_BYTES).collect();
+    if chunks.len() > MAX_CREDENTIAL_CHUNKS {
+        return Err(format!(
+            "Encrypted credential ({} bytes) exceeds maximum chunked vault capacity",
+            encrypted.len()
+        ));
+    }
+
+    for (idx, chunk) in chunks.iter().enumerate() {
+        write_raw_credential_blob(&chunk_target_name(target, idx), chunk)?;
+    }
+    let manifest = build_chunk_manifest(chunks.len());
+    write_raw_credential_blob(target, &manifest)?;
+
+    for idx in chunks.len()..old_chunk_count {
+        let _ = delete_raw_credential_blob(&chunk_target_name(target, idx));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn delete_credential(target: &str) -> Result<(), String> {
+    let old_chunk_count = read_raw_credential_blob(target)
+        .ok()
+        .flatten()
+        .and_then(|blob| parse_chunk_manifest(&blob))
+        .unwrap_or(0);
+    for idx in 0..old_chunk_count {
+        let _ = delete_raw_credential_blob(&chunk_target_name(target, idx));
+    }
+    delete_raw_credential_blob(target)
 }
 
 #[cfg(test)]

@@ -482,7 +482,9 @@ textarea {
    ========================================================================= */
 @media (prefers-reduced-transparency: reduce) {
   .charkle-mica-chrome,
-  .charkle-sidebar-surface {
+  .charkle-sidebar-surface,
+  :root[data-backdrop="mica"] .charkle-mica-chrome,
+  :root[data-backdrop="mica"] .charkle-sidebar-surface {
     background-color: var(--win-solid-base);
   }
 
@@ -1259,6 +1261,28 @@ textarea {
 }
 
 /* Also respect Windows "Animation effects = Off" surfaced via data-animations="disabled" */
+:root[data-animations="disabled"] {
+  --win-duration-faster: 0ms;
+  --win-duration-fast: 150ms;
+  --win-duration-normal: 150ms;
+  --win-duration-exit: 120ms;
+  --duration-press: 0ms;
+  --duration-sm: 150ms;
+  --duration-settle: 150ms;
+  --duration-move: 150ms;
+  --duration-md: 150ms;
+  --duration-lg: 150ms;
+  --duration-drawer: 150ms;
+  --duration-exit-sm: 120ms;
+  --duration-exit-md: 120ms;
+  --duration-overshoot: 150ms;
+  --duration-popover-in: 150ms;
+  --duration-popover-out: 120ms;
+  --ease-spring: linear;
+  --ease-overshoot: linear;
+  --ease-drawer: linear;
+}
+
 :root[data-animations="disabled"] .charkle-skeleton::after {
   animation: none;
   display: none;
@@ -1273,13 +1297,44 @@ textarea {
   animation: none;
 }
 
+:root[data-animations="disabled"] .charkle-pressable:active:not(:disabled),
+:root[data-animations="disabled"] .group:hover .charkle-media-zoom,
+:root[data-animations="disabled"] .charkle-filmstrip-thumb[data-active="true"],
 :root[data-animations="disabled"] .win-dialog-popup,
+:root[data-animations="disabled"] .win-dialog-popup[data-starting-style],
+:root[data-animations="disabled"] .win-dialog-popup[data-ending-style],
 :root[data-animations="disabled"] .win-flyout-popup,
+:root[data-animations="disabled"] .win-flyout-popup[data-starting-style],
+:root[data-animations="disabled"] .win-flyout-popup[data-ending-style],
 :root[data-animations="disabled"] .win-tooltip-popup,
+:root[data-animations="disabled"] .win-tooltip-popup[data-starting-style],
+:root[data-animations="disabled"] .win-tooltip-popup[data-ending-style],
+:root[data-animations="disabled"] .charkle-quicklook-stage,
+:root[data-animations="disabled"] .charkle-quicklook-stage[data-closing="true"],
+:root[data-animations="disabled"] .charkle-reveal-top,
+:root[data-animations="disabled"] .charkle-reveal-bottom,
+:root[data-animations="disabled"] .charkle-shelf-shell,
 :root[data-animations="disabled"] .win-drawer-content {
   transition-property: opacity;
   transition-duration: 120ms;
   transform: none !important;
+}
+
+:root[data-animations="disabled"] .win-collapsible-panel {
+  transition: opacity 150ms linear;
+}
+
+:root[data-animations="disabled"] .win-switch-thumb,
+:root[data-animations="disabled"] .win-slider-thumb::after {
+  transition: none !important;
+}
+
+:root[data-animations="disabled"] .win-slider-control:hover .win-slider-thumb::after,
+:root[data-animations="disabled"] .win-slider-thumb:hover::after,
+:root[data-animations="disabled"] .win-slider-root[data-dragging] .win-slider-thumb::after,
+:root[data-animations="disabled"] .win-slider-thumb[data-dragging]::after,
+:root[data-animations="disabled"] .win-slider-thumb:active::after {
+  transform: scale(1) !important;
 }
 
 /* =========================================================================

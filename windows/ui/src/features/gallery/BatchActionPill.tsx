@@ -16,6 +16,7 @@ import {
 import { getTransport } from '../../api/transport';
 import { Button, ModalShell, Popover, Tooltip } from '../../design-system';
 import {
+  moveAssetsToFolderWithUndo,
   useCoordinatorStore,
   useLibraryStore,
   useMoodboardStore,
@@ -366,17 +367,7 @@ export const BatchActionPill: React.FC = () => {
             const destName = folderId
               ? folders.find((f) => f.id === folderId)?.name ?? '文件夹'
               : '收件箱';
-            void updateAssets(
-              {
-                assetIDs: ids,
-                folderAssignment: folderId ? { folder: folderId } : 'inbox',
-              },
-              destination,
-              {
-                undoMessage: `已移动 ${ids.length} 项至「${destName}」`,
-                undoPatch: { assetIDs: ids, folderAssignment: 'inbox' },
-              },
-            );
+            void moveAssetsToFolderWithUndo(ids, folderId, destName, destination);
           }}
         />
       </Popover>

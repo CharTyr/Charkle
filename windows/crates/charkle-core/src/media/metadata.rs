@@ -252,12 +252,15 @@ impl ImageMetadataExtractor {
     // =========================================================================
 
     pub fn extract_png_text_chunks(data: &[u8]) -> HashMap<String, String> {
+        const MAX_PNG_TEXT_CHUNKS: usize = 64;
+        const MAX_TOTAL_PNG_TEXT_BYTES: usize = 16 * 1024 * 1024;
         let mut chunks = HashMap::new();
+        let mut total_decoded_bytes: usize = 0;
         if data.len() <= 16 || !data.starts_with(&PNG_SIGNATURE) {
             return chunks;
         }
         let mut offset = 8usize;
-        while offset + 12 <= data.len() {
+        while offset + 12 <= data.len() && chunks.len() < MAX_PNG_TEXT_CHUNKS {
             let len = u32::from_be_bytes([
                 data[offset],
                 data[offset + 1],
@@ -284,6 +287,11 @@ impl ImageMetadataExtractor {
                     _ => None,
                 };
                 if let Some((k, v)) = decoded {
+                    let added = k.len().saturating_add(v.len());
+                    if total_decoded_bytes.saturating_add(added) > MAX_TOTAL_PNG_TEXT_BYTES {
+                        break;
+                    }
+                    total_decoded_bytes = total_decoded_bytes.saturating_add(added);
                     chunks.insert(k, v);
                 }
             }
@@ -629,17 +637,26 @@ impl ImageMetadataExtractor {
             }
         }
 
+        const MAX_COMFY_GRAPH_DEPTH: usize = 64;
+        const MAX_COMFY_GRAPH_STEPS: usize = 2_000;
+
         fn collect_prompts(
             start_id: Option<String>,
             nodes: &HashMap<String, Node<'_>>,
             visited: &mut HashSet<String>,
+            depth: usize,
+            steps_remaining: &mut usize,
         ) -> Vec<String> {
+            if depth >= MAX_COMFY_GRAPH_DEPTH || *steps_remaining == 0 {
+                return Vec::new();
+            }
             let Some(node_id) = start_id else {
                 return Vec::new();
             };
             if !visited.insert(node_id.clone()) {
                 return Vec::new();
             }
+            *steps_remaining -= 1;
             let Some(node) = nodes.get(&node_id) else {
                 return Vec::new();
             };
@@ -654,7 +671,13 @@ impl ImageMetadataExtractor {
                             found.push(s);
                         }
                     } else if let Some(linked) = linked_node_id(Some(val)) {
-                        found.extend(collect_prompts(Some(linked), nodes, visited));
+                        found.extend(collect_prompts(
+                            Some(linked),
+                            nodes,
+                            visited,
+                            depth + 1,
+                            steps_remaining,
+                        ));
                     }
                 }
             }
@@ -670,7 +693,13 @@ impl ImageMetadataExtractor {
                     "guider",
                 ] {
                     if let Some(linked) = linked_node_id(node.inputs.get(key)) {
-                        found.extend(collect_prompts(Some(linked), nodes, visited));
+                        found.extend(collect_prompts(
+                            Some(linked),
+                            nodes,
+                            visited,
+                            depth + 1,
+                            steps_remaining,
+                        ));
                     }
                 }
             }
@@ -712,14 +741,34 @@ impl ImageMetadataExtractor {
                     seed = json_seed_str(inputs.get("seed").or_else(|| inputs.get("noise_seed")));
                 }
                 let mut v_pos = HashSet::new();
+                let mut pos_budget = MAX_COMFY_GRAPH_STEPS;
                 if let Some(pos_id) = linked_node_id(inputs.get("positive")) {
-                    positive_texts.extend(collect_prompts(Some(pos_id), &nodes, &mut v_pos));
+                    positive_texts.extend(collect_prompts(
+                        Some(pos_id),
+                        &nodes,
+                        &mut v_pos,
+                        0,
+                        &mut pos_budget,
+                    ));
                 } else if let Some(guider_id) = linked_node_id(inputs.get("guider")) {
-                    positive_texts.extend(collect_prompts(Some(guider_id), &nodes, &mut v_pos));
+                    positive_texts.extend(collect_prompts(
+                        Some(guider_id),
+                        &nodes,
+                        &mut v_pos,
+                        0,
+                        &mut pos_budget,
+                    ));
                 }
                 let mut v_neg = HashSet::new();
+                let mut neg_budget = MAX_COMFY_GRAPH_STEPS;
                 if let Some(neg_id) = linked_node_id(inputs.get("negative")) {
-                    negative_texts.extend(collect_prompts(Some(neg_id), &nodes, &mut v_neg));
+                    negative_texts.extend(collect_prompts(
+                        Some(neg_id),
+                        &nodes,
+                        &mut v_neg,
+                        0,
+                        &mut neg_budget,
+                    ));
                 }
             }
 
@@ -1079,10 +1128,14 @@ fn decode_png_itxt(payload: &[u8]) -> Option<(String, String)> {
 }
 
 fn inflate_zlib(compressed: &[u8]) -> Option<Vec<u8>> {
+    const MAX_SINGLE_ZLIB_BYTES: u64 = 4 * 1024 * 1024;
     let decoder = ZlibDecoder::new(compressed);
     let mut out = Vec::new();
-    decoder.take(4 * 1024 * 1024).read_to_end(&mut out).ok()?;
-    if out.is_empty() {
+    decoder
+        .take(MAX_SINGLE_ZLIB_BYTES + 1)
+        .read_to_end(&mut out)
+        .ok()?;
+    if out.is_empty() || out.len() as u64 > MAX_SINGLE_ZLIB_BYTES {
         None
     } else {
         Some(out)

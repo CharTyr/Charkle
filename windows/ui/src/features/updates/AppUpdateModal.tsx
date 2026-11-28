@@ -1,6 +1,4 @@
 import React, { useMemo } from 'react';
-import DOMPurify from 'dompurify';
-import { marked } from 'marked';
 import {
   ArrowClockwise16Regular,
   ArrowDownload16Regular,
@@ -12,12 +10,18 @@ import {
   ShieldCheckmark16Regular,
   Warning20Regular,
 } from '@fluentui/react-icons';
-import { getTransport } from '../../api/transport';
-import { Button, CharkleBrandMark, ModalShell } from '../../design-system';
+import {
+  Button,
+  CharkleBrandMark,
+  ModalShell,
+  openSafeExternalUrl,
+  sanitizeMarkdownHtml,
+} from '../../design-system';
 import {
   formatByteCount,
   formatRelativeCheckTime,
   useAppUpdateStore,
+  useCoordinatorStore,
 } from '../../stores';
 import type { AppReleaseUpdate } from '../../types/domain';
 
@@ -33,29 +37,10 @@ function formatPublishedDate(iso?: string | null): string | null {
 }
 
 function renderSafeMarkdown(raw: string): string {
-  const source = raw.trim();
-  if (!source) return '';
-  const html = marked.parse(source, { async: false, gfm: true, breaks: true }) as string;
-  return DOMPurify.sanitize(html, {
-    ALLOWED_TAGS: [
-      'h1',
-      'h2',
-      'h3',
-      'h4',
-      'p',
-      'ul',
-      'ol',
-      'li',
-      'strong',
-      'em',
-      'code',
-      'pre',
-      'blockquote',
-      'hr',
-      'br',
-      'a',
-    ],
-    ALLOWED_ATTR: ['href', 'title'],
+  return sanitizeMarkdownHtml(raw, {
+    allowImages: false,
+    breaks: true,
+    strictReleaseNotes: true,
   });
 }
 
@@ -144,9 +129,12 @@ export const AppUpdateModal: React.FC = () => {
     const href = anchor.getAttribute('href');
     if (!href) return;
     e.preventDefault();
-    if (/^https?:\/\//i.test(href)) {
-      void getTransport().openExternalUrl(href);
-    }
+    void openSafeExternalUrl(href, {
+      onError: () =>
+        useCoordinatorStore
+          .getState()
+          .pushToast({ message: '无法在默认浏览器中打开链接', tone: 'error' }),
+    });
   };
 
   const renderFooter = () => {
@@ -397,6 +385,7 @@ export const AppUpdateModal: React.FC = () => {
               </div>
               <div
                 onClick={handleMarkdownClick}
+                onAuxClick={handleMarkdownClick}
                 className="max-h-[240px] overflow-y-auto charkle-scroll rounded-[8px] border border-[var(--win-stroke-divider)] bg-[var(--bg-subtle)]/65 px-3.5 py-3 text-[12.5px] leading-[1.65] text-[var(--text-primary)] [&_h1]:text-[14px] [&_h1]:font-semibold [&_h1]:mb-1.5 [&_h2]:text-[13px] [&_h2]:font-semibold [&_h2]:mt-2.5 [&_h2]:mb-1 [&_h3]:text-[12.5px] [&_h3]:font-semibold [&_h3]:mt-2 [&_h3]:mb-1 [&_ul]:list-disc [&_ul]:pl-5 [&_ul]:my-1 [&_ol]:list-decimal [&_ol]:pl-5 [&_ol]:my-1 [&_li]:my-0.5 [&_p]:my-1 [&_code]:charkle-mono [&_code]:text-[11px] [&_code]:px-1 [&_code]:py-0.5 [&_code]:rounded [&_code]:bg-[var(--win-subtle-hover)] [&_a]:text-[var(--accent)] [&_a]:underline"
               >
                 {renderedNotesHtml ? (

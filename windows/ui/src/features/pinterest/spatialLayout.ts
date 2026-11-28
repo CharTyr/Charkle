@@ -30,7 +30,12 @@ export interface PinterestSpatialCard {
 }
 
 export function pinAspectRatio(pin: Pick<PinterestPin, 'pixelWidth' | 'pixelHeight'>): number {
-  if (pin.pixelWidth > 0 && pin.pixelHeight > 0) {
+  if (
+    Number.isFinite(pin.pixelWidth) &&
+    Number.isFinite(pin.pixelHeight) &&
+    pin.pixelWidth > 0 &&
+    pin.pixelHeight > 0
+  ) {
     return Math.min(2.1, Math.max(0.45, pin.pixelWidth / pin.pixelHeight));
   }
   return 0.78;
@@ -301,16 +306,23 @@ export const SPATIAL_CAMERA_MIN_SCALE = 0.24;
 export const SPATIAL_CAMERA_MAX_SCALE = 3.2;
 export const SPATIAL_CAMERA_DEFAULT_SCALE = 0.9;
 
+function safeFinite(value: number, fallback: number): number {
+  return Number.isFinite(value) ? value : fallback;
+}
+
 export function createCenteredCamera(
   viewport: SpatialSize,
   scale = SPATIAL_CAMERA_DEFAULT_SCALE,
 ): InfiniteSpatialCamera {
-  const clamped = Math.min(SPATIAL_CAMERA_MAX_SCALE, Math.max(SPATIAL_CAMERA_MIN_SCALE, scale));
+  const finiteScale = safeFinite(scale, SPATIAL_CAMERA_DEFAULT_SCALE);
+  const clamped = Math.min(SPATIAL_CAMERA_MAX_SCALE, Math.max(SPATIAL_CAMERA_MIN_SCALE, finiteScale));
+  const w = Math.max(0, safeFinite(viewport.width, 0));
+  const h = Math.max(0, safeFinite(viewport.height, 0));
   return {
     scale: clamped,
     offset: {
-      x: viewport.width * 0.5,
-      y: viewport.height * 0.5,
+      x: w * 0.5,
+      y: h * 0.5,
     },
   };
 }
@@ -319,10 +331,14 @@ export function cameraScreenToWorld(
   camera: InfiniteSpatialCamera,
   screen: SpatialPoint,
 ): SpatialPoint {
-  const safeScale = Math.max(0.001, camera.scale);
+  const safeScale = Math.max(0.001, safeFinite(camera.scale, SPATIAL_CAMERA_DEFAULT_SCALE));
+  const ox = safeFinite(camera.offset.x, 0);
+  const oy = safeFinite(camera.offset.y, 0);
+  const sx = safeFinite(screen.x, 0);
+  const sy = safeFinite(screen.y, 0);
   return {
-    x: (screen.x - camera.offset.x) / safeScale,
-    y: (screen.y - camera.offset.y) / safeScale,
+    x: (sx - ox) / safeScale,
+    y: (sy - oy) / safeScale,
   };
 }
 
@@ -330,9 +346,14 @@ export function cameraWorldToScreen(
   camera: InfiniteSpatialCamera,
   world: SpatialPoint,
 ): SpatialPoint {
+  const safeScale = Math.max(0.001, safeFinite(camera.scale, SPATIAL_CAMERA_DEFAULT_SCALE));
+  const ox = safeFinite(camera.offset.x, 0);
+  const oy = safeFinite(camera.offset.y, 0);
+  const wx = safeFinite(world.x, 0);
+  const wy = safeFinite(world.y, 0);
   return {
-    x: world.x * camera.scale + camera.offset.x,
-    y: world.y * camera.scale + camera.offset.y,
+    x: wx * safeScale + ox,
+    y: wy * safeScale + oy,
   };
 }
 
@@ -341,13 +362,18 @@ export function cameraZoomAt(
   newScale: number,
   anchor: SpatialPoint,
 ): InfiniteSpatialCamera {
-  const clamped = Math.min(SPATIAL_CAMERA_MAX_SCALE, Math.max(SPATIAL_CAMERA_MIN_SCALE, newScale));
-  const worldBefore = cameraScreenToWorld(camera, anchor);
+  const finiteScale = safeFinite(newScale, safeFinite(camera.scale, SPATIAL_CAMERA_DEFAULT_SCALE));
+  const clamped = Math.min(SPATIAL_CAMERA_MAX_SCALE, Math.max(SPATIAL_CAMERA_MIN_SCALE, finiteScale));
+  const safeAnchor: SpatialPoint = {
+    x: safeFinite(anchor.x, 0),
+    y: safeFinite(anchor.y, 0),
+  };
+  const worldBefore = cameraScreenToWorld(camera, safeAnchor);
   return {
     scale: clamped,
     offset: {
-      x: anchor.x - worldBefore.x * clamped,
-      y: anchor.y - worldBefore.y * clamped,
+      x: safeAnchor.x - worldBefore.x * clamped,
+      y: safeAnchor.y - worldBefore.y * clamped,
     },
   };
 }
@@ -356,8 +382,10 @@ export function cameraVisibleWorldRect(
   camera: InfiniteSpatialCamera,
   viewport: SpatialSize,
 ): SpatialRect {
+  const w = Math.max(0, safeFinite(viewport.width, 0));
+  const h = Math.max(0, safeFinite(viewport.height, 0));
   const tl = cameraScreenToWorld(camera, { x: 0, y: 0 });
-  const br = cameraScreenToWorld(camera, { x: viewport.width, y: viewport.height });
+  const br = cameraScreenToWorld(camera, { x: w, y: h });
   return {
     x: tl.x,
     y: tl.y,

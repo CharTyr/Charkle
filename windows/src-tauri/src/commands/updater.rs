@@ -8,9 +8,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use charkle_core::updater::{
-    now_epoch_ms, AppReleaseUpdate, AppUpdateCheckPolicy, GitHubReleaseUpdater, UpdateCheckOutcome,
-    UpdatePreferences, UpdaterError, VerifiedUpdateInstaller, DEFAULT_GITHUB_OWNER,
-    DEFAULT_GITHUB_REPO,
+    compute_file_sha256, now_epoch_ms, AppReleaseUpdate, AppUpdateCheckPolicy,
+    GitHubReleaseUpdater, UpdateCheckOutcome, UpdatePreferences, UpdaterError,
+    VerifiedUpdateInstaller, DEFAULT_GITHUB_OWNER, DEFAULT_GITHUB_REPO,
 };
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
@@ -23,7 +23,8 @@ pub const CURRENT_APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub struct UpdaterRuntimeState {
     pub preferences: Mutex<UpdatePreferences>,
     pub cancel_flag: Mutex<Option<Arc<AtomicBool>>>,
-    pub staged_installer_path: Mutex<Option<PathBuf>>,
+    /// Verified `(canonical_installer_path, expected_sha256_hex)` stored after download.
+    pub staged_installer: Mutex<Option<(PathBuf, String)>>,
 }
 
 impl UpdaterRuntimeState {
@@ -31,7 +32,7 @@ impl UpdaterRuntimeState {
         Self {
             preferences: Mutex::new(UpdatePreferences::load(data_dir)),
             cancel_flag: Mutex::new(None),
-            staged_installer_path: Mutex::new(None),
+            staged_installer: Mutex::new(None),
         }
     }
 
@@ -60,15 +61,15 @@ impl UpdaterRuntimeState {
     }
 
     fn validate_staged_installer(&self, raw_path: &str) -> IpcResult<PathBuf> {
-        let staged = self
-            .staged_installer_path
+        let (staged, expected_sha256) = self
+            .staged_installer
             .lock()
             .ok()
             .and_then(|g| g.clone())
             .ok_or_else(|| IpcError {
-                code: "INVALID_OPERATION",
-                message: "未找到已校验的更新安装包，请重新下载更新。".to_string(),
-            })?;
+            code: "INVALID_OPERATION",
+            message: "未找到已校验的更新安装包，请重新下载更新。".to_string(),
+        })?;
 
         let requested = PathBuf::from(raw_path.trim());
         let canon_staged = std::fs::canonicalize(&staged).map_err(|_| IpcError {
@@ -95,6 +96,18 @@ impl UpdaterRuntimeState {
             return Err(IpcError {
                 code: "INVALID_OPERATION",
                 message: "仅允许启动 .exe 更新安装程序。".to_string(),
+            });
+        }
+
+        // Re-verify SHA-256 right before launch to mitigate TOCTOU tampering in %TEMP%.
+        let actual_sha256 = compute_file_sha256(&canon_staged).map_err(map_updater_error)?;
+        if !actual_sha256.eq_ignore_ascii_case(&expected_sha256) {
+            if let Ok(mut slot) = self.staged_installer.lock() {
+                *slot = None;
+            }
+            return Err(IpcError {
+                code: "CHECKSUM_MISMATCH",
+                message: "更新安装包在启动前校验不一致，可能已被修改，请重新下载。".to_string(),
             });
         }
 
@@ -275,8 +288,11 @@ pub async fn download_and_verify_update(
     }
 
     let verified = result.map_err(map_updater_error)?;
-    if let Ok(mut staged) = state.updater.staged_installer_path.lock() {
-        *staged = Some(PathBuf::from(&verified.installer_path));
+    if let Ok(mut staged) = state.updater.staged_installer.lock() {
+        *staged = Some((
+            PathBuf::from(&verified.installer_path),
+            verified.verified_sha256.clone(),
+        ));
     }
 
     Ok(verified)
@@ -386,13 +402,10 @@ pub fn reveal_update_installer(
 
     #[cfg(target_os = "windows")]
     {
-        std::process::Command::new("explorer.exe")
-            .arg(format!("/select,{}", verified_path.display()))
-            .spawn()
-            .map_err(|e| IpcError {
-                code: "IO_ERROR",
-                message: format!("无法在资源管理器中显示安装包：{e}"),
-            })?;
+        super::media::spawn_explorer_select(&verified_path).map_err(|e| IpcError {
+            code: "IO_ERROR",
+            message: format!("无法在资源管理器中显示安装包：{e}"),
+        })?;
     }
     #[cfg(not(target_os = "windows"))]
     {

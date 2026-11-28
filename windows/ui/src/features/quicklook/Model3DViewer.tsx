@@ -33,9 +33,11 @@ export const Model3DViewer: React.FC<Model3DViewerProps> = ({ asset }) => {
     if (!container) return;
 
     let disposed = false;
+    let contextLost = false;
     let rafId = 0;
     let renderer: {
       dispose: () => void;
+      forceContextLoss?: () => void;
       setSize: (w: number, h: number) => void;
       render: (s: unknown, c: unknown) => void;
       domElement: HTMLCanvasElement;
@@ -43,9 +45,11 @@ export const Model3DViewer: React.FC<Model3DViewerProps> = ({ asset }) => {
     let controlsRef: { dispose: () => void } | null = null;
     let sceneRef: import('three').Scene | null = null;
     let resizeObs: ResizeObserver | null = null;
+    let detachContextListener: (() => void) | null = null;
 
     const disposeObject3D = (root: import('three').Object3D | null) => {
       if (!root) return;
+      const disposedTextures = new Set<unknown>();
       root.traverse((obj) => {
         const mesh = obj as {
           geometry?: { dispose?: () => void };
@@ -60,24 +64,39 @@ export const Model3DViewer: React.FC<Model3DViewerProps> = ({ asset }) => {
         for (const mat of materials) {
           if (!mat || typeof mat !== 'object') continue;
           const matRec = mat as Record<string, unknown>;
-          for (const key of [
-            'map',
-            'normalMap',
-            'roughnessMap',
-            'metalnessMap',
-            'emissiveMap',
-            'aoMap',
-            'alphaMap',
-            'bumpMap',
-            'lightMap',
-            'envMap',
-          ]) {
-            const tex = matRec[key] as { dispose?: () => void } | undefined;
-            tex?.dispose?.();
+          for (const val of Object.values(matRec)) {
+            if (
+              val &&
+              typeof val === 'object' &&
+              !disposedTextures.has(val) &&
+              'isTexture' in val &&
+              (val as { isTexture?: boolean }).isTexture === true
+            ) {
+              disposedTextures.add(val);
+              (val as { dispose?: () => void }).dispose?.();
+            }
           }
           (matRec as { dispose?: () => void }).dispose?.();
         }
       });
+    };
+
+    const cleanupResources = () => {
+      cancelAnimationFrame(rafId);
+      rafId = 0;
+      resizeObs?.disconnect();
+      resizeObs = null;
+      detachContextListener?.();
+      detachContextListener = null;
+      controlsRef?.dispose();
+      controlsRef = null;
+      disposeObject3D(sceneRef);
+      sceneRef = null;
+      renderer?.forceContextLoss?.();
+      renderer?.dispose();
+      renderer = null;
+      resetFnRef.current = null;
+      container.replaceChildren();
     };
 
     resetFnRef.current = null;
@@ -102,8 +121,20 @@ export const Model3DViewer: React.FC<Model3DViewerProps> = ({ asset }) => {
         webgl.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
         webgl.setSize(width, height);
         renderer = webgl as unknown as typeof renderer;
-        container.innerHTML = '';
-        container.appendChild(webgl.domElement);
+        const onContextLost = (ev: Event) => {
+          ev.preventDefault();
+          contextLost = true;
+          cancelAnimationFrame(rafId);
+          rafId = 0;
+          if (!disposed) {
+            setStatus('error');
+            setErrorMsg('WebGL 渲染上下文已丢失，请重新打开 3D 预览。');
+          }
+        };
+        webgl.domElement.addEventListener('webglcontextlost', onContextLost, false);
+        detachContextListener = () =>
+          webgl.domElement.removeEventListener('webglcontextlost', onContextLost, false);
+        container.replaceChildren(webgl.domElement);
 
         const hemi = new THREE.HemisphereLight(0xffffff, 0x3b404c, 1.25);
         scene.add(hemi);
@@ -141,7 +172,7 @@ export const Model3DViewer: React.FC<Model3DViewerProps> = ({ asset }) => {
           rootObj = gltf.scene;
         }
 
-        if (disposed) {
+        if (disposed || contextLost) {
           disposeObject3D(rootObj);
           return;
         }
@@ -155,35 +186,84 @@ export const Model3DViewer: React.FC<Model3DViewerProps> = ({ asset }) => {
         rootObj.position.sub(center.multiplyScalar(normScale));
         scene.add(rootObj);
 
+        // Demand-driven rendering (0% idle CPU/GPU when orbit damping settles)
+        let interacting = false;
+        let inRenderFrame = false;
+        let settleFrames = 0;
+        const prevPos = new THREE.Vector3();
+        const prevTarget = new THREE.Vector3();
+
+        const renderFrame = () => {
+          rafId = 0;
+          if (disposed || contextLost) return;
+          inRenderFrame = true;
+          prevPos.copy(camera.position);
+          prevTarget.copy(controls.target);
+          controls.update();
+          webgl.render(scene, camera);
+          inRenderFrame = false;
+
+          const moved =
+            prevPos.distanceToSquared(camera.position) > 1e-8 ||
+            prevTarget.distanceToSquared(controls.target) > 1e-8;
+          if (interacting || moved) {
+            settleFrames = 0;
+            scheduleRender();
+          } else if (settleFrames < 1) {
+            settleFrames += 1;
+            scheduleRender();
+          }
+        };
+
+        const scheduleRender = () => {
+          if (disposed || contextLost || rafId !== 0) return;
+          rafId = requestAnimationFrame(renderFrame);
+        };
+
+        controls.addEventListener('start', () => {
+          interacting = true;
+          settleFrames = 0;
+          scheduleRender();
+        });
+        controls.addEventListener('end', () => {
+          interacting = false;
+          settleFrames = 0;
+          scheduleRender();
+        });
+        controls.addEventListener('change', () => {
+          if (inRenderFrame) return;
+          settleFrames = 0;
+          scheduleRender();
+        });
+
         const resetCamera = () => {
           camera.position.set(2.4, 1.8, 3.2);
           controls.target.set(0, 0, 0);
           controls.update();
+          settleFrames = 0;
+          scheduleRender();
         };
         resetFnRef.current = resetCamera;
         resetCamera();
 
         if (typeof ResizeObserver !== 'undefined') {
           resizeObs = new ResizeObserver(() => {
-            if (!container || disposed) return;
+            if (!container || disposed || contextLost) return;
             const w = Math.max(200, container.clientWidth);
             const h = Math.max(200, container.clientHeight);
             camera.aspect = w / h;
             camera.updateProjectionMatrix();
             webgl.setSize(w, h);
+            settleFrames = 0;
+            scheduleRender();
           });
           resizeObs.observe(container);
         }
 
         setStatus('ready');
-        const tick = () => {
-          if (disposed) return;
-          controls.update();
-          webgl.render(scene, camera);
-          rafId = requestAnimationFrame(tick);
-        };
-        tick();
+        scheduleRender();
       } catch (err) {
+        cleanupResources();
         if (!disposed) {
           setStatus('error');
           setErrorMsg(err instanceof Error ? err.message : '无法加载 3D 模型');
@@ -195,16 +275,7 @@ export const Model3DViewer: React.FC<Model3DViewerProps> = ({ asset }) => {
 
     return () => {
       disposed = true;
-      cancelAnimationFrame(rafId);
-      resizeObs?.disconnect();
-      controlsRef?.dispose();
-      controlsRef = null;
-      disposeObject3D(sceneRef);
-      sceneRef = null;
-      renderer?.dispose();
-      renderer = null;
-      resetFnRef.current = null;
-      container.innerHTML = '';
+      cleanupResources();
     };
   }, [asset.id, formatLabel]);
 
@@ -217,7 +288,7 @@ export const Model3DViewer: React.FC<Model3DViewerProps> = ({ asset }) => {
 
       {status === 'loading' && (
         <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-[13px] text-white/75 pointer-events-none">
-          <Cube24Regular className="w-6 h-6 text-[var(--accent)] animate-pulse" />
+          <Cube24Regular className="w-6 h-6 text-[var(--accent)] animate-pulse motion-reduce:animate-none" />
           <span>正在加载 3D 场景…</span>
         </div>
       )}

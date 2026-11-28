@@ -62,7 +62,9 @@ pub struct PredecodedDragPreview {
 /// Safe and recommended to run on a background blocking thread (`tokio::task::spawn_blocking`)
 /// BEFORE entering `app.run_on_main_thread(...)` so `DoDragDrop` setup never stalls the Win32 UI thread.
 pub fn decode_drag_preview_thumbnail(path: &Path) -> Option<PredecodedDragPreview> {
-    if !path.is_file() {
+    const MAX_PREVIEW_SOURCE_BYTES: u64 = 8 * 1024 * 1024;
+    let meta = std::fs::metadata(path).ok()?;
+    if !meta.is_file() || meta.len() == 0 || meta.len() > MAX_PREVIEW_SOURCE_BYTES {
         return None;
     }
     let img = image::open(path).ok()?;
@@ -175,7 +177,7 @@ mod win_ole {
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         EnumChildWindows, GetForegroundWindow, GetSystemMetrics, GetWindowLongPtrW,
-        GetWindowThreadProcessId, PostMessageW, SetForegroundWindow, SetWindowLongPtrW,
+        GetWindowThreadProcessId, IsWindow, PostMessageW, SetForegroundWindow, SetWindowLongPtrW,
         GWL_EXSTYLE, SM_SWAPBUTTON, WM_CANCELMODE, WS_EX_NOACTIVATE,
     };
 
@@ -386,93 +388,106 @@ mod win_ole {
         let init_hr = unsafe { OleInitialize(None) };
         let _ole_guard = OleGuard(init_hr.is_ok());
 
-        let mut orig_ex_style = None;
-        let orig_allow_activate = if is_shelf_window && source_hwnd != 0 {
-            get_shelf_allow_activate(source_hwnd)
-        } else {
-            false
+        let mut shelf_guard = ShelfDragGuard {
+            hwnd_raw: source_hwnd,
+            orig_ex_style: None,
+            orig_allow_activate: if is_shelf_window && source_hwnd != 0 {
+                get_shelf_allow_activate(source_hwnd)
+            } else {
+                false
+            },
+            is_shelf: is_shelf_window,
         };
         if source_hwnd != 0 {
             let hwnd = HWND(source_hwnd as *mut c_void);
+            // SAFETY: Validating `hwnd` via `IsWindow` before reading/updating styles or enumerating children.
             unsafe {
-                if is_shelf_window {
-                    let cur_ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-                    orig_ex_style = Some(cur_ex);
-                    set_shelf_allow_activate(source_hwnd, true);
-                    let _ = SetWindowLongPtrW(
+                if IsWindow(hwnd).as_bool() {
+                    if is_shelf_window {
+                        let cur_ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+                        shelf_guard.orig_ex_style = Some(cur_ex);
+                        set_shelf_allow_activate(source_hwnd, true);
+                        let _ = SetWindowLongPtrW(
+                            hwnd,
+                            GWL_EXSTYLE,
+                            cur_ex & !(WS_EX_NOACTIVATE.0 as isize),
+                        );
+                    }
+
+                    // Collect child WebView2 HWNDs (`Chrome_WidgetWin_0/1`, `Chrome_RenderWidgetHostHWND`)
+                    // so we can cleanly cancel cross-process Chromium mouse capture before `DoDragDrop`
+                    // calls `SetCapture` on our UI thread!
+                    let mut child_hwnds: Vec<HWND> = Vec::new();
+                    unsafe extern "system" fn collect_child_hwnd(
+                        child: HWND,
+                        lparam: LPARAM,
+                    ) -> BOOL {
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            if lparam.0 == 0 {
+                                return BOOL::from(false);
+                            }
+                            let list = unsafe { &mut *(lparam.0 as *mut Vec<HWND>) };
+                            list.push(child);
+                            BOOL::from(true)
+                        }))
+                        .unwrap_or(BOOL::from(false))
+                    }
+                    let _ = EnumChildWindows(
                         hwnd,
-                        GWL_EXSTYLE,
-                        cur_ex & !(WS_EX_NOACTIVATE.0 as isize),
+                        Some(collect_child_hwnd),
+                        LPARAM(&mut child_hwnds as *mut Vec<HWND> as isize),
                     );
-                }
 
-                // Collect child WebView2 HWNDs (`Chrome_WidgetWin_0/1`, `Chrome_RenderWidgetHostHWND`)
-                // so we can cleanly cancel cross-process Chromium mouse capture before `DoDragDrop`
-                // calls `SetCapture` on our UI thread!
-                let mut child_hwnds: Vec<HWND> = Vec::new();
-                unsafe extern "system" fn collect_child_hwnd(child: HWND, lparam: LPARAM) -> BOOL {
-                    let list = unsafe { &mut *(lparam.0 as *mut Vec<HWND>) };
-                    list.push(child);
-                    BOOL::from(true)
-                }
-                let _ = EnumChildWindows(
-                    hwnd,
-                    Some(collect_child_hwnd),
-                    LPARAM(&mut child_hwnds as *mut Vec<HWND> as isize),
-                );
-
-                // Release any lingering mouse capture across foreground AND WebView2 child threads,
-                // then promote our UI thread to foreground when needed (e.g. non-activating Drop
-                // Shelf or when Charkle is already foreground). If the user ALREADY opened Alt+Tab
-                // / Win+Tab (a different app/switcher owns foreground for a main-window drag), do
-                // NOT steal foreground back so the task switcher stays open!
-                // Always detach `AttachThreadInput` BEFORE `DoDragDrop` so drop targets never deadlock.
-                let cur_tid = GetCurrentThreadId();
-                let mut remote_tids: Vec<u32> = Vec::new();
-                let fg = GetForegroundWindow();
-                let should_promote_fg = is_shelf_window || fg == hwnd;
-                if should_promote_fg && !fg.0.is_null() {
-                    let fg_tid = GetWindowThreadProcessId(fg, None);
-                    if fg_tid != 0 && fg_tid != cur_tid {
-                        remote_tids.push(fg_tid);
+                    // Release any lingering mouse capture across foreground AND WebView2 child threads,
+                    // then promote our UI thread to foreground when needed (e.g. non-activating Drop
+                    // Shelf or when Charkle is already foreground). If the user ALREADY opened Alt+Tab
+                    // / Win+Tab (a different app/switcher owns foreground for a main-window drag), do
+                    // NOT steal foreground back so the task switcher stays open!
+                    // Always detach `AttachThreadInput` BEFORE `DoDragDrop` so drop targets never deadlock.
+                    let cur_tid = GetCurrentThreadId();
+                    let mut remote_tids: Vec<u32> = Vec::new();
+                    let fg = GetForegroundWindow();
+                    let should_promote_fg = is_shelf_window || fg == hwnd;
+                    if should_promote_fg && !fg.0.is_null() {
+                        let fg_tid = GetWindowThreadProcessId(fg, None);
+                        if fg_tid != 0 && fg_tid != cur_tid {
+                            remote_tids.push(fg_tid);
+                        }
                     }
-                }
-                for &child in &child_hwnds {
-                    let child_tid = GetWindowThreadProcessId(child, None);
-                    if child_tid != 0 && child_tid != cur_tid && !remote_tids.contains(&child_tid) {
-                        remote_tids.push(child_tid);
+                    for &child in &child_hwnds {
+                        let child_tid = GetWindowThreadProcessId(child, None);
+                        if child_tid != 0
+                            && child_tid != cur_tid
+                            && !remote_tids.contains(&child_tid)
+                        {
+                            remote_tids.push(child_tid);
+                        }
                     }
-                }
 
-                for &tid in &remote_tids {
-                    let attached = AttachThreadInput(cur_tid, tid, true).as_bool();
+                    for &tid in &remote_tids {
+                        let attached = AttachThreadInput(cur_tid, tid, true).as_bool();
+                        let _ = ReleaseCapture();
+                        if should_promote_fg {
+                            let _ = SetForegroundWindow(hwnd);
+                        }
+                        if attached {
+                            let _ = AttachThreadInput(cur_tid, tid, false);
+                        }
+                    }
                     let _ = ReleaseCapture();
                     if should_promote_fg {
                         let _ = SetForegroundWindow(hwnd);
                     }
-                    if attached {
-                        let _ = AttachThreadInput(cur_tid, tid, false);
-                    }
-                }
-                let _ = ReleaseCapture();
-                if should_promote_fg {
-                    let _ = SetForegroundWindow(hwnd);
-                }
 
-                // Inform root and WebView2 child HWNDs cleanly to cancel internal pointer capture
-                let _ = PostMessageW(hwnd, WM_CANCELMODE, WPARAM(0), LPARAM(0));
-                for child in child_hwnds {
-                    let _ = PostMessageW(child, WM_CANCELMODE, WPARAM(0), LPARAM(0));
+                    // Inform root and WebView2 child HWNDs cleanly to cancel internal pointer capture
+                    let _ = PostMessageW(hwnd, WM_CANCELMODE, WPARAM(0), LPARAM(0));
+                    for child in child_hwnds {
+                        let _ = PostMessageW(child, WM_CANCELMODE, WPARAM(0), LPARAM(0));
+                    }
                 }
             }
         }
-
-        let _shelf_guard = ShelfDragGuard {
-            hwnd_raw: source_hwnd,
-            orig_ex_style,
-            orig_allow_activate,
-            is_shelf: is_shelf_window,
-        };
+        let _shelf_guard = shelf_guard;
 
         let mut pidls = PidlList(Vec::with_capacity(paths.len()));
         for path in paths {

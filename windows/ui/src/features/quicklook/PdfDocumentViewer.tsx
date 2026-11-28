@@ -32,9 +32,11 @@ export const PdfDocumentViewer: React.FC<PdfDocumentViewerProps> = ({ asset }) =
         canvasContext: CanvasRenderingContext2D;
         viewport: unknown;
       }) => { promise: Promise<void>; cancel?: () => void };
+      cleanup?: () => void;
     }>;
   } | null>(null);
-  const renderTaskRef = useRef<{ cancel?: () => void } | null>(null);
+  const renderTaskRef = useRef<{ promise: Promise<void>; cancel?: () => void } | null>(null);
+  const activePageRef = useRef<{ cleanup?: () => void } | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -54,6 +56,7 @@ export const PdfDocumentViewer: React.FC<PdfDocumentViewerProps> = ({ asset }) =
     const load = async () => {
       try {
         const pdfjs = await import('pdfjs-dist');
+        if (cancelled) return;
         pdfjs.GlobalWorkerOptions.workerSrc = new URL(
           'pdfjs-dist/build/pdf.worker.min.mjs',
           import.meta.url,
@@ -80,6 +83,8 @@ export const PdfDocumentViewer: React.FC<PdfDocumentViewerProps> = ({ asset }) =
       cancelled = true;
       renderTaskRef.current?.cancel?.();
       renderTaskRef.current = null;
+      activePageRef.current?.cleanup?.();
+      activePageRef.current = null;
       if (loadingTask?.destroy) {
         void Promise.resolve(loadingTask.destroy()).catch(() => {});
       }
@@ -87,6 +92,11 @@ export const PdfDocumentViewer: React.FC<PdfDocumentViewerProps> = ({ asset }) =
       pdfDocRef.current = null;
       if (activeDoc?.destroy) {
         void Promise.resolve(activeDoc.destroy()).catch(() => {});
+      }
+      const canvas = canvasRef.current;
+      if (canvas) {
+        canvas.width = 0;
+        canvas.height = 0;
       }
     };
   }, [asset.id]);
@@ -98,11 +108,27 @@ export const PdfDocumentViewer: React.FC<PdfDocumentViewerProps> = ({ asset }) =
     if (!doc || !canvas || numPages === 0) return;
 
     const renderPage = async () => {
+      let currentPage: { cleanup?: () => void } | null = null;
+      let currentTask: { promise: Promise<void>; cancel?: () => void } | null = null;
       try {
-        renderTaskRef.current?.cancel?.();
+        const prevTask = renderTaskRef.current;
         renderTaskRef.current = null;
-        const page = await doc.getPage(pageNumber);
+        if (prevTask) {
+          prevTask.cancel?.();
+          await prevTask.promise.catch(() => {});
+        }
+        activePageRef.current?.cleanup?.();
+        activePageRef.current = null;
         if (cancelled) return;
+
+        const page = await doc.getPage(pageNumber);
+        currentPage = page;
+        if (cancelled) {
+          page.cleanup?.();
+          return;
+        }
+        activePageRef.current = page;
+
         const dpr = Math.min(window.devicePixelRatio || 1, 2);
         const cssViewport = page.getViewport({ scale });
         const renderViewport = page.getViewport({ scale: scale * dpr });
@@ -113,6 +139,7 @@ export const PdfDocumentViewer: React.FC<PdfDocumentViewerProps> = ({ asset }) =
         const ctx = canvas.getContext('2d');
         if (!ctx) return;
         const task = page.render({ canvasContext: ctx, viewport: renderViewport });
+        currentTask = task;
         renderTaskRef.current = task;
         await task.promise;
       } catch (err) {
@@ -121,13 +148,22 @@ export const PdfDocumentViewer: React.FC<PdfDocumentViewerProps> = ({ asset }) =
         if (!cancelled && !isRenderCancelled) {
           setError(err instanceof Error ? err.message : '渲染 PDF 页面失败');
         }
+      } finally {
+        if (currentTask && renderTaskRef.current === currentTask) {
+          renderTaskRef.current = null;
+        }
+        if (currentPage) {
+          currentPage.cleanup?.();
+          if (activePageRef.current === currentPage) {
+            activePageRef.current = null;
+          }
+        }
       }
     };
     void renderPage();
     return () => {
       cancelled = true;
       renderTaskRef.current?.cancel?.();
-      renderTaskRef.current = null;
     };
   }, [asset.id, pageNumber, scale, numPages]);
 

@@ -16,7 +16,7 @@ pub mod web_snapshot;
 use std::backtrace::Backtrace;
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, AtomicU8};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, AtomicU8, AtomicUsize};
 use std::sync::{Arc, Mutex};
 
 use charkle_core::bridge::LocalExtensionBridgeServer;
@@ -224,6 +224,7 @@ pub fn run() {
             let shelf_pinned = Arc::new(AtomicBool::new(false));
             let shelf_drag_hovering = Arc::new(AtomicBool::new(false));
             let shelf_busy = Arc::new(AtomicBool::new(false));
+            let shelf_busy_count = Arc::new(AtomicUsize::new(0));
             let shelf_hold_until_ms = Arc::new(AtomicU64::new(0));
             let shelf_hwnd = Arc::new(AtomicIsize::new(0));
             let shelf_anim_gen = Arc::new(AtomicU64::new(0));
@@ -378,6 +379,7 @@ pub fn run() {
                 shelf_pinned,
                 shelf_drag_hovering,
                 shelf_busy,
+                shelf_busy_count,
                 shelf_hold_until_ms,
                 shelf_hwnd,
                 shelf_anim_gen,

@@ -759,7 +759,7 @@ export const MoodboardGeneratorModal: React.FC<MoodboardGeneratorModalProps> = (
                 ) : step.status === 'warning' ? (
                   <Warning16Regular className="w-3.5 h-3.5 text-[var(--warning)] shrink-0 mt-0.5" />
                 ) : (
-                  <ArrowSync16Regular className="w-3.5 h-3.5 text-[var(--accent)] shrink-0 mt-0.5 animate-spin" />
+                  <ArrowSync16Regular className="w-3.5 h-3.5 text-[var(--accent)] shrink-0 mt-0.5 animate-spin motion-reduce:animate-none" />
                 )}
                 <div className="min-w-0">
                   <span className="font-medium text-[var(--text-primary)]">{step.title}</span>

@@ -7,6 +7,7 @@ import {
   VideoOff24Regular,
 } from '@fluentui/react-icons';
 import { getTransport, isTauriRuntime } from '../../api/transport';
+import { isAllowedVideoEmbedUrl } from '../../design-system';
 import type { VideoDirectStream, VideoStreamPlaybackPlan } from '../../types/domain';
 
 export interface CapturedVideoFrame {
@@ -121,6 +122,8 @@ export const QuickLookStreamingVideoView: React.FC<QuickLookStreamingVideoViewPr
   const stageRef = useRef<HTMLDivElement | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
+  const latestPlaybackKeyRef = useRef<string>(`${assetId}:${playbackKey}`);
+  latestPlaybackKeyRef.current = `${assetId}:${playbackKey}`;
 
   const nativeHlsSupported = useMemo(() => supportsNativeHlsPlayback(), []);
 
@@ -172,11 +175,14 @@ export const QuickLookStreamingVideoView: React.FC<QuickLookStreamingVideoViewPr
       ? playableDirectStreams[directStreamIndex]
       : null;
 
+  const safeEmbedPlayer =
+    plan?.embedPlayer && isAllowedVideoEmbedUrl(plan.embedPlayer.url) ? plan.embedPlayer : null;
+
   const activeEmbed =
     !activeDirectStream &&
-    plan?.embedPlayer &&
+    safeEmbedPlayer &&
     (useEmbedMode || allDirectStreamsFailed || playableDirectStreams.length === 0)
-      ? plan.embedPlayer
+      ? safeEmbedPlayer
       : null;
 
   const directVideoSrc = useMemo(() => {
@@ -220,17 +226,17 @@ export const QuickLookStreamingVideoView: React.FC<QuickLookStreamingVideoViewPr
   }, [activeEmbed?.url, playbackKey]);
 
   const canToggleModes = Boolean(
-    playableDirectStreams.length > 0 && !allDirectStreamsFailed && plan?.embedPlayer,
+    playableDirectStreams.length > 0 && !allDirectStreamsFailed && safeEmbedPlayer,
   );
   const isPlayerMounted = Boolean(activeDirectStream || activeEmbed);
-  const hasPlayableSource = Boolean(playableDirectStreams.length > 0 || plan?.embedPlayer);
+  const hasPlayableSource = Boolean(playableDirectStreams.length > 0 || safeEmbedPlayer);
 
   const handleDirectStreamError = () => {
     if (directStreamIndex + 1 < playableDirectStreams.length) {
       setDirectStreamIndex((i) => i + 1);
     } else {
       setAllDirectStreamsFailed(true);
-      if (plan?.embedPlayer) {
+      if (safeEmbedPlayer) {
         setUseEmbedMode(true);
       }
     }
@@ -238,12 +244,14 @@ export const QuickLookStreamingVideoView: React.FC<QuickLookStreamingVideoViewPr
 
   const handleCaptureCover = async () => {
     if (!onSetCoverFrame || isCapturingCover) return;
+    const captureKey = latestPlaybackKeyRef.current;
     setIsCapturingCover(true);
     try {
       // 1. Direct HTML5 <video> frame capture via offscreen canvas (preserves exact MM:SS playhead)
       if (activeDirectStream && videoRef.current) {
         const directFrame = captureVideoElementFrameJpeg(videoRef.current);
         if (directFrame) {
+          if (latestPlaybackKeyRef.current !== captureKey) return;
           await onSetCoverFrame(directFrame);
           return;
         }
@@ -265,6 +273,7 @@ export const QuickLookStreamingVideoView: React.FC<QuickLookStreamingVideoViewPr
         }
       });
 
+      if (latestPlaybackKeyRef.current !== captureKey) return;
       const dpr = typeof window !== 'undefined' && window.devicePixelRatio > 0 ? window.devicePixelRatio : 1;
       const jpegBase64 = await getTransport().captureWebviewRegionJpeg(
         rect.left,
@@ -274,6 +283,7 @@ export const QuickLookStreamingVideoView: React.FC<QuickLookStreamingVideoViewPr
         dpr,
       );
       setHideControlsForCapture(false);
+      if (latestPlaybackKeyRef.current !== captureKey) return;
       if (jpegBase64) {
         const ts =
           activeDirectStream && videoRef.current && Number.isFinite(videoRef.current.currentTime)
@@ -337,7 +347,8 @@ export const QuickLookStreamingVideoView: React.FC<QuickLookStreamingVideoViewPr
           title={coverAlt}
           src={activeEmbed.url}
           referrerPolicy="strict-origin-when-cross-origin"
-          allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share; fullscreen"
+          sandbox="allow-scripts allow-same-origin allow-presentation allow-popups"
+          allow="accelerometer; autoplay; encrypted-media; gyroscope; picture-in-picture; web-share; fullscreen"
           allowFullScreen
           className="w-full h-full border-0 bg-black"
         />
@@ -348,8 +359,8 @@ export const QuickLookStreamingVideoView: React.FC<QuickLookStreamingVideoViewPr
       {/* Resolving Overlay */}
       {isResolving && (
         <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-          <div className="inline-flex items-center gap-2 px-3.5 py-2 rounded-full bg-black/70 border border-white/20 text-white text-[12.5px] font-semibold backdrop-blur-md">
-            <span className="w-3.5 h-3.5 rounded-full border-2 border-white/30 border-t-white animate-spin" />
+          <div className="win-acrylic-dark inline-flex items-center gap-2 px-3.5 py-2 rounded-full text-[12.5px] font-semibold">
+            <span className="w-3.5 h-3.5 rounded-full border-2 border-white/30 border-t-white animate-spin motion-reduce:animate-none" />
             <span>正在连接流式播放…</span>
           </div>
         </div>
@@ -358,7 +369,7 @@ export const QuickLookStreamingVideoView: React.FC<QuickLookStreamingVideoViewPr
       {/* Unplayable Fallback Overlay */}
       {!isResolving && !hasPlayableSource && (
         <div className="absolute inset-0 flex items-center justify-center">
-          <div className="flex flex-col items-center gap-2.5 px-5 py-4 rounded-[14px] bg-black/72 border border-white/15 text-center backdrop-blur-md">
+          <div className="win-acrylic-dark flex flex-col items-center gap-2.5 px-5 py-4 rounded-[14px] text-center">
             <VideoOff24Regular className="w-6 h-6 text-white/85" />
             <span className="text-[12.5px] font-medium text-white/92">
               暂无法直接流式播放此视频
@@ -390,7 +401,7 @@ export const QuickLookStreamingVideoView: React.FC<QuickLookStreamingVideoViewPr
                 disabled={isCapturingCover}
                 title="截取当前播放画面作为此素材封面"
                 onClick={() => void handleCaptureCover()}
-                className="charkle-pressable inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-black/68 hover:bg-black/82 border border-white/22 text-white text-[11px] font-semibold backdrop-blur-md disabled:opacity-60 cursor-pointer"
+                className="win-acrylic-dark charkle-pressable inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold hover:brightness-110 disabled:opacity-60 cursor-pointer"
               >
                 <Camera16Regular className="w-3.5 h-3.5" />
                 <span>{isCapturingCover ? '截取中…' : '设当前帧为封面'}</span>
@@ -401,7 +412,7 @@ export const QuickLookStreamingVideoView: React.FC<QuickLookStreamingVideoViewPr
                 type="button"
                 data-testid="streaming-toggle-mode-btn"
                 onClick={() => setUseEmbedMode((v) => !v)}
-                className="charkle-pressable inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-black/68 hover:bg-black/82 border border-white/22 text-white text-[11px] font-semibold backdrop-blur-md cursor-pointer"
+                className="win-acrylic-dark charkle-pressable inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold hover:brightness-110 cursor-pointer"
               >
                 {useEmbedMode ? (
                   <Play16Filled className="w-3 h-3" />

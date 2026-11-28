@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use charkle_core::media::resolvers::SocialPostResolver;
 use charkle_core::traits::{WebPageSnapshot, WebPageSnapshotProvider};
 use serde::Deserialize;
 use tauri::webview::PageLoadEvent;
@@ -92,7 +93,7 @@ impl TauriWebViewSnapshotter {
 impl WebPageSnapshotProvider for TauriWebViewSnapshotter {
     async fn capture_snapshot(&self, raw_url: &str) -> Option<WebPageSnapshot> {
         let parsed = Url::parse(raw_url.trim()).ok()?;
-        if !matches!(parsed.scheme(), "http" | "https") {
+        if !SocialPostResolver::is_safe_public_media_url(&parsed) {
             return None;
         }
         let _permit = self.semaphore.acquire().await.ok()?;
@@ -124,6 +125,7 @@ impl WebPageSnapshotProvider for TauriWebViewSnapshotter {
                 .incognito(true)
                 .disable_drag_drop_handler()
                 .user_agent(SNAPSHOT_BROWSER_UA)
+                .on_navigation(SocialPostResolver::is_safe_public_media_url)
                 .on_page_load(move |_win, payload| {
                     if matches!(payload.event(), PageLoadEvent::Finished) {
                         if let Ok(mut slot) = loaded_slot.lock() {
@@ -152,6 +154,49 @@ impl WebPageSnapshotProvider for TauriWebViewSnapshotter {
 }
 
 #[cfg(target_os = "windows")]
+fn read_com_stream_bytes(stream: &windows::Win32::System::Com::IStream) -> Option<Vec<u8>> {
+    use windows::Win32::Foundation::HGLOBAL;
+    use windows::Win32::System::Com::StructuredStorage::GetHGlobalFromStream;
+    use windows::Win32::System::Com::{STATFLAG_NONAME, STATSTG};
+    use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
+
+    struct GlobalLockGuard(HGLOBAL);
+    impl Drop for GlobalLockGuard {
+        fn drop(&mut self) {
+            // SAFETY: Balances a successful `GlobalLock(self.0)` call.
+            unsafe {
+                let _ = GlobalUnlock(self.0);
+            }
+        }
+    }
+
+    // SAFETY: `stream` was allocated via `CreateStreamOnHGlobal` and stays alive for this read.
+    let hglobal = unsafe { GetHGlobalFromStream(stream) }.ok()?;
+    // SAFETY: `hglobal` is owned by `stream`.
+    let alloc_size = unsafe { GlobalSize(hglobal) };
+    if alloc_size == 0 {
+        return None;
+    }
+    let mut stat = STATSTG::default();
+    // SAFETY: `stat` is a valid stack `STATSTG`.
+    let exact_len = if unsafe { stream.Stat(&mut stat, STATFLAG_NONAME) }.is_ok() && stat.cbSize > 0
+    {
+        (stat.cbSize as usize).min(alloc_size)
+    } else {
+        alloc_size
+    };
+    // SAFETY: Locks `hglobal` and pairs immediately with `GlobalLockGuard`.
+    let ptr = unsafe { GlobalLock(hglobal) };
+    if ptr.is_null() {
+        return None;
+    }
+    let _lock_guard = GlobalLockGuard(hglobal);
+    // SAFETY: `ptr` is valid for at least `exact_len <= alloc_size` bytes until `_lock_guard` drops.
+    let data = unsafe { std::slice::from_raw_parts(ptr as *const u8, exact_len) }.to_vec();
+    Some(data)
+}
+
+#[cfg(target_os = "windows")]
 async fn capture_webview2_preview(win: &tauri::WebviewWindow) -> Option<WebPageSnapshot> {
     use webview2_com::Microsoft::Web::WebView2::Win32::{
         ICoreWebView2_8, COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG,
@@ -159,11 +204,8 @@ async fn capture_webview2_preview(win: &tauri::WebviewWindow) -> Option<WebPageS
     use webview2_com::{CapturePreviewCompletedHandler, ExecuteScriptCompletedHandler};
     use windows::core::{w, Interface, PWSTR};
     use windows::Win32::Foundation::HGLOBAL;
-    use windows::Win32::System::Com::StructuredStorage::{
-        CreateStreamOnHGlobal, GetHGlobalFromStream,
-    };
-    use windows::Win32::System::Com::{CoTaskMemFree, STATFLAG_NONAME, STATSTG};
-    use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
+    use windows::Win32::System::Com::CoTaskMemFree;
+    use windows::Win32::System::Com::StructuredStorage::CreateStreamOnHGlobal;
 
     let (png_tx, png_rx) = oneshot::channel::<Option<Vec<u8>>>();
     let (meta_tx, meta_rx) = oneshot::channel::<Option<DomMetaPayload>>();
@@ -260,32 +302,7 @@ async fn capture_webview2_preview(win: &tauri::WebviewWindow) -> Option<WebPageS
         let png_slot_cb = Arc::clone(&png_slot);
         let preview_handler = CapturePreviewCompletedHandler::create(Box::new(move |hr| {
             let bytes = if hr.is_ok() {
-                unsafe { GetHGlobalFromStream(&stream_for_cb) }
-                    .ok()
-                    .and_then(|hglobal| {
-                        let alloc_size = unsafe { GlobalSize(hglobal) };
-                        if alloc_size == 0 {
-                            return None;
-                        }
-                        let mut stat = STATSTG::default();
-                        let exact_len =
-                            if unsafe { stream_for_cb.Stat(&mut stat, STATFLAG_NONAME) }.is_ok()
-                                && stat.cbSize > 0
-                            {
-                                (stat.cbSize as usize).min(alloc_size)
-                            } else {
-                                alloc_size
-                            };
-                        let ptr = unsafe { GlobalLock(hglobal) };
-                        if ptr.is_null() {
-                            return None;
-                        }
-                        let data =
-                            unsafe { std::slice::from_raw_parts(ptr as *const u8, exact_len) }
-                                .to_vec();
-                        let _ = unsafe { GlobalUnlock(hglobal) };
-                        Some(data)
-                    })
+                read_com_stream_bytes(&stream_for_cb)
             } else {
                 None
             };
@@ -405,17 +422,14 @@ pub async fn capture_window_region_jpeg(
         use webview2_com::CapturePreviewCompletedHandler;
         use webview2_com::Microsoft::Web::WebView2::Win32::COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG;
         use windows::Win32::Foundation::HGLOBAL;
-        use windows::Win32::System::Com::StructuredStorage::{
-            CreateStreamOnHGlobal, GetHGlobalFromStream,
-        };
-        use windows::Win32::System::Com::{STATFLAG_NONAME, STATSTG};
-        use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
+        use windows::Win32::System::Com::StructuredStorage::CreateStreamOnHGlobal;
 
         let (png_tx, png_rx) = oneshot::channel::<Option<Vec<u8>>>();
         let png_slot = Arc::new(Mutex::new(Some(png_tx)));
 
         let dispatch_res = win.with_webview(move |platform_wv| {
             let controller = platform_wv.controller();
+            // SAFETY: Running on the WebView2 UI thread inside `with_webview`.
             let Ok(core) = (unsafe { controller.CoreWebView2() }) else {
                 if let Ok(mut s) = png_slot.lock() {
                     if let Some(tx) = s.take() {
@@ -424,6 +438,7 @@ pub async fn capture_window_region_jpeg(
                 }
                 return;
             };
+            // SAFETY: Allocates an in-memory COM stream owned by the returned `IStream`.
             let Ok(stream) = (unsafe { CreateStreamOnHGlobal(HGLOBAL::default(), true) }) else {
                 if let Ok(mut s) = png_slot.lock() {
                     if let Some(tx) = s.take() {
@@ -436,34 +451,7 @@ pub async fn capture_window_region_jpeg(
             let png_slot_cb = Arc::clone(&png_slot);
             let preview_handler = CapturePreviewCompletedHandler::create(Box::new(move |hr| {
                 let bytes = if hr.is_ok() {
-                    unsafe { GetHGlobalFromStream(&stream_for_cb) }
-                        .ok()
-                        .and_then(|hglobal| {
-                            let alloc_size = unsafe { GlobalSize(hglobal) };
-                            if alloc_size == 0 {
-                                return None;
-                            }
-                            let mut stat = STATSTG::default();
-                            let exact_len = if unsafe {
-                                stream_for_cb.Stat(&mut stat, STATFLAG_NONAME)
-                            }
-                            .is_ok()
-                                && stat.cbSize > 0
-                            {
-                                (stat.cbSize as usize).min(alloc_size)
-                            } else {
-                                alloc_size
-                            };
-                            let ptr = unsafe { GlobalLock(hglobal) };
-                            if ptr.is_null() {
-                                return None;
-                            }
-                            let data =
-                                unsafe { std::slice::from_raw_parts(ptr as *const u8, exact_len) }
-                                    .to_vec();
-                            let _ = unsafe { GlobalUnlock(hglobal) };
-                            Some(data)
-                        })
+                    read_com_stream_bytes(&stream_for_cb)
                 } else {
                     None
                 };

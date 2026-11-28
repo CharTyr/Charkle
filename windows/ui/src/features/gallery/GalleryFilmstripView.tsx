@@ -33,6 +33,7 @@ import {
   useResolvedIsDark,
 } from '../../design-system';
 import {
+  moveAssetsToFolderWithUndo,
   useCoordinatorStore,
   useLibraryStore,
   useMoodboardStore,
@@ -61,6 +62,10 @@ export interface GalleryFilmstripViewProps {
  */
 const FilmstripThumbVisual: React.FC<{ item: AssetRecord; src: string }> = ({ item, src }) => {
   const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    setFailed(false);
+  }, [item.id, src]);
 
   if (item.fileName.toLowerCase().endsWith('.swatch')) {
     const hex = item.dominantColors[0]?.hex ?? '#4E7D96';
@@ -113,6 +118,44 @@ const FilmstripThumbVisual: React.FC<{ item: AssetRecord; src: string }> = ({ it
       draggable={false}
       onError={() => setFailed(true)}
       className="w-full h-full object-cover"
+    />
+  );
+};
+
+const FilmstripStageVideo: React.FC<{
+  src: string;
+  poster: string;
+  assetHex?: string;
+  assetColors?: string;
+}> = ({ src, poster, assetHex, assetColors }) => {
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+
+  useEffect(() => {
+    const v = videoRef.current;
+    return () => {
+      if (v) {
+        v.pause();
+        v.removeAttribute('src');
+        try {
+          v.load();
+        } catch {
+          // Ignore in jsdom
+        }
+      }
+    };
+  }, [src]);
+
+  return (
+    <video
+      ref={videoRef}
+      src={src}
+      poster={poster}
+      controls
+      autoPlay
+      playsInline
+      data-asset-hex={assetHex}
+      data-asset-colors={assetColors}
+      className="max-w-full max-h-full rounded-[var(--radius-settings-outer)] shadow-[0_14px_38px_rgba(0,0,0,0.22)] bg-black"
     />
   );
 };
@@ -175,6 +218,8 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({
   );
 
   const [zoomScale, setZoomScale] = useState(1);
+  const zoomScaleRef = useRef(1);
+  zoomScaleRef.current = zoomScale;
   const [panOffset, setPanOffset] = useState({ x: 0, y: 0 });
   const [isPanning, setIsPanning] = useState(false);
   const [rotationDegrees, setRotationDegrees] = useState(0);
@@ -182,6 +227,9 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({
   const [flipVertical, setFlipVertical] = useState(false);
   const [fallbackThumb, setFallbackThumb] = useState(false);
   const [stageSize, setStageSize] = useState({ width: 900, height: 520 });
+  const [stripViewportWidth, setStripViewportWidth] = useState(1080);
+  const [stripScrollLeft, setStripScrollLeft] = useState(0);
+  const committedStripScrollLeftRef = useRef(0);
 
   const [contextTarget, setContextTarget] = useState<{
     asset: AssetRecord;
@@ -276,6 +324,7 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({
   }, [activeAsset, displayRotationDegrees, stageSize.height, stageSize.width]);
 
   const resetViewTransform = useCallback(() => {
+    zoomScaleRef.current = 1;
     setZoomScale(1);
     setPanOffset({ x: 0, y: 0 });
     setRotationDegrees(0);
@@ -286,13 +335,15 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({
   const stepZoom = useCallback(
     (factor: number) => {
       if (!supportsVisualTransform) return;
-      setZoomScale((prev) => {
-        const next = Math.max(0.5, Math.min(maxZoomLimit, Number((prev * factor).toFixed(3))));
-        if (next <= 1.01) {
-          setPanOffset({ x: 0, y: 0 });
-        }
-        return next;
-      });
+      const next = Math.max(
+        0.5,
+        Math.min(maxZoomLimit, Number((zoomScaleRef.current * factor).toFixed(3))),
+      );
+      zoomScaleRef.current = next;
+      setZoomScale(next);
+      if (next <= 1.01) {
+        setPanOffset({ x: 0, y: 0 });
+      }
     },
     [maxZoomLimit, supportsVisualTransform],
   );
@@ -348,15 +399,94 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({
     return () => obs.disconnect();
   }, []);
 
-  // Center active thumbnail in bottom filmstrip
+  // Precompute prefix-sum horizontal layout for O(log N) bottom filmstrip virtualization
+  const stripLayout = useMemo(() => {
+    const gap = 8;
+    const padX = 16;
+    const items: Array<{ index: number; left: number; width: number }> = [];
+    let cursor = padX;
+    for (let i = 0; i < assets.length; i++) {
+      const item = assets[i];
+      const ratio =
+        item.pixelWidth > 0 && item.pixelHeight > 0 ? item.pixelWidth / item.pixelHeight : 1.25;
+      const width = Math.max(
+        46,
+        Math.min(116, Math.round(68 * Math.max(0.6, Math.min(1.75, ratio)))),
+      );
+      items.push({ index: i, left: cursor, width });
+      cursor += width + gap;
+    }
+    const totalWidth = Math.max(padX * 2, cursor - gap + padX);
+    return { items, totalWidth };
+  }, [assets]);
+
+  const visibleStripItems = useMemo(() => {
+    const { items } = stripLayout;
+    if (items.length === 0) return [];
+    const overscan = Math.max(360, stripViewportWidth * 0.75);
+    const minX = Math.max(0, stripScrollLeft - overscan);
+    const maxX = stripScrollLeft + stripViewportWidth + overscan;
+
+    let lo = 0;
+    let hi = items.length - 1;
+    let start = items.length;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (items[mid].left + items[mid].width >= minX) {
+        start = mid;
+        hi = mid - 1;
+      } else {
+        lo = mid + 1;
+      }
+    }
+
+    const visible: Array<{ index: number; left: number; width: number }> = [];
+    let hasActive = false;
+    for (let i = start; i < items.length; i++) {
+      const entry = items[i];
+      if (entry.left > maxX) break;
+      if (entry.index === activeIndex) hasActive = true;
+      visible.push(entry);
+    }
+    if (!hasActive && activeIndex >= 0 && activeIndex < items.length) {
+      visible.push(items[activeIndex]);
+    }
+    return visible;
+  }, [stripLayout, stripScrollLeft, stripViewportWidth, activeIndex]);
+
+  // Measure bottom filmstrip container width
   useEffect(() => {
     const strip = stripRef.current;
-    if (!strip || !activeAsset) return;
-    const activeEl = strip.querySelector<HTMLElement>(
-      `[data-strip-id="${CSS.escape(activeAsset.id)}"]`,
-    );
-    activeEl?.scrollIntoView?.({ behavior: 'smooth', inline: 'center', block: 'nearest' });
-  }, [activeAsset]);
+    if (!strip) return;
+    const measure = () => {
+      const w = strip.clientWidth;
+      if (w > 40) {
+        setStripViewportWidth((prev) => (Math.abs(prev - w) >= 2 ? w : prev));
+      }
+    };
+    measure();
+    if (typeof ResizeObserver === 'undefined') return;
+    const obs = new ResizeObserver(measure);
+    obs.observe(strip);
+    return () => obs.disconnect();
+  }, []);
+
+  // Center active thumbnail mathematically in virtualized bottom filmstrip
+  useEffect(() => {
+    const strip = stripRef.current;
+    const entry = stripLayout.items[activeIndex];
+    if (!strip || !entry) return;
+    const viewW = strip.clientWidth || stripViewportWidth;
+    const maxScroll = Math.max(0, stripLayout.totalWidth - viewW);
+    const targetLeft = Math.max(0, Math.min(maxScroll, entry.left + entry.width * 0.5 - viewW * 0.5));
+    if (typeof strip.scrollTo === 'function') {
+      strip.scrollTo({ left: targetLeft, behavior: 'smooth' });
+    } else {
+      strip.scrollLeft = targetLeft;
+    }
+    committedStripScrollLeftRef.current = targetLeft;
+    setStripScrollLeft(targetLeft);
+  }, [activeIndex, stripLayout, stripViewportWidth]);
 
   // Non-passive wheel zoom on visual stage
   useEffect(() => {
@@ -537,19 +667,15 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({
         const posterVer =
           posterRev > 0 ? `${String(activeAsset.updatedAt ?? 0)}-${posterRev}` : activeAsset.updatedAt;
         return (
-          <video
+          <FilmstripStageVideo
             key={activeAsset.id}
             src={transport.originalUrl(activeAsset.id)}
             poster={cacheBustedUrl(
               transport.thumbnailUrl(activeAsset.id, 'preview1400'),
               posterVer,
             )}
-            controls
-            autoPlay
-            playsInline
-            data-asset-hex={stageAssetHex}
-            data-asset-colors={stageAssetColors}
-            className="max-w-full max-h-full rounded-[var(--radius-settings-outer)] shadow-[0_14px_38px_rgba(0,0,0,0.22)] bg-black"
+            assetHex={stageAssetHex}
+            assetColors={stageAssetColors}
           />
         );
       }
@@ -1011,90 +1137,111 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({
         </div>
       </div>
 
-      {/* Synchronized Bottom Filmstrip Scrubber (proportional widths + wheel-to-horizontal scroll) */}
+      {/* Virtualized Bottom Filmstrip Scrubber (proportional widths + wheel-to-horizontal scroll) */}
       <div
         ref={stripRef}
-        className="relative z-20 shrink-0 h-[96px] border-t border-[var(--win-stroke-divider)] bg-[var(--bg-elevated)]/85 px-4 flex items-center gap-2 overflow-x-auto charkle-scroll-hidden"
+        onScroll={(e) => {
+          const nextLeft = e.currentTarget.scrollLeft;
+          const maxLeft = Math.max(
+            0,
+            stripLayout.totalWidth - (e.currentTarget.clientWidth || stripViewportWidth),
+          );
+          if (
+            Math.abs(nextLeft - committedStripScrollLeftRef.current) >= 80 ||
+            nextLeft <= 1 ||
+            nextLeft >= maxLeft - 1
+          ) {
+            committedStripScrollLeftRef.current = nextLeft;
+            setStripScrollLeft(nextLeft);
+          }
+        }}
+        className="relative z-20 shrink-0 h-[96px] border-t border-[var(--win-stroke-divider)] bg-[var(--bg-elevated)]/85 flex items-center overflow-x-auto charkle-scroll-hidden"
       >
-        {assets.map((item) => {
-          const isFocused = item.id === activeAsset.id;
-          const isSelected = selectedSet.has(item.id);
-          const ratio =
-            item.pixelWidth > 0 && item.pixelHeight > 0
-              ? item.pixelWidth / item.pixelHeight
-              : 1.25;
-          const thumbWidth = Math.max(
-            46,
-            Math.min(116, Math.round(68 * Math.max(0.6, Math.min(1.75, ratio)))),
-          );
+        <div
+          className="relative shrink-0"
+          style={{ width: stripLayout.totalWidth, height: 68 }}
+        >
+          {visibleStripItems.map((entry) => {
+            const item = assets[entry.index];
+            if (!item) return null;
+            const isFocused = item.id === activeAsset.id;
+            const isSelected = selectedSet.has(item.id);
 
-          return (
-            <button
-              key={item.id}
-              type="button"
-              data-strip-id={item.id}
-              data-active={isFocused ? 'true' : undefined}
-              style={{ width: thumbWidth, height: 68 }}
-              onPointerDown={(e) => {
-                if (e.button !== 0) return;
-                const dragIds = selectedSet.has(item.id) ? selectedAssetIds : [item.id];
-                beginPointerDrag(e, {
-                  kind: 'assets',
-                  assetIds: dragIds,
-                  previewAssetId: item.id,
-                  title: item.title,
-                });
-              }}
-              onClick={(e) => {
-                if (wasRecentPointerDrag()) return;
-                selectAsset(item.id, orderedIds, {
-                  multi: e.ctrlKey || e.metaKey,
-                  range: e.shiftKey,
-                });
-              }}
-              onDoubleClick={() => launchQuickLook(item)}
-              onContextMenu={(e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                const latestSel = useCoordinatorStore.getState().selectedAssetIds;
-                let snapshotIds: string[];
-                if (latestSel.includes(item.id) && latestSel.length > 1) {
-                  snapshotIds = [...latestSel];
-                } else {
-                  if (!latestSel.includes(item.id)) {
-                    selectAsset(item.id, orderedIds);
+            return (
+              <button
+                key={item.id}
+                type="button"
+                data-strip-id={item.id}
+                data-active={isFocused ? 'true' : undefined}
+                style={{
+                  position: 'absolute',
+                  top: 0,
+                  left: 0,
+                  transform: `translate3d(${entry.left}px, 0, 0)`,
+                  width: entry.width,
+                  height: 68,
+                }}
+                onPointerDown={(e) => {
+                  if (e.button !== 0) return;
+                  const dragIds = selectedSet.has(item.id) ? selectedAssetIds : [item.id];
+                  beginPointerDrag(e, {
+                    kind: 'assets',
+                    assetIds: dragIds,
+                    previewAssetId: item.id,
+                    title: item.title,
+                  });
+                }}
+                onClick={(e) => {
+                  if (wasRecentPointerDrag()) return;
+                  selectAsset(item.id, orderedIds, {
+                    multi: e.ctrlKey || e.metaKey,
+                    range: e.shiftKey,
+                  });
+                }}
+                onDoubleClick={() => launchQuickLook(item)}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  const latestSel = useCoordinatorStore.getState().selectedAssetIds;
+                  let snapshotIds: string[];
+                  if (latestSel.includes(item.id) && latestSel.length > 1) {
+                    snapshotIds = [...latestSel];
+                  } else {
+                    if (!latestSel.includes(item.id)) {
+                      selectAsset(item.id, orderedIds);
+                    }
+                    snapshotIds = [item.id];
                   }
-                  snapshotIds = [item.id];
-                }
-                setMoveSubOpen(false);
-                setContextTarget({
-                  asset: item,
-                  point: { x: e.clientX, y: e.clientY },
-                  targetIds: snapshotIds,
-                });
-              }}
-              title={item.title}
-              className={[
-                'charkle-filmstrip-thumb shrink-0 rounded-[var(--win-radius-control)] overflow-hidden cursor-pointer bg-[var(--bg-subtle)]',
-                isFocused
-                  ? 'ring-2 ring-[var(--accent)] opacity-100'
-                  : isSelected
-                    ? 'ring-[1.5px] ring-[var(--accent)]/65 opacity-95'
-                    : 'opacity-70 hover:opacity-100 ring-1 ring-[var(--win-stroke-card)]',
-              ].join(' ')}
-            >
-              <FilmstripThumbVisual
-                item={item}
-                src={cacheBustedUrl(
-                  transport.thumbnailUrl(item.id, 'grid520'),
-                  (thumbnailRevisions[item.id] ?? 0) > 0
-                    ? `${String(item.updatedAt ?? 0)}-${thumbnailRevisions[item.id]}`
-                    : item.updatedAt,
-                )}
-              />
-            </button>
-          );
-        })}
+                  setMoveSubOpen(false);
+                  setContextTarget({
+                    asset: item,
+                    point: { x: e.clientX, y: e.clientY },
+                    targetIds: snapshotIds,
+                  });
+                }}
+                title={item.title}
+                className={[
+                  'charkle-filmstrip-thumb shrink-0 rounded-[var(--win-radius-control)] overflow-hidden cursor-pointer bg-[var(--bg-subtle)]',
+                  isFocused
+                    ? 'ring-2 ring-[var(--accent)] opacity-100'
+                    : isSelected
+                      ? 'ring-[1.5px] ring-[var(--accent)]/65 opacity-95'
+                      : 'opacity-70 hover:opacity-100 ring-1 ring-[var(--win-stroke-card)]',
+                ].join(' ')}
+              >
+                <FilmstripThumbVisual
+                  item={item}
+                  src={cacheBustedUrl(
+                    transport.thumbnailUrl(item.id, 'grid520'),
+                    (thumbnailRevisions[item.id] ?? 0) > 0
+                      ? `${String(item.updatedAt ?? 0)}-${thumbnailRevisions[item.id]}`
+                      : item.updatedAt,
+                  )}
+                />
+              </button>
+            );
+          })}
+        </div>
       </div>
 
       {/* Stage & Filmstrip Shared Fluent Acrylic Right-Click Context Menu */}
@@ -1230,26 +1377,12 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({
                         }
                         onSelectFolder={(folderId) => {
                           const ids = [...contextTargetIds];
-                          const prevFolder = contextTarget.asset.folderID;
                           setContextTarget(null);
                           setMoveSubOpen(false);
                           const destName = folderId
                             ? folders.find((f) => f.id === folderId)?.name ?? '文件夹'
                             : '收件箱';
-                          void updateAssets(
-                            {
-                              assetIDs: ids,
-                              folderAssignment: folderId ? { folder: folderId } : 'inbox',
-                            },
-                            destination,
-                            {
-                              undoMessage: `已移动 ${ids.length} 项至「${destName}」`,
-                              undoPatch: {
-                                assetIDs: ids,
-                                folderAssignment: prevFolder ? { folder: prevFolder } : 'inbox',
-                              },
-                            },
-                          );
+                          void moveAssetsToFolderWithUndo(ids, folderId, destName, destination);
                         }}
                       />
                     </div>

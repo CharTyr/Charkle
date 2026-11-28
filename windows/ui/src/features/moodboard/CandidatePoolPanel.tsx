@@ -649,7 +649,7 @@ export const CandidatePoolPanel: React.FC<CandidatePoolPanelProps> = ({
               className="charkle-pressable h-7 w-7 shrink-0 rounded-[var(--win-radius-control)] bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-[var(--accent-text)] inline-flex items-center justify-center cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed"
             >
               {isRefiningActiveBoard ? (
-                <ArrowSync16Regular className="w-3.5 h-3.5 animate-spin" />
+                <ArrowSync16Regular className="w-3.5 h-3.5 animate-spin motion-reduce:animate-none" />
               ) : (
                 <ArrowUp16Regular className="w-3.5 h-3.5" />
               )}
@@ -685,7 +685,7 @@ export const CandidatePoolPanel: React.FC<CandidatePoolPanelProps> = ({
 
           {isRefiningActiveBoard && latestStep && (
             <div className="flex items-start gap-2 pt-0.5 text-[10.5px]">
-              <ArrowSync16Regular className="w-3 h-3 text-[var(--accent)] animate-spin shrink-0 mt-0.5" />
+              <ArrowSync16Regular className="w-3 h-3 text-[var(--accent)] animate-spin motion-reduce:animate-none shrink-0 mt-0.5" />
               <div className="min-w-0">
                 <div className="font-semibold text-[var(--text-primary)]">{latestStep.title}</div>
                 {latestStep.detail && (
@@ -729,7 +729,7 @@ export const CandidatePoolPanel: React.FC<CandidatePoolPanelProps> = ({
                           ) : step.status === 'warning' ? (
                             <Warning16Regular className="w-3 h-3 text-[var(--warning)] shrink-0 mt-0.5" />
                           ) : (
-                            <ArrowSync16Regular className="w-3 h-3 text-[var(--accent)] shrink-0 mt-0.5 animate-spin" />
+                            <ArrowSync16Regular className="w-3 h-3 text-[var(--accent)] shrink-0 mt-0.5 animate-spin motion-reduce:animate-none" />
                           )}
                           <div className="min-w-0">
                             <div className="font-medium text-[var(--text-primary)]">{step.title}</div>

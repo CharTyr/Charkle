@@ -82,6 +82,7 @@ export const HorizontalJustifiedView: React.FC<HorizontalJustifiedViewProps> = (
   const prevSnappedStopRef = useRef<number>(0);
   const prevLayoutRef = useRef<Map<string, PlacedAssetFrame>>(new Map());
   const prevScrollTopRef = useRef<number>(0);
+  const committedScrollTopRef = useRef<number>(0);
   const pendingFlipRef = useRef<{
     prevLayout: Map<string, PlacedAssetFrame>;
     oldScrollY: number;
@@ -273,6 +274,7 @@ export const HorizontalJustifiedView: React.FC<HorizontalJustifiedViewProps> = (
       });
     }
     prevScrollTopRef.current = 0;
+    committedScrollTopRef.current = 0;
     setScrollTop(0);
   }, [destinationKey]);
 
@@ -284,6 +286,7 @@ export const HorizontalJustifiedView: React.FC<HorizontalJustifiedViewProps> = (
       programmaticScrollRef.current = true;
       if (el) el.scrollTop = maxScroll;
       prevScrollTopRef.current = maxScroll;
+      committedScrollTopRef.current = maxScroll;
       setScrollTop(maxScroll);
       requestAnimationFrame(() => {
         programmaticScrollRef.current = false;
@@ -372,6 +375,7 @@ export const HorizontalJustifiedView: React.FC<HorizontalJustifiedViewProps> = (
             scrollMutated = true;
             programmaticScrollRef.current = true;
             el.scrollTop = nextScrollY;
+            committedScrollTopRef.current = nextScrollY;
             setScrollTop(nextScrollY);
             prevScrollTopRef.current = nextScrollY;
             requestAnimationFrame(() => {
@@ -441,6 +445,7 @@ export const HorizontalJustifiedView: React.FC<HorizontalJustifiedViewProps> = (
     } else {
       el.scrollTop = targetTop;
     }
+    committedScrollTopRef.current = targetTop;
     setScrollTop(targetTop);
     prevScrollTopRef.current = targetTop;
     requestAnimationFrame(() => {
@@ -549,7 +554,18 @@ export const HorizontalJustifiedView: React.FC<HorizontalJustifiedViewProps> = (
           if (!programmaticScrollRef.current) {
             sessionZoomAnchorRef.current = null;
           }
-          setScrollTop(nextTop);
+          const maxScroll = Math.max(
+            0,
+            (layoutRef.current?.totalHeight ?? 0) - (e.currentTarget.clientHeight || viewport.height),
+          );
+          if (
+            Math.abs(nextTop - committedScrollTopRef.current) >= 96 ||
+            nextTop <= 1 ||
+            nextTop >= maxScroll - 1
+          ) {
+            committedScrollTopRef.current = nextTop;
+            setScrollTop(nextTop);
+          }
         }}
         onMouseDown={(e) => {
           if (e.button !== 0) return;
@@ -590,15 +606,11 @@ export const HorizontalJustifiedView: React.FC<HorizontalJustifiedViewProps> = (
                 orderedIds={orderedIds}
                 width={item.width}
                 height={item.height}
+                x={Math.round(item.x)}
+                y={Math.round(item.y)}
+                zIndex={isAnchor ? 20 : 1}
                 onHoverChange={handleHoverChange}
                 cardRefCallback={handleCardRef}
-                style={{
-                  position: 'absolute',
-                  transform: `translate3d(${Math.round(item.x)}px, ${Math.round(item.y)}px, 0)`,
-                  top: 0,
-                  left: 0,
-                  zIndex: isAnchor ? 20 : 1,
-                }}
               />
             );
           })}

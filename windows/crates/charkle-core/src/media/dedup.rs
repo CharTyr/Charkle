@@ -1335,19 +1335,25 @@ fn cluster_within_bucket(
             })
             .collect();
 
-        scored.sort_by(|lhs, rhs| {
-            if (lhs.eval.score - rhs.eval.score).abs() > 0.001 {
-                return rhs
-                    .eval
-                    .score
-                    .partial_cmp(&lhs.eval.score)
-                    .unwrap_or(std::cmp::Ordering::Equal);
+        fn quantize_dedup_score(score: f64) -> i64 {
+            if score.is_finite() {
+                (score * 1000.0)
+                    .round()
+                    .clamp(i64::MIN as f64, i64::MAX as f64) as i64
+            } else {
+                i64::MIN
             }
-            let la = &items[lhs.item_idx].asset;
-            let ra = &items[rhs.item_idx].asset;
-            la.created_at
-                .cmp(&ra.created_at)
-                .then_with(|| la.id.to_string().cmp(&ra.id.to_string()))
+        }
+        scored.sort_by(|lhs, rhs| {
+            quantize_dedup_score(rhs.eval.score)
+                .cmp(&quantize_dedup_score(lhs.eval.score))
+                .then_with(|| {
+                    let la = &items[lhs.item_idx].asset;
+                    let ra = &items[rhs.item_idx].asset;
+                    la.created_at
+                        .cmp(&ra.created_at)
+                        .then_with(|| la.id.cmp(&ra.id))
+                })
         });
 
         let Some(winner) = scored.first() else {

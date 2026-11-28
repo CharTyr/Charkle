@@ -8,7 +8,7 @@ import {
   SpeakerMute16Regular,
 } from '@fluentui/react-icons';
 import { getTransport } from '../../api/transport';
-import { Button, formatDuration } from '../../design-system';
+import { Button, formatDuration, isLightHex } from '../../design-system';
 import type { AssetRecord } from '../../types/domain';
 
 export interface AudioStudioViewerProps {
@@ -36,6 +36,7 @@ export const AudioStudioViewer: React.FC<AudioStudioViewerProps> = ({ asset }) =
   const [playbackError, setPlaybackError] = useState<string | null>(null);
 
   const accentHex = asset.dominantColors[0]?.hex ?? '#3D5A80';
+  const playButtonTextColor = isLightHex(accentHex) ? 'rgba(0,0,0,0.86)' : '#ffffff';
 
   const peaks = useMemo(() => {
     const target = 48;
@@ -100,9 +101,19 @@ export const AudioStudioViewer: React.FC<AudioStudioViewerProps> = ({ asset }) =
         setPlaybackError(null);
         await el.play();
         setPlaying(true);
-      } catch {
+      } catch (err) {
         setPlaying(false);
-        setPlaybackError('当前音频暂无法直接播放，可在资源管理器中打开');
+        const isAbort =
+          (typeof DOMException !== 'undefined' &&
+            err instanceof DOMException &&
+            err.name === 'AbortError') ||
+          (typeof err === 'object' &&
+            err !== null &&
+            'name' in err &&
+            (err as { name?: unknown }).name === 'AbortError');
+        if (!isAbort) {
+          setPlaybackError('当前音频暂无法直接播放，可在资源管理器中打开');
+        }
       }
     } else {
       el.pause();
@@ -143,8 +154,8 @@ export const AudioStudioViewer: React.FC<AudioStudioViewerProps> = ({ asset }) =
           disabled={Boolean(playbackError)}
           aria-label={playing ? '暂停播放' : '开始播放'}
           onClick={() => void togglePlay()}
-          style={{ backgroundColor: accentHex }}
-          className="charkle-pressable w-11 h-11 rounded-full text-white inline-flex items-center justify-center shrink-0 cursor-pointer disabled:opacity-45"
+          style={{ backgroundColor: accentHex, color: playButtonTextColor }}
+          className="charkle-pressable w-11 h-11 rounded-full inline-flex items-center justify-center shrink-0 cursor-pointer disabled:opacity-45"
         >
           {playing ? (
             <Pause16Regular className="w-5 h-5" />

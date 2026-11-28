@@ -18,7 +18,7 @@ use url::Url;
 
 use crate::error::{CoreError, CoreResult};
 use crate::media::douyin::{DouyinURLParser, DOUYIN_REFERER};
-use crate::media::resolvers::{ResolvedSocialPost, SocialPostResolver, WebBookmarkResolver};
+use crate::media::resolvers::{ResolvedSocialPost, SocialPostResolver};
 use crate::models::core::{
     SocialMediaAttachment, SocialMediaAttachmentKind, SocialPlatform, SocialPostMetadata,
     WebPageRichMetadata,
@@ -410,7 +410,7 @@ impl VideoPlatformResolver {
         Client::builder()
             .timeout(Duration::from_secs(12))
             .user_agent(BROWSER_UA)
-            .redirect(reqwest::redirect::Policy::limited(8))
+            .redirect(crate::net_safety::public_redirect_policy(8, false))
             .build()
             .unwrap_or_else(|_| Client::new())
     }
@@ -419,7 +419,7 @@ impl VideoPlatformResolver {
         Client::builder()
             .timeout(Duration::from_secs(240))
             .user_agent(BROWSER_UA)
-            .redirect(reqwest::redirect::Policy::limited(8))
+            .redirect(crate::net_safety::public_redirect_policy(8, false))
             .build()
             .unwrap_or_else(|_| Client::new())
     }
@@ -1835,7 +1835,7 @@ impl VideoPlatformResolver {
         page_url: &str,
     ) -> Option<VideoDirectStream> {
         let parsed = Url::parse(page_url.trim()).ok()?;
-        if !WebBookmarkResolver::is_web_url(&parsed) {
+        if !SocialPostResolver::is_safe_public_media_url(&parsed) {
             return None;
         }
         let binary = find_yt_dlp_binary()?;
@@ -1850,6 +1850,7 @@ impl VideoPlatformResolver {
                 "-g",
                 "-f",
                 "best[ext=mp4]/best[protocol*=m3u8]/best",
+                "--",
                 &url_owned,
             ]);
             #[cfg(target_os = "windows")]
@@ -2285,7 +2286,9 @@ impl VideoPlatformResolver {
         if let Some(r) = referer {
             req = req.header("Referer", r);
         }
-        let resp = req.send().await.ok()?;
+        const MIN_VIDEO_BYTES: u64 = 8 * 1024;
+        const MAX_VIDEO_BYTES: u64 = 600 * 1024 * 1024;
+        let mut resp = req.send().await.ok()?;
         if !resp.status().is_success() {
             return None;
         }
@@ -2293,21 +2296,65 @@ impl VideoPlatformResolver {
             return None;
         }
         if let Some(len) = resp.content_length() {
-            if !(8 * 1024..=600 * 1024 * 1024).contains(&len) {
+            if !(MIN_VIDEO_BYTES..=MAX_VIDEO_BYTES).contains(&len) {
                 return None;
             }
         }
-        let bytes = resp.bytes().await.ok()?;
-        if bytes.len() < 8 * 1024 || bytes.len() > 600 * 1024 * 1024 {
-            return None;
-        }
-        let head = String::from_utf8_lossy(&bytes[..bytes.len().min(64)]).to_ascii_lowercase();
-        if head.contains("<html") || head.contains("<!doctype") {
-            return None;
-        }
+
+        // Stream directly to a sibling temp file so downloading up to 600 MiB never spikes RAM.
         let safe_base = sanitized_file_name(base_name);
         let dest = directory.join(format!("{safe_base}.mp4"));
-        std::fs::write(&dest, &bytes).ok()?;
+        let tmp_dest = directory.join(format!(
+            "{safe_base}.{}.part",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let mut out_file = tokio::fs::File::create(&tmp_dest).await.ok()?;
+        let mut total_written: u64 = 0;
+        let mut head_probe: Vec<u8> = Vec::with_capacity(64);
+
+        use tokio::io::AsyncWriteExt;
+        while let Some(chunk) = match resp.chunk().await {
+            Ok(c) => c,
+            Err(_) => {
+                drop(out_file);
+                let _ = tokio::fs::remove_file(&tmp_dest).await;
+                return None;
+            }
+        } {
+            if head_probe.len() < 64 {
+                let take = (64 - head_probe.len()).min(chunk.len());
+                head_probe.extend_from_slice(&chunk[..take]);
+                if head_probe.len() >= 16 {
+                    let head = String::from_utf8_lossy(&head_probe).to_ascii_lowercase();
+                    if head.contains("<html") || head.contains("<!doctype") {
+                        drop(out_file);
+                        let _ = tokio::fs::remove_file(&tmp_dest).await;
+                        return None;
+                    }
+                }
+            }
+            total_written = total_written.saturating_add(chunk.len() as u64);
+            if total_written > MAX_VIDEO_BYTES {
+                drop(out_file);
+                let _ = tokio::fs::remove_file(&tmp_dest).await;
+                return None;
+            }
+            if out_file.write_all(&chunk).await.is_err() {
+                drop(out_file);
+                let _ = tokio::fs::remove_file(&tmp_dest).await;
+                return None;
+            }
+        }
+        if out_file.flush().await.is_err() || total_written < MIN_VIDEO_BYTES {
+            drop(out_file);
+            let _ = tokio::fs::remove_file(&tmp_dest).await;
+            return None;
+        }
+        drop(out_file);
+        if tokio::fs::rename(&tmp_dest, &dest).await.is_err() {
+            let _ = tokio::fs::remove_file(&tmp_dest).await;
+            return None;
+        }
         Some(dest)
     }
 
@@ -2317,7 +2364,7 @@ impl VideoPlatformResolver {
         base_name: &str,
     ) -> Option<PathBuf> {
         let parsed = Url::parse(page_url.trim()).ok()?;
-        if !WebBookmarkResolver::is_web_url(&parsed) {
+        if !SocialPostResolver::is_safe_public_media_url(&parsed) {
             return None;
         }
         let binary = find_yt_dlp_binary()?;
@@ -2334,12 +2381,15 @@ impl VideoPlatformResolver {
             cmd.args([
                 "--no-playlist",
                 "--no-warnings",
+                "--max-filesize",
+                "600M",
                 "-f",
                 "best[height<=1080][ext=mp4]/bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080]/best",
                 "--merge-output-format",
                 "mp4",
                 "-o",
                 &output_template,
+                "--",
                 &url_owned,
             ]);
             #[cfg(target_os = "windows")]
@@ -2348,11 +2398,30 @@ impl VideoPlatformResolver {
                 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
                 cmd.creation_flags(CREATE_NO_WINDOW);
             }
-            let status = cmd
+            let mut child = cmd
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
-                .status()
+                .spawn()
                 .ok()?;
+            let deadline = Instant::now() + Duration::from_secs(300);
+            let status = loop {
+                match child.try_wait() {
+                    Ok(Some(st)) => break st,
+                    Ok(None) => {
+                        if Instant::now() >= deadline {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            return None;
+                        }
+                        std::thread::sleep(Duration::from_millis(120));
+                    }
+                    Err(_) => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return None;
+                    }
+                }
+            };
             if !status.success() {
                 return None;
             }
@@ -2646,7 +2715,7 @@ pub async fn fetch_video_stream_chunk(
 
     let client = Client::builder()
         .timeout(Duration::from_secs(20))
-        .redirect(reqwest::redirect::Policy::limited(6))
+        .redirect(crate::net_safety::public_redirect_policy(6, true))
         .build()
         .unwrap_or_else(|_| Client::new());
 
@@ -2674,7 +2743,7 @@ pub async fn fetch_video_stream_chunk(
         .await
         .map_err(|e| VideoStreamProxyError::Upstream(format!("Stream upstream failed: {e}")))?;
 
-    if !SocialPostResolver::is_safe_public_media_url(resp.url()) {
+    if resp.url().scheme() != "https" || !SocialPostResolver::is_safe_public_media_url(resp.url()) {
         return Err(VideoStreamProxyError::Forbidden(
             "Redirected stream target blocked by SSRF guard",
         ));

@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { getTransport, isTauriRuntime } from './api/transport';
 import { Button, ModalShell, ToastHost } from './design-system';
+import { ErrorBoundary } from './design-system/ErrorBoundary';
 import { QuickCaptureModal } from './features/capture/QuickCaptureModal';
 import { PaneResizeDivider } from './features/chrome/PaneResizeDivider';
 import { Titlebar } from './features/chrome/Titlebar';
@@ -445,15 +446,8 @@ export const App: React.FC = () => {
         );
       },
       onDropAssetsToBoard: (boardId, assetIds) => {
-        const mb = useMoodboardStore.getState();
-        const coord = useCoordinatorStore.getState();
-        const boardTitle = mb.boards.find((b) => b.id === boardId)?.title ?? '情绪板';
-        void mb.addAssetsToBoard(boardId, assetIds).then(() => {
-          coord.pushToast({
-            message: `已加入情绪板「${boardTitle}」(${assetIds.length} 项)`,
-            tone: 'success',
-          });
-        });
+        // addAssetsToBoard already reports success/error toasts cleanly
+        void useMoodboardStore.getState().addAssetsToBoard(boardId, assetIds);
       },
     });
   }, []);
@@ -470,6 +464,7 @@ export const App: React.FC = () => {
       useCoordinatorStore.getState().openOnboarding();
     }
 
+    let disposed = false;
     let unlisten: (() => void) | null = null;
     void getTransport()
       .subscribeEvents({
@@ -617,6 +612,10 @@ export const App: React.FC = () => {
         },
       })
       .then((fn) => {
+        if (disposed) {
+          fn();
+          return;
+        }
         unlisten = fn;
       })
       .catch(() => {});
@@ -638,6 +637,7 @@ export const App: React.FC = () => {
     }
 
     return () => {
+      disposed = true;
       cancelLaunchUpdateCheck?.();
       unlisten?.();
     };
@@ -1177,6 +1177,7 @@ export const App: React.FC = () => {
       {/* Left Full-Height Mica Alt Navigation Rail (draggable 188–420px / 76px collapsed rail) */}
       <div
         aria-hidden={!sidebarOpen}
+        inert={!sidebarOpen}
         data-testid="sidebar-slot"
         style={{ width: sidebarEffectiveWidth }}
         className={[
@@ -1253,11 +1254,17 @@ export const App: React.FC = () => {
         <div className="charkle-gallery-surface rounded-tl-[8px] flex-1 min-w-0 min-h-0 flex overflow-hidden bg-[var(--bg-gallery)]">
           <div className="flex-1 min-w-0 min-h-0 h-full flex overflow-hidden">
             {isPinterestView ? (
-              <PinterestWorkspace />
+              <ErrorBoundary fullScreen={false} title="Pinterest 空间遇到意外中断">
+                <PinterestWorkspace />
+              </ErrorBoundary>
             ) : isMoodboardView ? (
-              <MoodboardsHome />
+              <ErrorBoundary fullScreen={false} title="情绪板视图遇到意外中断">
+                <MoodboardsHome />
+              </ErrorBoundary>
             ) : (
-              <GalleryView />
+              <ErrorBoundary fullScreen={false} title="素材画廊遇到意外中断">
+                <GalleryView />
+              </ErrorBoundary>
             )}
           </div>
 
@@ -1287,6 +1294,7 @@ export const App: React.FC = () => {
           {/* Right Draggable Inspector Slot (260–480px, default 300px, zero per-frame width transition) */}
           <div
             aria-hidden={!showMainInspector}
+            inert={!showMainInspector}
             data-testid="main-inspector-slot"
             style={{ width: showMainInspector ? inspectorEffectiveWidth : 0 }}
             className={[
@@ -1303,14 +1311,18 @@ export const App: React.FC = () => {
                 transition: isResizingPane === 'inspector' ? 'none' : undefined,
               }}
             >
-              <InspectorView />
+              <ErrorBoundary fullScreen={false} title="检查器遇到意外中断">
+                <InspectorView active={showMainInspector} />
+              </ErrorBoundary>
             </div>
           </div>
         </div>
       </div>
 
       <SmartDeduplicationModal />
-      <QuickLookOverlay />
+      <ErrorBoundary fullScreen={false} title="快速预览遇到意外中断">
+        <QuickLookOverlay />
+      </ErrorBoundary>
       <JumpAnywhereModal />
       <QuickCaptureModal />
       <MoodboardGeneratorModal

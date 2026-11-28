@@ -355,7 +355,6 @@ impl LiveCharkleEngine {
             .collect();
         let norm_full_query = search_text::normalize(trimmed);
 
-        let vectors = self.db.vectors().unwrap_or_default();
         let mut seed_assets = Vec::new();
         for &sid in seed_asset_ids {
             if let Some(a) = self.db.asset(sid)? {
@@ -369,6 +368,11 @@ impl LiveCharkleEngine {
             }
         }
         let need_visual = !seed_assets.is_empty() || !unlike_assets.is_empty();
+        let vectors = if need_visual {
+            self.db.vectors().unwrap_or_default()
+        } else {
+            HashMap::new()
+        };
         let descriptors = if need_visual {
             let mut all_for_desc = candidates.clone();
             all_for_desc.extend(seed_assets.iter().cloned());
@@ -1006,7 +1010,7 @@ impl LiveCharkleEngine {
                                 mapped_folder_id,
                             )
                             .await
-                    } else {
+                    } else if crate::net_safety::is_safe_public_url(bm_url, false) {
                         self.media
                             .ingest(
                                 CaptureInput::WebUrl {
@@ -1018,6 +1022,9 @@ impl LiveCharkleEngine {
                                 None,
                             )
                             .await
+                    } else {
+                        skipped_missing_count += 1;
+                        continue;
                     }
                 } else {
                     skipped_missing_count += 1;
@@ -2414,7 +2421,10 @@ impl LiveCharkleEngine {
             }
         }
 
-        if current.media_kind == MediaKind::WebBookmark && WebBookmarkResolver::is_web_url(&url) {
+        if current.media_kind == MediaKind::WebBookmark
+            && WebBookmarkResolver::is_web_url(&url)
+            && crate::net_safety::is_safe_public_url(&url, false)
+        {
             let bm =
                 WebBookmarkResolver::fetch_with_snapshot(&url, self.media.web_snapshotter()).await;
             let clean_domain = url

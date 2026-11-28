@@ -186,7 +186,10 @@ pub fn dib_bytes_to_png(dib: &[u8]) -> Result<(Vec<u8>, u32, u32), String> {
     }
     let top_down = height_i < 0;
 
-    // BI_RGB (0) or BI_BITFIELDS (3)
+    // Only BI_RGB (0) and BI_BITFIELDS (3) uncompressed layouts are supported.
+    if compression != 0 && compression != 3 {
+        return Err(format!("Unsupported DIB compression: {compression}"));
+    }
     let extra_masks = if compression == 3 && header_size == 40 {
         12usize
     } else {
@@ -285,14 +288,33 @@ pub fn dib_bytes_to_png(dib: &[u8]) -> Result<(Vec<u8>, u32, u32), String> {
     Ok((png, width, height))
 }
 
+#[cfg(target_os = "windows")]
+unsafe fn open_clipboard_with_retry() -> Result<(), String> {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::System::DataExchange::OpenClipboard;
+
+    let mut last_err = String::new();
+    for attempt in 0..5 {
+        match OpenClipboard(HWND::default()) {
+            Ok(()) => return Ok(()),
+            Err(err) => {
+                last_err = format!("OpenClipboard failed: {err}");
+                if attempt < 4 {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            }
+        }
+    }
+    Err(last_err)
+}
+
 /// Reads the current Windows clipboard snapshot (`CF_HDROP` -> `"PNG"` -> `CF_DIB` -> `CF_UNICODETEXT`).
 #[cfg(target_os = "windows")]
 pub fn read_current_clipboard() -> Result<Option<ClipboardSnapshot>, String> {
     use windows::core::w;
-    use windows::Win32::Foundation::{HGLOBAL, HWND};
+    use windows::Win32::Foundation::HGLOBAL;
     use windows::Win32::System::DataExchange::{
-        CloseClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,
-        RegisterClipboardFormatW,
+        CloseClipboard, GetClipboardData, IsClipboardFormatAvailable, RegisterClipboardFormatW,
     };
     use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
     use windows::Win32::System::Ole::{CF_DIB, CF_HDROP, CF_UNICODETEXT};
@@ -318,7 +340,7 @@ pub fn read_current_clipboard() -> Result<Option<ClipboardSnapshot>, String> {
 
     // SAFETY: Standard Win32 clipboard lock guarded by RAII `ClipboardGuard`.
     unsafe {
-        if OpenClipboard(HWND::default()).is_err() {
+        if open_clipboard_with_retry().is_err() {
             return Ok(None);
         }
         let _clip_guard = ClipboardGuard;
@@ -473,10 +495,9 @@ pub fn parse_png_dimensions(png: &[u8]) -> Option<(u32, u32)> {
 #[cfg(target_os = "windows")]
 pub fn read_current_clipboard_preview() -> Result<Option<ClipboardPreview>, String> {
     use windows::core::w;
-    use windows::Win32::Foundation::{HGLOBAL, HWND};
+    use windows::Win32::Foundation::HGLOBAL;
     use windows::Win32::System::DataExchange::{
-        CloseClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,
-        RegisterClipboardFormatW,
+        CloseClipboard, GetClipboardData, IsClipboardFormatAvailable, RegisterClipboardFormatW,
     };
     use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
     use windows::Win32::System::Ole::{CF_DIB, CF_HDROP, CF_UNICODETEXT};
@@ -502,7 +523,7 @@ pub fn read_current_clipboard_preview() -> Result<Option<ClipboardPreview>, Stri
 
     // SAFETY: Standard Win32 clipboard lock guarded by RAII `ClipboardGuard`.
     unsafe {
-        if OpenClipboard(HWND::default()).is_err() {
+        if open_clipboard_with_retry().is_err() {
             return Ok(None);
         }
         let _clip_guard = ClipboardGuard;
@@ -628,14 +649,23 @@ pub fn png_bytes_to_dib(png_bytes: &[u8]) -> Result<Vec<u8>, String> {
         .to_rgba8();
     let w = rgba.width();
     let h = rgba.height();
-    let mut dib = Vec::with_capacity(40 + (w as usize) * (h as usize) * 4);
+    if w == 0 || h == 0 || w > 16_384 || h > 16_384 {
+        return Err("PNG dimensions exceed safe clipboard DIB limits".to_string());
+    }
+    let pixel_bytes = (w as usize)
+        .checked_mul(h as usize)
+        .and_then(|px| px.checked_mul(4))
+        .ok_or_else(|| "PNG DIB byte length overflow".to_string())?;
+    let image_size_u32 =
+        u32::try_from(pixel_bytes).map_err(|_| "PNG DIB size exceeds u32 limit".to_string())?;
+    let mut dib = Vec::with_capacity(40usize.saturating_add(pixel_bytes));
     dib.extend_from_slice(&40u32.to_le_bytes()); // biSize
     dib.extend_from_slice(&(w as i32).to_le_bytes()); // biWidth
     dib.extend_from_slice(&(h as i32).to_le_bytes()); // biHeight (positive = bottom-up for max compatibility)
     dib.extend_from_slice(&1u16.to_le_bytes()); // biPlanes
     dib.extend_from_slice(&32u16.to_le_bytes()); // biBitCount
     dib.extend_from_slice(&0u32.to_le_bytes()); // BI_RGB
-    dib.extend_from_slice(&((w * h * 4) as u32).to_le_bytes()); // biSizeImage
+    dib.extend_from_slice(&image_size_u32.to_le_bytes()); // biSizeImage
     dib.extend_from_slice(&0i32.to_le_bytes()); // biXPelsPerMeter
     dib.extend_from_slice(&0i32.to_le_bytes()); // biYPelsPerMeter
     dib.extend_from_slice(&0u32.to_le_bytes()); // biClrUsed
@@ -659,10 +689,8 @@ pub fn png_bytes_to_dib(png_bytes: &[u8]) -> Result<Vec<u8>, String> {
 /// Figma, PowerPoint, Photoshop, and Explorer.
 #[cfg(target_os = "windows")]
 pub fn write_png_to_clipboard(png_bytes: &[u8]) -> Result<(), String> {
-    use windows::Win32::Foundation::{GlobalFree, HANDLE, HWND};
-    use windows::Win32::System::DataExchange::{
-        CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
-    };
+    use windows::Win32::Foundation::{GlobalFree, HANDLE};
+    use windows::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, SetClipboardData};
     use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
     use windows::Win32::System::Ole::CF_DIB;
 
@@ -679,7 +707,7 @@ pub fn write_png_to_clipboard(png_bytes: &[u8]) -> Result<(), String> {
 
     // SAFETY: Standard Win32 clipboard write sequence transferring owned HGLOBAL to OS on success.
     unsafe {
-        OpenClipboard(HWND::default()).map_err(|e| format!("OpenClipboard failed: {e}"))?;
+        open_clipboard_with_retry()?;
         let _guard = ClipboardGuard;
         EmptyClipboard().map_err(|e| format!("EmptyClipboard failed: {e}"))?;
 
@@ -706,6 +734,9 @@ pub fn write_png_to_clipboard(_png_bytes: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(target_os = "windows")]
+const CLIPBOARD_LISTENER_CLOSED: isize = -1;
+
 /// Handle stopping the background `AddClipboardFormatListener` message window on drop.
 pub struct ClipboardListenerHandle {
     hwnd_raw: Arc<AtomicIsize>,
@@ -715,10 +746,13 @@ impl Drop for ClipboardListenerHandle {
     fn drop(&mut self) {
         #[cfg(target_os = "windows")]
         {
-            let raw = self.hwnd_raw.swap(0, Ordering::SeqCst);
-            if raw != 0 {
+            let raw = self
+                .hwnd_raw
+                .swap(CLIPBOARD_LISTENER_CLOSED, Ordering::SeqCst);
+            if raw != 0 && raw != CLIPBOARD_LISTENER_CLOSED {
                 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
                 use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_CLOSE};
+                // SAFETY: `raw` is our owned message-only HWND registered by `start_clipboard_listener`.
                 unsafe {
                     let _ = PostMessageW(HWND(raw as *mut _), WM_CLOSE, WPARAM(0), LPARAM(0));
                 }
@@ -834,7 +868,15 @@ where
                 let raw_cb = Box::into_raw(boxed) as isize;
                 let _ = SetWindowLongPtrW(hwnd, GWLP_USERDATA, raw_cb);
                 let _ = AddClipboardFormatListener(hwnd);
-                hwnd_slot.store(hwnd.0 as isize, Ordering::SeqCst);
+                if hwnd_slot
+                    .compare_exchange(0, hwnd.0 as isize, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_err()
+                {
+                    // Handle was dropped before initialization finished; destroy HWND synchronously
+                    // so `WM_DESTROY` removes the listener and frees `raw_cb`.
+                    let _ = DestroyWindow(hwnd);
+                    return;
+                }
 
                 let mut msg = MSG::default();
                 while GetMessageW(&mut msg, HWND::default(), 0, 0).as_bool() {
@@ -860,9 +902,9 @@ pub fn copy_files_to_clipboard(paths: &[PathBuf]) -> Result<usize, String> {
     #[cfg(target_os = "windows")]
     {
         use crate::drag_out::build_hdrop_bytes;
-        use windows::Win32::Foundation::{GlobalFree, HANDLE, HWND};
+        use windows::Win32::Foundation::{GlobalFree, HANDLE};
         use windows::Win32::System::DataExchange::{
-            CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
+            CloseClipboard, EmptyClipboard, SetClipboardData,
         };
         use windows::Win32::System::Memory::{
             GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE,
@@ -887,7 +929,7 @@ pub fn copy_files_to_clipboard(paths: &[PathBuf]) -> Result<usize, String> {
 
         // SAFETY: Standard Win32 clipboard ownership transfer for CF_HDROP global buffer.
         unsafe {
-            OpenClipboard(HWND::default()).map_err(|e| format!("OpenClipboard failed: {e}"))?;
+            open_clipboard_with_retry()?;
             let result = (|| -> Result<usize, String> {
                 EmptyClipboard().map_err(|e| format!("EmptyClipboard failed: {e}"))?;
                 let hmem = GlobalAlloc(GMEM_MOVEABLE, hdrop_bytes.len())

@@ -21,6 +21,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use chrono::Utc;
 use serde_json::{json, Map, Value};
+use url::Url;
 use uuid::Uuid;
 
 use crate::agent::policy::ExternalAgentConfigStore;
@@ -843,10 +844,23 @@ impl CharkleExternalAgentService {
             );
         }
         let trimmed = raw_path.trim();
-        if trimmed.is_empty() {
-            return Err("`output_path` cannot be empty.".to_string());
+        if trimmed.is_empty()
+            || trimmed.chars().any(|c| c.is_control())
+            || trimmed.starts_with(r"\\")
+            || trimmed.starts_with("//")
+        {
+            return Err(
+                "`output_path` is empty, contains control characters, or points to a UNC path."
+                    .to_string(),
+            );
         }
         let path = PathBuf::from(trimmed);
+        if path
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            return Err("`output_path` cannot contain `..` path traversal segments.".to_string());
+        }
         let ext = path
             .extension()
             .and_then(|s| s.to_str())
@@ -858,13 +872,53 @@ impl CharkleExternalAgentService {
                 allowed_extensions.join(", ")
             ));
         }
-        let normalized_str = trimmed.replace('/', "\\").to_ascii_lowercase();
-        let data_dir_norm = self
-            .data_dir
+        let file_name = path
+            .file_name()
+            .ok_or_else(|| "`output_path` must include a file name.".to_string())?;
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+
+        // Canonicalize the nearest existing ancestor to defeat symlink and lexical traversal bypasses.
+        let mut probe = parent.to_path_buf();
+        let mut pending_tail: Vec<std::ffi::OsString> = Vec::new();
+        while !probe.exists() {
+            let Some(name) = probe.file_name() else {
+                break;
+            };
+            pending_tail.push(name.to_os_string());
+            let Some(next_parent) = probe.parent() else {
+                break;
+            };
+            probe = next_parent.to_path_buf();
+        }
+        let mut resolved = std::fs::canonicalize(&probe).unwrap_or(probe);
+        for seg in pending_tail.into_iter().rev() {
+            resolved.push(seg);
+        }
+        resolved.push(file_name);
+
+        let resolved_str = resolved
             .to_string_lossy()
             .replace('/', "\\")
             .to_ascii_lowercase();
-        if !data_dir_norm.is_empty() && normalized_str.starts_with(&data_dir_norm) {
+        if resolved_str.starts_with(r"\\?\unc\") {
+            return Err("`output_path` cannot target a remote UNC network share.".to_string());
+        }
+        let canon_data_dir = std::fs::canonicalize(&self.data_dir)
+            .unwrap_or_else(|_| self.data_dir.clone())
+            .to_string_lossy()
+            .replace('/', "\\")
+            .to_ascii_lowercase();
+        let norm_resolved = resolved_str.strip_prefix(r"\\?\").unwrap_or(&resolved_str);
+        let norm_data_dir = canon_data_dir
+            .strip_prefix(r"\\?\")
+            .unwrap_or(&canon_data_dir);
+        if !norm_data_dir.is_empty()
+            && (norm_resolved == norm_data_dir
+                || norm_resolved.starts_with(&format!("{norm_data_dir}\\")))
+        {
             return Err(
                 "`output_path` cannot write inside Charkle's managed library directory."
                     .to_string(),
@@ -873,17 +927,108 @@ impl CharkleExternalAgentService {
         for forbidden in [
             "\\.ssh\\",
             "\\.gnupg\\",
+            "\\.aws\\",
             "\\windows\\system32\\",
             "\\program files\\",
             "\\program files (x86)\\",
         ] {
-            if normalized_str.contains(forbidden) {
+            if norm_resolved.contains(forbidden) {
                 return Err(format!(
                     "`output_path` points to a protected system directory ({forbidden})."
                 ));
             }
         }
-        Ok(path)
+        Ok(resolved)
+    }
+
+    fn validate_agent_ingest_file_path(&self, raw: &str) -> Result<PathBuf, String> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty()
+            || trimmed.chars().any(|c| c.is_control())
+            || trimmed.starts_with(r"\\")
+            || trimmed.starts_with("//")
+        {
+            return Err("Rejected empty, malformed, or UNC file_path.".to_string());
+        }
+        let path = PathBuf::from(trimmed);
+        if path
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            return Err("`file_path` cannot contain `..` traversal segments.".to_string());
+        }
+        let canon = std::fs::canonicalize(&path)
+            .map_err(|_| format!("File not found or inaccessible: {trimmed}"))?;
+        let meta =
+            std::fs::metadata(&canon).map_err(|_| format!("Unable to inspect file: {trimmed}"))?;
+        if !meta.is_file() {
+            return Err("`file_path` must refer to a regular file.".to_string());
+        }
+        const MAX_AGENT_INGEST_BYTES: u64 = 256 * 1024 * 1024;
+        if meta.len() > MAX_AGENT_INGEST_BYTES {
+            return Err("`file_path` exceeds 256 MiB ingest limit.".to_string());
+        }
+        let canon_str = canon
+            .to_string_lossy()
+            .replace('/', "\\")
+            .to_ascii_lowercase();
+        if canon_str.starts_with(r"\\?\unc\") {
+            return Err("Remote UNC paths are forbidden for agent file ingest.".to_string());
+        }
+        let norm = canon_str.strip_prefix(r"\\?\").unwrap_or(&canon_str);
+        let canon_data_dir = std::fs::canonicalize(&self.data_dir)
+            .unwrap_or_else(|_| self.data_dir.clone())
+            .to_string_lossy()
+            .replace('/', "\\")
+            .to_ascii_lowercase();
+        let norm_data_dir = canon_data_dir
+            .strip_prefix(r"\\?\")
+            .unwrap_or(&canon_data_dir);
+        if !norm_data_dir.is_empty()
+            && (norm == norm_data_dir || norm.starts_with(&format!("{norm_data_dir}\\")))
+        {
+            return Err(
+                "Cannot ingest files from inside Charkle's managed data directory.".to_string(),
+            );
+        }
+        for forbidden in [
+            "\\.ssh\\",
+            "\\.gnupg\\",
+            "\\.aws\\",
+            "\\.kube\\",
+            "\\windows\\system32\\",
+            "\\windows\\syswow64\\",
+            "\\programdata\\microsoft\\",
+            "\\appdata\\local\\google\\chrome\\user data\\",
+            "\\appdata\\local\\microsoft\\edge\\user data\\",
+            "\\etc\\shadow",
+            "\\etc\\passwd",
+        ] {
+            if norm.contains(forbidden) {
+                return Err(format!(
+                    "`file_path` targets a protected system or credential path ({forbidden})."
+                ));
+            }
+        }
+        let file_name = canon
+            .file_name()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_ascii_lowercase())
+            .unwrap_or_default();
+        if file_name == ".env"
+            || file_name.starts_with(".env.")
+            || file_name == "id_rsa"
+            || file_name == "id_ed25519"
+            || file_name.ends_with(".pem")
+            || file_name.ends_with(".key")
+            || file_name.ends_with(".pfx")
+            || file_name.ends_with(".p12")
+        {
+            return Err(format!(
+                "Refused to ingest sensitive secret file `{file_name}`."
+            ));
+        }
+        Ok(canon)
     }
 
     // =========================================================================
@@ -3049,7 +3194,11 @@ impl CharkleExternalAgentService {
 
         let mut inputs = Vec::new();
         for fp in string_array_arg(args.get("file_paths")) {
-            inputs.push(CaptureInput::FilePath(PathBuf::from(fp)));
+            let safe_path = match self.validate_agent_ingest_file_path(&fp) {
+                Ok(p) => p,
+                Err(msg) => return Ok(ToolOutput::error(msg)),
+            };
+            inputs.push(CaptureInput::FilePath(safe_path));
         }
         if let Some(fp) = args
             .get("file_path")
@@ -3057,11 +3206,23 @@ impl CharkleExternalAgentService {
             .map(str::trim)
             .filter(|s| !s.is_empty())
         {
-            inputs.push(CaptureInput::FilePath(PathBuf::from(fp)));
+            let safe_path = match self.validate_agent_ingest_file_path(fp) {
+                Ok(p) => p,
+                Err(msg) => return Ok(ToolOutput::error(msg)),
+            };
+            inputs.push(CaptureInput::FilePath(safe_path));
         }
         for url in string_array_arg(args.get("web_urls")) {
+            let Ok(parsed) = Url::parse(url.trim()) else {
+                return Ok(ToolOutput::error(format!("Invalid web URL: {url}")));
+            };
+            if !crate::net_safety::is_safe_public_url(&parsed, false) {
+                return Ok(ToolOutput::error(format!(
+                    "Rejected unsafe or non-public web URL: {url}"
+                )));
+            }
             inputs.push(CaptureInput::WebUrl {
-                url,
+                url: parsed.to_string(),
                 title: None,
                 notes: None,
             });
@@ -3073,8 +3234,16 @@ impl CharkleExternalAgentService {
             .map(str::trim)
             .filter(|s| !s.is_empty())
         {
+            let Ok(parsed) = Url::parse(url) else {
+                return Ok(ToolOutput::error(format!("Invalid web URL: {url}")));
+            };
+            if !crate::net_safety::is_safe_public_url(&parsed, false) {
+                return Ok(ToolOutput::error(format!(
+                    "Rejected unsafe or non-public web URL: {url}"
+                )));
+            }
             inputs.push(CaptureInput::WebUrl {
-                url: url.to_string(),
+                url: parsed.to_string(),
                 title: args
                     .get("title")
                     .and_then(Value::as_str)

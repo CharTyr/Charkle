@@ -789,12 +789,12 @@ impl DriveSyncEngine {
                 .await?;
             report.downloaded_ops += pulled_after;
             changed_boards.extend(boards_after);
-        } else if options.defer_op_pruning {
+        } else if options.defer_op_pruning && cutoff > cursor_seq {
             if let Some(ref key) = op_cursor_key {
-                let latest_seq = self.db.max_pending_op_seq().unwrap_or(cursor_seq);
-                if latest_seq > cursor_seq {
-                    let _ = self.db.set_state(key, Some(&latest_seq));
-                }
+                // Only advance to `cutoff` (the snapshot upper bound actually evaluated this cycle),
+                // NEVER to `max_pending_op_seq()`, so concurrent local edits recorded during upload
+                // remain queued for the next sync pass instead of being silently skipped.
+                let _ = self.db.set_state(key, Some(&cutoff));
             }
         }
 
@@ -1088,7 +1088,10 @@ impl DriveSyncEngine {
                 let short_id = asset_id_str[..8].to_lowercase();
                 if let Some(matched) = existing_files.iter().find(|f| {
                     !f.is_folder()
-                        && (f.name == safe_name || f.name.to_lowercase().contains(&short_id))
+                        && (f.name.to_lowercase().contains(&short_id)
+                            || (f.name == safe_name
+                                && asset.file_size_bytes > 0
+                                && f.size == Some(asset.file_size_bytes)))
                 }) {
                     remote_assets.insert(asset_id_str, matched.id.clone());
                     continue;

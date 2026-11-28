@@ -68,6 +68,26 @@ impl FsTransportCore {
             .trim_matches('/')
     }
 
+    fn ensure_within_root(&self, candidate: &Path) -> CoreResult<()> {
+        let root_canon = fs::canonicalize(&self.root_dir).unwrap_or_else(|_| self.root_dir.clone());
+        let mut probe = candidate.to_path_buf();
+        while !probe.exists() {
+            let Some(parent) = probe.parent() else {
+                break;
+            };
+            probe = parent.to_path_buf();
+        }
+        if probe.exists() {
+            let probe_canon = fs::canonicalize(&probe).unwrap_or(probe);
+            if !probe_canon.starts_with(&root_canon) {
+                return Err(CoreError::InvalidOperation(
+                    "Rejected sync path escaping root directory via symlink.".to_string(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     fn resolve_path(&self, id: &str) -> CoreResult<PathBuf> {
         let rel = self.strip_prefix(id);
         let mut path = self.root_dir.clone();
@@ -86,6 +106,22 @@ impl FsTransportCore {
                 }
                 path.push(seg);
             }
+        }
+        self.ensure_within_root(&path)?;
+        Ok(path)
+    }
+
+    fn resolve_non_root_path(&self, id: &str) -> CoreResult<PathBuf> {
+        if id == DRIVE_ROOT_ID || self.strip_prefix(id).is_empty() {
+            return Err(CoreError::InvalidOperation(
+                "Refusing to modify or delete sync root directory.".to_string(),
+            ));
+        }
+        let path = self.resolve_path(id)?;
+        if path == self.root_dir {
+            return Err(CoreError::InvalidOperation(
+                "Refusing to modify or delete sync root directory.".to_string(),
+            ));
         }
         Ok(path)
     }
@@ -334,9 +370,10 @@ impl DriveTransport for LocalFolderTransport {
         self.core.ensure_available()?;
         let disk_name = sanitize_windows_filename(name);
         let target = match existing_file_id {
-            Some(eid) => self.core.resolve_path(eid)?,
+            Some(eid) => self.core.resolve_non_root_path(eid)?,
             None => self.core.resolve_path(parent_id)?.join(&disk_name),
         };
+        self.core.ensure_within_root(&target)?;
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -379,7 +416,7 @@ impl DriveTransport for LocalFolderTransport {
         new_name: Option<&str>,
     ) -> CoreResult<RemoteDriveFile> {
         self.core.ensure_available()?;
-        let src = self.core.resolve_path(file_id)?;
+        let src = self.core.resolve_non_root_path(file_id)?;
         if !src.exists() {
             return Err(CoreError::NotFound(file_id.to_string()));
         }
@@ -398,6 +435,7 @@ impl DriveTransport for LocalFolderTransport {
         let dst_parent = self.core.resolve_path(to_parent_id)?;
         fs::create_dir_all(&dst_parent)?;
         let dst = dst_parent.join(&disk_name);
+        self.core.ensure_within_root(&dst)?;
         if src != dst {
             fs::rename(&src, &dst)?;
         }
@@ -406,7 +444,7 @@ impl DriveTransport for LocalFolderTransport {
 
     async fn trash_file(&self, file_id: &str) -> CoreResult<()> {
         self.core.ensure_available()?;
-        let path = self.core.resolve_path(file_id)?;
+        let path = self.core.resolve_non_root_path(file_id)?;
         if !path.exists() {
             return Ok(());
         }
@@ -540,9 +578,10 @@ impl DriveTransport for MountedVolumeTransport {
         self.core.ensure_available()?;
         let disk_name = sanitize_windows_filename(name);
         let target = match existing_file_id {
-            Some(eid) => self.core.resolve_path(eid)?,
+            Some(eid) => self.core.resolve_non_root_path(eid)?,
             None => self.core.resolve_path(parent_id)?.join(&disk_name),
         };
+        self.core.ensure_within_root(&target)?;
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -576,7 +615,7 @@ impl DriveTransport for MountedVolumeTransport {
         new_name: Option<&str>,
     ) -> CoreResult<RemoteDriveFile> {
         self.core.ensure_available()?;
-        let src = self.core.resolve_path(file_id)?;
+        let src = self.core.resolve_non_root_path(file_id)?;
         if !src.exists() {
             return Err(CoreError::NotFound(file_id.to_string()));
         }
@@ -595,6 +634,7 @@ impl DriveTransport for MountedVolumeTransport {
         let dst_parent = self.core.resolve_path(to_parent_id)?;
         fs::create_dir_all(&dst_parent)?;
         let dst = dst_parent.join(&disk_name);
+        self.core.ensure_within_root(&dst)?;
         if src != dst {
             fs::rename(&src, &dst)?;
         }
@@ -603,7 +643,7 @@ impl DriveTransport for MountedVolumeTransport {
 
     async fn trash_file(&self, file_id: &str) -> CoreResult<()> {
         self.core.ensure_available()?;
-        let path = self.core.resolve_path(file_id)?;
+        let path = self.core.resolve_non_root_path(file_id)?;
         if !path.exists() {
             return Ok(());
         }

@@ -273,9 +273,17 @@ export const AISettingsPane: React.FC = () => {
   const hasTypeSafeKey = typesafeState?.hasApiKey ?? false;
   const usage = aiState?.usage;
 
-  const isLocalOllama =
-    aiDraft.provider === 'openAICompatible' &&
-    (aiDraft.baseURL.toLowerCase().includes('localhost') || aiDraft.baseURL.includes('127.0.0.1'));
+  const isLocalOllama = (() => {
+    if (aiDraft.provider !== 'openAICompatible') return false;
+    try {
+      const parsed = new URL(aiDraft.baseURL.trim());
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+      const host = parsed.hostname.toLowerCase();
+      return host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '[::1]';
+    } catch {
+      return false;
+    }
+  })();
 
   const isCloudProviderReady = (() => {
     switch (aiDraft.provider) {

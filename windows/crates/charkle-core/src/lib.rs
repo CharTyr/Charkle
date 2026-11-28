@@ -12,6 +12,7 @@ pub mod intelligence;
 pub mod layout;
 pub mod media;
 pub mod models;
+pub mod net_safety;
 pub mod pinterest;
 pub mod sync;
 pub mod traits;

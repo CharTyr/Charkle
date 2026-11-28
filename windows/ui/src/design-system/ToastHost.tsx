@@ -17,9 +17,12 @@ const ToastCard: React.FC<{
   onDismiss: (id: string) => void;
 }> = ({ toast, onDismiss }) => {
   const duration = toast.durationMs ?? (toast.actionLabel ? 4800 : 2800);
-  const [paused, setPaused] = useState(false);
+  const hasActionRing = Boolean(toast.actionLabel);
   const [hovered, setHovered] = useState(false);
+  const [focused, setFocused] = useState(false);
+  const paused = hovered || focused;
   const [remainingMs, setRemainingMs] = useState(duration);
+  const remainingRef = useRef<number>(duration);
   const lastTickRef = useRef<number>(Date.now());
   const dismissedRef = useRef(false);
 
@@ -31,26 +34,41 @@ const ToastCard: React.FC<{
 
   useEffect(() => {
     if (paused || dismissedRef.current) return;
-    lastTickRef.current = Date.now();
-    const interval = window.setInterval(() => {
-      const now = Date.now();
-      const dt = now - lastTickRef.current;
-      lastTickRef.current = now;
-      setRemainingMs((prev) => Math.max(0, prev - dt));
-    }, 50);
-    return () => window.clearInterval(interval);
-  }, [paused]);
+    const startedAt = Date.now();
+    lastTickRef.current = startedAt;
 
-  useEffect(() => {
-    if (remainingMs === 0 && !dismissedRef.current) {
-      dismissedRef.current = true;
-      onDismiss(toast.id);
+    if (hasActionRing) {
+      const interval = window.setInterval(() => {
+        const now = Date.now();
+        const dt = now - lastTickRef.current;
+        lastTickRef.current = now;
+        remainingRef.current = Math.max(0, remainingRef.current - dt);
+        setRemainingMs(remainingRef.current);
+        if (remainingRef.current === 0 && !dismissedRef.current) {
+          dismissedRef.current = true;
+          onDismiss(toast.id);
+        }
+      }, 50);
+      return () => window.clearInterval(interval);
     }
-  }, [remainingMs, onDismiss, toast.id]);
+
+    // Plain toast without visual countdown ring: single one-shot timer (zero 20Hz re-renders)
+    const timer = window.setTimeout(() => {
+      if (!dismissedRef.current) {
+        dismissedRef.current = true;
+        onDismiss(toast.id);
+      }
+    }, Math.max(0, remainingRef.current));
+    return () => {
+      window.clearTimeout(timer);
+      const elapsed = Date.now() - startedAt;
+      remainingRef.current = Math.max(0, remainingRef.current - elapsed);
+    };
+  }, [paused, hasActionRing, onDismiss, toast.id]);
 
   const progress = Math.max(0, Math.min(1, remainingMs / Math.max(1, duration)));
   const dashOffset = RING_CIRCUMFERENCE * (1 - progress);
-  const showClose = Boolean(toast.actionLabel) || hovered;
+  const showClose = hasActionRing || hovered;
 
   return (
     <m.div
@@ -58,16 +76,10 @@ const ToastCard: React.FC<{
       initial={{ opacity: 0, y: -8, scale: 0.96 }}
       animate={{ opacity: 1, y: 0, scale: 1, transition: WIN_TRANSITION_FAST }}
       exit={{ opacity: 0, scale: 0.96, transition: WIN_TRANSITION_EXIT }}
-      onMouseEnter={() => {
-        setHovered(true);
-        setPaused(true);
-      }}
-      onMouseLeave={() => {
-        setHovered(false);
-        setPaused(false);
-      }}
-      onFocus={() => setPaused(true)}
-      onBlur={() => setPaused(false)}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      onFocus={() => setFocused(true)}
+      onBlur={() => setFocused(false)}
       onKeyDown={(e) => {
         if (e.key === 'Escape') {
           e.stopPropagation();

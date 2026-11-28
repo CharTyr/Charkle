@@ -322,6 +322,10 @@ struct RawV1ImageItem {
     child_notes: Vec<PureRefTextNote>,
 }
 
+const MAX_PUREREF_FILE_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_PUREREF_TOTAL_BLOB_BYTES: usize = 512 * 1024 * 1024;
+const MAX_PUREREF_NOTE_DEPTH: usize = 64;
+
 pub struct PureRefCodec;
 
 impl PureRefCodec {
@@ -332,6 +336,13 @@ impl PureRefCodec {
     }
 
     pub fn decode_path(path: &Path) -> CoreResult<PureRefScene> {
+        let meta = fs::metadata(path)?;
+        if meta.len() > MAX_PUREREF_FILE_BYTES {
+            return Err(CoreError::Media(format!(
+                "PureRef (.pur) 场景文件过大（{} 字节，超过安全限制）",
+                meta.len()
+            )));
+        }
         let data = fs::read(path)?;
         let source_name = path
             .file_stem()
@@ -479,7 +490,7 @@ impl PureRefCodec {
                 && cursor + 12 + type_len <= search_limit
                 && bytes[(cursor + 12)..(cursor + 12 + type_len)] == txt_type[..]
             {
-                let Some(parsed) = Self::parse_v1_text_item(bytes, &mut cursor, search_limit)
+                let Some(parsed) = Self::parse_v1_text_item(bytes, &mut cursor, search_limit, 0)
                 else {
                     break;
                 };
@@ -504,17 +515,23 @@ impl PureRefCodec {
         let mut image_index_by_primary_id: HashMap<u32, usize> = HashMap::new();
         let mut image_index_by_start_offset: HashMap<usize, usize> = HashMap::new();
         let mut blobs: Vec<PureRefImageBlob> = Vec::new();
+        let mut total_blob_bytes: usize = 0;
         let mut skipped_missing_links = 0usize;
 
         for raw in &raw_images {
             let Some(&(start, end)) = ref_by_transform_id.get(&raw.id) else {
                 continue;
             };
-            if end.saturating_sub(start) <= 4 {
+            let span_len = end.saturating_sub(start);
+            if span_len <= 4 {
                 continue;
             }
             if let Some(&existing_idx) = image_index_by_start_offset.get(&start) {
                 image_index_by_primary_id.insert(raw.id, existing_idx);
+                continue;
+            }
+            if total_blob_bytes.saturating_add(span_len) > MAX_PUREREF_TOTAL_BLOB_BYTES {
+                skipped_missing_links += 1;
                 continue;
             }
             let blob_data = bytes[start..end].to_vec();
@@ -524,6 +541,7 @@ impl PureRefCodec {
             let Some((w, h)) = Self::inspect_image_dimensions(&blob_data) else {
                 continue;
             };
+            total_blob_bytes = total_blob_bytes.saturating_add(blob_data.len());
             let idx = blobs.len();
             blobs.push(PureRefImageBlob {
                 index: idx,
@@ -546,40 +564,10 @@ impl PureRefCodec {
                     if end.saturating_sub(start) == 4 {
                         let ref_val = read_u32_be(bytes, start);
                         if ref_val == 0xFFFF_FFFF {
-                            if let Some(ref src_path) = raw.source {
-                                let p = Path::new(src_path);
-                                if !src_path.is_empty()
-                                    && src_path != "BruteForceLoaded"
-                                    && p.is_file()
-                                {
-                                    if let Ok(linked_data) = fs::read(p) {
-                                        if let (Some(fmt), Some((w, h))) = (
-                                            Self::detect_image_format(&linked_data),
-                                            Self::inspect_image_dimensions(&linked_data),
-                                        ) {
-                                            let idx = blobs.len();
-                                            blobs.push(PureRefImageBlob {
-                                                index: idx,
-                                                data: linked_data,
-                                                format: fmt,
-                                                pixel_width: w,
-                                                pixel_height: h,
-                                                source_path: Some(src_path.clone()),
-                                                display_name: raw.name.clone(),
-                                            });
-                                            resolved_idx = Some(idx);
-                                        } else {
-                                            skipped_missing_links += 1;
-                                        }
-                                    } else {
-                                        skipped_missing_links += 1;
-                                    }
-                                } else {
-                                    skipped_missing_links += 1;
-                                }
-                            } else {
-                                skipped_missing_links += 1;
-                            }
+                            // Security: never auto-read arbitrary external local or UNC/SMB paths
+                            // referenced by an untrusted `.pur` scene file (prevents local file
+                            // exfiltration and NTLM credential leaks over UNC paths).
+                            skipped_missing_links += 1;
                         } else {
                             resolved_idx = image_index_by_primary_id.get(&ref_val).copied();
                         }
@@ -741,7 +729,7 @@ impl PureRefCodec {
         let mut children = Vec::new();
         if child_count > 0 && child_count <= 256 {
             for _ in 0..child_count {
-                let Some(child) = Self::parse_v1_text_item(bytes, cursor, limit) else {
+                let Some(child) = Self::parse_v1_text_item(bytes, cursor, limit, 1) else {
                     break;
                 };
                 children.push(child);
@@ -767,8 +755,9 @@ impl PureRefCodec {
         bytes: &[u8],
         cursor: &mut usize,
         limit: usize,
+        depth: usize,
     ) -> Option<PureRefTextNote> {
-        if *cursor + 12 > limit {
+        if depth >= MAX_PUREREF_NOTE_DEPTH || *cursor + 12 > limit {
             return None;
         }
         let end_address = usize::try_from(read_u64_be(bytes, *cursor)).unwrap_or(0);
@@ -811,9 +800,9 @@ impl PureRefCodec {
 
         *cursor = end_address;
         let mut children = Vec::new();
-        if child_count > 0 && child_count <= 128 {
+        if child_count > 0 && child_count <= 128 && depth + 1 < MAX_PUREREF_NOTE_DEPTH {
             for _ in 0..child_count {
-                let Some(child) = Self::parse_v1_text_item(bytes, cursor, limit) else {
+                let Some(child) = Self::parse_v1_text_item(bytes, cursor, limit, depth + 1) else {
                     break;
                 };
                 children.push(child);
@@ -1095,15 +1084,20 @@ impl PureRefCodec {
             }
         }
 
-        fn count_notes(list: &[PureRefTextNote]) -> u32 {
-            list.iter().map(|n| 1 + count_notes(&n.child_notes)).sum()
+        fn count_notes(list: &[PureRefTextNote], depth: usize) -> u32 {
+            if depth >= MAX_PUREREF_NOTE_DEPTH {
+                return 0;
+            }
+            list.iter()
+                .map(|n| 1u32.saturating_add(count_notes(&n.child_notes, depth + 1)))
+                .fold(0u32, u32::saturating_add)
         }
 
         let total_child_notes: u32 = ordered_placement_indices
             .iter()
-            .map(|&p_idx| count_notes(&scene.placements[p_idx].child_notes))
-            .sum();
-        let total_root_notes = count_notes(&scene.notes);
+            .map(|&p_idx| count_notes(&scene.placements[p_idx].child_notes, 0))
+            .fold(0u32, u32::saturating_add);
+        let total_root_notes = count_notes(&scene.notes, 0);
         let image_transform_count = ordered_placement_indices.len() as u32;
         let total_id_count = image_transform_count + total_child_notes + total_root_notes;
 
@@ -1661,7 +1655,11 @@ impl PureRefCodec {
             nodes: &mut Vec<BoardNode>,
             order_counter: &mut i32,
             note_count: &mut usize,
+            depth: usize,
         ) {
+            if depth >= MAX_PUREREF_NOTE_DEPTH {
+                return;
+            }
             for note in list {
                 let clean = note.text.trim();
                 let ncx = note.center_x * layout_scale + parent_offset_x;
@@ -1701,6 +1699,7 @@ impl PureRefCodec {
                         nodes,
                         order_counter,
                         note_count,
+                        depth + 1,
                     );
                 }
             }
@@ -1715,6 +1714,7 @@ impl PureRefCodec {
             &mut nodes,
             &mut order_counter,
             &mut note_count,
+            0,
         );
 
         let mut sorted_indices: Vec<usize> = (0..nodes.len()).collect();

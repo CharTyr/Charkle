@@ -36,6 +36,58 @@ const PINTEREST_ORIGIN: &str = "https://www.pinterest.com/";
 const PINTEREST_LOGIN_URL: &str = "https://www.pinterest.com/login/";
 const PINTEREST_BROWSER_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
+const PINTEREST_ALLOWED_DOMAINS: &[&str] = &[
+    "pinterest.com",
+    "pinterest.co.uk",
+    "pinterest.jp",
+    "pinterest.de",
+    "pinterest.fr",
+    "pinterest.es",
+    "pinterest.it",
+    "pinterest.ca",
+    "pinterest.com.au",
+    "pinterest.com.mx",
+    "pinterest.com.br",
+    "pinterest.ph",
+    "pinterest.pt",
+    "pinterest.se",
+    "pinterest.ch",
+    "pinterest.at",
+    "pinterest.cl",
+    "pinterest.ie",
+    "pinterest.nz",
+    "pinterest.dk",
+    "pinterest.co.kr",
+    "pinterest.ru",
+    "pinterest.tw",
+    "pinterest.nl",
+    "pinterest.be",
+    "pinterest.pl",
+    "pinterest.in",
+    "pinterest.co.in",
+    "pinterest.sg",
+    "pinterest.hk",
+];
+
+fn is_pinterest_host(raw_host: &str) -> bool {
+    let host = raw_host.trim().trim_end_matches('.').to_ascii_lowercase();
+    PINTEREST_ALLOWED_DOMAINS.iter().any(|domain| {
+        host == *domain
+            || (host.len() > domain.len()
+                && host.ends_with(domain)
+                && host.as_bytes()[host.len() - domain.len() - 1] == b'.')
+    })
+}
+
+fn is_safe_pinterest_token(raw: &str) -> bool {
+    !raw.is_empty()
+        && raw.len() <= 128
+        && !raw.contains("..")
+        && raw
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
+}
+
 #[derive(Debug, Deserialize)]
 struct RpcWireMessage {
     #[serde(rename = "__charklePinRpc")]
@@ -115,7 +167,8 @@ impl PinterestSessionBridge {
                 let url = payload.url();
                 let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
                 let path = url.path().to_ascii_lowercase();
-                if host.contains("pinterest.")
+                if url.scheme() == "https"
+                    && is_pinterest_host(&host)
                     && !path.contains("/login")
                     && !path.contains("/oauth")
                     && !path.contains("/connect")
@@ -398,6 +451,11 @@ impl PinterestSessionBridge {
         if clean_user.is_empty() {
             return Ok(Vec::new());
         }
+        if !is_safe_pinterest_token(clean_user) {
+            return Err(CoreError::InvalidPayload(
+                "Invalid Pinterest username".to_string(),
+            ));
+        }
 
         let mut all_boards: Vec<PinterestBoard> = Vec::new();
         let mut seen_ids: HashSet<String> = HashSet::new();
@@ -504,6 +562,11 @@ impl PinterestSessionBridge {
         &self,
         pin: &PinterestPin,
     ) -> CoreResult<PinterestPinDetailResult> {
+        if !is_safe_pinterest_token(pin.id.trim()) {
+            return Err(CoreError::InvalidPayload(
+                "Invalid Pinterest pin ID".to_string(),
+            ));
+        }
         let mut detailed = pin.clone();
         if let Ok((status, data)) = self
             .fetch_resource_raw(
@@ -544,7 +607,12 @@ impl PinterestSessionBridge {
         bookmark: Option<&str>,
         page_size: usize,
     ) -> CoreResult<PinterestFeedPage> {
-        let source_url = format!("/pin/{}/", pin.id);
+        if !is_safe_pinterest_token(pin.id.trim()) {
+            return Err(CoreError::InvalidPayload(
+                "Invalid Pinterest pin ID".to_string(),
+            ));
+        }
+        let source_url = format!("/pin/{}/", pin.id.trim());
 
         // 1. Primary: RelatedModulesResource
         let mut primary_opts = Map::new();
@@ -830,15 +898,37 @@ impl PinterestSessionBridge {
         let dispatch = win.with_webview(move |platform_wv| {
             let controller = platform_wv.controller();
             let result = (|| -> Result<(), String> {
+                // SAFETY: Running inside Tauri's `with_webview` callback on the UI STA thread.
                 let core = unsafe { controller.CoreWebView2() }.map_err(|e| e.to_string())?;
                 if let Ok(core8) = core.cast::<ICoreWebView2_8>() {
+                    // SAFETY: `core8` is a valid `ICoreWebView2_8` interface on the UI thread.
                     let _ = unsafe { core8.SetIsMuted(true) };
                 }
 
                 let pending_cb = Arc::clone(&pending);
                 let handler = WebMessageReceivedEventHandler::create(Box::new(move |_wv, args| {
                     if let Some(args) = args {
+                        // Strictly verify that the WebMessage originated from an HTTPS Pinterest origin.
+                        let mut source_ptr = PWSTR::null();
+                        let source_allowed = if unsafe { args.Source(&mut source_ptr) }.is_ok()
+                            && !source_ptr.is_null()
+                        {
+                            // SAFETY: `source_ptr` was allocated by WebView2 via CoTaskMemAlloc.
+                            let source_url = unsafe { source_ptr.to_string() }.unwrap_or_default();
+                            unsafe { CoTaskMemFree(Some(source_ptr.0 as _)) };
+                            Url::parse(&source_url).ok().is_some_and(|u| {
+                                u.scheme() == "https"
+                                    && is_pinterest_host(u.host_str().unwrap_or_default())
+                            })
+                        } else {
+                            false
+                        };
+                        if !source_allowed {
+                            return Ok(());
+                        }
+
                         let mut raw = PWSTR::null();
+                        // SAFETY: `raw` receives a CoTaskMem-allocated UTF-16 string freed immediately below.
                         if unsafe { args.TryGetWebMessageAsString(&mut raw) }.is_ok()
                             && !raw.is_null()
                         {
@@ -863,6 +953,7 @@ impl PinterestSessionBridge {
                 }));
 
                 let mut token: i64 = 0;
+                // SAFETY: `handler` is a COM-refcounted WebView2 callback kept alive by `core`.
                 unsafe { core.add_WebMessageReceived(&handler, &mut token) }
                     .map_err(|e| e.to_string())?;
                 Ok(())
@@ -904,11 +995,27 @@ impl PinterestSessionBridge {
         use webview2_com::ExecuteScriptCompletedHandler;
         use windows::core::HSTRING;
 
+        struct PendingRpcGuard {
+            pending: Arc<Mutex<HashMap<String, oneshot::Sender<RpcReply>>>>,
+            req_id: String,
+        }
+        impl Drop for PendingRpcGuard {
+            fn drop(&mut self) {
+                if let Ok(mut map) = self.pending.lock() {
+                    map.remove(&self.req_id);
+                }
+            }
+        }
+
         let req_id = Uuid::new_v4().simple().to_string();
         let (tx, rx) = oneshot::channel::<RpcReply>();
         if let Ok(mut map) = self.pending_rpc.lock() {
             map.insert(req_id.clone(), tx);
         }
+        let _pending_guard = PendingRpcGuard {
+            pending: Arc::clone(&self.pending_rpc),
+            req_id: req_id.clone(),
+        };
 
         let req_id_json =
             serde_json::to_string(&req_id).map_err(|e| CoreError::InvalidPayload(e.to_string()))?;
@@ -935,18 +1042,49 @@ impl PinterestSessionBridge {
         );
 
         let script_hstring = HSTRING::from(wrapped);
+        let pending_for_exec = Arc::clone(&self.pending_rpc);
+        let req_id_for_exec = req_id.clone();
         let dispatch_err = win.with_webview(move |platform_wv| {
             let controller = platform_wv.controller();
-            if let Ok(core) = unsafe { controller.CoreWebView2() } {
-                let noop = ExecuteScriptCompletedHandler::create(Box::new(|_hr, _res| Ok(())));
-                let _ = unsafe { core.ExecuteScript(&script_hstring, &noop) };
+            let fail_pending = |msg: String| {
+                if let Ok(mut map) = pending_for_exec.lock() {
+                    if let Some(sender) = map.remove(&req_id_for_exec) {
+                        let _ = sender.send(RpcReply {
+                            status: 0,
+                            body: String::new(),
+                            error: Some(msg),
+                        });
+                    }
+                }
+            };
+            // SAFETY: Executing on the WebView2 UI thread inside `with_webview`.
+            let Ok(core) = (unsafe { controller.CoreWebView2() }) else {
+                fail_pending("CoreWebView2 unavailable".to_string());
+                return;
+            };
+            let pending_cb = Arc::clone(&pending_for_exec);
+            let req_id_cb = req_id_for_exec.clone();
+            let handler = ExecuteScriptCompletedHandler::create(Box::new(move |hr, _res| {
+                if let Err(err) = hr {
+                    if let Ok(mut map) = pending_cb.lock() {
+                        if let Some(sender) = map.remove(&req_id_cb) {
+                            let _ = sender.send(RpcReply {
+                                status: 0,
+                                body: String::new(),
+                                error: Some(format!("ExecuteScript failed: {err}")),
+                            });
+                        }
+                    }
+                }
+                Ok(())
+            }));
+            // SAFETY: `script_hstring` and `handler` stay valid for the `ExecuteScript` call.
+            if let Err(err) = unsafe { core.ExecuteScript(&script_hstring, &handler) } {
+                fail_pending(format!("ExecuteScript dispatch failed: {err}"));
             }
         });
 
         if let Err(err) = dispatch_err {
-            if let Ok(mut map) = self.pending_rpc.lock() {
-                map.remove(&req_id);
-            }
             return Err(CoreError::InvalidOperation(format!(
                 "无法执行 Pinterest 页面脚本：{err}"
             )));
@@ -957,14 +1095,9 @@ impl PinterestSessionBridge {
             Ok(Err(_)) => Err(CoreError::InvalidOperation(
                 "Pinterest 会话桥在等待响应时关闭".to_string(),
             )),
-            Err(_) => {
-                if let Ok(mut map) = self.pending_rpc.lock() {
-                    map.remove(&req_id);
-                }
-                Err(CoreError::InvalidOperation(
-                    "Pinterest 请求超时，请检查网络连接后重试".to_string(),
-                ))
-            }
+            Err(_) => Err(CoreError::InvalidOperation(
+                "Pinterest 请求超时，请检查网络连接后重试".to_string(),
+            )),
         }
     }
 

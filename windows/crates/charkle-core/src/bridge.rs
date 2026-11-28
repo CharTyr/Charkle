@@ -44,6 +44,7 @@ pub const FALLBACK_EXTENSION_BRIDGE_PORT_COUNT: u16 = 10;
 const BRIDGE_CONFIG_FILE: &str = "extension-bridge.json";
 const MAX_REQUEST_BODY_BYTES: usize = 48 * 1024 * 1024;
 const MAX_HEADER_BYTES: usize = 64 * 1024;
+const MAX_CONCURRENT_BRIDGE_CONNECTIONS: usize = 64;
 const CONNECTION_IO_TIMEOUT: Duration = Duration::from_secs(30);
 const MUTATION_DEBOUNCE_DELAY: Duration = Duration::from_millis(450);
 
@@ -53,7 +54,9 @@ const MUTATION_DEBOUNCE_DELAY: Duration = Duration::from_millis(450);
 pub struct ExtensionBridgeConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
-    #[serde(default = "default_true")]
+    /// Explicit opt-in for zero-config same-machine browser-extension auto-pairing (default `false`
+    /// so local processes cannot silently harvest the Bearer token without user consent).
+    #[serde(default)]
     pub allow_local_auto_pair: bool,
     #[serde(default)]
     pub access_token: String,
@@ -67,7 +70,7 @@ impl Default for ExtensionBridgeConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            allow_local_auto_pair: true,
+            allow_local_auto_pair: false,
             access_token: Self::generate_token(),
         }
     }
@@ -102,17 +105,9 @@ impl ExtensionBridgeConfig {
 
     /// Atomically persists `<data_dir>/extension-bridge.json`.
     pub fn save(&self, data_dir: &Path) -> CoreResult<()> {
-        std::fs::create_dir_all(data_dir)?;
         let path = data_dir.join(BRIDGE_CONFIG_FILE);
-        let tmp = data_dir.join(format!("{BRIDGE_CONFIG_FILE}.tmp"));
         let bytes = serde_json::to_vec_pretty(self)?;
-        std::fs::write(&tmp, bytes)?;
-        if std::fs::rename(&tmp, &path).is_err() {
-            if path.exists() {
-                let _ = std::fs::remove_file(&path);
-            }
-            std::fs::rename(&tmp, &path)?;
-        }
+        crate::net_safety::write_bytes_atomic(&path, &bytes)?;
         Ok(())
     }
 }
@@ -276,6 +271,9 @@ impl LocalExtensionBridgeServer {
         let pending_mutations = Arc::clone(&self.pending_mutations);
         let on_mutated = self.on_mutated.clone();
 
+        let conn_semaphore = Arc::new(tokio::sync::Semaphore::new(
+            MAX_CONCURRENT_BRIDGE_CONNECTIONS,
+        ));
         let accept_task = tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -287,12 +285,24 @@ impl LocalExtensionBridgeServer {
                     }
                     accepted = listener.accept() => {
                         match accepted {
-                            Ok((stream, _peer)) => {
+                            Ok((mut stream, _peer)) => {
+                                let Ok(permit) = Arc::clone(&conn_semaphore).try_acquire_owned() else {
+                                    let busy = HttpResponse::json(
+                                        503,
+                                        build_cors_headers(None, true),
+                                        json!({ "error": "本地桥接服务繁忙，请稍后重试。", "code": "SERVICE_UNAVAILABLE" }),
+                                    )
+                                    .serialize();
+                                    let _ = stream.write_all(&busy).await;
+                                    let _ = stream.shutdown().await;
+                                    continue;
+                                };
                                 let eng = Arc::clone(&engine);
                                 let st = Arc::clone(&shared_state);
                                 let pm = Arc::clone(&pending_mutations);
                                 let cb = on_mutated.clone();
                                 tokio::spawn(async move {
+                                    let _permit = permit;
                                     handle_connection(stream, eng, st, pm, cb).await;
                                 });
                             }
@@ -526,6 +536,11 @@ impl HttpResponse {
             self.body.len()
         );
         for (k, v) in &self.headers {
+            if k.bytes().any(|b| matches!(b, b'\r' | b'\n' | 0))
+                || v.bytes().any(|b| matches!(b, b'\r' | b'\n' | 0))
+            {
+                continue;
+            }
             head.push_str(k);
             head.push_str(": ");
             head.push_str(v);
@@ -610,6 +625,9 @@ async fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, ParseE
 
     let mut headers = HashMap::new();
     for line in lines {
+        if line.bytes().any(|b| matches!(b, b'\r' | b'\n' | 0)) {
+            return Err(ParseError::BadRequest("请求头包含非法控制字符。"));
+        }
         if let Some((k, v)) = line.split_once(':') {
             let key = k.trim().to_ascii_lowercase();
             let val = v.trim().to_string();
@@ -628,38 +646,58 @@ async fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, ParseE
 
     if is_chunked {
         let mut raw_stream = already_read;
+        let mut cursor = 0usize;
+        const MAX_CHUNKED_RAW_BUFFER: usize = MAX_REQUEST_BODY_BYTES + 65_536;
         loop {
-            while find_bytes(&raw_stream, b"\r\n").is_none() {
+            let line_rel = loop {
+                if let Some(pos) = find_bytes(&raw_stream[cursor..], b"\r\n") {
+                    break pos;
+                }
+                if raw_stream.len().saturating_sub(cursor) > 1024 {
+                    return Err(ParseError::BadRequest("分块头长度超限。"));
+                }
                 let n = stream.read(&mut tmp).await.map_err(|_| ParseError::Eof)?;
                 if n == 0 {
                     return Err(ParseError::BadRequest("分块请求体未完整结束。"));
                 }
                 raw_stream.extend_from_slice(&tmp[..n]);
-                if raw_stream.len() > MAX_REQUEST_BODY_BYTES + 65_536 {
+                if raw_stream.len().saturating_sub(cursor) > MAX_CHUNKED_RAW_BUFFER {
                     return Err(ParseError::PayloadTooLarge);
                 }
-            }
-            let line_end = find_bytes(&raw_stream, b"\r\n").unwrap_or(0);
-            let size_line = String::from_utf8_lossy(&raw_stream[..line_end]);
+            };
+            let size_line = String::from_utf8_lossy(&raw_stream[cursor..cursor + line_rel]);
             let hex_part = size_line.split(';').next().unwrap_or("").trim();
             let chunk_len = usize::from_str_radix(hex_part, 16)
                 .map_err(|_| ParseError::BadRequest("无效的分块长度。"))?;
-            raw_stream.drain(..line_end + 2);
+            cursor += line_rel + 2;
             if chunk_len == 0 {
                 break;
             }
             if body.len().saturating_add(chunk_len) > MAX_REQUEST_BODY_BYTES {
                 return Err(ParseError::PayloadTooLarge);
             }
-            while raw_stream.len() < chunk_len + 2 {
+            let needed = chunk_len
+                .checked_add(2)
+                .ok_or(ParseError::PayloadTooLarge)?;
+            while raw_stream.len().saturating_sub(cursor) < needed {
                 let n = stream.read(&mut tmp).await.map_err(|_| ParseError::Eof)?;
                 if n == 0 {
                     return Err(ParseError::BadRequest("分块内容截断。"));
                 }
                 raw_stream.extend_from_slice(&tmp[..n]);
+                if raw_stream.len().saturating_sub(cursor) > MAX_CHUNKED_RAW_BUFFER {
+                    return Err(ParseError::PayloadTooLarge);
+                }
             }
-            body.extend_from_slice(&raw_stream[..chunk_len]);
-            raw_stream.drain(..chunk_len + 2);
+            if &raw_stream[cursor + chunk_len..cursor + needed] != b"\r\n" {
+                return Err(ParseError::BadRequest("分块结束符无效。"));
+            }
+            body.extend_from_slice(&raw_stream[cursor..cursor + chunk_len]);
+            cursor += needed;
+            if cursor >= 64 * 1024 {
+                raw_stream.drain(..cursor);
+                cursor = 0;
+            }
         }
     } else if let Some(cl_raw) = headers.get("content-length") {
         let expected = cl_raw
@@ -708,6 +746,17 @@ async fn route_request(
     // for browser-extension origins (`chrome-extension://`, `safari-web-extension://`,
     // `moz-extension://`) on BOTH OPTIONS preflight and POST responses.
     let cors_headers = build_cors_headers(origin, is_local_pair);
+
+    // Reject non-loopback `Host` headers to prevent DNS-rebinding attacks against 127.0.0.1.
+    if let Some(host_hdr) = req.header("host") {
+        if !is_allowed_loopback_host_header(host_hdr) {
+            return HttpResponse::json(
+                403,
+                build_cors_headers(None, true),
+                json!({ "error": "已拒绝非本机 Host 请求头。", "code": "INVALID_HOST" }),
+            );
+        }
+    }
 
     if req.method == "OPTIONS" {
         return HttpResponse {
@@ -895,15 +944,6 @@ fn handle_get_folders(
             );
         }
     };
-    let assets = engine
-        .fetch_assets(&FilterCriteria::default())
-        .unwrap_or_default();
-    let mut counts: HashMap<Uuid, usize> = HashMap::new();
-    for asset in assets {
-        if let Some(fid) = asset.folder_id {
-            *counts.entry(fid).or_insert(0) += 1;
-        }
-    }
     let serialized: Vec<Value> = folders
         .into_iter()
         .map(|f| {
@@ -912,7 +952,7 @@ fn handle_get_folders(
                 "name": f.name,
                 "parentID": f.parent_id.map(|p| format_swift_uuid(&p)),
                 "sortOrder": f.sort_order,
-                "assetCount": counts.get(&f.id).copied().unwrap_or(0),
+                "assetCount": f.asset_count.max(0),
             })
         })
         .collect();
@@ -1665,6 +1705,7 @@ async fn ingest_social_media_jobs(
         let post_id_part = sanitize_bridge_filename_part(&job.post_id);
         let referer_owned = job.referer.clone();
 
+        let dl_sem = Arc::new(tokio::sync::Semaphore::new(6));
         let mut join_set: tokio::task::JoinSet<(usize, Option<PathBuf>)> =
             tokio::task::JoinSet::new();
         for (idx, item) in resolved_media.iter().cloned().enumerate() {
@@ -1675,7 +1716,11 @@ async fn ingest_social_media_jobs(
             };
             let post_dir_clone = post_dir.clone();
             let referer_clone = referer_owned.clone();
+            let sem_clone = Arc::clone(&dl_sem);
             join_set.spawn(async move {
+                let Ok(_permit) = sem_clone.acquire_owned().await else {
+                    return (idx, None);
+                };
                 let primary = SocialPostResolver::download_media_bytes_with_referer(
                     &item.url,
                     item.kind,
@@ -1704,7 +1749,7 @@ async fn ingest_social_media_jobs(
                         ext.trim().trim_start_matches('.')
                     };
                     let dest = post_dir_clone.join(format!("{base_name}.{clean_ext}"));
-                    if std::fs::write(&dest, &bytes).is_ok() {
+                    if tokio::fs::write(&dest, &bytes).await.is_ok() {
                         return (idx, Some(dest));
                     }
                 }
@@ -1917,7 +1962,9 @@ async fn handle_ingest(
                 let Ok(url) = Url::parse(url_str) else {
                     continue;
                 };
-                if !WebBookmarkResolver::is_web_url(&url) {
+                if !WebBookmarkResolver::is_web_url(&url)
+                    || !crate::net_safety::is_safe_public_url(&url, false)
+                {
                     continue;
                 }
                 if skip_duplicates {
@@ -2301,13 +2348,48 @@ fn constant_time_eq(lhs: &[u8], rhs: &[u8]) -> bool {
     diff == 0
 }
 
+fn is_allowed_loopback_host_header(raw: &str) -> bool {
+    let trimmed = raw.trim();
+    if trimmed.is_empty()
+        || trimmed
+            .bytes()
+            .any(|b| b.is_ascii_control() || b.is_ascii_whitespace())
+    {
+        return false;
+    }
+    let host_only = if let Some(rest) = trimmed.strip_prefix('[') {
+        let Some((inside, after)) = rest.split_once(']') else {
+            return false;
+        };
+        if !after.is_empty()
+            && (!after.starts_with(':') || !after[1..].bytes().all(|b| b.is_ascii_digit()))
+        {
+            return false;
+        }
+        inside
+    } else if let Some((h, port)) = trimmed.rsplit_once(':') {
+        if port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) {
+            return false;
+        }
+        h
+    } else {
+        trimmed
+    };
+    host_only.eq_ignore_ascii_case("localhost") || host_only == "127.0.0.1" || host_only == "::1"
+}
+
 /// Strictly validates browser-extension origins (`chrome-extension://`, `safari-web-extension://`,
-/// `moz-extension://`) with a non-empty host. Rejects `http://localhost`, `http://127.0.0.1`,
-/// `https://*`, `file://`, and empty/missing origins.
+/// `moz-extension://`) with a non-empty host and zero path/query/CRLF characters.
 pub fn is_browser_extension_origin(origin: Option<&str>) -> bool {
     let Some(raw) = origin.map(str::trim).filter(|s| !s.is_empty()) else {
         return false;
     };
+    if raw
+        .bytes()
+        .any(|b| b.is_ascii_control() || b.is_ascii_whitespace())
+    {
+        return false;
+    }
     let lower = raw.to_ascii_lowercase();
     let rest = if let Some(r) = lower.strip_prefix("chrome-extension://") {
         r
@@ -2318,7 +2400,7 @@ pub fn is_browser_extension_origin(origin: Option<&str>) -> bool {
     } else {
         return false;
     };
-    let host = rest.split('/').next().unwrap_or("");
+    let host = rest.strip_suffix('/').unwrap_or(rest);
     !host.is_empty()
         && host
             .bytes()
@@ -2326,15 +2408,26 @@ pub fn is_browser_extension_origin(origin: Option<&str>) -> bool {
 }
 
 fn is_loopback_http_origin(origin: &str) -> bool {
-    let lower = origin.trim().to_ascii_lowercase();
-    for prefix in ["http://127.0.0.1", "http://localhost"] {
-        if let Some(rest) = lower.strip_prefix(prefix) {
-            if rest.is_empty() || rest.starts_with(':') || rest.starts_with('/') {
-                return true;
-            }
-        }
+    let trimmed = origin.trim();
+    if trimmed.is_empty()
+        || trimmed
+            .bytes()
+            .any(|b| b.is_ascii_control() || b.is_ascii_whitespace())
+    {
+        return false;
     }
-    false
+    let Ok(parsed) = Url::parse(trimmed) else {
+        return false;
+    };
+    parsed.scheme() == "http"
+        && parsed.username().is_empty()
+        && parsed.password().is_none()
+        && parsed.query().is_none()
+        && parsed.fragment().is_none()
+        && matches!(parsed.path(), "" | "/")
+        && parsed
+            .host_str()
+            .is_some_and(|h| h.eq_ignore_ascii_case("localhost") || h == "127.0.0.1")
 }
 
 fn build_cors_headers(origin: Option<&str>, extension_only: bool) -> Vec<(String, String)> {
@@ -2356,11 +2449,15 @@ fn build_cors_headers(origin: Option<&str>, extension_only: bool) -> Vec<(String
     ];
 
     if let Some(trimmed) = origin.map(str::trim).filter(|s| !s.is_empty()) {
-        let allowed = if extension_only {
-            is_browser_extension_origin(Some(trimmed))
-        } else {
-            is_browser_extension_origin(Some(trimmed)) || is_loopback_http_origin(trimmed)
-        };
+        let safe_header_val = !trimmed
+            .bytes()
+            .any(|b| b.is_ascii_control() || b.is_ascii_whitespace());
+        let allowed = safe_header_val
+            && if extension_only {
+                is_browser_extension_origin(Some(trimmed))
+            } else {
+                is_browser_extension_origin(Some(trimmed)) || is_loopback_http_origin(trimmed)
+            };
         if allowed {
             headers.push((
                 "Access-Control-Allow-Origin".to_string(),

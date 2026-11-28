@@ -121,6 +121,23 @@ export const PinterestInfiniteCanvas: React.FC<PinterestInfiniteCanvasProps> = (
     [getSpatialLayout, loadMoreIfNeeded, prefetchAhead],
   );
 
+  const commitCamera = useCallback(
+    (
+      next: InfiniteSpatialCamera,
+      opts?: { notifyScale?: boolean; prefetch?: boolean; vx?: number; vy?: number },
+    ) => {
+      cameraRef.current = next;
+      setCamera(next);
+      if (opts?.notifyScale) {
+        onCameraScaleChange?.(next.scale);
+      }
+      if (opts?.prefetch) {
+        notifyPrefetchAndEdge(next, opts.vx ?? 0, opts.vy ?? 0);
+      }
+    },
+    [notifyPrefetchAndEdge, onCameraScaleChange],
+  );
+
   // Track container dimensions cleanly via ResizeObserver
   useEffect(() => {
     const el = containerRef.current;
@@ -135,8 +152,7 @@ export const PinterestInfiniteCanvas: React.FC<PinterestInfiniteCanvasProps> = (
         if (!initialized) {
           initialized = true;
           const centered = createCenteredCamera(nextSize, SPATIAL_CAMERA_DEFAULT_SCALE);
-          setCamera(centered);
-          onCameraScaleChange?.(centered.scale);
+          commitCamera(centered, { notifyScale: true });
         }
       }
     };
@@ -149,16 +165,15 @@ export const PinterestInfiniteCanvas: React.FC<PinterestInfiniteCanvasProps> = (
     }
     window.addEventListener('resize', updateSize);
     return () => window.removeEventListener('resize', updateSize);
-  }, [onCameraScaleChange]);
+  }, [commitCamera]);
 
   // Reset camera on explicit center request or source swap
   useEffect(() => {
     if (cameraResetNonce === 0) return;
     stopInertia();
     const centered = createCenteredCamera(viewportRef.current, SPATIAL_CAMERA_DEFAULT_SCALE);
-    setCamera(centered);
-    onCameraScaleChange?.(centered.scale);
-  }, [cameraResetNonce, onCameraScaleChange, stopInertia]);
+    commitCamera(centered, { notifyScale: true });
+  }, [cameraResetNonce, commitCamera, stopInertia]);
 
   // Expose imperative zoom & reset commands to top floating toolbar
   useEffect(() => {
@@ -168,25 +183,20 @@ export const PinterestInfiniteCanvas: React.FC<PinterestInfiniteCanvasProps> = (
         stopInertia();
         const vp = viewportRef.current;
         const center = { x: vp.width * 0.5, y: vp.height * 0.5 };
-        setCamera((prev) => {
-          const next = cameraZoomAt(prev, prev.scale * factor, center);
-          onCameraScaleChange?.(next.scale);
-          notifyPrefetchAndEdge(next);
-          return next;
-        });
+        const prev = cameraRef.current;
+        const next = cameraZoomAt(prev, prev.scale * factor, center);
+        commitCamera(next, { notifyScale: true, prefetch: true });
       },
       resetCenter: () => {
         stopInertia();
         const centered = createCenteredCamera(viewportRef.current, SPATIAL_CAMERA_DEFAULT_SCALE);
-        setCamera(centered);
-        onCameraScaleChange?.(centered.scale);
-        notifyPrefetchAndEdge(centered);
+        commitCamera(centered, { notifyScale: true, prefetch: true });
       },
     };
     return () => {
       zoomCommandRef.current = null;
     };
-  }, [notifyPrefetchAndEdge, onCameraScaleChange, stopInertia, zoomCommandRef]);
+  }, [commitCamera, stopInertia, zoomCommandRef]);
 
   // Non-passive wheel listener for cursor-anchored zoom (Ctrl/Meta/Alt + wheel) & 2D trackpad pan
   useEffect(() => {
@@ -204,37 +214,32 @@ export const PinterestInfiniteCanvas: React.FC<PinterestInfiniteCanvasProps> = (
 
       if (e.ctrlKey || e.metaKey || e.altKey) {
         const zoomFactor = Math.exp(-e.deltaY * 0.0024);
-        setCamera((prev) => {
-          const nextScale = Math.min(
-            SPATIAL_CAMERA_MAX_SCALE,
-            Math.max(SPATIAL_CAMERA_MIN_SCALE, prev.scale * zoomFactor),
-          );
-          const next = cameraZoomAt(prev, nextScale, anchor);
-          onCameraScaleChange?.(next.scale);
-          notifyPrefetchAndEdge(next);
-          return next;
-        });
+        const prev = cameraRef.current;
+        const nextScale = Math.min(
+          SPATIAL_CAMERA_MAX_SCALE,
+          Math.max(SPATIAL_CAMERA_MIN_SCALE, prev.scale * zoomFactor),
+        );
+        const next = cameraZoomAt(prev, nextScale, anchor);
+        commitCamera(next, { notifyScale: true, prefetch: true });
         return;
       }
 
       const dx = e.shiftKey && Math.abs(e.deltaX) < 1 ? -e.deltaY : -e.deltaX;
       const dy = e.shiftKey && Math.abs(e.deltaX) < 1 ? 0 : -e.deltaY;
-      setCamera((prev) => {
-        const next: InfiniteSpatialCamera = {
-          scale: prev.scale,
-          offset: {
-            x: prev.offset.x + dx,
-            y: prev.offset.y + dy,
-          },
-        };
-        notifyPrefetchAndEdge(next, dx * 18, dy * 18);
-        return next;
-      });
+      const prev = cameraRef.current;
+      const next: InfiniteSpatialCamera = {
+        scale: prev.scale,
+        offset: {
+          x: prev.offset.x + dx,
+          y: prev.offset.y + dy,
+        },
+      };
+      commitCamera(next, { prefetch: true, vx: dx * 18, vy: dy * 18 });
     };
 
     el.addEventListener('wheel', handleWheel, { passive: false });
     return () => el.removeEventListener('wheel', handleWheel);
-  }, [notifyPrefetchAndEdge, onCameraScaleChange, stopInertia]);
+  }, [commitCamera, stopInertia]);
 
   useEffect(() => () => stopInertia(), [stopInertia]);
 
@@ -283,17 +288,15 @@ export const PinterestInfiniteCanvas: React.FC<PinterestInfiniteCanvasProps> = (
     drag.lastY = e.clientY;
     drag.lastTime = now;
 
-    setCamera((prev) => {
-      const next: InfiniteSpatialCamera = {
-        scale: prev.scale,
-        offset: {
-          x: prev.offset.x + dx,
-          y: prev.offset.y + dy,
-        },
-      };
-      notifyPrefetchAndEdge(next, drag.vx, drag.vy);
-      return next;
-    });
+    const prev = cameraRef.current;
+    const next: InfiniteSpatialCamera = {
+      scale: prev.scale,
+      offset: {
+        x: prev.offset.x + dx,
+        y: prev.offset.y + dy,
+      },
+    };
+    commitCamera(next, { prefetch: true, vx: drag.vx, vy: drag.vy });
   };
 
   const finishDrag = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -330,17 +333,15 @@ export const PinterestInfiniteCanvas: React.FC<PinterestInfiniteCanvasProps> = (
 
       const dx = vx * dtSec;
       const dy = vy * dtSec;
-      setCamera((prev) => {
-        const next: InfiniteSpatialCamera = {
-          scale: prev.scale,
-          offset: {
-            x: prev.offset.x + dx,
-            y: prev.offset.y + dy,
-          },
-        };
-        notifyPrefetchAndEdge(next, vx, vy);
-        return next;
-      });
+      const prevCam = cameraRef.current;
+      const next: InfiniteSpatialCamera = {
+        scale: prevCam.scale,
+        offset: {
+          x: prevCam.offset.x + dx,
+          y: prevCam.offset.y + dy,
+        },
+      };
+      commitCamera(next, { prefetch: true, vx, vy });
 
       if (Math.hypot(vx, vy) > 28) {
         inertiaRafRef.current = requestAnimationFrame(step);
@@ -389,8 +390,7 @@ export const PinterestInfiniteCanvas: React.FC<PinterestInfiniteCanvasProps> = (
         if ((e.target as HTMLElement).closest('[data-pin-card="true"]')) return;
         stopInertia();
         const centered = createCenteredCamera(viewportRef.current, SPATIAL_CAMERA_DEFAULT_SCALE);
-        setCamera(centered);
-        onCameraScaleChange?.(centered.scale);
+        commitCamera(centered, { notifyScale: true });
       }}
       className={[
         'relative w-full h-full overflow-hidden select-none touch-none',
@@ -475,23 +475,25 @@ export const PinterestInfiniteCanvas: React.FC<PinterestInfiniteCanvasProps> = (
                 )}
               </div>
 
-              {/* Video indicator badge (top-left) */}
-              {pin.videoURL && (
-                <span className="pointer-events-none absolute top-2 left-2 inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-black/60 text-white text-[10px] font-medium backdrop-blur-sm">
-                  <VideoClip16Filled className="w-3 h-3" />
-                  <span>视频</span>
-                </span>
-              )}
-
-              {/* Already-imported indicator (bottom-right when not hovered) */}
-              {isImported && !isCollected && (
-                <span
-                  title="已在 Charkle 素材库中"
-                  className="pointer-events-none absolute top-2 left-2 inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-emerald-600/90 text-white text-[10px] font-medium shadow-sm"
-                >
-                  <CheckmarkCircle16Filled className="w-3 h-3" />
-                  <span>已入库</span>
-                </span>
+              {/* Top-left indicators (non-overlapping flex cluster) */}
+              {(pin.videoURL || (isImported && !isCollected)) && (
+                <div className="pointer-events-none absolute top-2 left-2 flex flex-wrap items-center gap-1 max-w-[calc(100%-56px)]">
+                  {pin.videoURL && (
+                    <span className="win-acrylic-dark inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-white text-[10px] font-medium">
+                      <VideoClip16Filled className="w-3 h-3" />
+                      <span>视频</span>
+                    </span>
+                  )}
+                  {isImported && !isCollected && (
+                    <span
+                      title="已在 Charkle 素材库中"
+                      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-emerald-600/90 text-white text-[10px] font-medium shadow-sm"
+                    >
+                      <CheckmarkCircle16Filled className="w-3 h-3" />
+                      <span>已入库</span>
+                    </span>
+                  )}
+                </div>
               )}
 
               {/* Top-right Badge:
@@ -521,7 +523,7 @@ export const PinterestInfiniteCanvas: React.FC<PinterestInfiniteCanvasProps> = (
                       e.stopPropagation();
                       void openPinDetail(pin, true);
                     }}
-                    className="w-7 h-7 rounded-full bg-black/55 text-white inline-flex items-center justify-center opacity-0 group-hover:opacity-100 hover:bg-black/75 transition-opacity cursor-pointer backdrop-blur-sm"
+                    className="win-acrylic-dark w-7 h-7 rounded-full text-white inline-flex items-center justify-center opacity-0 group-hover:opacity-100 hover:bg-black/75 transition-opacity cursor-pointer"
                   >
                     <Eye16Regular className="w-3.5 h-3.5" />
                   </button>
@@ -534,7 +536,7 @@ export const PinterestInfiniteCanvas: React.FC<PinterestInfiniteCanvasProps> = (
                       e.stopPropagation();
                       toggleTrayPin(pin);
                     }}
-                    className="w-7 h-7 rounded-full bg-black/62 text-white inline-flex items-center justify-center shadow-md hover:bg-[var(--accent)] hover:text-[var(--accent-text)] transition-colors cursor-pointer backdrop-blur-sm"
+                    className="win-acrylic-dark w-7 h-7 rounded-full text-white inline-flex items-center justify-center shadow-md hover:bg-[var(--accent)] hover:text-[var(--accent-text)] transition-colors cursor-pointer"
                   >
                     <Add16Filled className="w-4 h-4" />
                   </button>
@@ -549,7 +551,7 @@ export const PinterestInfiniteCanvas: React.FC<PinterestInfiniteCanvasProps> = (
       {isLoadingMore && cards.length > 0 && (
         <div
           onPointerDown={(e) => e.stopPropagation()}
-          className="pointer-events-none absolute bottom-5 left-1/2 -translate-x-1/2 px-3 py-1.5 rounded-full bg-[var(--bg-elevated)]/90 border border-[var(--win-stroke-card)] shadow-md text-[12px] text-[var(--text-secondary)] backdrop-blur-md"
+          className="win-acrylic pointer-events-none absolute bottom-5 left-1/2 -translate-x-1/2 px-3 py-1.5 rounded-full shadow-md text-[12px] text-[var(--text-secondary)]"
         >
           正在向外延展更多灵感…
         </div>

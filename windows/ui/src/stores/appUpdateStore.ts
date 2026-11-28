@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { getTransport } from '../api/transport';
+import { useCoordinatorStore } from './coordinatorStore';
 import type {
   AppReleaseUpdate,
   AppUpdateState,
@@ -171,7 +172,9 @@ export const useAppUpdateStore = create<AppUpdateStoreState>((set, get) => ({
     set({ hasScheduledLaunchCheck: true });
 
     let cancelled = false;
+    let fired = false;
     const timer = window.setTimeout(async () => {
+      fired = true;
       if (cancelled) return;
       const prefs = await get().loadPreferences();
       if (cancelled || !prefs || !prefs.autoCheckUpdates) return;
@@ -215,6 +218,9 @@ export const useAppUpdateStore = create<AppUpdateStoreState>((set, get) => ({
     return () => {
       cancelled = true;
       window.clearTimeout(timer);
+      if (!fired) {
+        set({ hasScheduledLaunchCheck: false });
+      }
     };
   },
 
@@ -313,14 +319,14 @@ export const useAppUpdateStore = create<AppUpdateStoreState>((set, get) => ({
   },
 
   cancelDownload: async () => {
-    const current = get().state;
     try {
       await getTransport().cancelUpdateDownload();
     } catch {
       // Ignore cancel errors
     }
-    if (current.status === 'downloading') {
-      set({ state: { status: 'available', update: current.update } });
+    const latest = get().state;
+    if (latest.status === 'downloading' || latest.status === 'verifying') {
+      set({ state: { status: 'available', update: latest.update } });
     }
   },
 
@@ -356,7 +362,14 @@ export const useAppUpdateStore = create<AppUpdateStoreState>((set, get) => ({
     ) {
       return;
     }
-    await getTransport().openUpdateInstaller(current.installer.installerPath);
+    try {
+      await getTransport().openUpdateInstaller(current.installer.installerPath);
+    } catch (err) {
+      useCoordinatorStore.getState().pushToast({
+        message: `无法打开安装程序：${extractErrorInfo(err).message}`,
+        tone: 'error',
+      });
+    }
   },
 
   revealDownloadedInstaller: async () => {
@@ -368,7 +381,14 @@ export const useAppUpdateStore = create<AppUpdateStoreState>((set, get) => ({
     ) {
       return;
     }
-    await getTransport().revealUpdateInstaller(current.installer.installerPath);
+    try {
+      await getTransport().revealUpdateInstaller(current.installer.installerPath);
+    } catch (err) {
+      useCoordinatorStore.getState().pushToast({
+        message: `无法在资源管理器中显示安装包：${extractErrorInfo(err).message}`,
+        tone: 'error',
+      });
+    }
   },
 
   openReleasePage: async () => {
@@ -386,7 +406,18 @@ export const useAppUpdateStore = create<AppUpdateStoreState>((set, get) => ({
     } else if (current.status === 'failed' && current.update?.htmlUrl) {
       url = current.update.htmlUrl;
     }
-    await getTransport().openExternalUrl(url);
+    try {
+      const parsed = new URL(url);
+      if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+        throw new Error('不支持的发布页链接协议');
+      }
+      await getTransport().openExternalUrl(parsed.toString());
+    } catch (err) {
+      useCoordinatorStore.getState().pushToast({
+        message: `无法打开发布页面：${extractErrorInfo(err).message}`,
+        tone: 'error',
+      });
+    }
   },
 
   handleProgressEvent: (progress) => {

@@ -1228,6 +1228,50 @@ fn print_completions(shell: &str) {
 }
 
 const MAX_MCP_CONTENT_LENGTH: usize = 16 * 1024 * 1024;
+const MAX_MCP_LINE_BYTES: usize = MAX_MCP_CONTENT_LENGTH + 4096;
+
+/// Reads one newline-terminated line with a hard byte bound so hostile stdin cannot cause OOM.
+fn read_bounded_line<R: BufRead>(
+    reader: &mut R,
+    out: &mut String,
+    max_bytes: usize,
+) -> io::Result<Option<usize>> {
+    out.clear();
+    let mut raw = Vec::new();
+    loop {
+        let avail = reader.fill_buf()?;
+        if avail.is_empty() {
+            if raw.is_empty() {
+                return Ok(None);
+            }
+            break;
+        }
+        if let Some(nl_pos) = avail.iter().position(|&b| b == b'\n') {
+            let take = nl_pos + 1;
+            if raw.len().saturating_add(take) > max_bytes {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Input line exceeds 16 MiB safety limit",
+                ));
+            }
+            raw.extend_from_slice(&avail[..take]);
+            reader.consume(take);
+            break;
+        }
+        let take = avail.len();
+        if raw.len().saturating_add(take) > max_bytes {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Input line exceeds 16 MiB safety limit",
+            ));
+        }
+        raw.extend_from_slice(avail);
+        reader.consume(take);
+    }
+    let len = raw.len();
+    *out = String::from_utf8_lossy(&raw).into_owned();
+    Ok(Some(len))
+}
 
 /// Parses an LSP-style `Content-Length` header line case-insensitively with an upper bound.
 fn parse_mcp_content_length(header_line: &str) -> Option<Result<usize, &'static str>> {
@@ -1242,7 +1286,18 @@ fn parse_mcp_content_length(header_line: &str) -> Option<Result<usize, &'static 
     }
 }
 
-/// Supports both newline-delimited JSON-RPC (MCP stdio spec) and LSP-style `Content-Length` framing.
+fn looks_like_lsp_header(line: &str) -> bool {
+    if line.starts_with('{') || line.starts_with('[') {
+        return false;
+    }
+    let Some((name, _)) = line.split_once(':') else {
+        return false;
+    };
+    !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+}
+
+/// Supports both newline-delimited JSON-RPC (MCP stdio spec) and LSP-style `Content-Length` framing
+/// regardless of header ordering (e.g. `Content-Type` before `Content-Length`).
 async fn run_mcp_stdio(service: &CharkleExternalAgentService) {
     let stdin = io::stdin();
     let stdout = io::stdout();
@@ -1251,27 +1306,51 @@ async fn run_mcp_stdio(service: &CharkleExternalAgentService) {
     let mut line = String::new();
 
     loop {
-        line.clear();
-        let Ok(n) = reader.read_line(&mut line) else {
-            break;
-        };
-        if n == 0 {
-            break;
+        match read_bounded_line(&mut reader, &mut line, MAX_MCP_LINE_BYTES) {
+            Ok(Some(_)) => {}
+            Ok(None) => break,
+            Err(err) => {
+                let reply = json!({
+                    "jsonrpc": "2.0",
+                    "id": Value::Null,
+                    "error": { "code": -32600, "message": err.to_string() }
+                })
+                .to_string();
+                let _ = writeln!(out, "{reply}");
+                let _ = out.flush();
+                break;
+            }
         }
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
         }
 
-        if let Some(parsed_len) = parse_mcp_content_length(trimmed) {
+        if looks_like_lsp_header(trimmed) {
+            let mut parsed_len = parse_mcp_content_length(trimmed);
+            let mut header_count = 1usize;
             loop {
-                line.clear();
-                if reader.read_line(&mut line).unwrap_or(0) == 0 || line.trim().is_empty() {
-                    break;
+                let mut hdr = String::new();
+                match read_bounded_line(&mut reader, &mut hdr, 16 * 1024) {
+                    Ok(Some(_)) => {
+                        let t = hdr.trim();
+                        if t.is_empty() {
+                            break;
+                        }
+                        header_count += 1;
+                        if header_count > 32 {
+                            parsed_len = Some(Err("Too many LSP framing headers"));
+                            break;
+                        }
+                        if let Some(cl) = parse_mcp_content_length(t) {
+                            parsed_len = Some(cl);
+                        }
+                    }
+                    _ => break,
                 }
             }
             match parsed_len {
-                Ok(content_len) => {
+                Some(Ok(content_len)) => {
                     let mut buf = vec![0u8; content_len];
                     if reader.read_exact(&mut buf).is_err() {
                         break;
@@ -1282,7 +1361,7 @@ async fn run_mcp_stdio(service: &CharkleExternalAgentService) {
                         let _ = out.flush();
                     }
                 }
-                Err(msg) => {
+                Some(Err(msg)) => {
                     let reply = json!({
                         "jsonrpc": "2.0",
                         "id": Value::Null,
@@ -1292,6 +1371,16 @@ async fn run_mcp_stdio(service: &CharkleExternalAgentService) {
                     let _ = write!(out, "Content-Length: {}\r\n\r\n{}", reply.len(), reply);
                     let _ = out.flush();
                     break;
+                }
+                None => {
+                    let reply = json!({
+                        "jsonrpc": "2.0",
+                        "id": Value::Null,
+                        "error": { "code": -32600, "message": "Missing Content-Length header" }
+                    })
+                    .to_string();
+                    let _ = write!(out, "Content-Length: {}\r\n\r\n{}", reply.len(), reply);
+                    let _ = out.flush();
                 }
             }
             continue;

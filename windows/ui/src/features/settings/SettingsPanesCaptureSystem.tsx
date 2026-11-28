@@ -16,7 +16,12 @@ import {
   WindowHeaderHorizontal20Regular,
 } from '@fluentui/react-icons';
 import { getTransport } from '../../api/transport';
-import { CharkleBrandMark, CustomSelect, SegmentedControl } from '../../design-system';
+import {
+  CharkleBrandMark,
+  CustomSelect,
+  SegmentedControl,
+  copyTextToClipboard,
+} from '../../design-system';
 import {
   formatByteCount,
   formatRelativeCheckTime,
@@ -418,6 +423,7 @@ export const CaptureShortcutsSettingsPane: React.FC = () => {
     };
     const errText = validateHotkeys(trimmed);
     if (errText) {
+      if (fallbackPrev) setHotkeys(fallbackPrev);
       setStatusFeedback(null, errText);
       pushToast({ message: errText, tone: 'error' });
       return;
@@ -612,7 +618,7 @@ export const ExtensionsSettingsPane: React.FC = () => {
 
   const copyToClipboard = async (text: string, message: string) => {
     try {
-      await navigator.clipboard?.writeText(text);
+      await copyTextToClipboard(text);
       setStatusFeedback(message, null);
       pushToast({ message, tone: 'success' });
     } catch {
@@ -1008,7 +1014,11 @@ export const AdvancedAboutSettingsPane: React.FC = () => {
   const pushToast = useCoordinatorStore((s) => s.pushToast);
 
   const assets = useLibraryStore((s) => s.assets);
+  const allAssets = useLibraryStore((s) => s.allAssets);
   const refreshAll = useLibraryStore((s) => s.refreshAll);
+  const activeLibraryAssets = (allAssets.length > 0 ? allAssets : assets).filter(
+    (a) => !a.isTrashed,
+  );
 
   const syncConfig = useSyncAIStore((s) => s.syncConfig);
   const diagnostics = useSyncAIStore((s) => s.diagnostics);
@@ -1075,7 +1085,7 @@ export const AdvancedAboutSettingsPane: React.FC = () => {
       2,
     );
     try {
-      await navigator.clipboard?.writeText(payload);
+      await copyTextToClipboard(payload);
       pushToast({ message: '已复制系统诊断快照到剪贴板', tone: 'success' });
     } catch {
       pushToast({ message: '复制系统诊断快照失败', tone: 'error' });
@@ -1191,14 +1201,14 @@ export const AdvancedAboutSettingsPane: React.FC = () => {
             subtitle={
               rebuildProgress
                 ? `正在离线重建配色、OCR 与视觉相似特征（${rebuildProgress.completed} / ${rebuildProgress.total}）…`
-                : `当发现部分素材缺少配色、文字识别或相似推荐时，可离线重新扫描全库（当前已加载 ${assets.length} 项）`
+                : `当发现部分素材缺少配色、文字识别或相似推荐时，可离线重新扫描全库（共 ${activeLibraryAssets.length} 项活跃素材）`
             }
           >
             <SettingsButton
               variant="standard"
               loading={rebuildingVisualIndex}
               onClick={async () => {
-                await rebuildLocalVisualIndex(assets.map((a) => a.id));
+                await rebuildLocalVisualIndex(activeLibraryAssets.map((a) => a.id));
                 await refreshAll(destination);
               }}
             >

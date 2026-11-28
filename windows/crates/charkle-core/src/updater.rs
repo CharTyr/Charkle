@@ -405,9 +405,37 @@ pub enum UpdaterError {
 // Asset Selection & Windows-Scoped SHA-256 Extraction
 // =========================================================================
 
-fn is_https_url(raw: &str) -> bool {
+const ALLOWED_RELEASE_DOWNLOAD_DOMAINS: &[&str] = &["github.com", "githubusercontent.com"];
+
+const ALLOWED_RELEASE_REDIRECT_DOMAINS: &[&str] = &[
+    "github.com",
+    "githubusercontent.com",
+    "blob.core.windows.net",
+];
+
+fn host_matches_domain_list(url: &Url, allowed_domains: &[&str]) -> bool {
+    if !url.scheme().eq_ignore_ascii_case("https")
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return false;
+    }
+    let Some(raw_host) = url.host_str() else {
+        return false;
+    };
+    let host = raw_host.trim_end_matches('.').to_ascii_lowercase();
+    allowed_domains.iter().any(|domain| {
+        host == *domain
+            || (host.len() > domain.len()
+                && host.ends_with(domain)
+                && host.as_bytes()[host.len() - domain.len() - 1] == b'.')
+    })
+}
+
+/// Validates that an update installer download URL uses HTTPS and targets official GitHub Release hosts.
+pub fn is_allowed_github_release_url(raw: &str) -> bool {
     Url::parse(raw.trim())
-        .map(|u| u.scheme().eq_ignore_ascii_case("https"))
+        .map(|u| host_matches_domain_list(&u, ALLOWED_RELEASE_DOWNLOAD_DOMAINS))
         .unwrap_or(false)
 }
 
@@ -430,7 +458,7 @@ pub fn select_windows_installer_asset(
         {
             continue;
         }
-        if !is_https_url(&asset.browser_download_url) {
+        if !is_allowed_github_release_url(&asset.browser_download_url) {
             continue;
         }
 
@@ -711,7 +739,15 @@ impl GitHubReleaseUpdater {
         let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(15))
             .timeout(Duration::from_secs(300))
-            .redirect(reqwest::redirect::Policy::limited(8))
+            .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                if attempt.previous().len() >= 8 {
+                    return attempt.error("Too many redirects while downloading update");
+                }
+                if !host_matches_domain_list(attempt.url(), ALLOWED_RELEASE_REDIRECT_DOMAINS) {
+                    return attempt.error("Rejected unsafe or untrusted update redirect target");
+                }
+                attempt.follow()
+            }))
             .build()
             .map_err(|e| UpdaterError::Network(e.to_string()))?;
 
@@ -939,11 +975,20 @@ impl GitHubReleaseUpdater {
     where
         F: FnMut(UpdateDownloadProgress),
     {
-        if !is_https_url(&update.download_url) {
+        if !is_allowed_github_release_url(&update.download_url) {
             return Err(UpdaterError::InsecureDownloadUrl(
                 update.download_url.clone(),
             ));
         }
+        let normalized_expected_sha256 = extract_sha256_from_asset_digest(
+            update.expected_sha256.as_deref(),
+        )
+        .ok_or_else(|| {
+            UpdaterError::InvalidInstallerFile(
+                "发布信息缺少有效的 SHA-256 校验值，已拒绝下载并安装。".to_string(),
+            )
+        })?;
+        let _ = normalized_expected_sha256;
 
         let safe_filename = sanitize_installer_filename(&update.asset_name)?;
         let root = staging_root
@@ -1001,8 +1046,8 @@ impl GitHubReleaseUpdater {
             .await
             .map_err(|e| UpdaterError::Network(e.to_string()))?;
 
-        // Enforce HTTPS after any GitHub -> Azure/S3 CDN redirect!
-        if !response.url().scheme().eq_ignore_ascii_case("https") {
+        // Enforce HTTPS + trusted release host after any GitHub -> Azure/CDN redirect!
+        if !host_matches_domain_list(response.url(), ALLOWED_RELEASE_REDIRECT_DOMAINS) {
             return Err(UpdaterError::InsecureDownloadUrl(
                 response.url().to_string(),
             ));
@@ -1037,7 +1082,7 @@ impl GitHubReleaseUpdater {
         let mut downloaded_bytes: u64 = 0;
         let mut header_bytes = [0u8; 2];
         let mut header_filled = 0usize;
-        let mut last_emit = Instant::now() - Duration::from_secs(1);
+        let mut last_emit: Option<Instant> = None;
         let mut last_emit_bytes: u64 = 0;
 
         while let Some(chunk) = response
@@ -1067,9 +1112,10 @@ impl GitHubReleaseUpdater {
                 .map_err(|e| UpdaterError::Io(e.to_string()))?;
 
             let now = Instant::now();
-            if now.duration_since(last_emit) >= Duration::from_millis(80)
-                || downloaded_bytes.saturating_sub(last_emit_bytes) >= 256 * 1024
-            {
+            let should_emit = last_emit
+                .map(|prev| now.duration_since(prev) >= Duration::from_millis(80))
+                .unwrap_or(true);
+            if should_emit || downloaded_bytes.saturating_sub(last_emit_bytes) >= 256 * 1024 {
                 let effective_total = total_bytes.max(downloaded_bytes);
                 let fraction = if effective_total > 0 {
                     (downloaded_bytes as f64 / effective_total as f64).clamp(0.0, 1.0)
@@ -1082,7 +1128,7 @@ impl GitHubReleaseUpdater {
                     total_bytes: effective_total,
                     fraction,
                 });
-                last_emit = now;
+                last_emit = Some(now);
                 last_emit_bytes = downloaded_bytes;
             }
         }
@@ -1099,17 +1145,30 @@ impl GitHubReleaseUpdater {
             fraction: 1.0,
         });
 
+        let expected_sha256 = extract_sha256_from_asset_digest(update.expected_sha256.as_deref())
+            .ok_or_else(|| {
+            UpdaterError::InvalidInstallerFile(
+                "发布信息缺少有效的 SHA-256 校验值，已拒绝安装。".to_string(),
+            )
+        })?;
+        let streamed_sha256 = hex::encode(hasher.finalize());
         verify_installer_file(
             part_path,
             downloaded_bytes,
             header_filled,
             header_bytes,
-            &hex::encode(hasher.finalize()),
-            update.expected_sha256.as_deref(),
+            &streamed_sha256,
+            Some(&expected_sha256),
             self.min_installer_bytes,
         )?;
 
         let verified_sha256 = compute_file_sha256(part_path)?;
+        if !verified_sha256.eq_ignore_ascii_case(&expected_sha256) {
+            return Err(UpdaterError::ChecksumMismatch {
+                expected: expected_sha256,
+                actual: verified_sha256,
+            });
+        }
         fs::rename(part_path, final_path).map_err(|e| UpdaterError::Io(e.to_string()))?;
 
         Ok(VerifiedUpdateInstaller {
@@ -1119,7 +1178,7 @@ impl GitHubReleaseUpdater {
             file_name: safe_filename.to_string(),
             verified_sha256,
             size_bytes: downloaded_bytes,
-            checksum_verified_against_release: update.expected_sha256.is_some(),
+            checksum_verified_against_release: true,
         })
     }
 }
@@ -1179,15 +1238,19 @@ pub fn verify_installer_file(
             "文件头不是有效的 Windows 可执行安装包（缺少 MZ 签名）。".to_string(),
         ));
     }
-    if let Some(expected) = expected_sha256.map(str::trim).filter(|s| !s.is_empty()) {
-        let expected_lower = expected.to_ascii_lowercase();
-        let actual_lower = actual_sha256.trim().to_ascii_lowercase();
-        if actual_lower != expected_lower {
-            return Err(UpdaterError::ChecksumMismatch {
-                expected: expected_lower,
-                actual: actual_lower,
-            });
-        }
+    let expected = expected_sha256
+        .and_then(|raw| extract_sha256_from_asset_digest(Some(raw)))
+        .ok_or_else(|| {
+            UpdaterError::InvalidInstallerFile(
+                "缺少有效的发布包 SHA-256 校验值，已拒绝安装。".to_string(),
+            )
+        })?;
+    let actual_lower = actual_sha256.trim().to_ascii_lowercase();
+    if actual_lower != expected {
+        return Err(UpdaterError::ChecksumMismatch {
+            expected,
+            actual: actual_lower,
+        });
     }
     Ok(())
 }

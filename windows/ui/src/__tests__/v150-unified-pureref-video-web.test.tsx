@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { InMemoryMockTransport, setTransport } from '../api/transport';
 import { BatchActionPill } from '../features/gallery/BatchActionPill';
@@ -202,9 +202,10 @@ describe('Charkle Windows v1.5.0 parity (unified search, video bookmarks, univer
     useCoordinatorStore.setState({ quickLookAssetId: richWeb.id });
 
     render(<QuickLookOverlay />);
-    expect(screen.getByTestId('quicklook-web-bookmark-card')).toBeTruthy();
-    expect(screen.getByText(/Studio Journal/)).toBeTruthy();
-    expect(screen.getByText(/Deep dive into daylight apertures/)).toBeTruthy();
+    const webCard = screen.getByTestId('quicklook-web-bookmark-card');
+    expect(webCard).toBeTruthy();
+    expect(within(webCard).getByText(/Studio Journal/)).toBeTruthy();
+    expect(within(webCard).getByText(/Deep dive into daylight apertures/)).toBeTruthy();
 
     fireEvent.click(screen.getByTestId('web-extract-att-0'));
     await waitFor(() => {

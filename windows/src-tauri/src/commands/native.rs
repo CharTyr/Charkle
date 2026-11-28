@@ -100,9 +100,11 @@ pub async fn start_outbound_drag(
     .flatten();
 
     let is_shelf = window.label() == "shelf";
-    if is_shelf {
-        state.shelf_busy.store(true, Ordering::SeqCst);
-    }
+    let _busy_guard = if is_shelf {
+        Some(crate::commands::ShelfBusyGuard::acquire(&state))
+    } else {
+        None
+    };
     let shelf_hwnd_raw = state.shelf_hwnd.load(Ordering::SeqCst);
     let (tx, rx) = tokio::sync::oneshot::channel();
     let dispatch = app.run_on_main_thread(move || {
@@ -124,20 +126,12 @@ pub async fn start_outbound_drag(
         let _ = tx.send(res);
     });
     if let Err(e) = dispatch {
-        if is_shelf {
-            state.shelf_busy.store(false, Ordering::SeqCst);
-        }
         return Err(native_err(format!("拖出文件启动失败：{e}")));
     }
 
-    let outcome = rx
-        .await
+    rx.await
         .map_err(|_| native_err("拖出会话意外中断"))
-        .and_then(|r| r.map_err(native_err));
-    if is_shelf {
-        state.shelf_busy.store(false, Ordering::SeqCst);
-    }
-    outcome
+        .and_then(|r| r.map_err(native_err))
 }
 
 #[tauri::command]

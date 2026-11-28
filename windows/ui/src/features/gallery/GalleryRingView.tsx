@@ -24,6 +24,7 @@ import {
   CharkleSlider,
   ModalShell,
   Popover,
+  isSystemMotionReduced,
   useResolvedIsDark,
 } from '../../design-system';
 import {
@@ -78,19 +79,30 @@ function isTypingElement(target: EventTarget | null): boolean {
 }
 
 function useReducedMotionFlag(): boolean {
-  const [reduced, setReduced] = useState<boolean>(() =>
-    typeof window !== 'undefined' && typeof window.matchMedia === 'function'
-      ? window.matchMedia('(prefers-reduced-motion: reduce)').matches
-      : false,
-  );
+  const [reduced, setReduced] = useState<boolean>(() => isSystemMotionReduced());
 
   useEffect(() => {
-    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
-    const mq = window.matchMedia('(prefers-reduced-motion: reduce)');
-    const onChange = () => setReduced(mq.matches);
-    onChange();
-    mq.addEventListener?.('change', onChange);
-    return () => mq.removeEventListener?.('change', onChange);
+    const sync = () => setReduced(isSystemMotionReduced());
+    sync();
+    const mq =
+      typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+        ? window.matchMedia('(prefers-reduced-motion: reduce)')
+        : null;
+    mq?.addEventListener?.('change', sync);
+    const obs =
+      typeof MutationObserver !== 'undefined' && typeof document !== 'undefined'
+        ? new MutationObserver(sync)
+        : null;
+    if (obs && typeof document !== 'undefined') {
+      obs.observe(document.documentElement, {
+        attributes: true,
+        attributeFilter: ['data-animations'],
+      });
+    }
+    return () => {
+      mq?.removeEventListener?.('change', sync);
+      obs?.disconnect();
+    };
   }, []);
 
   return reduced;
@@ -212,19 +224,49 @@ export const GalleryRingView: React.FC<GalleryRingViewProps> = ({
     [openQuickLook, pushToast, setSelection, transport],
   );
 
-  const callbacksRef = useRef({
-    onFrontAssetChanged: (asset: AssetRecord | null) => {
+  const markOpenedTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (markOpenedTimerRef.current !== null) {
+        window.clearTimeout(markOpenedTimerRef.current);
+        markOpenedTimerRef.current = null;
+      }
+    };
+  }, []);
+
+  const scheduleMarkOpened = useCallback(
+    (assetId: string) => {
+      if (markOpenedTimerRef.current !== null) {
+        window.clearTimeout(markOpenedTimerRef.current);
+      }
+      markOpenedTimerRef.current = window.setTimeout(() => {
+        markOpenedTimerRef.current = null;
+        void transport.markAssetOpened(assetId);
+      }, 400);
+    },
+    [transport],
+  );
+
+  const handleFrontAssetChanged = useCallback(
+    (asset: AssetRecord | null) => {
       setFrontAsset(asset);
       if (asset) {
         const currentSel = useCoordinatorStore.getState().selectedAssetIds;
         if (currentSel.length <= 1 && currentSel[0] !== asset.id) {
           setSelection([asset.id], asset.id);
         }
-        void transport.markAssetOpened(asset.id);
+        scheduleMarkOpened(asset.id);
+      } else if (markOpenedTimerRef.current !== null) {
+        window.clearTimeout(markOpenedTimerRef.current);
+        markOpenedTimerRef.current = null;
       }
     },
-    onOpenAsset: handleOpenAsset,
-    onContextMenuRequest: (asset: AssetRecord, clientX: number, clientY: number) => {
+    [scheduleMarkOpened, setSelection],
+  );
+
+  const handleContextMenuRequest = useCallback(
+    (asset: AssetRecord, clientX: number, clientY: number) => {
       const latestSel = useCoordinatorStore.getState().selectedAssetIds;
       let snapshotIds: string[];
       if (latestSel.includes(asset.id) && latestSel.length > 1) {
@@ -237,33 +279,19 @@ export const GalleryRingView: React.FC<GalleryRingViewProps> = ({
       setBoardSubOpen(false);
       setContextTarget({ asset, point: { x: clientX, y: clientY }, targetIds: snapshotIds });
     },
+    [setSelection],
+  );
+
+  const callbacksRef = useRef({
+    onFrontAssetChanged: handleFrontAssetChanged,
+    onOpenAsset: handleOpenAsset,
+    onContextMenuRequest: handleContextMenuRequest,
   });
 
   callbacksRef.current = {
-    onFrontAssetChanged: (asset: AssetRecord | null) => {
-      setFrontAsset(asset);
-      if (asset) {
-        const currentSel = useCoordinatorStore.getState().selectedAssetIds;
-        if (currentSel.length <= 1 && currentSel[0] !== asset.id) {
-          setSelection([asset.id], asset.id);
-        }
-        void transport.markAssetOpened(asset.id);
-      }
-    },
+    onFrontAssetChanged: handleFrontAssetChanged,
     onOpenAsset: handleOpenAsset,
-    onContextMenuRequest: (asset: AssetRecord, clientX: number, clientY: number) => {
-      const latestSel = useCoordinatorStore.getState().selectedAssetIds;
-      let snapshotIds: string[];
-      if (latestSel.includes(asset.id) && latestSel.length > 1) {
-        snapshotIds = [...latestSel];
-      } else {
-        setSelection([asset.id], asset.id);
-        snapshotIds = [asset.id];
-      }
-      setMoveSubOpen(false);
-      setBoardSubOpen(false);
-      setContextTarget({ asset, point: { x: clientX, y: clientY }, targetIds: snapshotIds });
-    },
+    onContextMenuRequest: handleContextMenuRequest,
   };
 
   // Mount / unmount WebGL2 engine + ResizeObserver

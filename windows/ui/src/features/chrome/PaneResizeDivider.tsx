@@ -53,6 +53,9 @@ export const PaneResizeDivider: React.FC<PaneResizeDividerProps> = ({
     latestWidth: number;
   } | null>(null);
 
+  const onResizeEndRef = useRef(onResizeEnd);
+  onResizeEndRef.current = onResizeEnd;
+
   const restoreBodyCursor = useCallback(() => {
     if (typeof document !== 'undefined') {
       document.body.style.cursor = '';
@@ -63,8 +66,10 @@ export const PaneResizeDivider: React.FC<PaneResizeDividerProps> = ({
   useEffect(() => {
     return () => {
       if (dragSessionRef.current) {
+        const latestWidth = dragSessionRef.current.latestWidth;
         dragSessionRef.current = null;
         restoreBodyCursor();
+        onResizeEndRef.current(latestWidth);
       }
     };
   }, [restoreBodyCursor]);

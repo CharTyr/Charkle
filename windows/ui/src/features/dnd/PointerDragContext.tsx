@@ -184,12 +184,13 @@ export function beginPointerDrag(
   };
 
   const cleanup = () => {
+    active = false;
     releasePointerCaptureSafe();
     window.removeEventListener('pointermove', onMove, true);
     window.removeEventListener('pointerup', onUp, true);
     window.removeEventListener('pointercancel', onCancel, true);
     window.removeEventListener('keydown', onKeyDown, true);
-    window.removeEventListener('blur', onCancel);
+    window.removeEventListener('blur', onWindowBlur);
     window.removeEventListener('contextmenu', onCancel, true);
     captureRoot?.removeEventListener('pointerleave', onLeaveViewport);
     captureRoot?.removeEventListener('mouseleave', onLeaveViewport);

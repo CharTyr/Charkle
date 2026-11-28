@@ -178,12 +178,15 @@ impl LibraryDatabase {
                 )?;
             }
             // Strictly local visual descriptor cache (never synced into cross-platform asset_vectors.feature_print)
+            // plus secondary lookup indexes for fast deletions and pinned-asset filtering.
             conn.execute_batch(
                 "CREATE TABLE IF NOT EXISTS local_visual_descriptors (
                     asset_id TEXT PRIMARY KEY REFERENCES assets(id) ON DELETE CASCADE,
                     fingerprint TEXT NOT NULL,
                     descriptor BLOB NOT NULL
-                );",
+                );
+                CREATE INDEX IF NOT EXISTS board_assets_asset_id ON board_assets(asset_id);
+                CREATE INDEX IF NOT EXISTS assets_pinned ON assets(pinned) WHERE pinned <> 0;",
             )?;
             Ok(())
         })();
@@ -246,8 +249,7 @@ impl LibraryDatabase {
     }
 
     pub fn put_asset(&self, asset: &AssetRecord) -> CoreResult<()> {
-        let conn = self.lock_conn()?;
-        Self::put_asset_conn(&conn, asset)
+        self.with_transaction(|conn| Self::put_asset_conn(conn, asset))
     }
 
     pub(crate) fn put_asset_conn(conn: &Connection, asset: &AssetRecord) -> CoreResult<()> {
@@ -857,8 +859,7 @@ impl LibraryDatabase {
     }
 
     pub fn remove_asset(&self, id: Uuid) -> CoreResult<()> {
-        let conn = self.lock_conn()?;
-        Self::remove_asset_conn(&conn, id)
+        self.with_transaction(|conn| Self::remove_asset_conn(conn, id))
     }
 
     fn remove_asset_conn(conn: &Connection, id: Uuid) -> CoreResult<()> {
@@ -1751,19 +1752,58 @@ impl LibraryDatabase {
         Self::states_with_prefix_conn(&conn, prefix)
     }
 
+    fn next_prefix_bound(prefix: &str) -> Option<String> {
+        let mut chars: Vec<char> = prefix.chars().collect();
+        while let Some(last) = chars.pop() {
+            let mut next_code = (last as u32).saturating_add(1);
+            if (0xD800..=0xDFFF).contains(&next_code) {
+                next_code = 0xE000;
+            }
+            if let Some(next_ch) = char::from_u32(next_code) {
+                chars.push(next_ch);
+                return Some(chars.into_iter().collect());
+            }
+        }
+        None
+    }
+
     fn states_with_prefix_conn<T: DeserializeOwned>(
         conn: &Connection,
         prefix: &str,
     ) -> CoreResult<Vec<(String, T)>> {
-        let mut stmt = conn
-            .prepare("SELECT key, payload FROM sync_state WHERE substr(key, 1, length(?1)) = ?1")?;
-        let rows = stmt.query_map(params![prefix], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?))
-        })?;
         let mut out = Vec::new();
-        for row in rows {
-            let (k, bytes) = row?;
-            out.push((k, serde_json::from_slice(&bytes)?));
+        if prefix.is_empty() {
+            let mut stmt = conn.prepare("SELECT key, payload FROM sync_state")?;
+            let rows = stmt.query_map([], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?))
+            })?;
+            for row in rows {
+                let (k, bytes) = row?;
+                out.push((k, serde_json::from_slice(&bytes)?));
+            }
+            return Ok(out);
+        }
+        if let Some(upper) = Self::next_prefix_bound(prefix) {
+            let mut stmt =
+                conn.prepare("SELECT key, payload FROM sync_state WHERE key >= ?1 AND key < ?2")?;
+            let rows = stmt.query_map(params![prefix, upper], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?))
+            })?;
+            for row in rows {
+                let (k, bytes) = row?;
+                out.push((k, serde_json::from_slice(&bytes)?));
+            }
+        } else {
+            let mut stmt = conn.prepare(
+                "SELECT key, payload FROM sync_state WHERE substr(key, 1, length(?1)) = ?1",
+            )?;
+            let rows = stmt.query_map(params![prefix], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?))
+            })?;
+            for row in rows {
+                let (k, bytes) = row?;
+                out.push((k, serde_json::from_slice(&bytes)?));
+            }
         }
         Ok(out)
     }

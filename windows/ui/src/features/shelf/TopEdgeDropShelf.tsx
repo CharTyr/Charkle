@@ -940,9 +940,11 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
       try {
         let count = 0;
         for (const file of files) {
-          const dataUrl = await new Promise<string>((resolve) => {
+          const dataUrl = await new Promise<string>((resolve, reject) => {
             const reader = new FileReader();
             reader.onload = () => resolve(String(reader.result ?? ''));
+            reader.onerror = () => reject(reader.error ?? new Error('读取文件失败'));
+            reader.onabort = () => reject(new Error('文件读取已取消'));
             reader.readAsDataURL(file);
           });
           const b64 = dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl;
@@ -955,6 +957,8 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
           showBanner(`已收入「${targetDestinationName}」(${count} 项)`);
           void refreshData();
         }
+      } catch (err) {
+        showBanner(err instanceof Error ? err.message : '导入文件失败');
       } finally {
         setProcessingMessage(null);
       }
@@ -989,10 +993,22 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
     }
   };
 
+  const activeDragOutCleanupRef = useRef<(() => void) | null>(null);
+
+  useEffect(() => {
+    return () => {
+      activeDragOutCleanupRef.current?.();
+      activeDragOutCleanupRef.current = null;
+    };
+  }, []);
+
   // Start native Win32 OLE DoDragDrop ONLY after deliberate drag motion (distinguishing click vs drag!)
   const startCardDragOut = (e: React.PointerEvent, ids: string[], onClick?: () => void) => {
     if (e.button !== 0 || ids.length === 0) return;
     if ((e.target as HTMLElement).closest('button')) return;
+
+    activeDragOutCleanupRef.current?.();
+    activeDragOutCleanupRef.current = null;
 
     const captureTarget = e.currentTarget as HTMLElement;
     const pointerId = e.pointerId;
@@ -1018,6 +1034,9 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
     };
 
     const cleanup = () => {
+      if (activeDragOutCleanupRef.current === cleanup) {
+        activeDragOutCleanupRef.current = null;
+      }
       releaseCapture();
       window.removeEventListener('pointermove', onMove, true);
       window.removeEventListener('pointerup', onUp, true);
@@ -1025,6 +1044,7 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
       window.removeEventListener('blur', onCancel);
       window.removeEventListener('keydown', onKeyDown, true);
     };
+    activeDragOutCleanupRef.current = cleanup;
 
     const onMove = (ev: PointerEvent) => {
       if (launched) return;
@@ -1072,10 +1092,28 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
     window.addEventListener('keydown', onKeyDown, true);
   };
 
-  // Full Waterfall rubber-band marquee multi-select (ref-stabilized so listeners don't thrash per pixel)
+  // Full Waterfall rubber-band marquee multi-select (caches card rects once on start to avoid per-pixel layout thrash)
   const marqueeActive = marquee !== null;
   useEffect(() => {
     if (!marqueeActive) return;
+    const initContainer = waterfallGridRef.current;
+    const cachedCards: Array<{ id: string; x: number; y: number; w: number; h: number }> = [];
+    if (initContainer) {
+      const initRect = initContainer.getBoundingClientRect();
+      initContainer.querySelectorAll<HTMLElement>('[data-shelf-card-id]').forEach((card) => {
+        const id = card.dataset.shelfCardId;
+        if (!id) return;
+        const cr = card.getBoundingClientRect();
+        cachedCards.push({
+          id,
+          x: cr.left - initRect.left + initContainer.scrollLeft,
+          y: cr.top - initRect.top + initContainer.scrollTop,
+          w: cr.width,
+          h: cr.height,
+        });
+      });
+    }
+
     const onMove = (e: MouseEvent) => {
       const container = waterfallGridRef.current;
       const current = marqueeRef.current;
@@ -1091,16 +1129,11 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
       const bottom = Math.max(current.startY, curY);
       if (right - left > 4 || bottom - top > 4) {
         const hit: string[] = [];
-        const cards = container.querySelectorAll<HTMLElement>('[data-shelf-card-id]');
-        cards.forEach((card) => {
-          const cr = card.getBoundingClientRect();
-          const cx = cr.left - rect.left + container.scrollLeft;
-          const cy = cr.top - rect.top + container.scrollTop;
-          if (cx < right && cx + cr.width > left && cy < bottom && cy + cr.height > top) {
-            const id = card.dataset.shelfCardId;
-            if (id) hit.push(id);
+        for (const card of cachedCards) {
+          if (card.x < right && card.x + card.w > left && card.y < bottom && card.y + card.h > top) {
+            hit.push(card.id);
           }
-        });
+        }
         setSelectedIds(hit);
       }
     };
@@ -2193,7 +2226,7 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
                 {(isDropTargeted || processingMessage || statusMessage) && (
                   <div
                     data-testid="shelf-waterfall-drop-overlay"
-                    className="pointer-events-none absolute inset-1.5 z-40 rounded-[var(--win-radius-card)] bg-black/78 backdrop-blur-md border-[1.5px] border-dashed border-[var(--accent)] flex items-center justify-center px-4"
+                    className="win-acrylic-dark pointer-events-none absolute inset-1.5 z-40 rounded-[var(--win-radius-card)] border-[1.5px] border-dashed border-[var(--accent)] flex items-center justify-center px-4"
                   >
                     {renderDropWellContent(isSideDock)}
                   </div>

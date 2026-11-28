@@ -13,9 +13,11 @@ import {
   Button,
   CharkleFolderIcon,
   CharkleIcon,
+  CustomSelect,
   ModalShell,
   Popover,
   useDelayedFlag,
+  type SelectOption,
 } from '../../design-system';
 import {
   useCoordinatorStore,
@@ -310,7 +312,7 @@ export const InboxTriageBar: React.FC<InboxTriageBarProps> = ({ assets }) => {
             {showTriageSpinner ? (
               <span
                 aria-hidden="true"
-                className="h-3 w-3 rounded-full border-2 border-current border-t-transparent animate-spin"
+                className="h-3 w-3 rounded-full border-2 border-current border-t-transparent animate-spin motion-reduce:animate-none"
               />
             ) : (
               <Wand16Regular className="w-3.5 h-3.5 shrink-0" />
@@ -532,28 +534,28 @@ export const InboxTriageBar: React.FC<InboxTriageBarProps> = ({ assets }) => {
                   </div>
 
                   <div className="flex items-center gap-1.5 shrink-0">
-                    <select
-                      aria-label={`为「${rec.assetTitle}」选择目标目录`}
+                    <CustomSelect<string>
+                      ariaLabel={`为「${rec.assetTitle}」选择目标目录`}
+                      size="xs"
                       value={rec.recommendedFolderID ?? ''}
-                      onChange={(e) => handleOverrideTriageFolder(rec.assetID, e.target.value)}
+                      onChange={(val) => handleOverrideTriageFolder(rec.assetID, val)}
+                      options={[
+                        { value: '', label: '留在收件箱' } as SelectOption<string>,
+                        ...flatFolders.map(
+                          (node): SelectOption<string> => ({
+                            value: node.folder.id,
+                            label: node.folder.name,
+                            depth: node.depth,
+                          }),
+                        ),
+                      ]}
                       className={[
-                        'h-7 max-w-[160px] rounded-[var(--win-radius-control)] border px-2 text-[11.5px] font-medium outline-none cursor-pointer transition-colors',
+                        'max-w-[160px] text-[11.5px] font-medium',
                         rec.recommendedFolderID && rec.confidence >= 0.65
                           ? 'border-[var(--accent)]/30 bg-[var(--accent-soft)] text-[var(--accent)]'
-                          : rec.recommendedFolderID
-                            ? 'border-[var(--win-stroke-control)] bg-[var(--bg-elevated)] text-[var(--text-primary)]'
-                            : 'border-[var(--win-stroke-control)] bg-[var(--bg-elevated)] text-[var(--text-secondary)]',
+                          : '',
                       ].join(' ')}
-                    >
-                      <option value="">留在收件箱</option>
-                      {flatFolders.map((node) => (
-                        <option key={node.folder.id} value={node.folder.id}>
-                          {node.depth > 0
-                            ? `${'\u00A0\u00A0'.repeat(node.depth)}↳ ${node.folder.name}`
-                            : node.folder.name}
-                        </option>
-                      ))}
-                    </select>
+                    />
                     {rec.recommendedFolderID && rec.confidence > 0 && rec.confidence < 1 && (
                       <span className="text-[10.5px] text-[var(--text-tertiary)] charkle-tabular w-[30px] text-right">
                         {Math.round(rec.confidence * 100)}%

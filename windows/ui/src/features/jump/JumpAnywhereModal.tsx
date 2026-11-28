@@ -486,7 +486,7 @@ export const JumpAnywhereModal: React.FC = () => {
                 </>
               )}
             </>
-          ) : matches.length === 0 ? (
+          ) : selectableRows.length === 0 ? (
             <div className="py-8 text-center flex flex-col items-center gap-1.5">
               <div className="text-[13px] font-medium text-[var(--text-secondary)]">
                 未找到与「{query}」匹配的内容
@@ -496,8 +496,49 @@ export const JumpAnywhereModal: React.FC = () => {
               </div>
             </div>
           ) : (
-            matches.map((match, idx) => {
+            selectableRows.map((row, idx) => {
               const active = idx === activeIndex;
+              if (row.kind === 'command') {
+                const cmd = row.command;
+                return (
+                  <button
+                    key={`cmd:${cmd.id}`}
+                    ref={(el) => {
+                      rowRefs.current[idx] = el;
+                    }}
+                    type="button"
+                    onMouseEnter={() => setActiveIndex(idx)}
+                    onClick={() => executeCommand(cmd.id)}
+                    className={[
+                      'relative w-full flex items-center gap-2.5 px-3 py-2 rounded-[var(--win-radius-control)] text-left cursor-pointer',
+                      active
+                        ? 'bg-[var(--win-subtle-active)] text-[var(--text-primary)] font-medium'
+                        : 'text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)]',
+                    ].join(' ')}
+                  >
+                    {active && (
+                      <span
+                        aria-hidden="true"
+                        className="pointer-events-none absolute left-0 inset-y-0 my-auto w-[3px] h-4 rounded-full bg-[var(--accent)]"
+                      />
+                    )}
+                    <CommandIcon id={cmd.id} active={active} />
+                    <span className="flex-1 text-[13px] leading-[18px] truncate">{cmd.title}</span>
+                    {cmd.shortcut && (
+                      <kbd className="win-control-elevation text-[10.5px] font-medium charkle-mono px-1.5 py-0.5 rounded-[var(--win-radius-control)] bg-[var(--win-control-fill)] text-[var(--text-secondary)] shrink-0">
+                        {cmd.shortcut}
+                      </kbd>
+                    )}
+                    <span className="text-[11px] font-medium px-2 py-0.5 rounded-[var(--win-radius-control)] bg-[var(--win-control-fill)] border border-[var(--win-stroke-control)] text-[var(--text-secondary)] shrink-0">
+                      命令
+                    </span>
+                    {active && (
+                      <ArrowEnter16Regular className="w-3.5 h-3.5 shrink-0 text-[var(--accent)] opacity-90" />
+                    )}
+                  </button>
+                );
+              }
+              const match = row.match;
               return (
                 <button
                   key={match.id}

@@ -874,13 +874,9 @@ pub fn build_cloud_ai_provider(
                     )
                 })?;
             let mut effective = config.clone();
-            if effective.base_url.trim().is_empty()
-                || effective
-                    .base_url
-                    .contains("generativelanguage.googleapis.com")
-            {
-                effective.base_url = "https://api.openai.com/v1".to_string();
-            }
+            // Always pin ChatGPT subscription OAuth tokens to the official OpenAI API origin
+            // so a leftover custom/proxy base_url can never receive the user's OAuth Bearer token.
+            effective.base_url = "https://api.openai.com/v1".to_string();
             Ok(Some(Box::new(OpenAIResponsesProvider::new(
                 effective,
                 Some(token),

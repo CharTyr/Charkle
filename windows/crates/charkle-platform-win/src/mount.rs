@@ -57,9 +57,15 @@ fn extract_root_drive(path: &Path) -> Option<String> {
     match comps.next() {
         Some(Component::Prefix(prefix)) => {
             let raw = prefix.as_os_str().to_string_lossy();
-            let clean = raw.strip_prefix(r"\\?\").unwrap_or(&raw);
+            let clean = if let Some(unc) = raw.strip_prefix(r"\\?\UNC\") {
+                format!(r"\\{unc}")
+            } else if let Some(verbatim) = raw.strip_prefix(r"\\?\") {
+                verbatim.to_string()
+            } else {
+                raw.into_owned()
+            };
             if clean.ends_with('\\') {
-                Some(clean.to_string())
+                Some(clean)
             } else {
                 Some(format!("{clean}\\"))
             }

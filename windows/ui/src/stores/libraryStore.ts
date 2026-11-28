@@ -55,6 +55,77 @@ function readStoredTagFreq(): Record<string, number> {
   return {};
 }
 
+/**
+ * Moves one or more assets to `targetFolderId` (or Inbox when `null`) while recording each
+ * asset's exact previous folder so Undo restores mixed-origin selections cleanly.
+ */
+export async function moveAssetsToFolderWithUndo(
+  assetIds: string[],
+  targetFolderId: string | null,
+  targetLabel: string,
+  destination?: SidebarDestination,
+): Promise<void> {
+  if (assetIds.length === 0) return;
+  const lib = useLibraryStore.getState();
+  const coord = useCoordinatorStore.getState();
+  const effectiveDest = destination ?? coord.destination;
+
+  const folderByAssetId = new Map<string, string | null>();
+  for (const a of lib.allAssets) folderByAssetId.set(a.id, a.folderID ?? null);
+  for (const a of lib.assets) folderByAssetId.set(a.id, a.folderID ?? null);
+
+  const byPrevFolder = new Map<string | null, string[]>();
+  for (const id of assetIds) {
+    const prev = folderByAssetId.get(id) ?? null;
+    const list = byPrevFolder.get(prev) ?? [];
+    list.push(id);
+    byPrevFolder.set(prev, list);
+  }
+
+  const folderAssignment = targetFolderId ? { folder: targetFolderId } : ('inbox' as const);
+  const message =
+    targetFolderId === null
+      ? `已移动 ${assetIds.length} 项至收件箱`
+      : `已移动 ${assetIds.length} 项至「${targetLabel}」`;
+
+  const prevGroups = [...byPrevFolder.entries()];
+  if (prevGroups.length === 1) {
+    const [onlyPrev] = prevGroups[0];
+    await lib.updateAssets({ assetIDs: assetIds, folderAssignment }, effectiveDest, {
+      undoMessage: message,
+      undoPatch: {
+        assetIDs: assetIds,
+        folderAssignment: onlyPrev ? { folder: onlyPrev } : 'inbox',
+      },
+    });
+    return;
+  }
+
+  await lib.updateAssets({ assetIDs: assetIds, folderAssignment }, effectiveDest);
+  useCoordinatorStore.getState().pushToast({
+    message,
+    tone: 'info',
+    actionLabel: '撤销',
+    durationMs: 5500,
+    onAction: () => {
+      const liveDest = useCoordinatorStore.getState().destination;
+      void Promise.all(
+        prevGroups.map(([prevFolderId, ids]) =>
+          useLibraryStore
+            .getState()
+            .updateAssets(
+              {
+                assetIDs: ids,
+                folderAssignment: prevFolderId ? { folder: prevFolderId } : 'inbox',
+              },
+              liveDest,
+            ),
+        ),
+      );
+    },
+  });
+}
+
 export function isPlainWebBookmark(asset: AssetRecord | null | undefined): boolean {
   if (!asset || asset.mediaKind !== 'webBookmark') return false;
   if (asset.richMetadata?.githubRepo || asset.richMetadata?.socialPost) return false;
@@ -569,6 +640,18 @@ function pruneGhostSelectionForDestination(
 
 let fetchSeq = 0;
 let sidebarMetaSeq = 0;
+let bootstrapInFlight: Promise<void> | null = null;
+
+function resolvePostAwaitDestination(
+  initialCoordDest: SidebarDestination,
+  explicitDest?: SidebarDestination,
+): SidebarDestination {
+  const currentCoordDest = useCoordinatorStore.getState().destination;
+  if (currentCoordDest !== initialCoordDest) {
+    return currentCoordDest;
+  }
+  return explicitDest ?? currentCoordDest;
+}
 
 export const useLibraryStore = create<LibraryState>((set, get) => ({
   assets: [],
@@ -605,18 +688,25 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
 
   async bootstrap(destination) {
     if (get().bootstrapped) return;
+    if (bootstrapInFlight) return bootstrapInFlight;
+    const initialCoordDest = useCoordinatorStore.getState().destination;
     set({ loading: true, error: null });
-    try {
-      await getTransport().seedSampleLibraryIfEmpty();
-      await get().refreshAll(destination);
-      set({ bootstrapped: true });
-    } catch (err) {
-      set({
-        loading: false,
-        bootstrapped: true,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
+    bootstrapInFlight = (async () => {
+      try {
+        await getTransport().seedSampleLibraryIfEmpty();
+        await get().refreshAll(resolvePostAwaitDestination(initialCoordDest, destination));
+        set({ bootstrapped: true });
+      } catch (err) {
+        set({
+          loading: false,
+          bootstrapped: true,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      } finally {
+        bootstrapInFlight = null;
+      }
+    })();
+    return bootstrapInFlight;
   },
 
   async refreshSidebarMeta() {
@@ -748,6 +838,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
   },
 
   async updateAssets(patch, destination, opts) {
+    const initialCoordDest = useCoordinatorStore.getState().destination;
     const previous = get().assets;
     const previousAll = get().allAssets;
     const folders = get().folders;
@@ -780,7 +871,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
 
     try {
       const updated = await getTransport().updateAssets(patch);
-      await get().refreshAll(destination);
+      await get().refreshAll(resolvePostAwaitDestination(initialCoordDest, destination));
 
       if (opts?.undoMessage && opts.undoPatch) {
         const undoPatch = opts.undoPatch;
@@ -797,7 +888,11 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
 
       return updated;
     } catch (err) {
-      set({ assets: previous, allAssets: previousAll });
+      if (useCoordinatorStore.getState().destination === initialCoordDest) {
+        set({ assets: previous, allAssets: previousAll });
+      } else {
+        void get().refreshAll(useCoordinatorStore.getState().destination);
+      }
       useCoordinatorStore.getState().pushToast({
         message: `更新失败：${err instanceof Error ? err.message : String(err)}`,
         tone: 'error',
@@ -808,6 +903,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
 
   async permanentlyDeleteAssets(ids, destination) {
     if (ids.length === 0) return;
+    const initialCoordDest = useCoordinatorStore.getState().destination;
     const previousAssets = get().assets;
     const previousAll = get().allAssets;
     const delSet = new Set(ids);
@@ -821,13 +917,17 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     const coord = useCoordinatorStore.getState();
     try {
       await getTransport().permanentlyDeleteAssets(ids);
-      await get().refreshAll(destination);
+      await get().refreshAll(resolvePostAwaitDestination(initialCoordDest, destination));
       coord.pushToast({
         message: `已彻底删除 ${ids.length} 项素材`,
         tone: 'success',
       });
     } catch (err) {
-      set({ assets: previousAssets, allAssets: previousAll });
+      if (useCoordinatorStore.getState().destination === initialCoordDest) {
+        set({ assets: previousAssets, allAssets: previousAll });
+      } else {
+        void get().refreshAll(useCoordinatorStore.getState().destination);
+      }
       coord.pushToast({
         message: `删除失败：${err instanceof Error ? err.message : String(err)}`,
         tone: 'error',
@@ -974,10 +1074,10 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
 
   async ingestFiles(paths, targetFolderId = null, destination) {
     if (paths.length === 0) return [];
+    const initialCoordDest = useCoordinatorStore.getState().destination;
     const prevFolderIds = new Set(get().folders.map((f) => f.id));
     const created = await getTransport().ingestFiles(paths, targetFolderId, null);
-    const dest = destination ?? useCoordinatorStore.getState().destination;
-    await get().refreshAll(dest);
+    await get().refreshAll(resolvePostAwaitDestination(initialCoordDest, destination));
     const newFolders = get().folders.filter((f) => !prevFolderIds.has(f.id));
     let message: string;
     if (newFolders.length > 0 && created.length > 0) {
@@ -1001,9 +1101,9 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
   },
 
   async ingestUrl(url, title = null, notes = null, targetFolderId = null, destination) {
+    const initialCoordDest = useCoordinatorStore.getState().destination;
     const created = await getTransport().ingestUrl(url, title, notes, targetFolderId, null);
-    const dest = destination ?? useCoordinatorStore.getState().destination;
-    await get().refreshAll(dest);
+    await get().refreshAll(resolvePostAwaitDestination(initialCoordDest, destination));
     useCoordinatorStore.getState().pushToast({
       message: '已采集网页链接',
       tone: 'success',
@@ -1012,9 +1112,9 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
   },
 
   async ingestText(title, text, sourceUrl = null, targetFolderId = null, destination) {
+    const initialCoordDest = useCoordinatorStore.getState().destination;
     const created = await getTransport().ingestText(title, text, sourceUrl, targetFolderId, null);
-    const dest = destination ?? useCoordinatorStore.getState().destination;
-    await get().refreshAll(dest);
+    await get().refreshAll(resolvePostAwaitDestination(initialCoordDest, destination));
     useCoordinatorStore.getState().pushToast({
       message: '已保存文本笔记',
       tone: 'success',
@@ -1023,9 +1123,9 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
   },
 
   async ingestSwatch(hex, title = null, targetFolderId = null, destination) {
+    const initialCoordDest = useCoordinatorStore.getState().destination;
     const created = await getTransport().ingestSwatch(hex, title, targetFolderId, null);
-    const dest = destination ?? useCoordinatorStore.getState().destination;
-    await get().refreshAll(dest);
+    await get().refreshAll(resolvePostAwaitDestination(initialCoordDest, destination));
     useCoordinatorStore.getState().pushToast({
       message: `已保存色卡 ${hex.toUpperCase()}`,
       tone: 'success',
@@ -1034,6 +1134,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
   },
 
   async ingestImageBase64(dataBase64, suggestedName, sourceUrl = null, targetFolderId = null, destination) {
+    const initialCoordDest = useCoordinatorStore.getState().destination;
     const created = await getTransport().ingestImageBase64(
       dataBase64,
       suggestedName,
@@ -1041,8 +1142,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
       targetFolderId,
       null,
     );
-    const dest = destination ?? useCoordinatorStore.getState().destination;
-    await get().refreshAll(dest);
+    await get().refreshAll(resolvePostAwaitDestination(initialCoordDest, destination));
     useCoordinatorStore.getState().pushToast({
       message: '已从剪贴板导入图片',
       tone: 'success',
@@ -1108,6 +1208,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
       .filter(Boolean)
       .join('\n\n');
 
+    const initialCoordDest = useCoordinatorStore.getState().destination;
     const attachments = getEffectiveSocialAttachments(post);
     try {
       const standalone = await getTransport().extractLinkMediaAttachment(
@@ -1123,7 +1224,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
         notes: attributionNotes,
         addTags: [platformLabel],
       });
-      await get().refreshAll(destination);
+      await get().refreshAll(resolvePostAwaitDestination(initialCoordDest, destination));
       return { ...standalone, title: extractedTitle, notes: attributionNotes };
     } catch (err) {
       useCoordinatorStore.getState().pushToast({
@@ -1141,6 +1242,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
 
   async extractWebAttachment(webAsset, attachment, index, destination) {
     if (!attachment.url) return null;
+    const initialCoordDest = useCoordinatorStore.getState().destination;
     const total = webAsset.richMetadata?.webPage?.attachments?.length ?? 1;
     try {
       const standalone = await getTransport().extractLinkMediaAttachment(
@@ -1149,7 +1251,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
         attachment.kind,
         total > 1 ? index : null,
       );
-      await get().refreshAll(destination);
+      await get().refreshAll(resolvePostAwaitDestination(initialCoordDest, destination));
       return standalone;
     } catch (err) {
       useCoordinatorStore.getState().pushToast({
@@ -1161,20 +1263,21 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
   },
 
   async batchExtractLinkMedia(assetIds, destination) {
+    const initialCoordDest = useCoordinatorStore.getState().destination;
     const report = await getTransport().batchExtractLinkMedia(assetIds);
-    await get().refreshAll(destination);
+    await get().refreshAll(resolvePostAwaitDestination(initialCoordDest, destination));
     return report;
   },
 
   async importPureRefScenes(paths, targetFolderId = null, createMoodboard = true, destination) {
     if (paths.length === 0) return [];
+    const initialCoordDest = useCoordinatorStore.getState().destination;
     const results = await getTransport().importPureRefScenes(
       paths,
       targetFolderId,
       createMoodboard,
     );
-    const dest = destination ?? useCoordinatorStore.getState().destination;
-    await get().refreshAll(dest);
+    await get().refreshAll(resolvePostAwaitDestination(initialCoordDest, destination));
     return results;
   },
 
@@ -1234,11 +1337,15 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
   },
 
   patchSingleAssetInMemory(asset) {
-    set((s) => ({
-      assets: s.assets.map((item) => (item.id === asset.id ? asset : item)),
-      allAssets: s.allAssets.some((item) => item.id === asset.id)
-        ? s.allAssets.map((item) => (item.id === asset.id ? asset : item))
-        : [...s.allAssets, asset],
-    }));
+    set((s) => {
+      const inAssets = s.assets.some((item) => item.id === asset.id);
+      const inAllAssets = s.allAssets.some((item) => item.id === asset.id);
+      return {
+        assets: inAssets ? s.assets.map((item) => (item.id === asset.id ? asset : item)) : s.assets,
+        allAssets: inAllAssets
+          ? s.allAssets.map((item) => (item.id === asset.id ? asset : item))
+          : [...s.allAssets, asset],
+      };
+    });
   },
 }));

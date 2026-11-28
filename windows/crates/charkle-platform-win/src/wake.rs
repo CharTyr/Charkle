@@ -116,7 +116,7 @@ where
     LibraryWakeHandle { stop }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "windows"))]
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
