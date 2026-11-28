@@ -7,6 +7,7 @@ import {
   isVideoSocialPlatform,
   isZeroDownloadVideoBookmark,
   matchesSmartFolderRule,
+  type AIProviderStateDto,
   type AssetBatchPatch,
   type AssetRecord,
   type FilterCriteria,
@@ -17,8 +18,70 @@ import {
   type SocialMediaAttachment,
   type SocialPostMetadata,
   type TagCount,
+  type TypeSafeStateDto,
 } from '../types/domain';
 import { useCoordinatorStore } from './coordinatorStore';
+import { useSyncAIStore } from './syncAIStore';
+
+export interface EnrichEngineStatus {
+  canEnrich: boolean;
+  jevReady: boolean;
+  vlmReady: boolean;
+  concurrency: number;
+  label: string | null;
+}
+
+/**
+ * Resolves live AI tagging engine readiness across both ordinary Cloud AI providers and
+ * pure-Jev zero-hallucination closed-set tagging (unlocking tagging even when VLM is disabled).
+ */
+export function resolveEnrichEngineStatus(
+  aiState: AIProviderStateDto | null | undefined,
+  typesafeState: TypeSafeStateDto | null | undefined,
+  targets: AssetRecord[] = [],
+): EnrichEngineStatus {
+  const tsCfg = typesafeState?.config;
+  const jevReady = Boolean(
+    tsCfg?.enabled && (tsCfg.enableClosedSetTagging ?? true) && typesafeState?.hasApiKey,
+  );
+  const aiCfg = aiState?.config;
+  const isLocalOllama = (() => {
+    if (!aiCfg || aiCfg.provider !== 'openAICompatible') return false;
+    try {
+      const host = new URL(aiCfg.baseURL.trim()).hostname.toLowerCase();
+      return host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '[::1]';
+    } catch {
+      return false;
+    }
+  })();
+  const vlmReady = Boolean(
+    aiCfg &&
+      aiCfg.provider !== 'disabled' &&
+      (aiCfg.provider === 'chatGPTSubscription'
+        ? aiState?.chatgptSession.status === 'connected' && aiState.chatgptSession.sharingEnabled
+        : Boolean(aiState?.hasApiKey || isLocalOllama)),
+  );
+  const canEnrich = jevReady || vlmReady;
+  const allHaveDesc =
+    targets.length > 0 && targets.every((a) => Boolean(a.aiDescription?.trim()));
+  const label =
+    jevReady && vlmReady
+      ? allHaveDesc
+        ? 'Jev 闭集打标'
+        : 'Jev 闭集 + 云端描述'
+      : jevReady
+        ? 'Jev 闭集打标'
+        : vlmReady
+          ? '云端 AI 打标'
+          : null;
+  return {
+    canEnrich,
+    jevReady,
+    vlmReady,
+    concurrency: jevReady ? 6 : 3,
+    label,
+  };
+}
 
 const RECENT_TAGS_STORAGE_KEY = 'charkle.win.recentTags.v1';
 const TAG_FREQ_STORAGE_KEY = 'charkle.win.tagUsageFreq.v1';
@@ -408,6 +471,9 @@ export interface LibraryState {
   error: string | null;
   mediaRevision: number;
   thumbnailRevisions: Record<string, number>;
+  enrichingAssetIds: string[];
+  enrichProgress: { completed: number; total: number } | null;
+  enrichEngineLabel: string | null;
 
   bumpMediaRevision: () => void;
   bumpThumbnailRevisions: (assetIds: string[]) => void;
@@ -527,6 +593,7 @@ export interface LibraryState {
     timestampSeconds?: number | null,
   ) => Promise<AssetRecord | null>;
   hydrateImageMetadata: (id: string) => Promise<AssetRecord | null>;
+  enrichAssets: (assetIds: string[], destination: SidebarDestination) => Promise<AssetRecord[]>;
   markAssetOpened: (id: string) => Promise<void>;
   patchSingleAssetInMemory: (asset: AssetRecord) => void;
 }
@@ -670,6 +737,9 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
   error: null,
   mediaRevision: 0,
   thumbnailRevisions: {},
+  enrichingAssetIds: [],
+  enrichProgress: null,
+  enrichEngineLabel: null,
 
   bumpMediaRevision() {
     set((s) => ({ mediaRevision: s.mediaRevision + 1 }));
@@ -1329,6 +1399,80 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     return updated;
   },
 
+  async enrichAssets(assetIds, destination) {
+    const uniqueIds = [...new Set(assetIds.filter((id) => Boolean(id && id.trim())))];
+    if (uniqueIds.length === 0) return [];
+
+    const syncAI = useSyncAIStore.getState();
+    const byId = new Map<string, AssetRecord>();
+    for (const a of get().allAssets) byId.set(a.id, a);
+    for (const a of get().assets) byId.set(a.id, a);
+    const targets = uniqueIds
+      .map((id) => byId.get(id))
+      .filter((a): a is AssetRecord => Boolean(a));
+    const status = resolveEnrichEngineStatus(syncAI.aiState, syncAI.typesafeState, targets);
+    if (!status.canEnrich) {
+      useCoordinatorStore.getState().pushToast({
+        message: '请先在「设置 → AI 智能」配置云端 AI 或开启 Jev 零幻觉闭集打标',
+        tone: 'info',
+      });
+      return [];
+    }
+
+    const label = status.label ?? 'AI 打标';
+    const chunkSize = status.concurrency;
+    const initialCoordDest = useCoordinatorStore.getState().destination;
+
+    set({
+      enrichingAssetIds: uniqueIds,
+      enrichProgress: { completed: 0, total: uniqueIds.length },
+      enrichEngineLabel: label,
+    });
+
+    const enrichedAll: AssetRecord[] = [];
+    try {
+      let completed = 0;
+      for (let i = 0; i < uniqueIds.length; i += chunkSize) {
+        const slice = uniqueIds.slice(i, i + chunkSize);
+        const batch = await getTransport().enrichAssets(slice);
+        for (const item of batch) {
+          get().patchSingleAssetInMemory(item);
+          enrichedAll.push(item);
+        }
+        completed = Math.min(uniqueIds.length, completed + slice.length);
+        set({ enrichProgress: { completed, total: uniqueIds.length } });
+      }
+      await get().refreshSidebarMeta();
+      if (enrichedAll.length > 0) {
+        useCoordinatorStore.getState().pushToast({
+          message: `${label}完成（已更新 ${enrichedAll.length} 项素材）`,
+          tone: 'success',
+        });
+      } else {
+        useCoordinatorStore.getState().pushToast({
+          message: `${label}已完成，未产生新的候选标签`,
+          tone: 'info',
+        });
+      }
+      if (destination.type === 'untagged' && enrichedAll.some((a) => a.tags.length > 0)) {
+        await get().refreshAssets(resolvePostAwaitDestination(initialCoordDest, destination));
+      }
+      return enrichedAll;
+    } catch (err) {
+      useCoordinatorStore.getState().pushToast({
+        message: `${label}失败：${err instanceof Error ? err.message : String(err)}`,
+        tone: 'error',
+      });
+      return enrichedAll;
+    } finally {
+      set({
+        enrichingAssetIds: [],
+        enrichProgress: null,
+        enrichEngineLabel: null,
+      });
+    }
+  },
+
   async markAssetOpened(id) {
     const updated = await getTransport().markAssetOpened(id);
     if (updated) {
@@ -1349,3 +1493,16 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     });
   },
 }));
+
+// Synchronously clear stale search text whenever the user navigates to a different sidebar
+// destination (unless `preserveSearch: true` was explicitly passed, e.g. searching from Moodboards).
+useCoordinatorStore.subscribe((state, prev) => {
+  if (state.destinationClearSearchNonce !== prev.destinationClearSearchNonce) {
+    const current = useLibraryStore.getState();
+    if (current.criteria.searchQuery !== '') {
+      useLibraryStore.setState({
+        criteria: { ...current.criteria, searchQuery: '' },
+      });
+    }
+  }
+});

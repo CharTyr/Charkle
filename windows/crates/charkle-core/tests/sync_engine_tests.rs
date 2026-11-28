@@ -1238,3 +1238,164 @@ async fn simultaneous_multi_backend_sync_local_primary_and_icloud_secondary() {
         .exists());
     assert!(!icloud_dir.join("CharkleICloud").join("Editorial").exists());
 }
+
+#[tokio::test]
+async fn icloud_reused_path_after_deletion_ingests_new_file_without_trashing_it() {
+    use charkle_core::models::core::FilterCriteria;
+    use charkle_core::models::sync::SyncBackendProfile;
+
+    let dir = tempdir().unwrap();
+    let icloud_root = dir.path().join("CharkleReuse");
+    std::fs::create_dir_all(&icloud_root).unwrap();
+
+    let engine = LiveCharkleEngine::open(dir.path().join("app")).unwrap();
+    let mut profile = SyncBackendProfile::new(DriveTransportMode::ICloudDrive);
+    profile.id = SyncBackendProfile::LEGACY_PRIMARY_ID;
+    profile.name = "iCloud".to_string();
+    profile.is_enabled = true;
+    profile.is_primary = true;
+    profile.icloud_folder_name = "CharkleReuse".to_string();
+    profile.icloud_custom_folder_path = icloud_root.to_string_lossy().into_owned();
+    let mut cfg = DriveSyncConfig {
+        auto_sync_interval_seconds: 0,
+        sync_thumbnails: true,
+        sync_embeddings: false,
+        backends: vec![profile],
+        ..DriveSyncConfig::default()
+    };
+    cfg.synchronize_primary_fields();
+    engine.save_sync_config(cfg).unwrap();
+
+    // 1. Place first image at Inbox/reused.png and sync into library
+    let inbox_dir = icloud_root.join("Inbox");
+    std::fs::create_dir_all(&inbox_dir).unwrap();
+    let reused_file = inbox_dir.join("reused.png");
+    std::fs::write(&reused_file, sample_png([220, 40, 40, 255])).unwrap();
+
+    let first_sync = engine.sync_now().await.unwrap();
+    assert_eq!(first_sync.discovered_remote_assets, 1);
+    let initial_assets = engine.fetch_assets(&FilterCriteria::default()).unwrap();
+    assert_eq!(initial_assets.len(), 1);
+    let old_id = initial_assets[0].id;
+
+    // 2. Permanently delete old asset and sync (removes remote file & writes deleted.drive marker)
+    engine.permanently_delete_assets(&[old_id]).unwrap();
+    engine.sync_now().await.unwrap();
+    assert!(
+        !reused_file.exists(),
+        "remote file should be deleted after permanent delete sync"
+    );
+
+    // 3. One clean sync pass while absent clears stale path-based deleted.drive marker
+    engine.sync_now().await.unwrap();
+
+    // 4. User creates a brand-new image with DIFFERENT content at the exact same path
+    std::fs::write(&reused_file, sample_png([40, 180, 90, 255])).unwrap();
+
+    let reuse_sync = engine.sync_now().await.unwrap();
+    assert_eq!(
+        reuse_sync.discovered_remote_assets, 1,
+        "new file at reused iCloud path must be discovered instead of skipped or trashed"
+    );
+    assert!(
+        reused_file.exists(),
+        "new file at reused iCloud path must NOT be silently deleted"
+    );
+    let after_assets = engine.fetch_assets(&FilterCriteria::default()).unwrap();
+    assert_eq!(after_assets.len(), 1);
+    assert_ne!(after_assets[0].id, old_id);
+}
+
+#[tokio::test]
+async fn multi_backend_defers_projection_clearing_and_remote_grid520_invalidates_preview1400() {
+    use charkle_core::models::media::CaptureInput;
+    use charkle_core::models::moodboard::MoodboardDocument;
+    use charkle_core::models::sync::SyncBackendProfile;
+
+    let dir = tempdir().unwrap();
+    let primary_root = dir.path().join("PrimaryLib");
+    let secondary_root = dir.path().join("SecondaryLib");
+    std::fs::create_dir_all(&primary_root).unwrap();
+    std::fs::create_dir_all(&secondary_root).unwrap();
+
+    let engine = LiveCharkleEngine::open(dir.path().join("app")).unwrap();
+    let mut primary_profile = SyncBackendProfile::new(DriveTransportMode::LocalOnly);
+    primary_profile.id = SyncBackendProfile::LEGACY_PRIMARY_ID;
+    primary_profile.name = "Primary".to_string();
+    primary_profile.is_enabled = true;
+    primary_profile.is_primary = true;
+    primary_profile.local_library_path = primary_root.to_string_lossy().into_owned();
+
+    let mut secondary_profile = SyncBackendProfile::new(DriveTransportMode::ICloudDrive);
+    secondary_profile.name = "Secondary".to_string();
+    secondary_profile.is_enabled = true;
+    secondary_profile.is_primary = false;
+    secondary_profile.icloud_folder_name = "SecondaryLib".to_string();
+    secondary_profile.icloud_custom_folder_path = secondary_root.to_string_lossy().into_owned();
+
+    let mut cfg = DriveSyncConfig {
+        auto_sync_interval_seconds: 0,
+        sync_thumbnails: true,
+        sync_embeddings: false,
+        backends: vec![primary_profile, secondary_profile],
+        ..DriveSyncConfig::default()
+    };
+    cfg.synchronize_primary_fields();
+    engine.save_sync_config(cfg).unwrap();
+
+    // Create an asset + board so BOTH projection.boards and projection.thumbnails are dirty
+    let src_img = dir.path().join("hero.png");
+    std::fs::write(&src_img, sample_png([60, 120, 210, 255])).unwrap();
+    let imported = engine
+        .ingest(vec![CaptureInput::FilePath(src_img)], None, None)
+        .await
+        .unwrap();
+    let asset_id = imported[0].id;
+    let board = engine
+        .save_board(&MoodboardDocument::new("Dual Board"))
+        .unwrap();
+
+    engine.sync_now().await.unwrap();
+
+    let board_file = format!("{}.json", board.id.to_string().to_lowercase());
+    let thumb_file = format!("{}.jpg", asset_id.to_string().to_lowercase());
+    assert!(
+        primary_root
+            .join(".charkle/boards")
+            .join(&board_file)
+            .exists(),
+        "primary backend must receive board projection"
+    );
+    assert!(
+        secondary_root
+            .join(".charkle/boards")
+            .join(&board_file)
+            .exists(),
+        "secondary backend must ALSO receive board projection (not cleared early by primary)"
+    );
+    assert!(
+        secondary_root
+            .join(".charkle/thumbnails")
+            .join(&thumb_file)
+            .exists(),
+        "secondary backend must ALSO receive thumbnail projection"
+    );
+
+    // Seed a local Preview1400 file, then overwrite remote Grid520 with new bytes on primary
+    let preview_path = engine.media().thumbnail_path(
+        asset_id,
+        charkle_core::models::media::ThumbnailTier::Preview1400,
+    );
+    std::fs::write(&preview_path, b"stale-preview-1400").unwrap();
+    assert!(preview_path.exists());
+
+    let remote_thumb_path = primary_root.join(".charkle/thumbnails").join(&thumb_file);
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    std::fs::write(&remote_thumb_path, sample_png([250, 180, 15, 255])).unwrap();
+
+    engine.sync_now().await.unwrap();
+    assert!(
+        !preview_path.exists(),
+        "downloading an updated remote Grid520 must remove stale local Preview1400"
+    );
+}

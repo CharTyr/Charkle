@@ -13,12 +13,17 @@ use tokio::sync::broadcast;
 use url::Url;
 use uuid::Uuid;
 
+use crate::agent::ExternalAgentStateStore;
 use crate::db::{search_text, LibraryDatabase};
 use crate::error::{CoreError, CoreResult};
 use crate::export::{
     BoardImageExporter, FigmaBridgeExportReport, FigmaBridgeExporter, MoodboardExportOptions,
 };
-use crate::intelligence::{MoodboardAgentHarness, TypeSafeImagePreparer};
+use crate::intelligence::{
+    build_cloud_ai_provider, canonicalize_suggested_tags, ClosedSetTagFunnel, CloudAIProvider,
+    CloudAIUsageStore, FolderOptionInput, MoodboardAgentHarness, TypeSafeImagePreparer,
+    VisualGroundingEngine,
+};
 use crate::layout::{EditorialLayoutResult, EditorialLayoutSolver};
 use crate::media::artwork::MediaArtwork;
 use crate::media::metadata::ImageMetadataExtractor;
@@ -41,7 +46,9 @@ use crate::models::core::{
     SocialPlatform, TagCount, WebPageRichMetadata,
 };
 use crate::models::media::{
-    cosine_similarity, AssetVector, CacheStats, CaptureInput, ThumbnailTier,
+    cosine_similarity, AIProviderConfig, AssetVector, CacheStats, CaptureInput, ClosedSetTagOption,
+    ClosedSetTaggingResult, CloudAIProviderKind, CloudEnrichmentResult, ThumbnailTier,
+    TypeSafeExperimentalConfig,
 };
 use crate::models::moodboard::{
     AutoLayoutConfig, BoardLayoutMode, BoardNode, BoardNodeKind, BoardRect, MoodboardAgentStep,
@@ -118,6 +125,8 @@ pub struct LiveCharkleEngine {
     injected_transport: Option<Arc<dyn DriveTransport>>,
     events: broadcast::Sender<EngineEvent>,
     dedup_cache: std::sync::Mutex<Option<HashMap<Uuid, CachedDedupFingerprintEntry>>>,
+    closed_set_funnel_cache:
+        std::sync::Mutex<Option<(Arc<ClosedSetTagFunnel>, std::time::Instant)>>,
 }
 
 impl LiveCharkleEngine {
@@ -179,6 +188,7 @@ impl LiveCharkleEngine {
             injected_transport,
             events,
             dedup_cache: std::sync::Mutex::new(None),
+            closed_set_funnel_cache: std::sync::Mutex::new(None),
         }
     }
 
@@ -1360,6 +1370,12 @@ impl LiveCharkleEngine {
     pub fn update_assets(&self, patch: &AssetBatchPatch) -> CoreResult<Vec<AssetRecord>> {
         let changed = self.db.update_assets_locally(patch)?;
 
+        if !patch.add_tags.is_empty()
+            || !patch.remove_tags.is_empty()
+            || patch.accept_suggested_tags
+        {
+            self.invalidate_closed_set_funnel_cache();
+        }
         if patch.pinned_offline == Some(false) {
             let _ = self
                 .media
@@ -1369,6 +1385,605 @@ impl LiveCharkleEngine {
             self.emit(EngineEvent::LibraryChanged);
         }
         Ok(changed)
+    }
+
+    /// Clears the in-memory 45-second `ClosedSetTagFunnel` cache (called on manual tag edits).
+    pub fn invalidate_closed_set_funnel_cache(&self) {
+        if let Ok(mut guard) = self.closed_set_funnel_cache.lock() {
+            *guard = None;
+        }
+    }
+
+    /// Returns a cached (45s TTL) or freshly constructed `ClosedSetTagFunnel` if the library
+    /// contains at least 2 eligible canonical tags.
+    pub fn resolve_closed_set_funnel(&self) -> Option<Arc<ClosedSetTagFunnel>> {
+        const FUNNEL_TTL: std::time::Duration = std::time::Duration::from_secs(45);
+        if let Ok(guard) = self.closed_set_funnel_cache.lock() {
+            if let Some((ref cached, built_at)) = *guard {
+                if built_at.elapsed() < FUNNEL_TTL {
+                    return (cached.eligible_tag_count() >= 2).then(|| Arc::clone(cached));
+                }
+            }
+        }
+        let active_assets = self
+            .db
+            .fetch_assets(
+                &FilterCriteria {
+                    include_trashed: false,
+                    ..FilterCriteria::default()
+                },
+                None,
+            )
+            .unwrap_or_default();
+        let folders = self.db.fetch_folders().unwrap_or_default();
+        // Zero-cost cached visual descriptor lookup (`max_extract = 0` avoids disk churn)
+        let descriptors = self.ensure_visual_descriptors(&active_assets, &[], 0);
+        let vectors = self.db.vectors().unwrap_or_default();
+        let taxonomy = ExternalAgentStateStore::load_taxonomy(&self.db);
+        let funnel = Arc::new(ClosedSetTagFunnel::new(
+            &active_assets,
+            &folders,
+            descriptors,
+            vectors,
+            &taxonomy,
+        ));
+        if let Ok(mut guard) = self.closed_set_funnel_cache.lock() {
+            *guard = Some((Arc::clone(&funnel), std::time::Instant::now()));
+        }
+        (funnel.eligible_tag_count() >= 2).then_some(funnel)
+    }
+
+    /// Enriches one or more assets via Hybrid Cloud AI and/or TypeSafe System One (`Jev`)
+    /// zero-hallucination closed-set multi-`Noul` auto-tagging.
+    ///
+    /// Mirrors `Sources/CharkleCore/LiveCharkleEngine.swift:enrichAssetsWithCloudAI`:
+    /// - Pure-Jev unlock: works even when `ai_config.provider == Disabled` if Jev closed-set tagging
+    ///   is enabled and a TypeSafe API key is provided.
+    /// - VLM-skip acceleration: skips slow generative VLM whenever Jev runs and `asset.ai_description`
+    ///   is already non-empty (runs VLM + Jev in parallel when description is missing).
+    /// - Dual-mode tag write: promotes `confirmed_tags` into formal `asset.tags` + HLC ops when
+    ///   `auto_apply_high_confidence_tags == true`, otherwise writes into `suggested_tags`.
+    /// - Bounded batch concurrency: `6` when Jev closed-set is active, `3` for pure generative VLM.
+    pub async fn enrich_assets_with_ai(
+        &self,
+        asset_ids: &[Uuid],
+        ai_config: &AIProviderConfig,
+        ai_secret: Option<String>,
+        ts_config: &TypeSafeExperimentalConfig,
+        ts_api_key: Option<String>,
+        usage_store: Arc<CloudAIUsageStore>,
+    ) -> CoreResult<Vec<AssetRecord>> {
+        let ts_cfg = ts_config.clone().sanitized();
+        let clean_ts_key = ts_api_key
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let can_use_jev =
+            ts_cfg.enabled && ts_cfg.enable_closed_set_tagging && clean_ts_key.is_some();
+
+        let provider: Option<Arc<dyn CloudAIProvider>> =
+            if ai_config.provider != CloudAIProviderKind::Disabled {
+                match build_cloud_ai_provider(ai_config, ai_secret, Arc::clone(&usage_store)) {
+                    Ok(Some(p)) => Some(Arc::from(p)),
+                    Ok(None) => None,
+                    Err(err) => {
+                        if !can_use_jev {
+                            return Err(err);
+                        }
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
+        if provider.is_none() && !can_use_jev {
+            return Ok(Vec::new());
+        }
+
+        let sync_cfg = self.sync_config();
+        let funnel = if can_use_jev {
+            self.resolve_closed_set_funnel()
+        } else {
+            None
+        };
+        let grounding = Arc::new(VisualGroundingEngine::new(usage_store));
+
+        struct EnrichJob {
+            before: AssetRecord,
+            candidate_tags: Vec<ClosedSetTagOption>,
+            should_run_jev: bool,
+            should_run_vlm: bool,
+            jev_jpeg: Option<Vec<u8>>,
+            vlm_jpeg: Option<Vec<u8>>,
+            vlm_prompt_text: String,
+        }
+
+        let mut visited = HashSet::new();
+        let mut jobs: Vec<EnrichJob> = Vec::new();
+        let mut cached_library_tags: Option<Vec<String>> = None;
+
+        for &id in asset_ids {
+            if !visited.insert(id) {
+                continue;
+            }
+            let Some(before) = self.db.asset(id)? else {
+                continue;
+            };
+            if before.is_trashed {
+                continue;
+            }
+            let candidate_tags = funnel
+                .as_ref()
+                .map(|f| f.select_candidates(&before, 20))
+                .unwrap_or_default();
+            let should_run_jev = can_use_jev && !candidate_tags.is_empty();
+            let has_existing_desc = before
+                .ai_description
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|s| !s.is_empty());
+            let should_run_vlm = provider.is_some() && (!should_run_jev || !has_existing_desc);
+            if !should_run_jev && !should_run_vlm {
+                continue;
+            }
+
+            let jev_jpeg = if should_run_jev {
+                self.prepare_visual_grounding_jpeg(&before, 320)
+            } else {
+                None
+            };
+            let vlm_jpeg = if should_run_vlm && ai_config.send_thumbnails_to_cloud {
+                self.media
+                    .thumbnail_url(before.id, ThumbnailTier::Grid520)
+                    .and_then(|p| std::fs::read(p).ok())
+                    .or_else(|| self.prepare_visual_grounding_jpeg(&before, 520))
+            } else {
+                None
+            };
+
+            let vlm_prompt_text = if should_run_vlm {
+                if cached_library_tags.is_none() {
+                    cached_library_tags = Some(
+                        self.db
+                            .fetch_tag_counts()
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(|t| t.name)
+                            .collect(),
+                    );
+                }
+                let tag_vocab = cached_library_tags
+                    .as_deref()
+                    .unwrap_or(&[])
+                    .iter()
+                    .take(40)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(
+                    "Title: {}\nNotes: {}\nExisting tags: {}\nPreferred library tags: {}",
+                    before.title,
+                    before.notes,
+                    before.tags.join(", "),
+                    tag_vocab
+                )
+            } else {
+                String::new()
+            };
+
+            jobs.push(EnrichJob {
+                before,
+                candidate_tags,
+                should_run_jev,
+                should_run_vlm,
+                jev_jpeg,
+                vlm_jpeg,
+                vlm_prompt_text,
+            });
+        }
+
+        if jobs.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let concurrency = if can_use_jev { 6 } else { 3 };
+        let sem = Arc::new(tokio::sync::Semaphore::new(concurrency));
+        let mut handles = Vec::with_capacity(jobs.len());
+
+        for job in jobs {
+            let sem = Arc::clone(&sem);
+            let grounding = Arc::clone(&grounding);
+            let provider = provider.clone();
+            let ts_cfg = ts_cfg.clone();
+            let ts_key = clean_ts_key.clone();
+
+            handles.push(tokio::spawn(async move {
+                let _permit = sem.acquire_owned().await;
+                let notes_ctx = format!(
+                    "{} {}",
+                    job.before.notes,
+                    job.before.ai_description.as_deref().unwrap_or("")
+                );
+
+                let mut vlm_out: Option<CloudEnrichmentResult> = None;
+                let mut jev_out: Option<ClosedSetTaggingResult> = None;
+                let mut fatal_err: Option<CoreError> = None;
+
+                match (
+                    job.should_run_vlm.then_some(provider).flatten(),
+                    job.should_run_jev.then_some(ts_key).flatten(),
+                ) {
+                    (Some(prov), Some(key)) => {
+                        let vlm_fut = prov.enrich(&job.vlm_prompt_text, job.vlm_jpeg.as_deref());
+                        let jev_fut = grounding.classify_closed_set_tags(
+                            &job.before.title,
+                            &job.before.tags,
+                            &notes_ctx,
+                            job.jev_jpeg.as_deref(),
+                            &job.candidate_tags,
+                            &ts_cfg,
+                            Some(&key),
+                            20,
+                            5,
+                            6,
+                        );
+                        let (vlm_res, jev_res) = tokio::join!(vlm_fut, jev_fut);
+                        match (vlm_res, jev_res) {
+                            (Ok(v), Ok(j)) => {
+                                vlm_out = Some(v);
+                                jev_out = Some(j);
+                            }
+                            (Ok(v), Err(_)) => {
+                                vlm_out = Some(v);
+                            }
+                            (Err(_), Ok(j)) => {
+                                jev_out = Some(j);
+                            }
+                            (Err(e), Err(_)) => {
+                                fatal_err = Some(e);
+                            }
+                        }
+                    }
+                    (None, Some(key)) => {
+                        match grounding
+                            .classify_closed_set_tags(
+                                &job.before.title,
+                                &job.before.tags,
+                                &notes_ctx,
+                                job.jev_jpeg.as_deref(),
+                                &job.candidate_tags,
+                                &ts_cfg,
+                                Some(&key),
+                                20,
+                                5,
+                                6,
+                            )
+                            .await
+                        {
+                            Ok(j) => jev_out = Some(j),
+                            Err(e) => fatal_err = Some(e),
+                        }
+                    }
+                    (Some(prov), None) => {
+                        match prov
+                            .enrich(&job.vlm_prompt_text, job.vlm_jpeg.as_deref())
+                            .await
+                        {
+                            Ok(v) => vlm_out = Some(v),
+                            Err(e) => fatal_err = Some(e),
+                        }
+                    }
+                    (None, None) => {}
+                }
+
+                (job.before, vlm_out, jev_out, fatal_err)
+            }));
+        }
+
+        let mut updated: Vec<AssetRecord> = Vec::new();
+        let mut first_err: Option<CoreError> = None;
+        let mut applied_formal_tags = false;
+        let fallback_vocab = cached_library_tags.unwrap_or_default();
+
+        for handle in handles {
+            let Ok((before, vlm_out, jev_out, err)) = handle.await else {
+                continue;
+            };
+            if let Some(e) = err {
+                if first_err.is_none() {
+                    first_err = Some(e);
+                }
+                continue;
+            }
+            if vlm_out.is_none() && jev_out.is_none() {
+                continue;
+            }
+
+            let Some(mut asset) = self.db.asset(before.id)? else {
+                continue;
+            };
+            if asset.content_hash != before.content_hash {
+                continue;
+            }
+
+            if let Some(ref enrichment) = vlm_out {
+                if let Some(ref desc) = enrichment.description {
+                    let trimmed = desc.trim();
+                    if !trimmed.is_empty() {
+                        asset.ai_description = Some(trimmed.to_string());
+                    }
+                }
+                if let Some(ref emb) = enrichment.embedding {
+                    let vector = AssetVector {
+                        embedding: Some(emb.clone()),
+                        embedding_model: Some(
+                            provider
+                                .as_ref()
+                                .map(|p| p.embedding_identity())
+                                .unwrap_or_else(|| ai_config.embedding_model.clone()),
+                        ),
+                        ..AssetVector::default()
+                    };
+                    let _ = self.db.save_vector(asset.id, &vector);
+                    if sync_cfg.sync_embeddings {
+                        let _ = self.db.mark_projection("embeddings", asset.id);
+                    }
+                }
+            }
+
+            if let Some(jev) = jev_out.as_ref().filter(|j| j.evaluated_tag_count > 0) {
+                let mut existing_norm: HashSet<String> = asset
+                    .tags
+                    .iter()
+                    .map(|t| search_text::normalize(t))
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                let confirmed_names: Vec<String> =
+                    jev.confirmed_tags.iter().map(|m| m.tag.clone()).collect();
+                let borderline_names: Vec<String> =
+                    jev.suggested_tags.iter().map(|m| m.tag.clone()).collect();
+
+                if ts_cfg.auto_apply_high_confidence_tags && !confirmed_names.is_empty() {
+                    let mut merged = asset.tags.clone();
+                    for tag in &confirmed_names {
+                        let norm = search_text::normalize(tag);
+                        if !norm.is_empty() && existing_norm.insert(norm) {
+                            merged.push(tag.clone());
+                            applied_formal_tags = true;
+                        }
+                    }
+                    merged.sort();
+                    asset.tags = merged;
+
+                    let mut seen_sug = HashSet::new();
+                    asset.suggested_tags = borderline_names
+                        .into_iter()
+                        .filter(|t| {
+                            let norm = search_text::normalize(t);
+                            !norm.is_empty()
+                                && !existing_norm.contains(&norm)
+                                && seen_sug.insert(norm)
+                        })
+                        .take(6)
+                        .collect();
+                } else {
+                    let mut seen_sug = HashSet::new();
+                    asset.suggested_tags = confirmed_names
+                        .into_iter()
+                        .chain(borderline_names)
+                        .filter(|t| {
+                            let norm = search_text::normalize(t);
+                            !norm.is_empty()
+                                && !existing_norm.contains(&norm)
+                                && seen_sug.insert(norm)
+                        })
+                        .take(6)
+                        .collect();
+                }
+
+                // Cold-start safety: only fall back to VLM open-set tags when vocabulary had < 3
+                // evaluated candidates AND Jev matched 0 tags.
+                if jev.evaluated_tag_count < 3 && jev.all_matched_tag_names().is_empty() {
+                    if let Some(ref enrichment) = vlm_out {
+                        if !enrichment.suggested_tags.is_empty() {
+                            let latest_tags: Vec<String> = self
+                                .db
+                                .fetch_tag_counts()
+                                .unwrap_or_default()
+                                .into_iter()
+                                .map(|t| t.name)
+                                .collect();
+                            let vocab = if latest_tags.is_empty() {
+                                &fallback_vocab
+                            } else {
+                                &latest_tags
+                            };
+                            asset.suggested_tags = canonicalize_suggested_tags(
+                                &enrichment.suggested_tags,
+                                vocab,
+                                &asset.tags,
+                                6,
+                            );
+                        }
+                    }
+                }
+            } else if let Some(ref enrichment) = vlm_out {
+                let latest_tags: Vec<String> = self
+                    .db
+                    .fetch_tag_counts()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|t| t.name)
+                    .collect();
+                let vocab = if latest_tags.is_empty() {
+                    &fallback_vocab
+                } else {
+                    &latest_tags
+                };
+                asset.suggested_tags =
+                    canonicalize_suggested_tags(&enrichment.suggested_tags, vocab, &asset.tags, 6);
+            }
+
+            let saved = self.db.save_asset_locally(&asset, false)?;
+            self.emit(EngineEvent::AssetEnriched(saved.id));
+            updated.push(saved);
+        }
+
+        if applied_formal_tags {
+            self.invalidate_closed_set_funnel_cache();
+        }
+        if !updated.is_empty() {
+            self.emit(EngineEvent::LibraryChanged);
+            return Ok(updated);
+        }
+        if let Some(err) = first_err {
+            return Err(err);
+        }
+        Ok(updated)
+    }
+
+    /// Concurrent multi-asset folder suggestion: builds `FolderOptionInput` **once** and fans out
+    /// up to 4 concurrent Jev `Choice + Noul` requests when `ts_config.enabled && ts_config.enable_inbox_smart_triage`
+    /// with a valid API key, falling back cleanly per-asset to offline `suggest_folders_for_assets`.
+    pub async fn suggest_folders_with_grounding(
+        &self,
+        targets: &[AssetRecord],
+        ts_config: &TypeSafeExperimentalConfig,
+        ts_api_key: Option<&str>,
+        usage_store: Arc<CloudAIUsageStore>,
+    ) -> CoreResult<Vec<(Uuid, Option<FolderSuggestion>)>> {
+        if targets.is_empty() {
+            return Ok(Vec::new());
+        }
+        let offline = self.suggest_folders_for_assets(targets)?;
+        let Some(key) = ts_api_key.map(str::trim).filter(|k| !k.is_empty()) else {
+            return Ok(offline);
+        };
+        if !ts_config.enabled || !ts_config.enable_inbox_smart_triage {
+            return Ok(offline);
+        }
+
+        let folders = self.db.fetch_folders()?;
+        if folders.is_empty() {
+            return Ok(offline);
+        }
+        let all_assets = self
+            .db
+            .fetch_assets(
+                &FilterCriteria {
+                    include_trashed: false,
+                    ..FilterCriteria::default()
+                },
+                None,
+            )
+            .unwrap_or_default();
+
+        // Build closed-set FolderOptionInput ONCE for the whole batch
+        let folder_by_id: HashMap<Uuid, &FolderRecord> =
+            folders.iter().map(|f| (f.id, f)).collect();
+        let mut tags_by_folder: HashMap<Uuid, HashMap<String, usize>> = HashMap::new();
+        let mut titles_by_folder: HashMap<Uuid, Vec<String>> = HashMap::new();
+        for a in &all_assets {
+            let Some(fid) = a.folder_id else { continue };
+            let entry = tags_by_folder.entry(fid).or_default();
+            for t in a.tags.iter().chain(a.suggested_tags.iter()) {
+                let clean = t.trim();
+                if !clean.is_empty() {
+                    *entry.entry(clean.to_string()).or_insert(0) += 1;
+                }
+            }
+            let titles = titles_by_folder.entry(fid).or_default();
+            if titles.len() < 4 && !a.title.trim().is_empty() {
+                titles.push(a.title.trim().chars().take(48).collect());
+            }
+        }
+        let options: Arc<Vec<FolderOptionInput>> = Arc::new(
+            folders
+                .iter()
+                .map(|folder| {
+                    let display_path = build_folder_display_path(folder.id, &folder_by_id);
+                    let mut pairs: Vec<(String, usize)> = tags_by_folder
+                        .remove(&folder.id)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .collect();
+                    pairs.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+                    FolderOptionInput {
+                        id: folder.id,
+                        name: folder.name.clone(),
+                        display_path,
+                        sample_tags: pairs.into_iter().take(6).map(|(t, _)| t).collect(),
+                        sample_titles: titles_by_folder.remove(&folder.id).unwrap_or_default(),
+                    }
+                })
+                .collect(),
+        );
+        let folder_names: Arc<HashMap<Uuid, String>> =
+            Arc::new(folders.iter().map(|f| (f.id, f.name.clone())).collect());
+        let offline_map: HashMap<Uuid, Option<FolderSuggestion>> = offline.into_iter().collect();
+
+        let grounding = Arc::new(VisualGroundingEngine::new(usage_store));
+        let sem = Arc::new(tokio::sync::Semaphore::new(4));
+        let mut handles = Vec::with_capacity(targets.len());
+
+        for asset in targets {
+            let jpeg = self.prepare_visual_grounding_jpeg(asset, 384);
+            let fb = offline_map.get(&asset.id).cloned().flatten();
+            let grounding = Arc::clone(&grounding);
+            let options = Arc::clone(&options);
+            let folder_names = Arc::clone(&folder_names);
+            let sem = Arc::clone(&sem);
+            let cfg = ts_config.clone();
+            let key = key.to_string();
+            let asset_id = asset.id;
+            let title = asset.title.clone();
+            let tags: Vec<String> = asset
+                .tags
+                .iter()
+                .chain(asset.suggested_tags.iter())
+                .cloned()
+                .collect();
+            let notes = format!(
+                "{} {}",
+                asset.notes,
+                asset.ai_description.as_deref().unwrap_or("")
+            );
+
+            handles.push(tokio::spawn(async move {
+                let _permit = sem.acquire_owned().await;
+                match grounding
+                    .classify_into_folders(
+                        &title,
+                        &tags,
+                        &notes,
+                        jpeg.as_deref(),
+                        &options,
+                        &cfg,
+                        &key,
+                    )
+                    .await
+                {
+                    Ok(res) => {
+                        let sug = res.folder_id.map(|fid| FolderSuggestion {
+                            folder_id: fid,
+                            folder_name: folder_names.get(&fid).cloned().unwrap_or_default(),
+                            confidence: res.confidence,
+                            reason: res.reason,
+                        });
+                        (asset_id, sug)
+                    }
+                    Err(_) => (asset_id, fb),
+                }
+            }));
+        }
+
+        let mut out = Vec::with_capacity(handles.len());
+        for handle in handles {
+            if let Ok(pair) = handle.await {
+                out.push(pair);
+            }
+        }
+        Ok(out)
     }
 
     /// Permanently deletes assets, records tombstones + anti-respawn content fingerprints,
@@ -1460,6 +2075,17 @@ impl LiveCharkleEngine {
                 let _ = std::fs::remove_file(&path);
             }
             let _ = std::fs::rename(&tmp, &path);
+        }
+    }
+
+    fn invalidate_dedup_fingerprint(&self, id: Uuid) {
+        let mut cache_map = self.load_dedup_cache_snapshot();
+        if cache_map.remove(&id).is_some() {
+            {
+                let mut guard = self.dedup_cache.lock().unwrap_or_else(|e| e.into_inner());
+                *guard = Some(cache_map.clone());
+            }
+            self.persist_dedup_cache_map(&cache_map);
         }
     }
 
@@ -2656,6 +3282,7 @@ impl LiveCharkleEngine {
         if self.sync_config().sync_thumbnails {
             self.db.mark_projection("thumbnails", saved.id)?;
         }
+        self.invalidate_dedup_fingerprint(saved.id);
         let _ = self.index_local_visual_descriptor(&saved);
         self.emit(EngineEvent::AssetEnriched(saved.id));
         self.emit(EngineEvent::LibraryChanged);
@@ -3176,6 +3803,9 @@ impl LiveCharkleEngine {
         {
             return pwd;
         }
+        if backend_id != SyncBackendProfile::LEGACY_PRIMARY_ID {
+            return String::new();
+        }
         self.vault
             .get_secret(WEBDAV_PASSWORD_VAULT_KEY)
             .await
@@ -3317,6 +3947,7 @@ impl LiveCharkleEngine {
         profile: &SyncBackendProfile,
         base_config: &DriveSyncConfig,
         defer_op_pruning: bool,
+        defer_projection_clearing: bool,
         progress_prefix: Option<String>,
     ) -> CoreResult<SyncReport> {
         let single_config = profile.to_single_backend_config(base_config);
@@ -3332,6 +3963,7 @@ impl LiveCharkleEngine {
                     backend_id: Some(profile.id),
                     is_primary_backend: profile.is_primary,
                     defer_op_pruning,
+                    defer_projection_clearing,
                     progress_prefix,
                 },
             )
@@ -3357,6 +3989,7 @@ impl LiveCharkleEngine {
             .run_single_backend_sync(
                 &profile,
                 &config,
+                multi_count > 1,
                 multi_count > 1,
                 Some(format!("[{}]", profile.display_name())),
             )
@@ -3434,6 +4067,37 @@ impl LiveCharkleEngine {
         }
 
         let is_multi = enabled.len() > 1;
+        // In multi-backend mode, snapshot dirty projection versions before syncing so primary
+        // backend does not clear shared markers before secondary backends upload the same updates.
+        let initial_boards_dirty: std::collections::BTreeMap<String, String> = if is_multi {
+            self.db
+                .state("projection.boards")
+                .ok()
+                .flatten()
+                .unwrap_or_default()
+        } else {
+            std::collections::BTreeMap::new()
+        };
+        let initial_thumbs_dirty: std::collections::BTreeMap<String, String> =
+            if is_multi && config.sync_thumbnails {
+                self.db
+                    .state("projection.thumbnails")
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default()
+            } else {
+                std::collections::BTreeMap::new()
+            };
+        let initial_embeddings_dirty: std::collections::BTreeMap<String, String> =
+            if is_multi && config.sync_embeddings {
+                self.db
+                    .state("projection.embeddings")
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default()
+            } else {
+                std::collections::BTreeMap::new()
+            };
         let mut statuses = self.merged_backend_statuses(&config, &[]);
         let mut aggregated = SyncReport::default();
         let mut discovered_id_set = HashSet::new();
@@ -3473,7 +4137,7 @@ impl LiveCharkleEngine {
             }
 
             match self
-                .run_single_backend_sync(profile, &config, is_multi, prefix)
+                .run_single_backend_sync(profile, &config, is_multi, is_multi, prefix)
                 .await
             {
                 Ok(report) => {
@@ -3532,7 +4196,7 @@ impl LiveCharkleEngine {
             }
         }
 
-        // In multi-backend mode, prune `sync_ops` only through the minimum op cursor safely uploaded by ALL enabled backends.
+        // In multi-backend mode, prune `sync_ops` and clear shared dirty projections ONLY once ALL enabled backends succeed.
         if is_multi && succeeded_count == enabled.len() {
             let mut cursors = Vec::with_capacity(enabled.len());
             for profile in &enabled {
@@ -3544,6 +4208,18 @@ impl LiveCharkleEngine {
                 if safe_min > 0 {
                     let _ = self.db.acknowledge_ops(safe_min);
                 }
+            }
+            if !initial_boards_dirty.is_empty() {
+                let pairs: Vec<(String, String)> = initial_boards_dirty.into_iter().collect();
+                let _ = self.db.clear_projections("boards", &pairs);
+            }
+            if !initial_thumbs_dirty.is_empty() {
+                let pairs: Vec<(String, String)> = initial_thumbs_dirty.into_iter().collect();
+                let _ = self.db.clear_projections("thumbnails", &pairs);
+            }
+            if !initial_embeddings_dirty.is_empty() {
+                let pairs: Vec<(String, String)> = initial_embeddings_dirty.into_iter().collect();
+                let _ = self.db.clear_projections("embeddings", &pairs);
             }
         }
 
@@ -5934,5 +6610,221 @@ mod tests {
             .unwrap();
         assert_eq!(perm_cleanup.removed_asset_count, 1);
         assert!(engine.fetch_asset(doc_remove[0]).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn secondary_webdav_password_never_falls_back_to_primary_secret() {
+        let dir = tempdir().unwrap();
+        let engine = LiveCharkleEngine::open(dir.path()).unwrap();
+        engine
+            .vault
+            .set_secret(WEBDAV_PASSWORD_VAULT_KEY, "primary-secret-123")
+            .await
+            .unwrap();
+
+        let primary_pwd = engine
+            .read_backend_webdav_password(SyncBackendProfile::LEGACY_PRIMARY_ID)
+            .await;
+        assert_eq!(primary_pwd, "primary-secret-123");
+
+        let secondary_id = Uuid::new_v4();
+        assert!(!engine.has_backend_webdav_password(secondary_id).await);
+        let secondary_pwd = engine.read_backend_webdav_password(secondary_id).await;
+        assert!(
+            secondary_pwd.is_empty(),
+            "secondary WebDAV backend without its own secret must never read primary password"
+        );
+    }
+
+    #[tokio::test]
+    async fn jev_closed_set_enrichment_unlocks_without_vlm_skips_vlm_when_described_and_emits_hlc_ops(
+    ) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        // 1. Mock Jev server counting requests and returning high-confidence t_0 + borderline t_1
+        let jev_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let jev_addr = jev_listener.local_addr().unwrap();
+        let jev_hits = Arc::new(AtomicUsize::new(0));
+        let jev_hits_bg = Arc::clone(&jev_hits);
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = jev_listener.accept().await {
+                jev_hits_bg.fetch_add(1, Ordering::SeqCst);
+                let mut buf = vec![0u8; 32768];
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_millis(120),
+                    stream.read(&mut buf),
+                )
+                .await;
+                let body = r#"{"model":"jev-latest","answers":{"t_0":{"type":"noul","noul":0.91},"t_1":{"type":"noul","noul":0.63}},"usage":{"input_tokens":1200,"output_tokens":32}}"#;
+                let http = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(http.as_bytes()).await;
+                let _ = stream.shutdown().await;
+            }
+        });
+
+        // 2. Mock VLM server to verify it is SKIPPED whenever ai_description is already present
+        let vlm_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let vlm_addr = vlm_listener.local_addr().unwrap();
+        let vlm_hits = Arc::new(AtomicUsize::new(0));
+        let vlm_hits_bg = Arc::clone(&vlm_hits);
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = vlm_listener.accept().await {
+                vlm_hits_bg.fetch_add(1, Ordering::SeqCst);
+                let mut buf = vec![0u8; 16384];
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_millis(120),
+                    stream.read(&mut buf),
+                )
+                .await;
+                let body = r#"{"choices":[{"message":{"content":"{\"description\":\"生成描述\",\"tags\":[\"VLM标签\"]}"}}]}"#;
+                let http = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(http.as_bytes()).await;
+                let _ = stream.shutdown().await;
+            }
+        });
+
+        let dir = tempdir().unwrap();
+        let engine = LiveCharkleEngine::open(dir.path()).unwrap();
+
+        // Seed 2 existing tagged assets so ClosedSetTagFunnel has >= 2 canonical tags
+        let seed_assets = engine
+            .ingest(
+                vec![
+                    CaptureInput::TextSnippet {
+                        title: "Seed A".to_string(),
+                        text: "film sample".to_string(),
+                        source_url: None,
+                    },
+                    CaptureInput::TextSnippet {
+                        title: "Seed B".to_string(),
+                        text: "warm palette".to_string(),
+                        source_url: None,
+                    },
+                ],
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        engine
+            .update_assets(&AssetBatchPatch {
+                asset_ids: vec![seed_assets[0].id],
+                add_tags: vec!["胶片".to_string()],
+                ..Default::default()
+            })
+            .unwrap();
+        engine
+            .update_assets(&AssetBatchPatch {
+                asset_ids: vec![seed_assets[1].id],
+                add_tags: vec!["暖色调".to_string()],
+                ..Default::default()
+            })
+            .unwrap();
+
+        // Target asset already has an ai_description -> VLM MUST be skipped even when configured
+        let target = engine
+            .ingest(
+                vec![CaptureInput::TextSnippet {
+                    title: "Described Poster".to_string(),
+                    text: "already described".to_string(),
+                    source_url: None,
+                }],
+                None,
+                None,
+            )
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        let mut described = engine.fetch_asset(target.id).unwrap().unwrap();
+        described.ai_description = Some("已有暖色胶片海报描述".to_string());
+        engine.db.save_asset_locally(&described, false).unwrap();
+
+        let usage = Arc::new(CloudAIUsageStore::in_memory());
+        let ts_cfg_suggest_only = TypeSafeExperimentalConfig {
+            enabled: true,
+            base_url: format!("http://127.0.0.1:{}", jev_addr.port()),
+            enable_closed_set_tagging: true,
+            auto_apply_high_confidence_tags: false,
+            high_confidence_tag_threshold: 0.82,
+            suggested_tag_threshold: 0.52,
+            ..Default::default()
+        };
+
+        // Case A: Pure-Jev unlock with VLM Disabled + auto_apply = false -> fills suggested_tags, leaves tags untouched
+        let disabled_ai = AIProviderConfig::default();
+        let res_a = engine
+            .enrich_assets_with_ai(
+                &[target.id],
+                &disabled_ai,
+                None,
+                &ts_cfg_suggest_only,
+                Some("ts-key".to_string()),
+                Arc::clone(&usage),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res_a.len(), 1);
+        assert!(res_a[0].tags.is_empty());
+        assert_eq!(res_a[0].suggested_tags.len(), 2);
+        assert_eq!(jev_hits.load(Ordering::SeqCst), 1);
+
+        // Case B: VLM configured + asset already has ai_description + auto_apply = true
+        // -> skips slow VLM completely (0 VLM hits!), promotes confirmed tag into formal `tags` + emits HLC op
+        let ops_before = engine
+            .db
+            .pending_ops::<crate::models::sync::SyncOperation>(500)
+            .unwrap()
+            .len();
+        let vlm_ai = AIProviderConfig {
+            provider: CloudAIProviderKind::OpenAiCompatible,
+            base_url: format!("http://127.0.0.1:{}/v1", vlm_addr.port()),
+            chat_model: "mock-vlm".to_string(),
+            send_thumbnails_to_cloud: false,
+            ..Default::default()
+        };
+        let ts_cfg_auto_apply = TypeSafeExperimentalConfig {
+            auto_apply_high_confidence_tags: true,
+            ..ts_cfg_suggest_only
+        };
+        let res_b = engine
+            .enrich_assets_with_ai(
+                &[target.id],
+                &vlm_ai,
+                Some("vlm-key".to_string()),
+                &ts_cfg_auto_apply,
+                Some("ts-key".to_string()),
+                Arc::clone(&usage),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res_b.len(), 1);
+        assert_eq!(
+            vlm_hits.load(Ordering::SeqCst),
+            0,
+            "Slow generative VLM MUST be skipped when asset already has ai_description"
+        );
+        assert_eq!(jev_hits.load(Ordering::SeqCst), 2);
+        assert_eq!(res_b[0].tags.len(), 1);
+        assert_eq!(res_b[0].suggested_tags.len(), 1);
+        let ops_after = engine
+            .db
+            .pending_ops::<crate::models::sync::SyncOperation>(500)
+            .unwrap()
+            .len();
+        assert!(
+            ops_after > ops_before,
+            "Auto-applied Jev formal tags MUST emit HLC sync ops"
+        );
     }
 }

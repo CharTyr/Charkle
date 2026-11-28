@@ -1928,11 +1928,28 @@ impl PureRefCodec {
             .with_guessed_format()
             .ok()?;
         let (w, h) = reader.into_dimensions().ok()?;
-        (w > 0 && h > 0).then_some((w, h))
+        if w == 0 || h == 0 {
+            return None;
+        }
+        if matches!(read_exif_orientation(data), Some(5..=8)) {
+            Some((h, w))
+        } else {
+            Some((w, h))
+        }
     }
 
     pub fn convert_to_png(data: &[u8]) -> Option<Vec<u8>> {
-        let img = image::load_from_memory(data).ok()?;
+        let raw_img = image::load_from_memory(data).ok()?;
+        let img = match read_exif_orientation(data) {
+            Some(2) => raw_img.fliph(),
+            Some(3) => raw_img.rotate180(),
+            Some(4) => raw_img.flipv(),
+            Some(5) => raw_img.rotate90().fliph(),
+            Some(6) => raw_img.rotate90(),
+            Some(7) => raw_img.rotate270().fliph(),
+            Some(8) => raw_img.rotate270(),
+            _ => raw_img,
+        };
         let mut buf = Vec::new();
         img.write_to(&mut Cursor::new(&mut buf), image::ImageFormat::Png)
             .ok()?;
@@ -1969,8 +1986,16 @@ impl PureRefCodec {
 }
 
 // -----------------------------------------------------------------------------
-// Binary Stream Walkers (PNG / JPEG / GIF)
+// Binary Stream Walkers (PNG / JPEG / GIF) & EXIF Orientation Helper
 // -----------------------------------------------------------------------------
+
+fn read_exif_orientation(data: &[u8]) -> Option<u32> {
+    let mut cursor = Cursor::new(data);
+    let exif_data = exif::Reader::new().read_from_container(&mut cursor).ok()?;
+    exif_data
+        .get_field(exif::Tag::Orientation, exif::In::PRIMARY)
+        .and_then(|f| f.value.get_uint(0))
+}
 
 fn walk_png_end(bytes: &[u8], start: usize) -> Option<usize> {
     let mut pos = start + 8;

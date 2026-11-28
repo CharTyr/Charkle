@@ -42,19 +42,22 @@ impl ExternalAgentConfigStore {
 
     pub fn load(data_dir: &Path) -> ExternalAgentConfig {
         let path = Self::config_path(data_dir);
+        if !path.exists() {
+            return ExternalAgentConfig::default();
+        }
+        // Fail closed when an existing policy file is unreadable or corrupt so a damaged
+        // config cannot silently re-enable MCP after the user disabled it.
         std::fs::read(&path)
             .ok()
             .and_then(|bytes| serde_json::from_slice::<ExternalAgentConfig>(&bytes).ok())
-            .unwrap_or_default()
+            .unwrap_or_else(ExternalAgentConfig::fail_closed)
     }
 
     pub fn save(data_dir: &Path, config: &ExternalAgentConfig) -> CoreResult<()> {
         std::fs::create_dir_all(data_dir)?;
         let path = Self::config_path(data_dir);
         let bytes = serde_json::to_vec_pretty(config)?;
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, bytes)?;
-        std::fs::rename(&tmp, &path)?;
+        crate::net_safety::write_bytes_atomic(&path, &bytes)?;
         Ok(())
     }
 }

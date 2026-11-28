@@ -338,7 +338,7 @@ export const SidebarView: React.FC = () => {
     const timer = window.setTimeout(() => {
       const trimmed = searchDraft.trim();
       if (isMoodboardView && trimmed.length > 0) {
-        setDestination({ type: 'allItems' });
+        setDestination({ type: 'allItems' }, { preserveSearch: true });
       }
       void setCriteria({ searchQuery: searchDraft }, effectiveSearchDestination);
     }, 120);

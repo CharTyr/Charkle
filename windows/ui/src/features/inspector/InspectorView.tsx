@@ -56,9 +56,11 @@ import {
   getFolderDisplayPath,
   isInspectorCardOrderCustomized,
   isPlainWebBookmark,
+  resolveEnrichEngineStatus,
   useCoordinatorStore,
   useLibraryStore,
   useMoodboardStore,
+  useSyncAIStore,
   type InspectorCardId,
   type InspectorTab,
 } from '../../stores';
@@ -377,11 +379,18 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
   const cutAssets = useLibraryStore((s) => s.cutAssets);
   const setCriteria = useLibraryStore((s) => s.setCriteria);
   const refreshRichAsset = useLibraryStore((s) => s.refreshRichAsset);
+  const enrichAssets = useLibraryStore((s) => s.enrichAssets);
+  const enrichingAssetIds = useLibraryStore((s) => s.enrichingAssetIds);
+  const enrichProgress = useLibraryStore((s) => s.enrichProgress);
+  const enrichEngineLabel = useLibraryStore((s) => s.enrichEngineLabel);
   const markAssetOpened = useLibraryStore((s) => s.markAssetOpened);
   const hydrateImageMetadata = useLibraryStore((s) => s.hydrateImageMetadata);
   const patchSingleAssetInMemory = useLibraryStore((s) => s.patchSingleAssetInMemory);
   const extractSocialAttachment = useLibraryStore((s) => s.extractSocialAttachment);
   const extractAllSocialAttachments = useLibraryStore((s) => s.extractAllSocialAttachments);
+
+  const aiState = useSyncAIStore((s) => s.aiState);
+  const typesafeState = useSyncAIStore((s) => s.typesafeState);
 
   const boards = useMoodboardStore((s) => s.boards);
   const createBoard = useMoodboardStore((s) => s.createBoard);
@@ -1383,7 +1392,48 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
             )}
 
             <div className="flex flex-col gap-[7px]">
-              <span className="text-[10.5px] font-medium text-[var(--text-secondary)]">标签</span>
+              {(() => {
+                const enrichStatus = resolveEnrichEngineStatus(aiState, typesafeState, [
+                  targetAsset,
+                ]);
+                const isEnrichingThis = enrichingAssetIds.includes(targetAsset.id);
+                const hasExistingTagging =
+                  targetAsset.suggestedTags.length > 0 || Boolean(targetAsset.aiDescription);
+                return (
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[10.5px] font-medium text-[var(--text-secondary)]">
+                      标签
+                    </span>
+                    {enrichStatus.canEnrich && (
+                      <button
+                        type="button"
+                        data-testid="inspector-ai-tag-btn"
+                        disabled={enrichingAssetIds.length > 0}
+                        title={
+                          enrichStatus.label
+                            ? `当前引擎：${enrichStatus.label}`
+                            : '运行 AI 自动打标'
+                        }
+                        onClick={() => void enrichAssets([targetAsset.id], destination)}
+                        className="charkle-pressable inline-flex items-center gap-1 text-[10.5px] font-medium text-[var(--accent)] hover:underline disabled:opacity-50 cursor-pointer"
+                      >
+                        <Sparkle16Regular className="w-3 h-3" />
+                        <span>
+                          {isEnrichingThis
+                            ? `${enrichEngineLabel ?? 'AI 打标'}中${
+                                enrichProgress && enrichProgress.total > 1
+                                  ? ` (${enrichProgress.completed}/${enrichProgress.total})`
+                                  : '…'
+                              }`
+                            : hasExistingTagging
+                              ? '重新打标'
+                              : 'AI 打标'}
+                        </span>
+                      </button>
+                    )}
+                  </div>
+                );
+              })()}
 
               {targetAsset.tags.length > 0 && (
                 <div className="flex flex-wrap gap-1.5">

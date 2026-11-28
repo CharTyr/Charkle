@@ -7,9 +7,10 @@
 //! Mirrors `Sources/CharkleCore/Extension/LocalExtensionBridgeServer.swift`.
 
 use std::collections::{HashMap, HashSet};
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use base64::engine::general_purpose::STANDARD as BASE64_STD;
 use base64::Engine;
@@ -23,6 +24,7 @@ use tokio::task::JoinHandle;
 use url::Url;
 use uuid::Uuid;
 
+use crate::agent::{CharkleExternalAgentService, ExternalAgentConfigStore};
 use crate::engine::LiveCharkleEngine;
 use crate::error::{CoreError, CoreResult};
 use crate::media::douyin::{douyin_classification_tag, DouyinURLParser};
@@ -32,11 +34,15 @@ use crate::media::resolvers::{
     WebBookmarkResolver, XPostReference,
 };
 use crate::media::xiaohongshu::XiaohongshuPostResolver;
+use crate::models::agent::{
+    DownloadUrlIssuer, ExternalAgentRequestContext, ExternalAgentTransport,
+};
 use crate::models::core::{
     AssetRecord, FilterCriteria, MediaKind, SocialMediaAttachment, SocialMediaAttachmentKind,
     SocialPlatform, SocialPostMetadata,
 };
 use crate::models::media::CaptureInput;
+use crate::models::ThumbnailTier;
 use crate::wire::swift_codec::format_swift_uuid;
 
 pub const DEFAULT_EXTENSION_BRIDGE_PORT: u16 = 41937;
@@ -47,6 +53,9 @@ const MAX_HEADER_BYTES: usize = 64 * 1024;
 const MAX_CONCURRENT_BRIDGE_CONNECTIONS: usize = 64;
 const CONNECTION_IO_TIMEOUT: Duration = Duration::from_secs(30);
 const MUTATION_DEBOUNCE_DELAY: Duration = Duration::from_millis(450);
+const MCP_DOWNLOAD_TICKET_TTL: Duration = Duration::from_secs(600);
+const MCP_DOWNLOAD_MAX_TICKETS: usize = 256;
+const MCP_DOWNLOAD_MAX_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Persisted browser extension bridge configuration stored in `<data_dir>/extension-bridge.json`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -121,7 +130,7 @@ pub struct ExtensionBridgeMutation {
     pub target_board_id: Option<Uuid>,
 }
 
-/// Live runtime status snapshot of the local browser extension bridge.
+/// Live runtime status snapshot of the local browser extension & Streamable HTTP MCP bridge.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExtensionBridgeStatus {
@@ -132,9 +141,21 @@ pub struct ExtensionBridgeStatus {
     pub allow_local_auto_pair: bool,
     pub access_token: String,
     pub last_error: Option<String>,
+    #[serde(default)]
+    pub allows_remote_mcp: bool,
+    #[serde(default)]
+    pub mcp_endpoint_url: String,
 }
 
 type MutationCallback = Arc<dyn Fn(ExtensionBridgeMutation) + Send + Sync>;
+
+#[derive(Debug, Clone)]
+struct DownloadTicket {
+    asset_id: Uuid,
+    expires_at: Instant,
+}
+
+type DownloadTicketStore = Arc<Mutex<HashMap<String, DownloadTicket>>>;
 
 #[derive(Default)]
 struct PendingMutationBatch {
@@ -149,12 +170,14 @@ struct BridgeRuntimeState {
     config: ExtensionBridgeConfig,
     running: bool,
     bound_port: u16,
+    allow_remote_mcp: bool,
     last_error: Option<String>,
     shutdown_tx: Option<watch::Sender<bool>>,
     accept_task: Option<JoinHandle<()>>,
 }
 
-/// Pure-Tokio loopback HTTP/1.1 bridge server (`127.0.0.1:41937..=41946`).
+/// Pure-Tokio HTTP/1.1 bridge server (`127.0.0.1:41937..=41946`, or `0.0.0.0` when remote
+/// Streamable HTTP MCP is explicitly enabled while browser-extension routes remain strictly loopback-only).
 pub struct LocalExtensionBridgeServer {
     engine: Arc<LiveCharkleEngine>,
     data_dir: PathBuf,
@@ -163,6 +186,8 @@ pub struct LocalExtensionBridgeServer {
     state: Arc<RwLock<BridgeRuntimeState>>,
     pending_mutations: Arc<Mutex<PendingMutationBatch>>,
     on_mutated: Option<MutationCallback>,
+    mcp_service: Arc<CharkleExternalAgentService>,
+    download_tickets: DownloadTicketStore,
 }
 
 impl LocalExtensionBridgeServer {
@@ -193,6 +218,29 @@ impl LocalExtensionBridgeServer {
         allow_ephemeral_port: bool,
         on_mutated: Option<MutationCallback>,
     ) -> Self {
+        let pending_mutations = Arc::new(Mutex::new(PendingMutationBatch::default()));
+        let pm_for_mcp = Arc::clone(&pending_mutations);
+        let cb_for_mcp = on_mutated.clone();
+        let mcp_service = Arc::new(CharkleExternalAgentService::new(
+            Arc::clone(&engine),
+            data_dir.clone(),
+            Some(Arc::new(move |kind: &str| {
+                let (imported_delta, folder_delta) = if kind == "ingest_assets" {
+                    (1, 0)
+                } else {
+                    (0, 1)
+                };
+                schedule_debounced_mutation(
+                    &pm_for_mcp,
+                    &cb_for_mcp,
+                    imported_delta,
+                    folder_delta,
+                    None,
+                    None,
+                );
+            })),
+        ));
+        let allow_remote_mcp = ExternalAgentConfigStore::load(&data_dir).allow_remote_http_mcp;
         Self {
             engine,
             data_dir,
@@ -202,12 +250,15 @@ impl LocalExtensionBridgeServer {
                 config,
                 running: false,
                 bound_port: 0,
+                allow_remote_mcp,
                 last_error: None,
                 shutdown_tx: None,
                 accept_task: None,
             })),
-            pending_mutations: Arc::new(Mutex::new(PendingMutationBatch::default())),
+            pending_mutations,
             on_mutated,
+            mcp_service,
+            download_tickets: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -217,7 +268,7 @@ impl LocalExtensionBridgeServer {
         Self::snapshot_from_guard(&guard)
     }
 
-    /// Starts the loopback TCP listener if not already running.
+    /// Starts the TCP listener if not already running.
     pub async fn start(&self) -> CoreResult<ExtensionBridgeStatus> {
         {
             let guard = self.state.read().await;
@@ -225,6 +276,13 @@ impl LocalExtensionBridgeServer {
                 return Ok(Self::snapshot_from_guard(&guard));
             }
         }
+
+        let allow_remote_mcp = ExternalAgentConfigStore::load(&self.data_dir).allow_remote_http_mcp;
+        let bind_host = if allow_remote_mcp {
+            "0.0.0.0"
+        } else {
+            "127.0.0.1"
+        };
 
         let candidate_ports: Vec<u16> = if self.allow_ephemeral_port && self.preferred_port == 0 {
             vec![0]
@@ -242,7 +300,7 @@ impl LocalExtensionBridgeServer {
         let mut bound: Option<(TcpListener, u16)> = None;
         let mut last_err: Option<std::io::Error> = None;
         for port in candidate_ports {
-            match TcpListener::bind(("127.0.0.1", port)).await {
+            match TcpListener::bind((bind_host, port)).await {
                 Ok(listener) => {
                     let actual = listener.local_addr().map(|a| a.port()).unwrap_or(port);
                     bound = Some((listener, actual));
@@ -256,11 +314,12 @@ impl LocalExtensionBridgeServer {
 
         let Some((listener, actual_port)) = bound else {
             let msg = last_err
-                .map(|e| format!("无法在 127.0.0.1 绑定本地扩展桥接端口：{e}"))
-                .unwrap_or_else(|| "无法在 127.0.0.1 绑定本地扩展桥接端口。".to_string());
+                .map(|e| format!("无法在 {bind_host} 绑定本地桥接端口：{e}"))
+                .unwrap_or_else(|| format!("无法在 {bind_host} 绑定本地桥接端口。"));
             let mut guard = self.state.write().await;
             guard.running = false;
             guard.bound_port = 0;
+            guard.allow_remote_mcp = allow_remote_mcp;
             guard.last_error = Some(msg.clone());
             return Err(CoreError::InvalidOperation(msg));
         };
@@ -270,6 +329,8 @@ impl LocalExtensionBridgeServer {
         let shared_state = Arc::clone(&self.state);
         let pending_mutations = Arc::clone(&self.pending_mutations);
         let on_mutated = self.on_mutated.clone();
+        let mcp_service = Arc::clone(&self.mcp_service);
+        let download_tickets = Arc::clone(&self.download_tickets);
 
         let conn_semaphore = Arc::new(tokio::sync::Semaphore::new(
             MAX_CONCURRENT_BRIDGE_CONNECTIONS,
@@ -285,7 +346,7 @@ impl LocalExtensionBridgeServer {
                     }
                     accepted = listener.accept() => {
                         match accepted {
-                            Ok((mut stream, _peer)) => {
+                            Ok((mut stream, peer)) => {
                                 let Ok(permit) = Arc::clone(&conn_semaphore).try_acquire_owned() else {
                                     let busy = HttpResponse::json(
                                         503,
@@ -301,9 +362,22 @@ impl LocalExtensionBridgeServer {
                                 let st = Arc::clone(&shared_state);
                                 let pm = Arc::clone(&pending_mutations);
                                 let cb = on_mutated.clone();
+                                let mcp = Arc::clone(&mcp_service);
+                                let tickets = Arc::clone(&download_tickets);
+                                let is_loopback = is_loopback_socket_addr(&peer);
                                 tokio::spawn(async move {
                                     let _permit = permit;
-                                    handle_connection(stream, eng, st, pm, cb).await;
+                                    handle_connection(
+                                        stream,
+                                        is_loopback,
+                                        eng,
+                                        st,
+                                        pm,
+                                        cb,
+                                        mcp,
+                                        tickets,
+                                    )
+                                    .await;
                                 });
                             }
                             Err(err) => {
@@ -319,13 +393,14 @@ impl LocalExtensionBridgeServer {
         let mut guard = self.state.write().await;
         guard.running = true;
         guard.bound_port = actual_port;
+        guard.allow_remote_mcp = allow_remote_mcp;
         guard.last_error = None;
         guard.shutdown_tx = Some(shutdown_tx);
         guard.accept_task = Some(accept_task);
         Ok(Self::snapshot_from_guard(&guard))
     }
 
-    /// Stops the loopback listener cleanly.
+    /// Stops the TCP listener cleanly.
     pub async fn stop(&self) -> ExtensionBridgeStatus {
         let (tx, handle) = {
             let mut guard = self.state.write().await;
@@ -342,7 +417,37 @@ impl LocalExtensionBridgeServer {
         self.status().await
     }
 
-    /// Enables or disables the bridge, persisting config and starting/stopping the listener.
+    /// Synchronizes TCP listener lifecycle & bind address (`127.0.0.1` vs `0.0.0.0`) after
+    /// External Agent `httpMCPEnabled` or `allowRemoteHTTPMCP` policy changes.
+    pub async fn sync_mcp_network_binding(&self) -> CoreResult<ExtensionBridgeStatus> {
+        let policy = ExternalAgentConfigStore::load(&self.data_dir);
+        let (running, current_remote, ext_enabled) = {
+            let guard = self.state.read().await;
+            (
+                guard.running && guard.bound_port > 0,
+                guard.allow_remote_mcp,
+                guard.config.enabled,
+            )
+        };
+        let should_run = ext_enabled || policy.http_mcp_enabled;
+        if !should_run {
+            return if running {
+                Ok(self.stop().await)
+            } else {
+                Ok(self.status().await)
+            };
+        }
+        if running && current_remote != policy.allow_remote_http_mcp {
+            let _ = self.stop().await;
+            return self.start().await;
+        }
+        if !running {
+            return self.start().await;
+        }
+        Ok(self.status().await)
+    }
+
+    /// Enables or disables the browser extension bridge, persisting config and reconciling listener state.
     pub async fn set_enabled(&self, enabled: bool) -> CoreResult<ExtensionBridgeStatus> {
         {
             let mut guard = self.state.write().await;
@@ -352,11 +457,7 @@ impl LocalExtensionBridgeServer {
                 guard.last_error = None;
             }
         }
-        if enabled {
-            self.start().await
-        } else {
-            Ok(self.stop().await)
-        }
+        self.sync_mcp_network_binding().await
     }
 
     /// Enables or disables zero-config same-machine browser-extension auto-pairing.
@@ -379,19 +480,22 @@ impl LocalExtensionBridgeServer {
     }
 
     fn snapshot_from_guard(guard: &BridgeRuntimeState) -> ExtensionBridgeStatus {
-        let base_url = if guard.bound_port > 0 {
-            format!("http://127.0.0.1:{}", guard.bound_port)
+        let effective_port = if guard.bound_port > 0 {
+            guard.bound_port
         } else {
-            format!("http://127.0.0.1:{DEFAULT_EXTENSION_BRIDGE_PORT}")
+            DEFAULT_EXTENSION_BRIDGE_PORT
         };
+        let base_url = format!("http://127.0.0.1:{effective_port}");
         ExtensionBridgeStatus {
             enabled: guard.config.enabled,
             running: guard.running && guard.bound_port > 0,
             port: guard.bound_port,
+            mcp_endpoint_url: format!("{base_url}/api/v1/mcp"),
             base_url,
             allow_local_auto_pair: guard.config.allow_local_auto_pair,
             access_token: guard.config.access_token.clone(),
             last_error: guard.last_error.clone(),
+            allows_remote_mcp: guard.allow_remote_mcp,
         }
     }
 }
@@ -477,6 +581,7 @@ struct HttpRequest {
     raw_target: String,
     headers: HashMap<String, String>,
     body: Vec<u8>,
+    is_loopback_client: bool,
 }
 
 impl HttpRequest {
@@ -524,8 +629,10 @@ impl HttpResponse {
             401 => "Unauthorized",
             403 => "Forbidden",
             404 => "Not Found",
+            405 => "Method Not Allowed",
             409 => "Conflict",
             413 => "Payload Too Large",
+            415 => "Unsupported Media Type",
             503 => "Service Unavailable",
             _ => "Internal Server Error",
         };
@@ -559,17 +666,44 @@ enum ParseError {
     Eof,
 }
 
+fn is_loopback_socket_addr(addr: &SocketAddr) -> bool {
+    match addr.ip() {
+        IpAddr::V4(v4) => v4.is_loopback(),
+        IpAddr::V6(v6) => {
+            v6.is_loopback() || v6.to_ipv4_mapped().is_some_and(|v4| v4.is_loopback())
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn handle_connection(
     mut stream: TcpStream,
+    is_loopback_client: bool,
     engine: Arc<LiveCharkleEngine>,
     state: Arc<RwLock<BridgeRuntimeState>>,
     pending_mutations: Arc<Mutex<PendingMutationBatch>>,
     on_mutated: Option<MutationCallback>,
+    mcp_service: Arc<CharkleExternalAgentService>,
+    download_tickets: DownloadTicketStore,
 ) {
-    let response = match tokio::time::timeout(CONNECTION_IO_TIMEOUT, read_http_request(&mut stream))
-        .await
+    let response = match tokio::time::timeout(
+        CONNECTION_IO_TIMEOUT,
+        read_http_request(&mut stream, is_loopback_client),
+    )
+    .await
     {
-        Ok(Ok(req)) => route_request(req, &engine, &state, &pending_mutations, &on_mutated).await,
+        Ok(Ok(req)) => {
+            route_request(
+                req,
+                &engine,
+                &state,
+                &pending_mutations,
+                &on_mutated,
+                &mcp_service,
+                &download_tickets,
+            )
+            .await
+        }
         Ok(Err(ParseError::PayloadTooLarge)) => HttpResponse::json(
             413,
             build_cors_headers(None, true),
@@ -592,7 +726,10 @@ async fn handle_connection(
     .await;
 }
 
-async fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, ParseError> {
+async fn read_http_request(
+    stream: &mut TcpStream,
+    is_loopback_client: bool,
+) -> Result<HttpRequest, ParseError> {
     let mut buf = Vec::with_capacity(4096);
     let mut tmp = [0u8; 8192];
 
@@ -729,6 +866,7 @@ async fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, ParseE
         raw_target,
         headers,
         body,
+        is_loopback_client,
     })
 }
 
@@ -738,45 +876,67 @@ async fn route_request(
     state: &Arc<RwLock<BridgeRuntimeState>>,
     pending_mutations: &Arc<Mutex<PendingMutationBatch>>,
     on_mutated: &Option<MutationCallback>,
+    mcp_service: &Arc<CharkleExternalAgentService>,
+    download_tickets: &DownloadTicketStore,
 ) -> HttpResponse {
     let path = req.path_without_query().to_string();
     let origin = req.header("origin");
     let is_local_pair = path == "/api/v1/auth/local-pair";
+    let is_mcp_route = path == "/api/v1/mcp" || path.starts_with("/api/v1/mcp/download/");
+    let is_health_route = path == "/api/v1/health";
+
+    // Reject malformed Host headers universally (CR/LF/NUL/whitespace/slashes).
+    if let Some(host_hdr) = req.header("host") {
+        if !is_safe_host_header(host_hdr) {
+            return HttpResponse::json(
+                403,
+                build_cors_headers(None, true),
+                json!({ "error": "Host 请求头格式非法。", "code": "INVALID_HOST" }),
+            );
+        }
+    }
+
     // Security red line: `/api/v1/auth/local-pair` ONLY ever echoes CORS Allow-Origin
     // for browser-extension origins (`chrome-extension://`, `safari-web-extension://`,
     // `moz-extension://`) on BOTH OPTIONS preflight and POST responses.
     let cors_headers = build_cors_headers(origin, is_local_pair);
 
-    // Reject non-loopback `Host` headers to prevent DNS-rebinding attacks against 127.0.0.1.
-    if let Some(host_hdr) = req.header("host") {
-        if !is_allowed_loopback_host_header(host_hdr) {
-            return HttpResponse::json(
-                403,
-                build_cors_headers(None, true),
-                json!({ "error": "已拒绝非本机 Host 请求头。", "code": "INVALID_HOST" }),
-            );
-        }
-    }
-
     if req.method == "OPTIONS" {
+        let mut opt_headers = cors_headers;
+        if path == "/api/v1/mcp" {
+            opt_headers.push(("Allow".to_string(), "POST, OPTIONS".to_string()));
+        }
         return HttpResponse {
             status: 204,
-            headers: cors_headers,
+            headers: opt_headers,
             body: Vec::new(),
         };
     }
 
-    let (bound_port, allow_auto_pair, token) = {
+    let (bound_port, ext_enabled, allow_auto_pair, token) = {
         let guard = state.read().await;
         (
             guard.bound_port,
+            guard.config.enabled,
             guard.config.allow_local_auto_pair,
             guard.config.access_token.clone(),
         )
     };
 
-    // 1. Public liveness probe (NEVER exposes token or library contents)
-    if req.method == "GET" && path == "/api/v1/health" {
+    // 1. Public liveness probe (NEVER exposes tokens or library contents)
+    if req.method == "GET" && is_health_route {
+        let mcp_policy = mcp_service.current_policy();
+        if !mcp_policy.allow_remote_http_mcp {
+            if let Some(host_hdr) = req.header("host") {
+                if !is_allowed_loopback_host_header(host_hdr) {
+                    return HttpResponse::json(
+                        403,
+                        build_cors_headers(None, true),
+                        json!({ "error": "已拒绝非本机 Host 请求头。", "code": "INVALID_HOST" }),
+                    );
+                }
+            }
+        }
         return HttpResponse::json(
             200,
             cors_headers,
@@ -786,12 +946,58 @@ async fn route_request(
                 "name": "Charkle Windows",
                 "version": env!("CARGO_PKG_VERSION"),
                 "port": bound_port,
-                "autoPair": allow_auto_pair,
+                "autoPair": req.is_loopback_client && ext_enabled && allow_auto_pair,
+                "mcpHTTP": mcp_policy.http_mcp_enabled,
             }),
         );
     }
 
-    // 2. Strictly gated same-machine browser-extension auto-pairing
+    // 2. Pure MCP v2 Streamable HTTP endpoint (`POST /api/v1/mcp`)
+    if path == "/api/v1/mcp" {
+        return handle_http_mcp_request(&req, bound_port, mcp_service, download_tickets).await;
+    }
+
+    // 3. Short-lived signed asset download endpoint (`GET /api/v1/mcp/download/<ticket>`)
+    if let Some(ticket) = path.strip_prefix("/api/v1/mcp/download/") {
+        return handle_http_mcp_download(&req, ticket, engine, mcp_service, download_tickets);
+    }
+
+    // Security red line: EVERY browser-extension route (including `/api/v1/auth/local-pair`)
+    // MUST originate from a loopback socket AND carry a loopback Host header — even when
+    // `allowRemoteHTTPMCP` binds the shared HTTP listener on `0.0.0.0`.
+    if !is_mcp_route {
+        if !req.is_loopback_client {
+            return HttpResponse::json(
+                403,
+                build_cors_headers(None, true),
+                json!({
+                    "error": "浏览器扩展接口仅允许本机回环地址访问。",
+                    "code": "LOOPBACK_ONLY",
+                }),
+            );
+        }
+        if let Some(host_hdr) = req.header("host") {
+            if !is_allowed_loopback_host_header(host_hdr) {
+                return HttpResponse::json(
+                    403,
+                    build_cors_headers(None, true),
+                    json!({ "error": "已拒绝非本机 Host 请求头。", "code": "INVALID_HOST" }),
+                );
+            }
+        }
+        if !ext_enabled {
+            return HttpResponse::json(
+                403,
+                build_cors_headers(None, true),
+                json!({
+                    "error": "浏览器扩展桥接已在设置中关闭。",
+                    "code": "EXTENSION_BRIDGE_DISABLED",
+                }),
+            );
+        }
+    }
+
+    // 4. Strictly gated same-machine browser-extension auto-pairing
     if req.method == "POST" && is_local_pair {
         return handle_local_auto_pair(&req, cors_headers, bound_port, allow_auto_pair, &token);
     }
@@ -863,6 +1069,368 @@ async fn route_request(
             cors_headers,
             json!({ "error": "接口不存在。", "code": "NOT_FOUND" }),
         ),
+    }
+}
+
+// =============================================================================
+// Pure MCP v2 Streamable HTTP & Short-Lived Asset Download Handlers
+// =============================================================================
+
+async fn handle_http_mcp_request(
+    req: &HttpRequest,
+    bound_port: u16,
+    mcp_service: &Arc<CharkleExternalAgentService>,
+    download_tickets: &DownloadTicketStore,
+) -> HttpResponse {
+    if req.method == "GET" || req.method == "DELETE" {
+        return HttpResponse::json(
+            405,
+            vec![
+                ("Allow".to_string(), "POST, OPTIONS".to_string()),
+                ("Cache-Control".to_string(), "no-store".to_string()),
+            ],
+            json!({
+                "error": "Method Not Allowed: Charkle Streamable HTTP MCP accepts POST JSON-RPC requests.",
+                "code": "METHOD_NOT_ALLOWED",
+            }),
+        );
+    }
+    if req.method != "POST" {
+        return HttpResponse::json(
+            405,
+            vec![
+                ("Allow".to_string(), "POST, OPTIONS".to_string()),
+                ("Cache-Control".to_string(), "no-store".to_string()),
+            ],
+            json!({
+                "error": "Method Not Allowed",
+                "code": "METHOD_NOT_ALLOWED",
+            }),
+        );
+    }
+
+    let policy = mcp_service.current_policy();
+    if !policy.http_mcp_enabled {
+        return HttpResponse::json(
+            403,
+            vec![("Cache-Control".to_string(), "no-store".to_string())],
+            json!({
+                "error": "HTTP MCP 服务已在 Charkle 设置中关闭。",
+                "code": "HTTP_MCP_DISABLED",
+            }),
+        );
+    }
+
+    if !req.is_loopback_client && !policy.allow_remote_http_mcp {
+        return HttpResponse::json(
+            403,
+            vec![("Cache-Control".to_string(), "no-store".to_string())],
+            json!({
+                "error": "未启用局域网/远程 HTTP MCP 访问，请在设置中显式开启。",
+                "code": "REMOTE_MCP_DISABLED",
+            }),
+        );
+    }
+
+    if !policy.allow_remote_http_mcp {
+        if let Some(host_hdr) = req.header("host") {
+            if !is_allowed_loopback_host_header(host_hdr) {
+                return HttpResponse::json(
+                    403,
+                    vec![("Cache-Control".to_string(), "no-store".to_string())],
+                    json!({ "error": "已拒绝非本机 Host 请求头。", "code": "INVALID_HOST" }),
+                );
+            }
+        }
+    }
+
+    let Some(supplied_bearer) = extract_bearer_token(req.header("authorization")) else {
+        return HttpResponse::json(
+            401,
+            vec![
+                (
+                    "WWW-Authenticate".to_string(),
+                    "Bearer realm=\"charkle-mcp\"".to_string(),
+                ),
+                ("Cache-Control".to_string(), "no-store".to_string()),
+            ],
+            json!({
+                "error": "缺少有效的 Scoped Bearer Token，请在 Charkle「设置 → 外部 Agent」签发专属令牌。",
+                "code": "UNAUTHORIZED",
+            }),
+        );
+    };
+
+    let Some(matched_token) = policy.matching_token(supplied_bearer) else {
+        return HttpResponse::json(
+            401,
+            vec![
+                (
+                    "WWW-Authenticate".to_string(),
+                    "Bearer realm=\"charkle-mcp\"".to_string(),
+                ),
+                ("Cache-Control".to_string(), "no-store".to_string()),
+            ],
+            json!({
+                "error": "Scoped Bearer Token 无效、已停用或已吊销。",
+                "code": "UNAUTHORIZED",
+            }),
+        );
+    };
+
+    let host_for_urls = req
+        .header("host")
+        .map(str::trim)
+        .filter(|h| is_safe_host_header(h))
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("127.0.0.1:{bound_port}"));
+
+    let ticket_store = Arc::clone(download_tickets);
+    let issuer: DownloadUrlIssuer = Arc::new(move |asset_id: Uuid| {
+        let mut raw = [0u8; 16];
+        rand::rngs::OsRng.fill_bytes(&mut raw);
+        let ticket = hex::encode(raw);
+        let now = Instant::now();
+        let expires_at = now + MCP_DOWNLOAD_TICKET_TTL;
+        let Ok(mut map) = ticket_store.lock() else {
+            return None;
+        };
+        map.retain(|_, v| v.expires_at > now);
+        while map.len() >= MCP_DOWNLOAD_MAX_TICKETS {
+            if let Some(oldest_key) = map
+                .iter()
+                .min_by_key(|(_, v)| v.expires_at)
+                .map(|(k, _)| k.clone())
+            {
+                map.remove(&oldest_key);
+            } else {
+                break;
+            }
+        }
+        map.insert(
+            ticket.clone(),
+            DownloadTicket {
+                asset_id,
+                expires_at,
+            },
+        );
+        Some(format!(
+            "http://{host_for_urls}/api/v1/mcp/download/{ticket}"
+        ))
+    });
+
+    let ctx = ExternalAgentRequestContext {
+        transport: ExternalAgentTransport::Http,
+        scoped_access_level: Some(matched_token.access_level),
+        actor_label: format!("http:{}", matched_token.name),
+        issue_download_url: Some(issuer),
+    };
+
+    let raw_payload = String::from_utf8_lossy(&req.body);
+    match mcp_service
+        .handle_jsonrpc_with_context(&raw_payload, &ctx)
+        .await
+    {
+        None => HttpResponse {
+            status: 204,
+            headers: vec![("Cache-Control".to_string(), "no-store".to_string())],
+            body: Vec::new(),
+        },
+        Some(reply) => HttpResponse {
+            status: 200,
+            headers: vec![
+                (
+                    "Content-Type".to_string(),
+                    "application/json; charset=utf-8".to_string(),
+                ),
+                ("Cache-Control".to_string(), "no-store".to_string()),
+            ],
+            body: reply.into_bytes(),
+        },
+    }
+}
+
+fn handle_http_mcp_download(
+    req: &HttpRequest,
+    ticket: &str,
+    engine: &Arc<LiveCharkleEngine>,
+    mcp_service: &Arc<CharkleExternalAgentService>,
+    download_tickets: &DownloadTicketStore,
+) -> HttpResponse {
+    if req.method != "GET" {
+        return HttpResponse::json(
+            405,
+            vec![("Allow".to_string(), "GET".to_string())],
+            json!({ "error": "Method Not Allowed", "code": "METHOD_NOT_ALLOWED" }),
+        );
+    }
+
+    let policy = mcp_service.current_policy();
+    if !policy.http_mcp_enabled {
+        return HttpResponse::json(
+            403,
+            vec![("Cache-Control".to_string(), "no-store".to_string())],
+            json!({ "error": "HTTP MCP 服务已关闭。", "code": "HTTP_MCP_DISABLED" }),
+        );
+    }
+    if !req.is_loopback_client && !policy.allow_remote_http_mcp {
+        return HttpResponse::json(
+            403,
+            vec![("Cache-Control".to_string(), "no-store".to_string())],
+            json!({ "error": "未启用远程 HTTP MCP 下载。", "code": "REMOTE_MCP_DISABLED" }),
+        );
+    }
+    if !policy.allow_remote_http_mcp {
+        if let Some(host_hdr) = req.header("host") {
+            if !is_allowed_loopback_host_header(host_hdr) {
+                return HttpResponse::json(
+                    403,
+                    vec![("Cache-Control".to_string(), "no-store".to_string())],
+                    json!({ "error": "已拒绝非本机 Host 请求头。", "code": "INVALID_HOST" }),
+                );
+            }
+        }
+    }
+
+    let clean_ticket = ticket.trim();
+    if clean_ticket.is_empty()
+        || clean_ticket.len() > 128
+        || !clean_ticket.bytes().all(|b| b.is_ascii_alphanumeric())
+    {
+        return HttpResponse::json(
+            404,
+            vec![("Cache-Control".to_string(), "no-store".to_string())],
+            json!({ "error": "下载票据无效。", "code": "INVALID_TICKET" }),
+        );
+    }
+
+    let asset_id = {
+        let Ok(mut map) = download_tickets.lock() else {
+            return HttpResponse::json(
+                500,
+                vec![("Cache-Control".to_string(), "no-store".to_string())],
+                json!({ "error": "内部票据锁失败。", "code": "INTERNAL_ERROR" }),
+            );
+        };
+        let now = Instant::now();
+        map.retain(|_, v| v.expires_at > now);
+        map.get(clean_ticket).map(|entry| entry.asset_id)
+    };
+
+    let Some(asset_id) = asset_id else {
+        return HttpResponse::json(
+            404,
+            vec![("Cache-Control".to_string(), "no-store".to_string())],
+            json!({ "error": "下载链接已过期或不存在。", "code": "TICKET_EXPIRED" }),
+        );
+    };
+
+    let Ok(Some(asset)) = engine.fetch_asset(asset_id) else {
+        return HttpResponse::json(
+            404,
+            vec![("Cache-Control".to_string(), "no-store".to_string())],
+            json!({ "error": "素材不存在。", "code": "NOT_FOUND" }),
+        );
+    };
+    if asset.is_trashed {
+        return HttpResponse::json(
+            404,
+            vec![("Cache-Control".to_string(), "no-store".to_string())],
+            json!({ "error": "素材已在回收站中。", "code": "NOT_FOUND" }),
+        );
+    }
+
+    let file_path = engine
+        .cached_original_path(&asset)
+        .filter(|p| p.is_file())
+        .or_else(|| {
+            engine
+                .media()
+                .thumbnail_url(asset.id, ThumbnailTier::Preview1400)
+                .filter(|p| p.is_file())
+        })
+        .or_else(|| {
+            engine
+                .media()
+                .thumbnail_url(asset.id, ThumbnailTier::Grid520)
+                .filter(|p| p.is_file())
+        });
+
+    let Some(path) = file_path else {
+        return HttpResponse::json(
+            404,
+            vec![("Cache-Control".to_string(), "no-store".to_string())],
+            json!({ "error": "素材文件尚未缓存至本机。", "code": "FILE_NOT_CACHED" }),
+        );
+    };
+
+    let Ok(meta) = std::fs::metadata(&path) else {
+        return HttpResponse::json(
+            404,
+            vec![("Cache-Control".to_string(), "no-store".to_string())],
+            json!({ "error": "无法读取素材文件元数据。", "code": "NOT_FOUND" }),
+        );
+    };
+    if meta.len() > MCP_DOWNLOAD_MAX_BYTES {
+        return HttpResponse::json(
+            413,
+            vec![("Cache-Control".to_string(), "no-store".to_string())],
+            json!({ "error": "素材文件超过单次 HTTP 下载 64 MB 上限。", "code": "PAYLOAD_TOO_LARGE" }),
+        );
+    }
+
+    let Ok(bytes) = std::fs::read(&path) else {
+        return HttpResponse::json(
+            500,
+            vec![("Cache-Control".to_string(), "no-store".to_string())],
+            json!({ "error": "读取素材文件失败。", "code": "INTERNAL_ERROR" }),
+        );
+    };
+
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+    let content_type = match ext.as_str() {
+        "jpg" | "jpeg" => "image/jpeg",
+        "png" => "image/png",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        "svg" => "image/svg+xml",
+        "mp4" | "m4v" => "video/mp4",
+        "webm" => "video/webm",
+        "mov" => "video/quicktime",
+        "pdf" => "application/pdf",
+        "txt" | "md" => "text/plain; charset=utf-8",
+        "json" => "application/json; charset=utf-8",
+        _ => "application/octet-stream",
+    };
+
+    let safe_name = sanitize_bridge_filename_part(if !asset.file_name.trim().is_empty() {
+        &asset.file_name
+    } else {
+        &asset.title
+    });
+    let download_name =
+        if ext.is_empty() || safe_name.to_ascii_lowercase().ends_with(&format!(".{ext}")) {
+            safe_name
+        } else {
+            format!("{safe_name}.{ext}")
+        };
+
+    HttpResponse {
+        status: 200,
+        headers: vec![
+            ("Content-Type".to_string(), content_type.to_string()),
+            (
+                "Content-Disposition".to_string(),
+                format!("inline; filename=\"{download_name}\""),
+            ),
+            ("Cache-Control".to_string(), "private, no-store".to_string()),
+            ("X-Content-Type-Options".to_string(), "nosniff".to_string()),
+        ],
+        body: bytes,
     }
 }
 
@@ -2322,19 +2890,36 @@ async fn handle_multipart_upload(
 // Security, Payload & Multipart Helpers
 // =============================================================================
 
+fn extract_bearer_token(header: Option<&str>) -> Option<&str> {
+    let raw = header?.trim();
+    if raw.len() < 7 || !raw.as_bytes()[..7].eq_ignore_ascii_case(b"bearer ") {
+        return None;
+    }
+    let token = raw[7..].trim();
+    if token.is_empty() {
+        None
+    } else {
+        Some(token)
+    }
+}
+
 fn validate_bearer_token(header: Option<&str>, expected_token: &str) -> bool {
     if expected_token.is_empty() {
         return false;
     }
-    let Some(raw) = header else {
+    let Some(supplied) = extract_bearer_token(header) else {
         return false;
     };
-    let trimmed = raw.trim();
-    if trimmed.len() < 7 || !trimmed.as_bytes()[..7].eq_ignore_ascii_case(b"bearer ") {
-        return false;
-    }
-    let supplied = trimmed[7..].trim();
     constant_time_eq(supplied.as_bytes(), expected_token.as_bytes())
+}
+
+fn is_safe_host_header(raw: &str) -> bool {
+    let trimmed = raw.trim();
+    !trimmed.is_empty()
+        && trimmed.len() <= 255
+        && !trimmed
+            .bytes()
+            .any(|b| b.is_ascii_control() || b.is_ascii_whitespace() || b == b'/' || b == b'\\')
 }
 
 fn constant_time_eq(lhs: &[u8], rhs: &[u8]) -> bool {
@@ -3765,6 +4350,253 @@ mod tests {
         assert!(!dy_note_tags.iter().any(|t| t == "抖音视频"));
         assert!(dy_note_tags.iter().any(|t| t == "抖音"));
         assert!(dy_note_tags.iter().any(|t| t == "建筑"));
+
+        bridge.stop().await;
+    }
+
+    #[tokio::test]
+    async fn streamable_http_mcp_scoped_tokens_download_tickets_and_loopback_isolation() {
+        use crate::models::agent::{
+            ExternalAgentAccessLevel, ExternalAgentConfig, ExternalAgentToken,
+        };
+
+        let (tmp, engine, bridge, port, _ext_token) = spawn_test_bridge().await;
+        let client = reqwest::Client::new();
+        let base = format!("http://127.0.0.1:{port}");
+
+        // Mint two scoped HTTP tokens: one readOnly, one readWriteOrganize
+        let (ro_rec, ro_plain) =
+            ExternalAgentToken::mint("ReadOnly Agent", ExternalAgentAccessLevel::ReadOnly);
+        let (rw_rec, rw_plain) =
+            ExternalAgentToken::mint("Curator Agent", ExternalAgentAccessLevel::ReadWriteOrganize);
+        let mut policy = ExternalAgentConfig {
+            mcp_enabled: true,
+            http_mcp_enabled: true,
+            allow_remote_http_mcp: false,
+            access_level: ExternalAgentAccessLevel::ReadOnly,
+            tokens: vec![ro_rec, rw_rec],
+        };
+        ExternalAgentConfigStore::save(tmp.path(), &policy).unwrap();
+
+        // 1. GET & DELETE on /api/v1/mcp -> 405 Method Not Allowed with Allow: POST, OPTIONS
+        let get_res = client
+            .get(format!("{base}/api/v1/mcp"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(get_res.status(), 405);
+        assert_eq!(
+            get_res.headers().get("allow").and_then(|v| v.to_str().ok()),
+            Some("POST, OPTIONS")
+        );
+        let del_res = client
+            .delete(format!("{base}/api/v1/mcp"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(del_res.status(), 405);
+
+        // 2. Missing / invalid Bearer token -> 401
+        let unauth = client
+            .post(format!("{base}/api/v1/mcp"))
+            .json(&json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {} }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(unauth.status(), 401);
+
+        // 3. Valid readOnly Scoped Token -> tools/list returns 10 tools; manage_folder denied
+        let tools_res = client
+            .post(format!("{base}/api/v1/mcp"))
+            .header("Authorization", format!("Bearer {ro_plain}"))
+            .json(&json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {} }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(tools_res.status(), 200);
+        let tools_json: Value = tools_res.json().await.unwrap();
+        assert_eq!(tools_json["result"]["tools"].as_array().unwrap().len(), 10);
+
+        let denied_write = client
+            .post(format!("{base}/api/v1/mcp"))
+            .header("Authorization", format!("Bearer {ro_plain}"))
+            .json(&json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {
+                    "name": "manage_folder",
+                    "arguments": { "action": "create", "name": "Forbidden" }
+                }
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(denied_write.status(), 200);
+        let denied_json: Value = denied_write.json().await.unwrap();
+        assert_eq!(denied_json["result"]["isError"], true);
+
+        // 4. Valid readWriteOrganize Scoped Token -> ingest via inline_files succeeds, local file_path blocked over HTTP
+        let png = MediaArtwork::encode_png(&DynamicImage::ImageRgba8(RgbaImage::from_pixel(
+            32,
+            32,
+            Rgba([80, 140, 220, 255]),
+        )))
+        .unwrap();
+        let b64 = BASE64_STD.encode(&png);
+
+        let blocked_path = client
+            .post(format!("{base}/api/v1/mcp"))
+            .header("Authorization", format!("Bearer {rw_plain}"))
+            .json(&json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {
+                    "name": "ingest_assets",
+                    "arguments": { "file_path": "/etc/passwd" }
+                }
+            }))
+            .send()
+            .await
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap();
+        assert_eq!(blocked_path["result"]["isError"], true);
+
+        let ingest_ok = client
+            .post(format!("{base}/api/v1/mcp"))
+            .header("Authorization", format!("Bearer {rw_plain}"))
+            .json(&json!({
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "tools/call",
+                "params": {
+                    "name": "ingest_assets",
+                    "arguments": {
+                        "inline_files": [{
+                            "file_name": "remote_ref.png",
+                            "base64_data": b64,
+                            "title": "Remote MCP Ref"
+                        }]
+                    }
+                }
+            }))
+            .send()
+            .await
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap();
+        assert_eq!(ingest_ok["result"]["isError"], false);
+        let ingest_text = ingest_ok["result"]["content"][0]["text"].as_str().unwrap();
+        let ingest_payload: Value = serde_json::from_str(ingest_text).unwrap();
+        let asset_id = ingest_payload["assets"][0]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // 5. inspect_assets(include_download_url: true) issues short-lived download ticket & hides local path
+        let inspect_res = client
+            .post(format!("{base}/api/v1/mcp"))
+            .header("Authorization", format!("Bearer {ro_plain}"))
+            .json(&json!({
+                "jsonrpc": "2.0",
+                "id": 5,
+                "method": "tools/call",
+                "params": {
+                    "name": "inspect_assets",
+                    "arguments": {
+                        "asset_ids": [asset_id],
+                        "include_download_url": true
+                    }
+                }
+            }))
+            .send()
+            .await
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap();
+        assert_eq!(inspect_res["result"]["isError"], false);
+        let inspect_text = inspect_res["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap();
+        let inspect_payload: Value = serde_json::from_str(inspect_text).unwrap();
+        let item = &inspect_payload["assets"][0];
+        assert!(
+            item.get("localFilePath").is_none(),
+            "HTTP MCP must never leak localFilePath"
+        );
+        let dl_url = item["downloadURL"]
+            .as_str()
+            .expect("downloadURL minted for HTTP inspect_assets");
+        assert!(dl_url.contains("/api/v1/mcp/download/"));
+
+        // 6. Fetch signed download URL -> 200 OK with asset bytes & Cache-Control: private, no-store
+        let dl_res = client.get(dl_url).send().await.unwrap();
+        assert_eq!(dl_res.status(), 200);
+        assert_eq!(
+            dl_res
+                .headers()
+                .get("cache-control")
+                .and_then(|v| v.to_str().ok()),
+            Some("private, no-store")
+        );
+        let dl_bytes = dl_res.bytes().await.unwrap();
+        assert!(!dl_bytes.is_empty());
+
+        // 7. JSON-RPC notification -> 204 No Content
+        let notif_res = client
+            .post(format!("{base}/api/v1/mcp"))
+            .header("Authorization", format!("Bearer {ro_plain}"))
+            .json(&json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(notif_res.status(), 204);
+
+        // 8. Disabling http_mcp_enabled immediately blocks POST /api/v1/mcp with 403
+        policy.http_mcp_enabled = false;
+        ExternalAgentConfigStore::save(tmp.path(), &policy).unwrap();
+        let disabled_res = client
+            .post(format!("{base}/api/v1/mcp"))
+            .header("Authorization", format!("Bearer {ro_plain}"))
+            .json(&json!({ "jsonrpc": "2.0", "id": 6, "method": "tools/list", "params": {} }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(disabled_res.status(), 403);
+
+        // 9. Direct unit check of loopback security gate: non-loopback client on /local-pair -> 403 LOOPBACK_ONLY
+        let fake_remote_req = HttpRequest {
+            method: "POST".to_string(),
+            raw_target: "/api/v1/auth/local-pair".to_string(),
+            headers: HashMap::from([
+                ("host".to_string(), format!("127.0.0.1:{port}")),
+                (
+                    "origin".to_string(),
+                    "chrome-extension://abcdefghijklmnop".to_string(),
+                ),
+                ("x-charkle-extension".to_string(), "1".to_string()),
+            ]),
+            body: Vec::new(),
+            is_loopback_client: false,
+        };
+        let remote_pair_resp = route_request(
+            fake_remote_req,
+            &engine,
+            &bridge.state,
+            &bridge.pending_mutations,
+            &bridge.on_mutated,
+            &bridge.mcp_service,
+            &bridge.download_tickets,
+        )
+        .await;
+        assert_eq!(remote_pair_resp.status, 403);
+        let body_json: Value = serde_json::from_slice(&remote_pair_resp.body).unwrap();
+        assert_eq!(body_json["code"], "LOOPBACK_ONLY");
 
         bridge.stop().await;
     }

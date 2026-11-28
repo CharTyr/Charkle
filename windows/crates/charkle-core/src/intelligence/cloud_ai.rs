@@ -80,13 +80,87 @@ fn validate_and_normalize_base(raw_base: &str, default_path: &str) -> CoreResult
         .map_err(|e| CoreError::InvalidOperation(format!("规范化 AI 地址失败：{e}")))
 }
 
+/// Strips `<think>...</think>` reasoning blocks (case-insensitive) and extracts the final valid
+/// top-level JSON object via balanced-brace scanning (falling back to first..last braces).
+pub(crate) fn extract_json_object_value(raw: &str) -> Option<Value> {
+    let without_think = strip_think_blocks(raw);
+    let trimmed = without_think.trim();
+
+    let mut candidates: Vec<&str> = Vec::new();
+    let mut depth: usize = 0;
+    let mut start_byte: Option<usize> = None;
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for (idx, ch) in trimmed.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+        } else if ch == '"' {
+            in_string = true;
+        } else if ch == '{' {
+            if depth == 0 {
+                start_byte = Some(idx);
+            }
+            depth += 1;
+        } else if ch == '}' && depth > 0 {
+            depth -= 1;
+            if depth == 0 {
+                if let Some(start) = start_byte.take() {
+                    candidates.push(&trimmed[start..=idx]);
+                }
+            }
+        }
+    }
+
+    for candidate in candidates.into_iter().rev() {
+        if let Ok(val) = serde_json::from_str::<Value>(candidate) {
+            if val.is_object() {
+                return Some(val);
+            }
+        }
+    }
+
+    if let (Some(start), Some(end)) = (trimmed.find('{'), trimmed.rfind('}')) {
+        if start <= end {
+            if let Ok(val) = serde_json::from_str::<Value>(&trimmed[start..=end]) {
+                if val.is_object() {
+                    return Some(val);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn strip_think_blocks(raw: &str) -> String {
+    let lower = raw.to_ascii_lowercase();
+    let mut out = String::with_capacity(raw.len());
+    let mut cursor = 0usize;
+    while let Some(rel_open) = lower[cursor..].find("<think>") {
+        let open_pos = cursor + rel_open;
+        out.push_str(&raw[cursor..open_pos]);
+        let search_after = open_pos + "<think>".len();
+        if let Some(rel_close) = lower[search_after..].find("</think>") {
+            cursor = search_after + rel_close + "</think>".len();
+        } else {
+            // Unclosed <think> block: skip the tag itself so trailing JSON remains parseable if present
+            cursor = search_after;
+        }
+    }
+    out.push_str(&raw[cursor..]);
+    out
+}
+
 fn parse_caption_json(raw: &str) -> CoreResult<(String, Vec<String>)> {
-    let trimmed = raw.trim();
-    let cleaned = match (trimmed.find('{'), trimmed.rfind('}')) {
-        (Some(start), Some(end)) if start <= end => &trimmed[start..=end],
-        _ => trimmed,
-    };
-    let val: Value = serde_json::from_str(cleaned).unwrap_or_else(|_| {
+    let trimmed = strip_think_blocks(raw);
+    let trimmed = trimmed.trim();
+    let val: Value = extract_json_object_value(raw).unwrap_or_else(|| {
         json!({
             "description": trimmed.chars().take(180).collect::<String>(),
             "tags": []
@@ -1068,5 +1142,24 @@ mod tests {
             test_cloud_ai_connection(&cfg_gem, Some("gem-key".into()), Arc::clone(&usage)).await;
         assert!(probe.ok);
         assert_eq!(usage.snapshot().standard.today_requests, 3);
+    }
+
+    #[test]
+    fn extract_json_object_strips_think_blocks_and_prefers_final_valid_object() {
+        let raw = r#"<THINK>
+        Let me consider {"draft": true} first and reason about the image.
+        </think>
+        Here is the JSON result:
+        ```json
+        {"description": "极简建筑光影", "tags": ["建筑", "光影"]}
+        ```"#;
+        let (desc, tags) = parse_caption_json(raw).expect("caption json");
+        assert_eq!(desc, "极简建筑光影");
+        assert_eq!(tags, vec!["建筑", "光影"]);
+
+        let multi =
+            r#"Example: {"not": "final"} Final answer: {"fits_any": true, "confidence": 0.91}"#;
+        let val = extract_json_object_value(multi).expect("final json object");
+        assert_eq!(val.get("fits_any").and_then(Value::as_bool), Some(true));
     }
 }

@@ -332,11 +332,8 @@ pub fn run() {
 
             let bridge_for_boot = Arc::clone(&extension_bridge);
             tauri::async_runtime::spawn(async move {
-                let status = bridge_for_boot.status().await;
-                if status.enabled {
-                    if let Err(err) = bridge_for_boot.start().await {
-                        tracing::warn!(%err, "Failed to start local browser extension bridge");
-                    }
+                if let Err(err) = bridge_for_boot.sync_mcp_network_binding().await {
+                    tracing::warn!(%err, "Failed to start local extension / HTTP MCP bridge");
                 }
             });
 
@@ -555,9 +552,13 @@ pub fn run() {
             commands::settings::get_typesafe_state,
             commands::settings::save_typesafe_config,
             commands::settings::test_typesafe_connection,
+            commands::settings::enrich_assets,
             commands::settings::run_inbox_smart_triage,
             commands::settings::get_external_agent_state,
             commands::settings::save_external_agent_config,
+            commands::settings::mint_external_agent_token,
+            commands::settings::toggle_external_agent_token,
+            commands::settings::revoke_external_agent_token,
             commands::settings::run_external_agent_self_check,
             commands::settings::rebuild_local_visual_index,
             commands::settings::save_webdav_password,

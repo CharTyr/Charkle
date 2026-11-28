@@ -300,10 +300,18 @@ const TRACKING_QUERY_PARAMS: &[&str] = &[
     "share_source",
     "share_medium",
     "share_session_id",
-    "s",
-    "t",
     "xsec_token",
     "xsec_source",
+];
+
+const SOCIAL_SHORT_TRACKING_PARAMS: &[&str] = &["s", "t"];
+const SOCIAL_SHORT_TRACKING_HOSTS: &[&str] = &[
+    "x.com",
+    "twitter.com",
+    "mobile.twitter.com",
+    "youtube.com",
+    "m.youtube.com",
+    "youtu.be",
 ];
 
 pub struct SmartDeduplicator;
@@ -474,11 +482,20 @@ impl SmartDeduplicator {
         while path.len() > 1 && path.ends_with('/') {
             path.pop();
         }
+        let strip_short_social_params = SOCIAL_SHORT_TRACKING_HOSTS.contains(&host.as_str());
         let mut filtered_query: Vec<(String, String)> = url
             .query_pairs()
             .filter(|(k, _)| {
                 let lower = k.to_ascii_lowercase();
-                !lower.starts_with("utm_") && !TRACKING_QUERY_PARAMS.contains(&lower.as_str())
+                if lower.starts_with("utm_") || TRACKING_QUERY_PARAMS.contains(&lower.as_str()) {
+                    return false;
+                }
+                if strip_short_social_params
+                    && SOCIAL_SHORT_TRACKING_PARAMS.contains(&lower.as_str())
+                {
+                    return false;
+                }
+                true
             })
             .map(|(k, v)| (k.into_owned(), v.into_owned()))
             .collect();
@@ -1167,20 +1184,35 @@ fn cluster_within_bucket(
                     }
                 }
             } else {
-                // 4x16-bit Multi-Index Hashing (MIH) for large libraries (> 4,000 visual assets)
-                let mut p_buckets: [HashMap<u16, Vec<usize>>; 4] = Default::default();
-                let mut d_buckets: [HashMap<u16, Vec<usize>>; 4] = Default::default();
+                // 8 overlapping 16-bit bands (4 aligned + 4 half-band rotated by 8 bits) dramatically boost recall
+                // across 4k+ libraries when bit differences straddle a 16-bit band boundary.
+                let mut p_buckets: [HashMap<u16, Vec<usize>>; 8] = Default::default();
+                let mut d_buckets: [HashMap<u16, Vec<usize>>; 8] = Default::default();
                 let mut flat_indices: Vec<usize> = Vec::new();
 
                 for (pos, entry) in fp_reps.iter().enumerate() {
                     if entry.2.luma_std_dev < 3.5 {
                         flat_indices.push(pos);
                     }
+                    let p_rot = entry.2.p_hash.rotate_right(8);
+                    let d_rot = entry.2.d_hash.rotate_right(8);
                     for band in 0..4usize {
-                        let p_slice = ((entry.2.p_hash >> (band * 16)) & 0xFFFF) as u16;
-                        let d_slice = ((entry.2.d_hash >> (band * 16)) & 0xFFFF) as u16;
+                        let shift = band * 16;
+                        let p_slice = ((entry.2.p_hash >> shift) & 0xFFFF) as u16;
+                        let d_slice = ((entry.2.d_hash >> shift) & 0xFFFF) as u16;
                         p_buckets[band].entry(p_slice).or_default().push(pos);
                         d_buckets[band].entry(d_slice).or_default().push(pos);
+
+                        let p_rot_slice = ((p_rot >> shift) & 0xFFFF) as u16;
+                        let d_rot_slice = ((d_rot >> shift) & 0xFFFF) as u16;
+                        p_buckets[band + 4]
+                            .entry(p_rot_slice)
+                            .or_default()
+                            .push(pos);
+                        d_buckets[band + 4]
+                            .entry(d_rot_slice)
+                            .or_default()
+                            .push(pos);
                     }
                 }
 
@@ -1197,29 +1229,52 @@ fn cluster_within_bucket(
                     }
                 };
 
-                for band in 0..4usize {
-                    for list in p_buckets[band].values() {
-                        if list.len() >= 2 && list.len() <= 256 {
-                            for a in 0..list.len() {
-                                for &b in &list[a + 1..] {
-                                    check_pair_idx(list[a], b);
+                let mut evaluate_bucket = |list: &[usize], secondary_shift: usize| {
+                    if list.len() < 2 {
+                        return;
+                    }
+                    if list.len() <= 256 {
+                        for a in 0..list.len() {
+                            for &b in &list[a + 1..] {
+                                check_pair_idx(list[a], b);
+                            }
+                        }
+                        return;
+                    }
+                    // Sub-bucket oversized buckets by a secondary combined slice instead of dropping them outright.
+                    let mut sub_buckets: HashMap<u16, Vec<usize>> = HashMap::new();
+                    for &pos in list {
+                        let fp = fp_reps[pos].2;
+                        let secondary = (((fp.p_hash >> secondary_shift)
+                            ^ (fp.d_hash >> ((secondary_shift + 16) % 64)))
+                            & 0xFFFF) as u16;
+                        sub_buckets.entry(secondary).or_default().push(pos);
+                    }
+                    for sub_list in sub_buckets.values() {
+                        if sub_list.len() >= 2 {
+                            let capped = sub_list.len().min(256);
+                            for a in 0..capped {
+                                for &b in &sub_list[(a + 1)..capped] {
+                                    check_pair_idx(sub_list[a], b);
                                 }
                             }
                         }
+                    }
+                };
+
+                for band in 0..8usize {
+                    let secondary_shift = ((band + 2) % 4) * 16;
+                    for list in p_buckets[band].values() {
+                        evaluate_bucket(list, secondary_shift);
                     }
                     for list in d_buckets[band].values() {
-                        if list.len() >= 2 && list.len() <= 256 {
-                            for a in 0..list.len() {
-                                for &b in &list[a + 1..] {
-                                    check_pair_idx(list[a], b);
-                                }
-                            }
-                        }
+                        evaluate_bucket(list, secondary_shift);
                     }
                 }
-                if flat_indices.len() >= 2 && flat_indices.len() <= 512 {
-                    for a in 0..flat_indices.len() {
-                        for &b in &flat_indices[a + 1..] {
+                if flat_indices.len() >= 2 {
+                    let capped_flat = flat_indices.len().min(512);
+                    for a in 0..capped_flat {
+                        for &b in &flat_indices[(a + 1)..capped_flat] {
                             check_pair_idx(flat_indices[a], b);
                         }
                     }
@@ -1229,6 +1284,16 @@ fn cluster_within_bucket(
     }
 
     // 3. Anti-chaining clustering via Union-Find
+    let effective_anti_chain_sens = if matches!(
+        bucket,
+        MediaComparisonBucket::DesignFile | MediaComparisonBucket::Model3D
+    ) && sensitivity == DeduplicationSensitivity::Relaxed
+    {
+        DeduplicationSensitivity::Balanced
+    } else {
+        sensitivity
+    };
+    let anti_chain_th = effective_anti_chain_sens.thresholds();
     verified_edges.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
     let mut parent: Vec<usize> = (0..rep_indices.len()).collect();
     let mut cluster_members: Vec<Vec<usize>> = (0..rep_indices.len()).map(|i| vec![i]).collect();
@@ -1249,11 +1314,28 @@ fn cluster_within_bucket(
             continue;
         }
         if kind == DuplicateMatchKind::NearIdentical {
+            if bucket == MediaComparisonBucket::Video {
+                if let (Some(da), Some(db)) = (
+                    items[rep_indices[ra]].asset.duration_seconds,
+                    items[rep_indices[rb]].asset.duration_seconds,
+                ) {
+                    if da > 0.2 && db > 0.2 {
+                        let max_diff = anti_chain_th
+                            .video_duration_abs_seconds
+                            .max(da.min(db) * anti_chain_th.video_duration_rel_ratio);
+                        if (da - db).abs() > max_diff {
+                            continue;
+                        }
+                    }
+                }
+            }
             if let (Some(fp_a), Some(fp_b)) = (
                 items[rep_indices[ra]].fingerprint.as_ref(),
                 items[rep_indices[rb]].fingerprint.as_ref(),
             ) {
-                if SmartDeduplicator::visual_similarity(fp_a, fp_b, sensitivity).is_none() {
+                if SmartDeduplicator::visual_similarity(fp_a, fp_b, effective_anti_chain_sens)
+                    .is_none()
+                {
                     continue;
                 }
             }
@@ -2083,5 +2165,36 @@ mod tests {
         assert!(groups
             .iter()
             .any(|g| g.match_kind == DuplicateMatchKind::NormalizedText));
+    }
+
+    #[test]
+    fn bookmark_dedup_scopes_short_s_and_t_params_to_x_and_youtube() {
+        let mut site_a = AssetRecord::new("search red", "a.url");
+        site_a.media_kind = MediaKind::WebBookmark;
+        site_a.source_url = Some("https://shop.example.com/search?s=red&t=1&utm_source=x".into());
+        let mut site_b = AssetRecord::new("search blue", "b.url");
+        site_b.media_kind = MediaKind::WebBookmark;
+        site_b.source_url = Some("https://shop.example.com/search?s=blue&t=2".into());
+
+        let key_a = SmartDeduplicator::canonical_bookmark_key(&site_a).unwrap();
+        let key_b = SmartDeduplicator::canonical_bookmark_key(&site_b).unwrap();
+        assert_ne!(
+            key_a, key_b,
+            "generic site ?s= and ?t= query parameters must not be stripped"
+        );
+        assert!(key_a.contains("s=red") && key_a.contains("t=1"));
+        assert!(!key_a.contains("utm_source"));
+
+        let mut yt_a = AssetRecord::new("yt a", "yt1.url");
+        yt_a.media_kind = MediaKind::WebBookmark;
+        yt_a.source_url = Some("https://www.youtube.com/results?search_query=design&t=42s".into());
+        let mut yt_b = AssetRecord::new("yt b", "yt2.url");
+        yt_b.media_kind = MediaKind::WebBookmark;
+        yt_b.source_url = Some("https://youtube.com/results?search_query=design&t=99s".into());
+        assert_eq!(
+            SmartDeduplicator::canonical_bookmark_key(&yt_a),
+            SmartDeduplicator::canonical_bookmark_key(&yt_b),
+            "YouTube ?t= parameter should still be stripped"
+        );
     }
 }
