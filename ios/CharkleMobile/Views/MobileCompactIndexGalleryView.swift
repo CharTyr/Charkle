@@ -3,33 +3,35 @@ import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
 
-// MARK: - 5th Universal Gallery Mode: Tactile Studio Compact View (iOS 1-Col Folio / iPad 2-Col Bento)
+// MARK: - 5th Universal Gallery Mode: Studio Compact View (1-Col Hairline Table & iPad 2-Col Bento Grid)
 
 /// Native iOS & iPadOS implementation of `GalleryLayoutMode.compactList` (`紧凑视图`):
-/// - Adaptive 1-column Folio Strip on iPhone compact width; toggleable 2-column Bento Index Grid ⇄ 1-column Strip on iPad regular width.
-/// - 3D Micro-Folio layered stack artwork (pointer-hover fan-out on iPad, pure transform, Reduce Motion safe).
-/// - 12-Segment Diff Minimap on versioned documents + `.monospacedDigit()` timestamps.
-/// - Tap-to-expand inline horizontal Revision Rail (`v3` ── `Δ 6处 · 数字1` ── `v4 主版` ── `Δ 3处 · 数字2` ── `v5`)
-///   with 1-tap `设为主版` (`isPinnedPrimary`) and 1-tap `Δ` bridge to launch Document Diff!
+/// - Minimal sub-toolbar showing category pills (`全部 / 文档 / 媒体`) only on mixed collections, plus an icon-only
+///   1-col / 2-col segmented switcher on iPad regular width.
+/// - 1-Column Mode (`columns == 1`): unified `MobileTheme.surfaceElevated` rounded table surface separated by crisp
+///   `0.5pt` hairlines inset from `leading: 58` (zero puffy per-row drop shadows, audio-only waveform sparkbar).
+/// - 2-Column Mode on iPad (`columns == 2`): tight `8pt` non-splitting Bento grid of `58pt`-tall horizontal tiles.
+/// - Universal Vertical Version Timeline Popover (`MobileVersionTimelinePopover`): anchored to the quiet `vN/M ▾` badge
+///   in both 1-column and 2-column modes (`vN → v1` newest-first spine, `Δ N` diff trigger, 1-tap primary pin).
 struct MobileCompactIndexGalleryView: View {
     private enum QuickCategoryFilter: String, CaseIterable, Identifiable {
         case all = "全部"
-        case documents = "文档叠"
-        case visualAndAudio = "视觉·音视频"
+        case documents = "文档"
+        case media = "媒体"
 
         var id: String { rawValue }
     }
 
-    private enum CompactGridRow: Identifiable {
-        case single(AssetRecord)
+    private enum CompactBentoRow: Identifiable {
         case pair(AssetRecord, AssetRecord)
+        case single(AssetRecord)
 
         var id: String {
             switch self {
-            case .single(let a):
-                return "single:\(a.id.uuidString)"
             case .pair(let a, let b):
                 return "pair:\(a.id.uuidString):\(b.id.uuidString)"
+            case .single(let a):
+                return "single:\(a.id.uuidString)"
             }
         }
     }
@@ -54,7 +56,14 @@ struct MobileCompactIndexGalleryView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @State private var quickCategory: QuickCategoryFilter = .all
-    @State private var expandedStackGroupID: UUID? = nil
+    @State private var popoverAnchorAssetID: UUID? = nil
+    @State private var hoveredRowAssetID: UUID? = nil
+
+    private func isAssetSelected(_ item: AssetRecord) -> Bool {
+        store.isMultiSelectMode
+            ? store.selectedAssetIDs.contains(item.id)
+            : (store.selectedAssetID == item.id || store.highlightedAssetID == item.id)
+    }
 
     private var documentCount: Int {
         displayedAssets.filter { $0.mediaKind == .document }.count
@@ -64,13 +73,17 @@ struct MobileCompactIndexGalleryView: View {
         displayedAssets.count - documentCount
     }
 
+    private var shouldShowCategoryPills: Bool {
+        (documentCount > 0 && mediaCount > 0) || quickCategory != .all
+    }
+
     private var filteredItems: [AssetRecord] {
         switch quickCategory {
         case .all:
             return displayedAssets
         case .documents:
             return displayedAssets.filter { $0.mediaKind == .document }
-        case .visualAndAudio:
+        case .media:
             return displayedAssets.filter { $0.mediaKind != .document }
         }
     }
@@ -85,35 +98,22 @@ struct MobileCompactIndexGalleryView: View {
         return 2
     }
 
-    private func buildRows(items: [AssetRecord], columns: Int) -> [CompactGridRow] {
+    /// Pairs items strictly 2-by-2 in 2-column mode and NEVER splits `.pair` into `.single`.
+    private func buildRows(items: [AssetRecord], columns: Int) -> [CompactBentoRow] {
         guard columns == 2 else {
             return items.map { .single($0) }
         }
-        var rows: [CompactGridRow] = []
+        var rows: [CompactBentoRow] = []
         rows.reserveCapacity((items.count + 1) / 2)
-        var pendingLeft: AssetRecord? = nil
-
-        for item in items {
-            let siblings = store.stackMembers(for: item)
-            let isExpanded = siblings.count > 1
-                && item.richMetadata?.versionStack?.groupID != nil
-                && item.richMetadata?.versionStack?.groupID == expandedStackGroupID
-
-            if isExpanded {
-                if let left = pendingLeft {
-                    rows.append(.single(left))
-                    pendingLeft = nil
-                }
-                rows.append(.single(item))
-            } else if let left = pendingLeft {
-                rows.append(.pair(left, item))
-                pendingLeft = nil
+        var index = 0
+        while index < items.count {
+            if index + 1 < items.count {
+                rows.append(.pair(items[index], items[index + 1]))
+                index += 2
             } else {
-                pendingLeft = item
+                rows.append(.single(items[index]))
+                index += 1
             }
-        }
-        if let leftover = pendingLeft {
-            rows.append(.single(leftover))
         }
         return rows
     }
@@ -121,11 +121,12 @@ struct MobileCompactIndexGalleryView: View {
     var body: some View {
         GeometryReader { proxy in
             let columns = resolvedColumnCount(for: proxy.size.width)
-            let rows = buildRows(items: filteredItems, columns: columns)
+            let items = filteredItems
             let horizontalPad: CGFloat = isCompact ? 12 : 18
+            let tableShape = RoundedRectangle(cornerRadius: MobileTheme.Radius.cardOuter, style: .continuous)
 
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 10) {
+                VStack(alignment: .leading, spacing: 10) {
                     Color.clear
                         .frame(height: max(0, topInset - 6))
 
@@ -135,7 +136,7 @@ struct MobileCompactIndexGalleryView: View {
 
                     studioSubToolbar(columns: columns, canToggleBento: !isCompact && proxy.size.width >= 620)
 
-                    if rows.isEmpty {
+                    if items.isEmpty {
                         VStack(spacing: 8) {
                             Image(systemName: "doc.text.magnifyingglass")
                                 .font(.system(size: 22, weight: .medium))
@@ -146,15 +147,18 @@ struct MobileCompactIndexGalleryView: View {
                         }
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 48)
-                    } else {
-                        ForEach(rows) { row in
-                            switch row {
-                            case .single(let item):
-                                CompactFolioIndexCard(
+                    } else if columns == 1 {
+                        // 1-Column Mode: Sleek Unified Hairline Tracklist Table with Smart Divider Suppression
+                        let dividerLeading: CGFloat = store.isMultiSelectMode ? 88 : 60
+                        LazyVStack(alignment: .leading, spacing: 0) {
+                            ForEach(Array(items.enumerated()), id: \.element.id) { idx, item in
+                                CompactItemCellView(
                                     store: store,
                                     asset: item,
+                                    isBentoCell: false,
                                     isCompactWidth: isCompact,
-                                    expandedStackGroupID: $expandedStackGroupID,
+                                    popoverAnchorAssetID: $popoverAnchorAssetID,
+                                    hoveredRowAssetID: $hoveredRowAssetID,
                                     zoomNamespace: zoomNamespace,
                                     zoomOrigin: zoomOrigin,
                                     onOpenAsset: onOpenAsset,
@@ -165,41 +169,101 @@ struct MobileCompactIndexGalleryView: View {
                                     onRequestMoveFolder: onRequestMoveFolder,
                                     onRequestPermanentDelete: onRequestPermanentDelete
                                 )
-                            case .pair(let left, let right):
-                                HStack(alignment: .top, spacing: 10) {
-                                    CompactFolioIndexCard(
-                                        store: store,
-                                        asset: left,
-                                        isCompactWidth: false,
-                                        expandedStackGroupID: $expandedStackGroupID,
-                                        zoomNamespace: zoomNamespace,
-                                        zoomOrigin: zoomOrigin,
-                                        onOpenAsset: onOpenAsset,
-                                        onOpenDiff: onOpenDiff,
-                                        onFindSimilar: onFindSimilar,
-                                        onSharePrimary: onSharePrimary,
-                                        onRequestMergeStack: onRequestMergeStack,
-                                        onRequestMoveFolder: onRequestMoveFolder,
-                                        onRequestPermanentDelete: onRequestPermanentDelete
-                                    )
-                                    .frame(maxWidth: .infinity)
 
-                                    CompactFolioIndexCard(
-                                        store: store,
-                                        asset: right,
-                                        isCompactWidth: false,
-                                        expandedStackGroupID: $expandedStackGroupID,
-                                        zoomNamespace: zoomNamespace,
-                                        zoomOrigin: zoomOrigin,
-                                        onOpenAsset: onOpenAsset,
-                                        onOpenDiff: onOpenDiff,
-                                        onFindSimilar: onFindSimilar,
-                                        onSharePrimary: onSharePrimary,
-                                        onRequestMergeStack: onRequestMergeStack,
-                                        onRequestMoveFolder: onRequestMoveFolder,
-                                        onRequestPermanentDelete: onRequestPermanentDelete
-                                    )
-                                    .frame(maxWidth: .infinity)
+                                if idx < items.count - 1 {
+                                    let nextItem = items[idx + 1]
+                                    let suppressDivider = isAssetSelected(item)
+                                        || isAssetSelected(nextItem)
+                                        || hoveredRowAssetID == item.id
+                                        || hoveredRowAssetID == nextItem.id
+                                    if suppressDivider {
+                                        Color.clear.frame(height: 0.5)
+                                    } else {
+                                        Rectangle()
+                                            .fill(MobileTheme.hairline(for: colorScheme))
+                                            .frame(height: 0.5)
+                                            .padding(.leading, dividerLeading)
+                                    }
+                                }
+                            }
+                        }
+                        .padding(.vertical, 4)
+                        .background(MobileTheme.surfaceElevated(for: colorScheme), in: tableShape)
+                        .clipShape(tableShape)
+                        .overlay(
+                            tableShape.strokeBorder(MobileTheme.hairline(for: colorScheme), lineWidth: 0.5)
+                        )
+                    } else {
+                        // 2-Column Mode on iPad: Tight 8pt Non-Splitting Bento Grid
+                        let bentoRows = buildRows(items: items, columns: 2)
+                        LazyVStack(alignment: .leading, spacing: 8) {
+                            ForEach(bentoRows) { row in
+                                switch row {
+                                case .pair(let left, let right):
+                                    HStack(alignment: .center, spacing: 8) {
+                                        CompactItemCellView(
+                                            store: store,
+                                            asset: left,
+                                            isBentoCell: true,
+                                            isCompactWidth: false,
+                                            popoverAnchorAssetID: $popoverAnchorAssetID,
+                                            hoveredRowAssetID: $hoveredRowAssetID,
+                                            zoomNamespace: zoomNamespace,
+                                            zoomOrigin: zoomOrigin,
+                                            onOpenAsset: onOpenAsset,
+                                            onOpenDiff: onOpenDiff,
+                                            onFindSimilar: onFindSimilar,
+                                            onSharePrimary: onSharePrimary,
+                                            onRequestMergeStack: onRequestMergeStack,
+                                            onRequestMoveFolder: onRequestMoveFolder,
+                                            onRequestPermanentDelete: onRequestPermanentDelete
+                                        )
+                                        .frame(maxWidth: .infinity)
+
+                                        CompactItemCellView(
+                                            store: store,
+                                            asset: right,
+                                            isBentoCell: true,
+                                            isCompactWidth: false,
+                                            popoverAnchorAssetID: $popoverAnchorAssetID,
+                                            hoveredRowAssetID: $hoveredRowAssetID,
+                                            zoomNamespace: zoomNamespace,
+                                            zoomOrigin: zoomOrigin,
+                                            onOpenAsset: onOpenAsset,
+                                            onOpenDiff: onOpenDiff,
+                                            onFindSimilar: onFindSimilar,
+                                            onSharePrimary: onSharePrimary,
+                                            onRequestMergeStack: onRequestMergeStack,
+                                            onRequestMoveFolder: onRequestMoveFolder,
+                                            onRequestPermanentDelete: onRequestPermanentDelete
+                                        )
+                                        .frame(maxWidth: .infinity)
+                                    }
+
+                                case .single(let lone):
+                                    HStack(alignment: .center, spacing: 8) {
+                                        CompactItemCellView(
+                                            store: store,
+                                            asset: lone,
+                                            isBentoCell: true,
+                                            isCompactWidth: false,
+                                            popoverAnchorAssetID: $popoverAnchorAssetID,
+                                            hoveredRowAssetID: $hoveredRowAssetID,
+                                            zoomNamespace: zoomNamespace,
+                                            zoomOrigin: zoomOrigin,
+                                            onOpenAsset: onOpenAsset,
+                                            onOpenDiff: onOpenDiff,
+                                            onFindSimilar: onFindSimilar,
+                                            onSharePrimary: onSharePrimary,
+                                            onRequestMergeStack: onRequestMergeStack,
+                                            onRequestMoveFolder: onRequestMoveFolder,
+                                            onRequestPermanentDelete: onRequestPermanentDelete
+                                        )
+                                        .frame(maxWidth: .infinity)
+
+                                        Color.clear
+                                            .frame(maxWidth: .infinity, minHeight: 58, maxHeight: 58)
+                                    }
                                 }
                             }
                         }
@@ -232,42 +296,60 @@ struct MobileCompactIndexGalleryView: View {
         }
     }
 
+    // MARK: - Minimal Sub-Toolbar
+
     private func studioSubToolbar(columns: Int, canToggleBento: Bool) -> some View {
         HStack(spacing: 8) {
-            // Quick category pills matching compact_view_preview.html
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 4) {
+            if shouldShowCategoryPills {
+                HStack(spacing: 2) {
                     categoryPill(.all, count: displayedAssets.count)
-                    if documentCount > 0 {
+                    if documentCount > 0 || quickCategory == .documents {
                         categoryPill(.documents, count: documentCount)
                     }
-                    if mediaCount > 0 && documentCount > 0 {
-                        categoryPill(.visualAndAudio, count: mediaCount)
+                    if mediaCount > 0 || quickCategory == .media {
+                        categoryPill(.media, count: mediaCount)
                     }
                 }
-                .padding(3)
-                .background(MobileTheme.surfaceSubtle(for: colorScheme), in: Capsule())
+                .padding(2.5)
+                .background(
+                    MobileTheme.surfaceSubtle(for: colorScheme),
+                    in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                )
+            } else {
+                Text("\(displayedAssets.count) 项")
+                    .font(.system(size: 12, weight: .medium).monospacedDigit())
+                    .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
+                    .padding(.leading, 2)
             }
 
             Spacer(minLength: 4)
 
             if canToggleBento {
                 HStack(spacing: 2) {
-                    bentoToggleButton(title: "双列索引卡", icon: "rectangle.grid.2x2", active: columns == 2) {
-                        withAnimation(MobileMotion.accessible(MobileMotion.settleStrong, reduced: reduceMotion)) {
-                            store.setCompactBentoColumnOverride(2)
-                        }
-                    }
-                    bentoToggleButton(title: "单列折页条", icon: "rectangle.grid.1x2", active: columns == 1) {
+                    bentoIconToggleButton(
+                        icon: "list.bullet",
+                        accessibilityTitle: "单列列表",
+                        active: columns == 1
+                    ) {
                         withAnimation(MobileMotion.accessible(MobileMotion.settleStrong, reduced: reduceMotion)) {
                             store.setCompactBentoColumnOverride(1)
                         }
                     }
+
+                    bentoIconToggleButton(
+                        icon: "square.grid.2x2",
+                        accessibilityTitle: "双列网格",
+                        active: columns == 2
+                    ) {
+                        withAnimation(MobileMotion.accessible(MobileMotion.settleStrong, reduced: reduceMotion)) {
+                            store.setCompactBentoColumnOverride(2)
+                        }
+                    }
                 }
-                .padding(3)
+                .padding(2.5)
                 .background(
                     MobileTheme.surfaceSubtle(for: colorScheme),
-                    in: RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    in: RoundedRectangle(cornerRadius: 8, style: .continuous)
                 )
             }
         }
@@ -281,39 +363,47 @@ struct MobileCompactIndexGalleryView: View {
                 quickCategory = cat
             }
         } label: {
-            Text("\(cat.rawValue) \(count)")
-                .font(.system(size: 12, weight: isOn ? .semibold : .medium).monospacedDigit())
-                .foregroundStyle(isOn ? .primary : MobileTheme.secondaryInk(for: colorScheme))
-                .padding(.horizontal, 10)
-                .padding(.vertical, 5)
-                .background(
-                    isOn ? MobileTheme.surfaceElevated(for: colorScheme) : .clear,
-                    in: Capsule()
-                )
+            HStack(spacing: 4) {
+                Text(cat.rawValue)
+                    .font(.system(size: 12, weight: isOn ? .semibold : .medium))
+                Text("\(count)")
+                    .font(.system(size: 11, weight: .medium).monospacedDigit())
+                    .foregroundStyle(isOn ? MobileTheme.secondaryInk(for: colorScheme) : MobileTheme.tertiaryInk(for: colorScheme))
+            }
+            .foregroundStyle(isOn ? .primary : MobileTheme.secondaryInk(for: colorScheme))
+            .padding(.horizontal, 9)
+            .padding(.vertical, 4.5)
+            .background(
+                isOn ? MobileTheme.surfaceElevated(for: colorScheme) : .clear,
+                in: RoundedRectangle(cornerRadius: 6, style: .continuous)
+            )
+            .shadow(color: .black.opacity(isOn ? 0.06 : 0), radius: 2, y: 1)
         }
         .buttonStyle(.plain)
     }
 
-    private func bentoToggleButton(title: String, icon: String, active: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: {
+    private func bentoIconToggleButton(
+        icon: String,
+        accessibilityTitle: String,
+        active: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button {
             MobileHaptics.light()
             action()
-        }) {
-            HStack(spacing: 4) {
-                Image(systemName: icon)
-                    .font(.system(size: 11, weight: .semibold))
-                Text(title)
-                    .font(.system(size: 11.5, weight: active ? .semibold : .medium))
-            }
-            .foregroundStyle(active ? .primary : MobileTheme.secondaryInk(for: colorScheme))
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4.5)
-            .background(
-                active ? MobileTheme.surfaceElevated(for: colorScheme) : .clear,
-                in: RoundedRectangle(cornerRadius: 6, style: .continuous)
-            )
+        } label: {
+            Image(systemName: icon)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(active ? .primary : MobileTheme.secondaryInk(for: colorScheme))
+                .frame(width: 28, height: 24)
+                .background(
+                    active ? MobileTheme.surfaceElevated(for: colorScheme) : .clear,
+                    in: RoundedRectangle(cornerRadius: 6, style: .continuous)
+                )
+                .shadow(color: .black.opacity(active ? 0.06 : 0), radius: 2, y: 1)
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(accessibilityTitle)
     }
 
     private func compactSyncBanner(fraction: Double) -> some View {
@@ -338,18 +428,20 @@ struct MobileCompactIndexGalleryView: View {
         )
         .overlay(
             RoundedRectangle(cornerRadius: MobileTheme.Radius.cardOuter, style: .continuous)
-                .strokeBorder(MobileTheme.hairline(for: colorScheme), lineWidth: 0.75)
+                .strokeBorder(MobileTheme.hairline(for: colorScheme), lineWidth: 0.5)
         )
     }
 }
 
-// MARK: - Tactile Studio Folio Card + 3D Micro-Folio + 12-Seg Minimap + Inline Revision Rail
+// MARK: - Unified 1-Col Table Row & 2-Col Bento Cell
 
-private struct CompactFolioIndexCard: View {
+private struct CompactItemCellView: View {
     @Bindable var store: MobileAppStore
     let asset: AssetRecord
+    let isBentoCell: Bool
     let isCompactWidth: Bool
-    @Binding var expandedStackGroupID: UUID?
+    @Binding var popoverAnchorAssetID: UUID?
+    @Binding var hoveredRowAssetID: UUID?
     let zoomNamespace: Namespace.ID
     let zoomOrigin: PreviewZoomOrigin
     let onOpenAsset: (AssetRecord) -> Void
@@ -364,6 +456,7 @@ private struct CompactFolioIndexCard: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @State private var isHovered: Bool = false
+    @State private var isBadgeHovered: Bool = false
     @State private var isDropTargeted: Bool = false
     @State private var thumbImage: UIImage? = nil
 
@@ -383,9 +476,8 @@ private struct CompactFolioIndexCard: View {
         primaryAsset.richMetadata?.versionStack?.groupID ?? asset.richMetadata?.versionStack?.groupID
     }
 
-    private var isRailExpanded: Bool {
-        guard hasStack, let gid = stackGroupID else { return false }
-        return expandedStackGroupID == gid
+    private var isPopoverOpen: Bool {
+        hasStack && popoverAnchorAssetID == asset.id
     }
 
     private var isSelected: Bool {
@@ -408,132 +500,172 @@ private struct CompactFolioIndexCard: View {
         return 1
     }
 
-    private var latestDiffSummary: DocumentDiffSummary? {
-        if let latestDocDiff = siblings.last?.richMetadata?.document?.diffSummary,
-           latestDocDiff.totalChangedBlocks > 0 {
-            return latestDocDiff
+    private var defaultComparePair: (baseID: UUID, targetID: UUID) {
+        if siblings.count >= 2 {
+            if pendingNewerCount > 0, let latest = siblings.last, latest.id != primaryAsset.id {
+                return (primaryAsset.id, latest.id)
+            }
+            let lastTwo = Array(siblings.suffix(2))
+            return (lastTwo[0].id, lastTwo[1].id)
         }
-        return primaryAsset.richMetadata?.document?.diffSummary
+        return (primaryAsset.id, primaryAsset.id)
     }
 
     var body: some View {
         let accent = MobileTheme.accent(for: colorScheme)
-        let cardShape = RoundedRectangle(cornerRadius: MobileTheme.Radius.cardOuter, style: .continuous)
+        let cellShape = RoundedRectangle(cornerRadius: MobileTheme.Radius.cardOuter, style: .continuous)
+        let rowHighlightShape = RoundedRectangle(cornerRadius: 9, style: .continuous)
+        let thumbSize = primaryAsset.mediaKind == .document
+            ? CGSize(width: 36, height: 46)
+            : CGSize(width: 38, height: 44)
 
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(alignment: .center, spacing: 11) {
-                if store.isMultiSelectMode {
-                    Image(systemName: store.selectedAssetIDs.contains(asset.id) ? "checkmark.circle.fill" : "circle")
-                        .font(.system(size: 19, weight: .semibold))
-                        .foregroundStyle(store.selectedAssetIDs.contains(asset.id) ? accent : MobileTheme.tertiaryInk(for: colorScheme))
-                }
+        HStack(alignment: .center, spacing: isBentoCell ? 10 : 12) {
+            if store.isMultiSelectMode {
+                Image(systemName: store.selectedAssetIDs.contains(asset.id) ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(store.selectedAssetIDs.contains(asset.id) ? accent : MobileTheme.tertiaryInk(for: colorScheme))
+                    .frame(width: 16)
+            }
 
-                // 1. 3D Micro-Folio Artifact Stage (44 x 52pt)
-                MicroFolioArtifactStage(
-                    asset: primaryAsset,
-                    thumbnail: store.thumbnails.cachedImage(for: primaryAsset.id, tier: .grid520) ?? thumbImage,
-                    hasStack: hasStack,
-                    isFannedOpen: (isHovered || isRailExpanded) && !reduceMotion
-                )
+            // 1. Tracklist Squircle Artwork / Page Cover (`36×46` docs / `38×44` media)
+            CompactMiniatureSheetThumb(
+                asset: primaryAsset,
+                thumbnail: store.thumbnails.cachedImage(for: primaryAsset.id, tier: .grid520) ?? thumbImage,
+                hasStack: hasStack,
+                isFannedOpen: (isHovered || isPopoverOpen) && !reduceMotion,
+                size: thumbSize
+            )
 
-                // 2. Primary Title + Stack Pill + Adaptive Media Feature Line
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack(spacing: 6) {
-                        Text(primaryAsset.title)
-                            .font(.system(size: 13.5, weight: .semibold))
-                            .foregroundStyle(.primary)
-                            .lineLimit(1)
-                            .layoutPriority(1)
+            // 2. Title (1 line) + Concise Spec
+            VStack(alignment: .leading, spacing: 2.5) {
+                HStack(spacing: 5) {
+                    Text(primaryAsset.title)
+                        .font(.system(size: 13.5, weight: .medium))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .layoutPriority(1)
 
-                        if hasStack {
-                            stackToggleCapsule
+                    if primaryAsset.rating > 0 {
+                        HStack(spacing: 1.5) {
+                            Image(systemName: "star.fill")
+                                .font(.system(size: 9.5))
+                                .foregroundStyle(Color(charkleHex: "#E5B243"))
+                            Text("\(primaryAsset.rating)")
+                                .font(.system(size: 10.5, weight: .medium).monospacedDigit())
+                                .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
                         }
                     }
+                }
 
-                    HStack(spacing: 6) {
-                        Text(adaptiveFeatureLine)
-                            .font(.system(size: 11.5).monospacedDigit())
-                            .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
-                            .lineLimit(1)
+                HStack(spacing: 5) {
+                    Text(isBentoCell ? bentoSpecAndDateLine : conciseSpecLine)
+                        .font(.system(size: 11.5).monospacedDigit())
+                        .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
+                        .lineLimit(1)
 
-                        ForEach(primaryAsset.tags.prefix(isCompactWidth ? 1 : 2), id: \.self) { tag in
+                    if !isBentoCell {
+                        let maxTags = isCompactWidth ? 1 : 2
+                        ForEach(primaryAsset.tags.prefix(maxTags), id: \.self) { tag in
                             Text("#\(tag)")
                                 .font(.system(size: 10.5, weight: .medium))
-                                .foregroundStyle(MobileTheme.tertiaryInk(for: colorScheme))
+                                .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
                                 .lineLimit(1)
                                 .padding(.horizontal, 5.5)
-                                .padding(.vertical, 1.5)
+                                .padding(.vertical, 1)
                                 .background(
-                                    MobileTheme.surfaceSubtle(for: colorScheme),
-                                    in: RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                    Color.primary.opacity(0.055),
+                                    in: Capsule()
                                 )
-                        }
-
-                        let hiddenTagCount = primaryAsset.tags.count - (isCompactWidth ? 1 : 2)
-                        if hiddenTagCount > 0 {
-                            Text("+\(hiddenTagCount)")
-                                .font(.system(size: 10, weight: .semibold).monospacedDigit())
-                                .foregroundStyle(MobileTheme.tertiaryInk(for: colorScheme))
                         }
                     }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-
-                // 3. Right Trailing: Quick Share/Copy (on hover/iPad) + 12-Segment Diff Minimap / Sparkbar + Timestamp
-                HStack(spacing: 8) {
-                    if !isCompactWidth && isHovered && !store.isMultiSelectMode {
-                        Button {
-                            MobileHaptics.light()
-                            onSharePrimary(primaryAsset)
-                        } label: {
-                            Label("发主版", systemImage: "square.and.arrow.up")
-                                .font(.system(size: 11, weight: .semibold))
-                                .foregroundStyle(.primary)
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 5)
-                                .background(
-                                    MobileTheme.surfaceElevated(for: colorScheme),
-                                    in: RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                )
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                        .strokeBorder(MobileTheme.borderStrong(for: colorScheme), lineWidth: 0.75)
-                                )
-                        }
-                        .buttonStyle(MobileTactileButtonStyle())
-                        .transition(.opacity)
-                    }
-
-                    trailingSpectrumAndTimestamp
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
 
-            // 4. Inline Expandable Horizontal Revision Rail
-            if isRailExpanded {
-                inlineRevisionRail
-                    .padding(.top, 10)
-                    .transition(.opacity.combined(with: .move(edge: .top)))
+            Spacer(minLength: 6)
+
+            // 3. Right Trailing: Quiet Hover Share + Quiet vN·M Popover Capsule + Audio-Only Sparkbar + Tabular Timestamp
+            HStack(spacing: 8) {
+                if !isCompactWidth && isHovered && !store.isMultiSelectMode {
+                    Button {
+                        MobileHaptics.light()
+                        onSharePrimary(primaryAsset)
+                    } label: {
+                        Image(systemName: "square.and.arrow.up")
+                            .font(.system(size: 11.5, weight: .semibold))
+                            .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
+                            .frame(width: 26, height: 26)
+                            .background(Color.primary.opacity(0.055), in: Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(hasStack ? "分享主版本" : "分享")
+                }
+
+                if hasStack {
+                    versionTriggerBadge
+                }
+
+                if primaryAsset.mediaKind == .audio {
+                    audioWaveformSparkbar
+                }
+
+                if !isBentoCell {
+                    Text(MobileFormatters.relativeDate(primaryAsset.updatedAt))
+                        .font(.system(size: 11.5).monospacedDigit())
+                        .foregroundStyle(MobileTheme.tertiaryInk(for: colorScheme))
+                        .lineLimit(1)
+                        .frame(minWidth: 54, alignment: .trailing)
+                }
             }
         }
-        .padding(10)
-        .background(
-            MobileTheme.surfaceElevated(for: colorScheme),
-            in: cardShape
-        )
-        .overlay(
-            cardShape.strokeBorder(
-                isDropTargeted
-                    ? accent
-                    : (isSelected ? accent.opacity(0.65) : (isHovered ? MobileTheme.borderStrong(for: colorScheme) : MobileTheme.hairline(for: colorScheme))),
-                lineWidth: isDropTargeted ? 2.0 : (isSelected ? 1.5 : 0.75)
-            )
-        )
-        .shadow(
-            color: .black.opacity(colorScheme == .dark ? 0.22 : 0.035),
-            radius: 6,
-            y: 2
-        )
-        .contentShape(cardShape)
+        .padding(.horizontal, 12)
+        .padding(.vertical, isBentoCell ? 6 : 6.5)
+        .frame(minHeight: isBentoCell ? 58 : 52, maxHeight: isBentoCell ? 58 : nil)
+        .background {
+            if isBentoCell {
+                cellShape.fill(
+                    isDropTargeted
+                        ? accent.opacity(0.10)
+                        : (isSelected
+                            ? MobileTheme.accentSoft(for: colorScheme)
+                            : (isHovered
+                                ? Color.primary.opacity(0.04)
+                                : MobileTheme.surfaceElevated(for: colorScheme)))
+                )
+            } else {
+                rowHighlightShape
+                    .fill(
+                        isDropTargeted
+                            ? accent.opacity(0.10)
+                            : (isSelected
+                                ? MobileTheme.accentSoft(for: colorScheme)
+                                : (isHovered
+                                    ? Color.primary.opacity(0.04)
+                                    : .clear))
+                    )
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 1.5)
+            }
+        }
+        .overlay {
+            if isBentoCell {
+                cellShape.strokeBorder(
+                    isDropTargeted
+                        ? accent
+                        : (isSelected
+                            ? accent
+                            : (isHovered ? MobileTheme.borderStrong(for: colorScheme) : MobileTheme.hairline(for: colorScheme))),
+                    lineWidth: (isDropTargeted || isSelected) ? 1.5 : 0.5
+                )
+            } else if isDropTargeted {
+                rowHighlightShape
+                    .strokeBorder(accent, lineWidth: 1.5)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 1.5)
+            }
+        }
+        .contentShape(Rectangle())
         .onTapGesture {
             MobileKeyboard.dismiss()
             if store.isMultiSelectMode {
@@ -551,13 +683,18 @@ private struct CompactFolioIndexCard: View {
         .onHover { hovering in
             withAnimation(MobileMotion.accessible(MobileMotion.hoverPress, reduced: reduceMotion)) {
                 isHovered = hovering
+                if hovering {
+                    hoveredRowAssetID = asset.id
+                } else if hoveredRowAssetID == asset.id {
+                    hoveredRowAssetID = nil
+                }
             }
         }
         .matchedTransitionSource(
             id: PreviewZoomSourceID(origin: zoomOrigin, assetID: primaryAsset.id),
             in: zoomNamespace
         ) { configuration in
-            configuration.clipShape(cardShape)
+            configuration.clipShape(RoundedRectangle(cornerRadius: MobileTheme.Radius.cardOuter, style: .continuous))
         }
         .onDrag {
             let target = primaryAsset
@@ -595,56 +732,85 @@ private struct CompactFolioIndexCard: View {
         }
     }
 
-    // MARK: - Stack Capsule Button
+    // MARK: - Quiet Version Trigger Badge + Anchored Vertical Timeline Popover
 
-    private var stackToggleCapsule: some View {
-        let accent = MobileTheme.accent(for: colorScheme)
+    private var versionTriggerBadge: some View {
         let warn = MobileTheme.warning(for: colorScheme)
+        let popoverBinding = Binding<Bool>(
+            get: { popoverAnchorAssetID == asset.id },
+            set: { next in
+                if next {
+                    popoverAnchorAssetID = asset.id
+                } else if popoverAnchorAssetID == asset.id {
+                    popoverAnchorAssetID = nil
+                }
+            }
+        )
 
         return Button {
-            guard let gid = stackGroupID else { return }
             MobileHaptics.selection()
-            withAnimation(MobileMotion.accessible(MobileMotion.settleStrong, reduced: reduceMotion)) {
-                expandedStackGroupID = (expandedStackGroupID == gid) ? nil : gid
-            }
+            popoverAnchorAssetID = (popoverAnchorAssetID == asset.id) ? nil : asset.id
         } label: {
-            HStack(spacing: 4) {
-                Text("主版 v\(primaryVersionNumber)")
-                    .font(.system(size: 11, weight: .semibold).monospacedDigit())
+            HStack(spacing: 3.5) {
+                Image(systemName: "square.stack.3d.up")
+                    .font(.system(size: 9.5, weight: .semibold))
+                    .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
+
+                Text("v\(primaryVersionNumber) · \(siblings.count)")
+                    .font(.system(size: 11.5, weight: .medium).monospacedDigit())
+                    .foregroundStyle(.primary)
 
                 if pendingNewerCount > 0 {
-                    Text("+\(pendingNewerCount) 新版")
-                        .font(.system(size: 10, weight: .bold).monospacedDigit())
-                        .foregroundStyle(isRailExpanded ? .white : warn)
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 1)
-                        .background(
-                            isRailExpanded ? Color.white.opacity(0.22) : warn.opacity(0.16),
-                            in: Capsule()
-                        )
-                } else {
-                    Text("· 共\(siblings.count)版")
-                        .font(.system(size: 10.5, weight: .medium).monospacedDigit())
-                        .opacity(0.78)
+                    Circle()
+                        .fill(warn)
+                        .frame(width: 5, height: 5)
                 }
 
-                Image(systemName: isRailExpanded ? "chevron.up" : "chevron.down")
-                    .font(.system(size: 8.5, weight: .bold))
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 7.5, weight: .bold))
+                    .foregroundStyle(MobileTheme.tertiaryInk(for: colorScheme))
             }
-            .foregroundStyle(isRailExpanded ? .white : accent)
             .padding(.horizontal, 8)
-            .padding(.vertical, 3.5)
+            .padding(.vertical, 4)
             .background(
-                isRailExpanded ? accent : MobileTheme.accentSoft(for: colorScheme),
+                isPopoverOpen
+                    ? Color.primary.opacity(0.11)
+                    : Color.primary.opacity(isBadgeHovered ? 0.09 : 0.055),
                 in: Capsule()
             )
         }
-        .buttonStyle(MobileTactileButtonStyle())
+        .buttonStyle(.plain)
+        .onHover { hovering in
+            isBadgeHovered = hovering
+        }
+        .popover(isPresented: popoverBinding, arrowEdge: .top) {
+            MobileVersionTimelinePopover(
+                store: store,
+                siblings: siblings,
+                primaryAsset: primaryAsset,
+                defaultComparePair: defaultComparePair,
+                onSelectVersion: { ver in
+                    popoverAnchorAssetID = nil
+                    store.selectedAssetID = ver.id
+                    onOpenAsset(ver)
+                },
+                onOpenDiffPair: { targetVer, baseID, targetID in
+                    popoverAnchorAssetID = nil
+                    onOpenDiff(targetVer, baseID, targetID)
+                },
+                onPinPrimary: { ver in
+                    MobileHaptics.success()
+                    Task { await store.setPrimaryVersion(assetID: ver.id) }
+                }
+            )
+            .frame(minWidth: 292, maxWidth: 320)
+            .presentationCompactAdaptation(.popover)
+        }
     }
 
-    // MARK: - Media-Adaptive Feature Subtitle
+    // MARK: - Concise Spec Lines (No Boilerplate / No Editor Suffixes)
 
-    private var adaptiveFeatureLine: String {
+    private var conciseSpecLine: String {
         switch primaryAsset.mediaKind {
         case .document:
             let ext = (primaryAsset.fileName as NSString).pathExtension
@@ -652,21 +818,17 @@ private struct CompactFolioIndexCard: View {
             var parts: [String] = [family.badgeLabel]
             if let doc = primaryAsset.richMetadata?.document {
                 if !doc.sheetNames.isEmpty {
-                    parts.append("\(doc.sheetNames.count) 工作表")
+                    parts.append("\(doc.sheetNames.count) 表")
                 } else if doc.pageCount > 0 {
                     parts.append("\(doc.pageCount) 页")
                 }
                 if doc.wordCount > 0 && doc.sheetNames.isEmpty {
-                    parts.append("\(doc.wordCount) 字")
-                }
-                if !doc.hasTextLayer && family == .pdf {
-                    parts.append("扫描签批")
+                    parts.append("\(doc.wordCount.formatted()) 字")
+                } else if !doc.hasTextLayer && family == .pdf {
+                    parts.append("扫描件")
                 }
             } else if primaryAsset.fileSizeBytes > 0 {
                 parts.append(MobileFormatters.byteCount(primaryAsset.fileSizeBytes))
-            }
-            if let editor = primaryAsset.richMetadata?.versionStack?.editorName, !editor.isEmpty {
-                parts.append("\(editor)核定")
             }
             return parts.joined(separator: " · ")
 
@@ -676,8 +838,7 @@ private struct CompactFolioIndexCard: View {
             if !ext.isEmpty { parts.append(ext) }
             if primaryAsset.pixelWidth > 0 && primaryAsset.pixelHeight > 0 {
                 parts.append("\(primaryAsset.pixelWidth) × \(primaryAsset.pixelHeight)")
-            }
-            if primaryAsset.fileSizeBytes > 0 {
+            } else if primaryAsset.fileSizeBytes > 0 {
                 parts.append(MobileFormatters.byteCount(primaryAsset.fileSizeBytes))
             }
             return parts.isEmpty ? primaryAsset.displayTypeLabel : parts.joined(separator: " · ")
@@ -690,8 +851,7 @@ private struct CompactFolioIndexCard: View {
                 let mins = Int(dur) / 60
                 let secs = Int(dur) % 60
                 parts.append(String(format: "%d:%02d", mins, secs))
-            }
-            if primaryAsset.fileSizeBytes > 0 {
+            } else if primaryAsset.fileSizeBytes > 0 {
                 parts.append(MobileFormatters.byteCount(primaryAsset.fileSizeBytes))
             }
             return parts.isEmpty ? primaryAsset.displayTypeLabel : parts.joined(separator: " · ")
@@ -703,7 +863,7 @@ private struct CompactFolioIndexCard: View {
             if let repo = primaryAsset.richMetadata?.githubRepo {
                 return "GitHub · ★ \(repo.stars)"
             }
-            return primaryAsset.sourceDomain ?? "网页收藏"
+            return primaryAsset.sourceDomain ?? "网页"
 
         case .model3D:
             let fmt = primaryAsset.richMetadata?.model3DFormat ?? (primaryAsset.fileName as NSString).pathExtension.uppercased()
@@ -711,266 +871,36 @@ private struct CompactFolioIndexCard: View {
         }
     }
 
-    // MARK: - 12-Segment Diff Minimap & Waveform Sparkbar
+    private var bentoSpecAndDateLine: String {
+        let rel = MobileFormatters.relativeDate(primaryAsset.updatedAt)
+        return "\(conciseSpecLine) · \(rel)"
+    }
 
-    @ViewBuilder
-    private var trailingSpectrumAndTimestamp: some View {
-        VStack(alignment: .trailing, spacing: 4) {
-            if let diff = latestDiffSummary {
-                let buckets = DocumentDiffSummary.normalizeBuckets(diff.minimapBuckets)
-                HStack(alignment: .center, spacing: 2) {
-                    ForEach(0..<buckets.count, id: \.self) { idx in
-                        let level = buckets[idx]
-                        RoundedRectangle(cornerRadius: 1.5, style: .continuous)
-                            .fill(minimapColor(for: level))
-                            .frame(width: 3, height: minimapBarHeight(for: level))
-                    }
-                }
-                .padding(.horizontal, 6)
-                .padding(.vertical, 4)
-                .background(
-                    MobileTheme.surfaceSubtle(for: colorScheme),
-                    in: RoundedRectangle(cornerRadius: 6, style: .continuous)
-                )
-                .accessibilityLabel("全文 12 段改动分布微缩谱")
-            } else if primaryAsset.mediaKind == .audio {
-                let peaks = audioSparkBars
-                HStack(alignment: .center, spacing: 2) {
-                    ForEach(0..<peaks.count, id: \.self) { idx in
-                        RoundedRectangle(cornerRadius: 1.25, style: .continuous)
-                            .fill(MobileTheme.secondaryInk(for: colorScheme))
-                            .frame(width: 2.5, height: peaks[idx])
-                    }
-                }
-                .padding(.horizontal, 6)
-                .padding(.vertical, 4)
-                .background(
-                    MobileTheme.surfaceSubtle(for: colorScheme),
-                    in: RoundedRectangle(cornerRadius: 6, style: .continuous)
-                )
-            } else if primaryAsset.rating > 0 {
-                HStack(spacing: 2) {
-                    Image(systemName: "star.fill")
-                        .font(.system(size: 10))
-                        .foregroundStyle(Color(charkleHex: "#E5B243"))
-                    Text("\(primaryAsset.rating)")
-                        .font(.system(size: 11, weight: .semibold).monospacedDigit())
-                        .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
-                }
+    // MARK: - Audio-Only Waveform Sparkbar
+
+    private var audioWaveformSparkbar: some View {
+        let peaks = audioSparkBars
+        return HStack(alignment: .center, spacing: 2) {
+            ForEach(0..<peaks.count, id: \.self) { idx in
+                RoundedRectangle(cornerRadius: 1, style: .continuous)
+                    .fill(MobileTheme.secondaryInk(for: colorScheme))
+                    .frame(width: 2, height: peaks[idx])
             }
-
-            Text(MobileFormatters.relativeDate(primaryAsset.updatedAt))
-                .font(.system(size: 11).monospacedDigit())
-                .foregroundStyle(MobileTheme.tertiaryInk(for: colorScheme))
-                .lineLimit(1)
         }
-        .fixedSize(horizontal: true, vertical: false)
-    }
-
-    private func minimapColor(for level: Int) -> Color {
-        switch level {
-        case 2: MobileTheme.destructive(for: colorScheme)
-        case 1: MobileTheme.positive(for: colorScheme)
-        default: MobileTheme.borderStrong(for: colorScheme)
-        }
-    }
-
-    private func minimapBarHeight(for level: Int) -> CGFloat {
-        switch level {
-        case 2: 14
-        case 1: 11.5
-        default: 7.5
-        }
+        .padding(.horizontal, 5)
+        .padding(.vertical, 3.5)
+        .background(
+            MobileTheme.surfaceSubtle(for: colorScheme),
+            in: RoundedRectangle(cornerRadius: 5, style: .continuous)
+        )
+        .accessibilityLabel("音频波形")
     }
 
     private var audioSparkBars: [CGFloat] {
-        if primaryAsset.waveformPeaks.count >= 12 {
-            return primaryAsset.waveformPeaks.prefix(12).map { max(4, min(14, CGFloat($0) * 14)) }
+        if primaryAsset.waveformPeaks.count >= 10 {
+            return primaryAsset.waveformPeaks.prefix(10).map { max(4, min(13, CGFloat($0) * 13)) }
         }
-        return [5, 10, 7, 13, 14, 8, 11, 6, 12, 9, 7, 5]
-    }
-
-    // MARK: - Inline Horizontal Revision Rail
-
-    private var inlineRevisionRail: some View {
-        let accent = MobileTheme.accent(for: colorScheme)
-        let warn = MobileTheme.warning(for: colorScheme)
-        let pos = MobileTheme.positive(for: colorScheme)
-
-        return VStack(alignment: .leading, spacing: 8) {
-            Divider()
-
-            HStack(spacing: 8) {
-                Text(isCompactWidth ? "点选版本锁定「主版」，点 Δ 直接对比差异" : "版本演进脉络 · 点选任意版锁定对外「主版本」，点中间 Δ 直接对比挑拣")
-                    .font(.system(size: 11.5, weight: .medium))
-                    .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
-                    .lineLimit(1)
-
-                Spacer(minLength: 4)
-
-                if siblings.count >= 2 {
-                    let comparePair = defaultComparePair
-                    Button {
-                        MobileHaptics.light()
-                        onOpenDiff(primaryAsset, comparePair.baseID, comparePair.targetID)
-                    } label: {
-                        Text(primaryAsset.mediaKind == .document ? "精细对比与取舍 →" : "对比两版 →")
-                            .font(.system(size: 11.5, weight: .semibold))
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 9)
-                            .padding(.vertical, 4)
-                            .background(MobileTheme.accentButtonFill(for: colorScheme), in: Capsule())
-                    }
-                    .buttonStyle(MobileTactileButtonStyle())
-                }
-            }
-
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 6) {
-                    ForEach(Array(siblings.enumerated()), id: \.element.id) { index, verAsset in
-                        let verMeta = verAsset.richMetadata?.versionStack
-                        let vNum = verMeta?.versionNumber ?? (index + 1)
-                        let isPrimary = verAsset.id == primaryAsset.id
-                        let isUnreviewed = vNum > primaryVersionNumber
-
-                        if index > 0 {
-                            let prevAsset = siblings[index - 1]
-                            let deltaLabel = verAsset.richMetadata?.document?.diffSummary?.compactBridgeLabel ?? "Δ 对比"
-                            Button {
-                                MobileHaptics.light()
-                                onOpenDiff(verAsset, prevAsset.id, verAsset.id)
-                            } label: {
-                                Text(deltaLabel)
-                                    .font(.system(size: 11, weight: .semibold).monospacedDigit())
-                                    .foregroundStyle(warn)
-                                    .padding(.horizontal, 7.5)
-                                    .padding(.vertical, 4)
-                                    .background(warn.opacity(0.14), in: Capsule())
-                            }
-                            .buttonStyle(MobileTactileButtonStyle())
-                            .accessibilityLabel("对比 v\(prevAsset.richMetadata?.versionStack?.versionNumber ?? index) 与 v\(vNum)")
-                        }
-
-                        Button {
-                            if !isPrimary {
-                                MobileHaptics.success()
-                                Task { await store.setPrimaryVersion(assetID: verAsset.id) }
-                            } else {
-                                MobileHaptics.light()
-                                onOpenAsset(verAsset)
-                            }
-                        } label: {
-                            VStack(alignment: .leading, spacing: 2.5) {
-                                HStack(spacing: 5) {
-                                    Text(versionNodeHeadline(verAsset, vNum: vNum, isFirst: index == 0))
-                                        .font(.system(size: 12, weight: .semibold).monospacedDigit())
-                                        .foregroundStyle(.primary)
-                                        .lineLimit(1)
-
-                                    if isPrimary {
-                                        Text("主版")
-                                            .font(.system(size: 10, weight: .bold))
-                                            .foregroundStyle(pos)
-                                            .padding(.horizontal, 5)
-                                            .padding(.vertical, 1)
-                                            .background(pos.opacity(0.15), in: RoundedRectangle(cornerRadius: 4, style: .continuous))
-                                    } else if isUnreviewed {
-                                        Circle()
-                                            .fill(warn)
-                                            .frame(width: 6, height: 6)
-                                    }
-                                }
-
-                                Text(versionNodeSubline(verAsset))
-                                    .font(.system(size: 10.5).monospacedDigit())
-                                    .foregroundStyle(MobileTheme.tertiaryInk(for: colorScheme))
-                                    .lineLimit(1)
-                            }
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 6)
-                            .background(
-                                isPrimary
-                                    ? MobileTheme.accentSoft(for: colorScheme)
-                                    : MobileTheme.inspectorBackground(for: colorScheme),
-                                in: RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            )
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                    .strokeBorder(
-                                        isPrimary ? accent.opacity(0.50) : MobileTheme.hairline(for: colorScheme),
-                                        lineWidth: isPrimary ? 1.2 : 0.75
-                                    )
-                            )
-                        }
-                        .buttonStyle(MobileTactileButtonStyle())
-                        .contextMenu {
-                            Button {
-                                onOpenAsset(verAsset)
-                            } label: {
-                                Label("打开阅读 v\(vNum)", systemImage: "eye")
-                            }
-                            if !isPrimary {
-                                Button {
-                                    Task { await store.setPrimaryVersion(assetID: verAsset.id) }
-                                } label: {
-                                    Label("设为主版本（对外默认发出）", systemImage: "checkmark.seal.fill")
-                                }
-                            }
-                            if index > 0 {
-                                Button {
-                                    onOpenDiff(verAsset, siblings[index - 1].id, verAsset.id)
-                                } label: {
-                                    Label("与上一版对比差异", systemImage: "arrow.left.arrow.right")
-                                }
-                            }
-                            Divider()
-                            Button(role: .destructive) {
-                                Task { await store.unstackAsset(assetID: verAsset.id) }
-                            } label: {
-                                Label("从版本叠拆出为独立素材", systemImage: "square.stack.3d.up.slash")
-                            }
-                        }
-                    }
-                }
-                .padding(.vertical, 1)
-            }
-        }
-    }
-
-    private var defaultComparePair: (baseID: UUID, targetID: UUID) {
-        if siblings.count >= 2 {
-            if pendingNewerCount > 0, let latest = siblings.last, latest.id != primaryAsset.id {
-                return (primaryAsset.id, latest.id)
-            }
-            let lastTwo = Array(siblings.suffix(2))
-            return (lastTwo[0].id, lastTwo[1].id)
-        }
-        return (primaryAsset.id, primaryAsset.id)
-    }
-
-    private func versionNodeHeadline(_ item: AssetRecord, vNum: Int, isFirst: Bool) -> String {
-        if let note = item.richMetadata?.versionStack?.changeNote {
-            let cleaned = AssetVersionStackMetadata.strippingRedundantVersionPrefix(note)
-            if !cleaned.isEmpty {
-                return "v\(vNum) · \(String(cleaned.prefix(10)))"
-            }
-        }
-        if let label = item.richMetadata?.versionStack?.versionLabel {
-            let cleaned = AssetVersionStackMetadata.strippingRedundantVersionPrefix(label)
-            if !cleaned.isEmpty {
-                return "v\(vNum) · \(cleaned)"
-            }
-        }
-        return isFirst ? "v\(vNum) · 初稿" : "v\(vNum) · 修订版"
-    }
-
-    private func versionNodeSubline(_ item: AssetRecord) -> String {
-        let who = item.richMetadata?.versionStack?.editorName?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let rel = MobileFormatters.relativeDate(item.updatedAt)
-        if let who, !who.isEmpty {
-            return "\(who) · \(rel)"
-        }
-        return rel
+        return [5, 9, 7, 12, 13, 8, 11, 6, 10, 5]
     }
 
     // MARK: - Context Menu
@@ -991,7 +921,7 @@ private struct CompactFolioIndexCard: View {
             Button {
                 onOpenDiff(primaryAsset, pair.baseID, pair.targetID)
             } label: {
-                Label("对比版本差异与合成", systemImage: "arrow.left.arrow.right")
+                Label("对比差异", systemImage: "arrow.left.arrow.right")
             }
         }
 
@@ -1001,7 +931,7 @@ private struct CompactFolioIndexCard: View {
             onSharePrimary(primaryAsset)
         } label: {
             Label(
-                hasStack ? "分享主版本到微信 / 文件（防误发）" : "分享原文件",
+                hasStack ? "分享主版本" : "分享原文件",
                 systemImage: "square.and.arrow.up"
             )
         }
@@ -1016,40 +946,44 @@ private struct CompactFolioIndexCard: View {
 
         if hasStack {
             Menu {
-                ForEach(Array(siblings.enumerated()), id: \.element.id) { idx, member in
+                ForEach(Array(siblings.enumerated()).reversed(), id: \.element.id) { idx, member in
                     let v = member.richMetadata?.versionStack?.versionNumber ?? (idx + 1)
                     let isPrimary = member.id == primaryAsset.id
-                    let cleanTitle = AssetVersionStackMetadata.strippingRedundantVersionPrefix(member.title)
-                    let displayMemberTitle = cleanTitle.isEmpty ? member.title : cleanTitle
+                    let verMeta = member.richMetadata?.versionStack
+                    let desc = MobileVersionDisplayFormatting.cleanDescriptor(
+                        changeNote: verMeta?.changeNote,
+                        versionLabel: verMeta?.versionLabel,
+                        editorName: verMeta?.editorName
+                    )
                     Button {
                         Task { await store.setPrimaryVersion(assetID: member.id) }
                     } label: {
                         Label(
-                            "v\(v) · \(displayMemberTitle)" + (isPrimary ? "（当前主版 ✓）" : ""),
-                            systemImage: isPrimary ? "checkmark.seal.fill" : "circle"
+                            "v\(v)" + (desc.map { " · \($0)" } ?? "") + (isPrimary ? "（当前主版）" : ""),
+                            systemImage: isPrimary ? "pin.fill" : "pin"
                         )
                     }
                 }
             } label: {
-                Label("切换对外主版本…", systemImage: "checkmark.seal")
+                Label("切换主版本…", systemImage: "pin")
             }
 
             Button {
                 onRequestMergeStack(primaryAsset)
             } label: {
-                Label("合并其他版本到此叠…", systemImage: "arrow.triangle.merge")
+                Label("归入历史版本…", systemImage: "arrow.triangle.merge")
             }
 
             Button {
                 Task { await store.unstackAsset(assetID: primaryAsset.id) }
             } label: {
-                Label("拆出当前主版为独立素材", systemImage: "square.stack.3d.up.slash")
+                Label("拆分为独立素材", systemImage: "square.stack.3d.up.slash")
             }
         } else {
             Button {
                 onRequestMergeStack(primaryAsset)
             } label: {
-                Label("合并入版本叠…", systemImage: "square.stack.3d.up")
+                Label("合并版本…", systemImage: "square.stack.3d.up")
             }
         }
 
@@ -1098,7 +1032,7 @@ private struct CompactFolioIndexCard: View {
                 Task {
                     await store.patchAssets(
                         AssetBatchPatch(assetIDs: ids, isTrashed: true),
-                        successToast: hasStack ? "已将版本叠移入回收站" : "已移入回收站",
+                        successToast: "已移入回收站",
                         actionTitle: "撤销",
                         onAction: {
                             Task {
@@ -1111,36 +1045,261 @@ private struct CompactFolioIndexCard: View {
                     )
                 }
             } label: {
-                Label(hasStack ? "移入回收站（整叠）" : "移入回收站", systemImage: "trash")
+                Label(hasStack ? "移入回收站（全部版本）" : "移入回收站", systemImage: "trash")
             }
         }
     }
 }
 
-// MARK: - 3D Miniature Physical Folio Stack & Media Skeleton (44 x 52pt)
+// MARK: - Universal Vertical Version History Popover (`MobileVersionTimelinePopover`)
 
-private struct MicroFolioArtifactStage: View {
+private struct MobileVersionTimelinePopover: View {
+    @Bindable var store: MobileAppStore
+    let siblings: [AssetRecord]
+    let primaryAsset: AssetRecord
+    let defaultComparePair: (baseID: UUID, targetID: UUID)
+    let onSelectVersion: (AssetRecord) -> Void
+    let onOpenDiffPair: (AssetRecord, UUID, UUID) -> Void
+    let onPinPrimary: (AssetRecord) -> Void
+
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+
+    private var primaryVersionNumber: Int {
+        primaryAsset.richMetadata?.versionStack?.versionNumber ?? siblings.count
+    }
+
+    var body: some View {
+        let accent = MobileTheme.accent(for: colorScheme)
+        let pos = MobileTheme.positive(for: colorScheme)
+        let warn = MobileTheme.warning(for: colorScheme)
+        let danger = MobileTheme.destructive(for: colorScheme)
+        let reversedItems = Array(siblings.enumerated().reversed())
+
+        VStack(alignment: .leading, spacing: 0) {
+            // Header
+            HStack(spacing: 6) {
+                Text("历史版本")
+                    .font(.system(size: 12.5, weight: .semibold))
+                    .foregroundStyle(.primary)
+
+                Text("\(siblings.count)")
+                    .font(.system(size: 12, weight: .medium).monospacedDigit())
+                    .foregroundStyle(MobileTheme.tertiaryInk(for: colorScheme))
+
+                Spacer()
+
+                if siblings.count >= 2 {
+                    Button {
+                        MobileHaptics.light()
+                        onOpenDiffPair(primaryAsset, defaultComparePair.baseID, defaultComparePair.targetID)
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "arrow.left.arrow.right")
+                                .font(.system(size: 10.5, weight: .semibold))
+                            Text("对比差异")
+                                .font(.system(size: 11.5, weight: .semibold))
+                        }
+                        .foregroundStyle(.primary)
+                        .padding(.horizontal, 8.5)
+                        .padding(.vertical, 4)
+                        .background(Color.primary.opacity(0.06), in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.top, 12)
+            .padding(.bottom, 9)
+
+            Rectangle()
+                .fill(MobileTheme.hairline(for: colorScheme))
+                .frame(height: 0.5)
+
+            // Newest-First Vertical Timeline (`vN → v1`)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 2) {
+                    ForEach(Array(reversedItems.enumerated()), id: \.element.element.id) { displayIdx, entry in
+                        let ascIndex = entry.offset
+                        let member = entry.element
+                        let verMeta = member.richMetadata?.versionStack
+                        let vNum = verMeta?.versionNumber ?? (ascIndex + 1)
+                        let isPrimary = member.id == primaryAsset.id
+                        let isUnreviewed = vNum > primaryVersionNumber
+                        let prevMember: AssetRecord? = ascIndex > 0 ? siblings[ascIndex - 1] : nil
+                        let descriptor = MobileVersionDisplayFormatting.cleanDescriptor(
+                            changeNote: verMeta?.changeNote,
+                            versionLabel: verMeta?.versionLabel,
+                            editorName: verMeta?.editorName
+                        )
+                        let cleanEditor = MobileVersionDisplayFormatting.cleanEditor(
+                            verMeta?.editorName,
+                            excluding: descriptor
+                        )
+                        let diffSummary = member.richMetadata?.document?.diffSummary
+                        let changedBlocks = diffSummary?.totalChangedBlocks ?? 0
+                        let hasHighRisk = (diffSummary?.totalHighRiskChanges ?? 0) > 0
+
+                        HStack(alignment: .center, spacing: 8) {
+                            // Vertical Spine + Node
+                            GeometryReader { geo in
+                                let midX = geo.size.width * 0.5
+                                let midY = geo.size.height * 0.5
+                                ZStack {
+                                    if displayIdx > 0 {
+                                        Path { p in
+                                            p.move(to: CGPoint(x: midX, y: 0))
+                                            p.addLine(to: CGPoint(x: midX, y: midY))
+                                        }
+                                        .stroke(MobileTheme.hairline(for: colorScheme), lineWidth: 1)
+                                    }
+                                    if displayIdx < reversedItems.count - 1 {
+                                        Path { p in
+                                            p.move(to: CGPoint(x: midX, y: midY))
+                                            p.addLine(to: CGPoint(x: midX, y: geo.size.height))
+                                        }
+                                        .stroke(MobileTheme.hairline(for: colorScheme), lineWidth: 1)
+                                    }
+
+                                    if isPrimary {
+                                        Circle()
+                                            .fill(accent)
+                                            .frame(width: 8, height: 8)
+                                            .position(x: midX, y: midY)
+                                    } else {
+                                        Circle()
+                                            .fill(MobileTheme.surfaceElevated(for: colorScheme))
+                                            .frame(width: 8, height: 8)
+                                            .overlay(
+                                                Circle().strokeBorder(
+                                                    isUnreviewed ? warn : MobileTheme.secondaryInk(for: colorScheme).opacity(0.50),
+                                                    lineWidth: 1.5
+                                                )
+                                            )
+                                            .position(x: midX, y: midY)
+                                    }
+                                }
+                            }
+                            .frame(width: 18)
+
+                            // Timeline Row Content
+                            HStack(spacing: 6) {
+                                Button {
+                                    MobileHaptics.light()
+                                    onSelectVersion(member)
+                                } label: {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        HStack(spacing: 5) {
+                                            Text("v\(vNum)")
+                                                .font(.system(size: 12.5, weight: .semibold).monospacedDigit())
+                                                .foregroundStyle(.primary)
+
+                                            if let descriptor {
+                                                Text(descriptor)
+                                                    .font(.system(size: 12, weight: .regular))
+                                                    .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
+                                                    .lineLimit(1)
+                                            }
+
+                                            if isPrimary {
+                                                Text("主版")
+                                                    .font(.system(size: 10, weight: .semibold))
+                                                    .foregroundStyle(pos)
+                                                    .padding(.horizontal, 5)
+                                                    .padding(.vertical, 1)
+                                                    .background(pos.opacity(0.14), in: RoundedRectangle(cornerRadius: 4, style: .continuous))
+                                            }
+                                        }
+
+                                        HStack(spacing: 4) {
+                                            Text(MobileFormatters.relativeDate(member.updatedAt))
+                                                .font(.system(size: 11).monospacedDigit())
+                                                .foregroundStyle(MobileTheme.tertiaryInk(for: colorScheme))
+
+                                            if let cleanEditor {
+                                                Text("· \(cleanEditor)")
+                                                    .font(.system(size: 11))
+                                                    .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
+                                                    .lineLimit(1)
+                                            }
+                                        }
+                                    }
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+
+                                if let prevMember, changedBlocks > 0 {
+                                    Button {
+                                        MobileHaptics.light()
+                                        onOpenDiffPair(member, prevMember.id, member.id)
+                                    } label: {
+                                        Text("Δ \(changedBlocks)")
+                                            .font(.system(size: 11, weight: .semibold).monospacedDigit())
+                                            .foregroundStyle(hasHighRisk ? danger : MobileTheme.secondaryInk(for: colorScheme))
+                                            .padding(.horizontal, 6.5)
+                                            .padding(.vertical, 3)
+                                            .background(
+                                                hasHighRisk ? danger.opacity(0.12) : MobileTheme.surfaceSubtle(for: colorScheme),
+                                                in: Capsule()
+                                            )
+                                    }
+                                    .buttonStyle(.plain)
+                                    .accessibilityLabel("对比 v\(prevMember.richMetadata?.versionStack?.versionNumber ?? ascIndex) 与 v\(vNum)")
+                                }
+
+                                if !isPrimary {
+                                    Button {
+                                        onPinPrimary(member)
+                                    } label: {
+                                        Image(systemName: "pin")
+                                            .font(.system(size: 11, weight: .semibold))
+                                            .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
+                                            .frame(width: 24, height: 24)
+                                            .background(MobileTheme.surfaceSubtle(for: colorScheme), in: Circle())
+                                    }
+                                    .buttonStyle(.plain)
+                                    .accessibilityLabel("设为主版本")
+                                }
+                            }
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 6.5)
+                            .background(
+                                isPrimary ? MobileTheme.accentSoft(for: colorScheme) : .clear,
+                                in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            )
+                        }
+                    }
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+            }
+            .scrollBounceBehavior(.basedOnSize)
+            .frame(maxHeight: 280)
+        }
+        .background {
+            if reduceTransparency {
+                MobileTheme.surfaceElevated(for: colorScheme)
+            } else {
+                Rectangle().fill(.ultraThinMaterial)
+            }
+        }
+    }
+}
+
+// MARK: - Tracklist Squircle Artwork / Page Cover (`36×46` docs / `38×44` media)
+
+private struct CompactMiniatureSheetThumb: View {
     let asset: AssetRecord
     let thumbnail: UIImage?
     let hasStack: Bool
     let isFannedOpen: Bool
+    let size: CGSize
 
     @Environment(\.colorScheme) private var colorScheme
 
-    private var paperFront: Color {
-        colorScheme == .dark ? Color(charkleHex: "#282B33") : Color.white
-    }
-
-    private var paperBack1: Color {
-        colorScheme == .dark ? Color(charkleHex: "#21242B") : Color(charkleHex: "#F3F2EE")
-    }
-
-    private var paperBack2: Color {
-        colorScheme == .dark ? Color(charkleHex: "#1A1C22") : Color(charkleHex: "#E6E4DE")
-    }
-
-    private var paperLine: Color {
-        colorScheme == .dark ? Color.white.opacity(0.16) : Color.black.opacity(0.12)
+    private var paperSurface: Color {
+        MobileTheme.surfaceElevated(for: colorScheme)
     }
 
     private var extText: String {
@@ -1156,248 +1315,109 @@ private struct MicroFolioArtifactStage: View {
         }
     }
 
-    private var formatAccent: Color {
-        let lowerExt = (asset.fileName as NSString).pathExtension.lowercased()
-        switch lowerExt {
-        case "xlsx", "xls", "csv", "ods", "et":
-            return Color(charkleHex: "#1D7A46")
-        case "pdf", "ofd":
-            return Color(charkleHex: "#C83E37")
-        case "pptx", "ppt", "dps", "key":
-            return Color(charkleHex: "#C96A1B")
-        case "md", "markdown", "txt":
-            return Color(charkleHex: "#4E7D96")
-        default:
-            return MobileTheme.accent(for: colorScheme)
-        }
-    }
-
     var body: some View {
+        let sheetShape = RoundedRectangle(cornerRadius: 6, style: .continuous)
+
         ZStack {
             if hasStack {
-                RoundedRectangle(cornerRadius: 5, style: .continuous)
-                    .fill(paperBack2)
+                sheetShape
+                    .fill(MobileTheme.surfaceSubtle(for: colorScheme))
                     .overlay(
-                        RoundedRectangle(cornerRadius: 5, style: .continuous)
-                            .strokeBorder(MobileTheme.borderStrong(for: colorScheme), lineWidth: 0.75)
+                        sheetShape.strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5)
                     )
-                    .padding(.horizontal, 3)
-                    .padding(.vertical, 2)
-                    .offset(x: isFannedOpen ? 7.5 : 4, y: isFannedOpen ? -3.5 : -2.5)
-                    .rotationEffect(.degrees(isFannedOpen ? 8 : 3), anchor: .bottomLeading)
-
-                RoundedRectangle(cornerRadius: 5, style: .continuous)
-                    .fill(paperBack1)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 5, style: .continuous)
-                            .strokeBorder(MobileTheme.borderStrong(for: colorScheme), lineWidth: 0.75)
-                    )
-                    .padding(.horizontal, 3)
-                    .padding(.vertical, 2)
-                    .offset(x: isFannedOpen ? 4 : 2, y: isFannedOpen ? -2 : -1.2)
-                    .rotationEffect(.degrees(isFannedOpen ? 4 : 1.5), anchor: .bottomLeading)
+                    .padding(1)
+                    .offset(x: isFannedOpen ? 3.5 : 2.5, y: isFannedOpen ? -2.5 : -1.5)
+                    .rotationEffect(.degrees(isFannedOpen ? 4 : 0), anchor: .bottomLeading)
             }
 
-            frontSheetContent
-                .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+            frontContent
+                .clipShape(sheetShape)
                 .overlay(
-                    RoundedRectangle(cornerRadius: 5, style: .continuous)
-                        .strokeBorder(MobileTheme.borderStrong(for: colorScheme), lineWidth: 0.75)
+                    sheetShape.strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5)
                 )
-                .shadow(color: .black.opacity(0.08), radius: 2.5, y: 1)
-                .padding(.horizontal, 3)
-                .padding(.vertical, 2)
-                .rotation3DEffect(
-                    .degrees(isFannedOpen ? -22 : 0),
-                    axis: (x: 0, y: 1, z: 0),
-                    anchor: .leading,
-                    perspective: 0.45
+                .shadow(
+                    color: .black.opacity(colorScheme == .dark ? 0.28 : 0.08),
+                    radius: 3,
+                    y: 1.5
                 )
-                .offset(x: isFannedOpen ? -1 : 0)
+                .padding(1)
         }
-        .frame(width: 44, height: 52)
-        .animation(.spring(duration: 0.28, bounce: 0.14), value: isFannedOpen)
+        .frame(width: size.width, height: size.height)
+        .animation(.spring(duration: 0.24, bounce: 0.10), value: isFannedOpen)
     }
 
     @ViewBuilder
-    private var frontSheetContent: some View {
+    private var frontContent: some View {
         switch asset.mediaKind {
         case .document:
             let lowerExt = (asset.fileName as NSString).pathExtension.lowercased()
             let hasRealPagePoster = (lowerExt == "pdf" || MediaPipeline.isRichLayoutDocumentExtension(lowerExt))
                 && !(asset.pixelWidth == 900 && asset.pixelHeight == 1_240)
             if hasRealPagePoster, let thumbnail {
-                realDocumentPageCover(thumbnail: thumbnail)
+                Image(uiImage: thumbnail)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .clipped()
+                    .background(paperSurface)
             } else {
-                documentSkeletonCover
+                minimalPaperCover
             }
+
         case .audio:
-            audioCover
-        default:
-            visualMediaCover
-        }
-    }
-
-    private func realDocumentPageCover(thumbnail: UIImage) -> some View {
-        ZStack(alignment: .bottomLeading) {
-            Image(uiImage: thumbnail)
-                .resizable()
-                .scaledToFill()
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .clipped()
-
-            Text(extText)
-                .font(.system(size: 7.5, weight: .bold, design: .rounded))
-                .foregroundStyle(.white)
-                .lineLimit(1)
-                .minimumScaleFactor(0.65)
-                .fixedSize(horizontal: true, vertical: false)
-                .padding(.horizontal, 3)
-                .padding(.vertical, 1)
-                .background(formatAccent.opacity(0.88), in: RoundedRectangle(cornerRadius: 2.5, style: .continuous))
-                .padding(2.5)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(paperFront)
-    }
-
-    private var documentSkeletonCover: some View {
-        let lowerExt = (asset.fileName as NSString).pathExtension.lowercased()
-        let isSheet = ["xlsx", "xls", "csv", "ods", "et"].contains(lowerExt)
-        let isRedHeader = lowerExt == "pdf"
-            || asset.title.contains("红头")
-            || asset.title.contains("通知")
-            || asset.title.contains("汇报")
-            || asset.title.contains("方案")
-        let isStamped = lowerExt == "pdf" && (asset.richMetadata?.document?.hasTextLayer == false || asset.title.contains("扫描") || asset.title.contains("签"))
-
-        return VStack(alignment: .leading, spacing: 3) {
-            if isSheet {
-                RoundedRectangle(cornerRadius: 1, style: .continuous)
-                    .fill(formatAccent)
-                    .frame(height: 4)
-                VStack(spacing: 2) {
-                    ForEach(0..<3, id: \.self) { row in
-                        HStack(spacing: 2) {
-                            ForEach(0..<3, id: \.self) { col in
-                                RoundedRectangle(cornerRadius: 1, style: .continuous)
-                                    .fill(sheetCellTint(row: row, col: col))
-                                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                            }
-                        }
+            let bars: [CGFloat] = [4, 9, 6, 12, 10, 5]
+            VStack(spacing: 3) {
+                Spacer(minLength: 0)
+                HStack(alignment: .center, spacing: 1.5) {
+                    ForEach(0..<bars.count, id: \.self) { idx in
+                        Capsule()
+                            .fill(MobileTheme.secondaryInk(for: colorScheme))
+                            .frame(width: 1.75, height: bars[idx])
                     }
                 }
-                .frame(maxHeight: .infinity)
-            } else {
-                RoundedRectangle(cornerRadius: 1.5, style: .continuous)
-                    .fill(isRedHeader ? Color(charkleHex: "#D93B30") : formatAccent)
-                    .frame(width: 24, height: 3)
-                    .frame(maxWidth: .infinity)
-
-                VStack(alignment: .leading, spacing: 2.5) {
-                    Capsule().fill(paperLine).frame(height: 2)
-                    Capsule().fill(paperLine).frame(width: 22, height: 2)
-                    Capsule().fill(MobileTheme.accent(for: colorScheme).opacity(0.35)).frame(height: 2)
-                    Capsule().fill(paperLine).frame(width: 19, height: 2)
-                }
-                .padding(.top, 1)
-
                 Spacer(minLength: 0)
-            }
-
-            HStack(spacing: 2) {
                 Text(extText)
-                    .font(.system(size: 7.5, weight: .bold, design: .rounded))
-                    .foregroundStyle(formatAccent)
+                    .font(.system(size: 7.5, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(MobileTheme.tertiaryInk(for: colorScheme))
                     .lineLimit(1)
-                    .minimumScaleFactor(0.65)
-                    .fixedSize(horizontal: true, vertical: false)
-                Spacer(minLength: 0)
-                if isStamped {
-                    Circle()
-                        .strokeBorder(Color(charkleHex: "#D93B30").opacity(0.75), lineWidth: 1)
-                        .frame(width: 7.5, height: 7.5)
+            }
+            .padding(3)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(paperSurface)
+
+        default:
+            if let thumbnail {
+                Image(uiImage: thumbnail)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .clipped()
+                    .background(paperSurface)
+            } else {
+                let firstHex = asset.dominantColors.first?.hex
+                ZStack {
+                    (firstHex.map { Color(charkleHex: $0).opacity(0.22) } ?? MobileTheme.surfaceSubtle(for: colorScheme))
+                    Image(systemName: MobileTheme.mediaKindSymbol(for: asset.mediaKind))
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .padding(5)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(paperFront)
     }
 
-    private func sheetCellTint(row: Int, col: Int) -> Color {
-        if row == 0 && col == 1 { return MobileTheme.positive(for: colorScheme).opacity(0.32) }
-        if row == 1 && col == 1 { return MobileTheme.destructive(for: colorScheme).opacity(0.35) }
-        return paperLine
-    }
-
-    private var audioCover: some View {
-        let bars: [CGFloat] = [5, 11, 8, 15, 16, 9, 13, 6]
-        return VStack(spacing: 3) {
-            Spacer(minLength: 0)
-            HStack(alignment: .center, spacing: 1.5) {
-                ForEach(0..<bars.count, id: \.self) { idx in
-                    Capsule()
-                        .fill(MobileTheme.accent(for: colorScheme))
-                        .frame(width: 2, height: bars[idx])
-                }
-            }
+    /// Clean minimal paper rectangle with subtle format label — zero cartoon red/blue skeleton lines.
+    private var minimalPaperCover: some View {
+        VStack(spacing: 0) {
             Spacer(minLength: 0)
             Text(extText)
-                .font(.system(size: 7.5, weight: .bold, design: .rounded))
+                .font(.system(size: 8.5, weight: .semibold, design: .monospaced))
                 .foregroundStyle(MobileTheme.secondaryInk(for: colorScheme))
                 .lineLimit(1)
-                .minimumScaleFactor(0.65)
-                .fixedSize(horizontal: true, vertical: false)
+                .minimumScaleFactor(0.7)
+                .padding(.bottom, 5)
         }
-        .padding(4)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(paperFront)
-    }
-
-    private var visualMediaCover: some View {
-        let swatches = asset.dominantColors.prefix(4).map(\.hex)
-        return VStack(spacing: 0) {
-            ZStack(alignment: .bottomLeading) {
-                if let thumbnail {
-                    Image(uiImage: thumbnail)
-                        .resizable()
-                        .scaledToFill()
-                } else {
-                    LinearGradient(
-                        colors: [
-                            Color(charkleHex: swatches.first ?? "#3D5A80"),
-                            Color(charkleHex: swatches.dropFirst().first ?? "#5C6B73")
-                        ],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                }
-
-                Text(extText)
-                    .font(.system(size: 7.5, weight: .bold, design: .rounded))
-                    .foregroundStyle(.white)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.65)
-                    .fixedSize(horizontal: true, vertical: false)
-                    .padding(.horizontal, 3)
-                    .padding(.vertical, 1)
-                    .background(.black.opacity(0.52), in: RoundedRectangle(cornerRadius: 3, style: .continuous))
-                    .padding(2.5)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .clipped()
-
-            if !swatches.isEmpty {
-                HStack(spacing: 0) {
-                    ForEach(Array(swatches.enumerated()), id: \.offset) { _, hex in
-                        Rectangle()
-                            .fill(Color(charkleHex: hex))
-                    }
-                }
-                .frame(height: 5)
-            }
-        }
-        .background(paperFront)
+        .background(paperSurface)
     }
 }
